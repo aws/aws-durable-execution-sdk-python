@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import TYPE_CHECKING, TypeVar
 
@@ -13,6 +12,7 @@ from aws_durable_functions_sdk_python.lambda_service import (
     OperationSubType,
     OperationUpdate,
 )
+from aws_durable_functions_sdk_python.serdes import deserialize, serialize
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -50,8 +50,12 @@ def child_handler(
         )
         if checkpointed_result.result is None:
             return None  # type: ignore
-        return json.loads(checkpointed_result.result)
-
+        return deserialize(
+            serdes=config.serdes,
+            data=checkpointed_result.result,
+            operation_id=operation_identifier.operation_id,
+            durable_execution_arn=state.durable_execution_arn,
+        )
     if checkpointed_result.is_failed():
         checkpointed_result.raise_callable_error()
     sub_type = (
@@ -67,7 +71,12 @@ def child_handler(
 
     try:
         raw_result: T = func()
-        serialized_result: str = json.dumps(raw_result)
+        serialized_result: str = serialize(
+            serdes=config.serdes,
+            value=raw_result,
+            operation_id=operation_identifier.operation_id,
+            durable_execution_arn=state.durable_execution_arn,
+        )
 
         success_operation = OperationUpdate.create_context_succeed(
             identifier=operation_identifier,

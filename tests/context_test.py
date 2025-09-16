@@ -29,6 +29,7 @@ from aws_durable_functions_sdk_python.lambda_service import (
     OperationType,
 )
 from aws_durable_functions_sdk_python.state import CheckpointedResult, ExecutionState
+from tests.serdes_test import CustomDictSerDes
 
 
 def test_durable_context():
@@ -40,6 +41,7 @@ def test_durable_context():
 def test_callback_init():
     """Test Callback initialization."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     callback = Callback("callback123", "op456", mock_state)
 
     assert callback.callback_id == "callback123"
@@ -50,6 +52,7 @@ def test_callback_init():
 def test_callback_result_succeeded():
     """Test Callback.result() when operation succeeded."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.CALLBACK,
@@ -155,6 +158,53 @@ def test_callback_result_not_started():
         callback.result()
 
 
+def test_callback_custom_serdes_result_succeeded():
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.CALLBACK,
+        status=OperationStatus.SUCCEEDED,
+        callback_details=CallbackDetails(
+            callback_id="callback1",
+            result='{"key": "VALUE", "number": "84", "list": [1, 2, 3]}',
+        ),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    callback = Callback("callback1", "op1", mock_state, CustomDictSerDes())
+    result = callback.result()
+
+    expected_complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
+
+    assert result == expected_complex_result
+
+
+def test_callback_result_timed_out():
+    """Test Callback.result() when operation timed out."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    error = ErrorObject(
+        message="Callback timed out", type="TimeoutError", data=None, stack_trace=None
+    )
+    operation = Operation(
+        operation_id="op_timeout",
+        operation_type=OperationType.CALLBACK,
+        status=OperationStatus.TIMED_OUT,
+        callback_details=CallbackDetails(callback_id="callback_timeout", error=error),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    callback = Callback("callback_timeout", "op_timeout", mock_state)
+
+    with pytest.raises(CallableRuntimeError):
+        callback.result()
+
+
 # endregion Callback
 
 
@@ -180,7 +230,7 @@ def test_create_callback_basic(mock_handler):
     mock_handler.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier("1", None, None),
-        config=None,
+        config=CallbackConfig(),
     )
 
 
@@ -228,7 +278,7 @@ def test_create_callback_with_parent_id(mock_handler):
     mock_handler.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier("parent123-3", "parent123"),
-        config=None,
+        config=CallbackConfig(),
     )
 
 
@@ -1091,30 +1141,6 @@ def test_parallel_with_many_callables(mock_handler):
 
 
 # endregion parallel
-
-
-def test_callback_result_timed_out():
-    """Test Callback.result() when operation timed out."""
-    mock_state = Mock(spec=ExecutionState)
-    mock_state.durable_execution_arn = (
-        "arn:aws:durable:us-east-1:123456789012:execution/test"
-    )
-    error = ErrorObject(
-        message="Callback timed out", type="TimeoutError", data=None, stack_trace=None
-    )
-    operation = Operation(
-        operation_id="op_timeout",
-        operation_type=OperationType.CALLBACK,
-        status=OperationStatus.TIMED_OUT,
-        callback_details=CallbackDetails(callback_id="callback_timeout", error=error),
-    )
-    mock_result = CheckpointedResult.create_from_operation(operation)
-    mock_state.get_checkpoint_result.return_value = mock_result
-
-    callback = Callback("callback_timeout", "op_timeout", mock_state)
-
-    with pytest.raises(CallableRuntimeError):
-        callback.result()
 
 
 # region map

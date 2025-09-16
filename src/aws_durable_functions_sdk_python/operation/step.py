@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import TYPE_CHECKING, TypeVar
@@ -20,6 +19,7 @@ from aws_durable_functions_sdk_python.exceptions import (
 from aws_durable_functions_sdk_python.lambda_service import ErrorObject, OperationUpdate
 from aws_durable_functions_sdk_python.logger import Logger, LogInfo
 from aws_durable_functions_sdk_python.retries import RetryPresets
+from aws_durable_functions_sdk_python.serdes import deserialize, serialize
 from aws_durable_functions_sdk_python.types import StepContext
 
 if TYPE_CHECKING:
@@ -59,11 +59,15 @@ def step_handler(
             operation_identifier.operation_id,
             operation_identifier.name,
         )
-        # TODO: serdes
         if checkpointed_result.result is None:
             return None  # type: ignore
 
-        return json.loads(checkpointed_result.result)
+        return deserialize(
+            serdes=config.serdes,
+            data=checkpointed_result.result,
+            operation_id=operation_identifier.operation_id,
+            durable_execution_arn=state.durable_execution_arn,
+        )
 
     if checkpointed_result.is_failed():
         # have to throw the exact same error on replay as the checkpointed failure
@@ -107,7 +111,12 @@ def step_handler(
     try:
         # this is the actual code provided by the caller to execute durably inside the step
         raw_result: T = func(step_context)
-        serialized_result: str = json.dumps(raw_result)
+        serialized_result: str = serialize(
+            serdes=config.serdes,
+            value=raw_result,
+            operation_id=operation_identifier.operation_id,
+            durable_execution_arn=state.durable_execution_arn,
+        )
 
         success_operation: OperationUpdate = OperationUpdate.create_step_succeed(
             identifier=operation_identifier,

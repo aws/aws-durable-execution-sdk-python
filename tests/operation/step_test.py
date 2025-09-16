@@ -29,11 +29,13 @@ from aws_durable_functions_sdk_python.lambda_service import (
 from aws_durable_functions_sdk_python.logger import Logger
 from aws_durable_functions_sdk_python.operation.step import step_handler
 from aws_durable_functions_sdk_python.state import CheckpointedResult, ExecutionState
+from tests.serdes_test import CustomDictSerDes
 
 
 def test_step_handler_already_succeeded():
     """Test step_handler when operation already succeeded."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     operation = Operation(
         operation_id="step1",
         operation_type=OperationType.STEP,
@@ -62,6 +64,7 @@ def test_step_handler_already_succeeded():
 def test_step_handler_already_succeeded_none_result():
     """Test step_handler when operation succeeded with None result."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     operation = Operation(
         operation_id="step2",
         operation_type=OperationType.STEP,
@@ -89,6 +92,7 @@ def test_step_handler_already_succeeded_none_result():
 def test_step_handler_already_failed():
     """Test step_handler when operation already failed."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     error = ErrorObject(
         message="Test error", type="TestError", data=None, stack_trace=None
     )
@@ -119,6 +123,7 @@ def test_step_handler_already_failed():
 def test_step_handler_started_at_most_once():
     """Test step_handler when operation started with AT_MOST_ONCE semantics."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     operation = Operation(
         operation_id="step4",
         operation_type=OperationType.STEP,
@@ -145,6 +150,7 @@ def test_step_handler_started_at_most_once():
 def test_step_handler_started_at_least_once():
     """Test step_handler when operation started with AT_LEAST_ONCE semantics."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     error = ErrorObject(
         message="Test error", type="TestError", data=None, stack_trace=None
     )
@@ -425,3 +431,62 @@ def test_step_handler_retry_handler_no_exception(mock_retry_handler):
         )
 
     mock_retry_handler.assert_called_once()
+
+
+def test_step_handler_custom_serdes_success():
+    mock_state = Mock(spec=ExecutionState)
+    mock_result = CheckpointedResult.create_not_found()
+    mock_state.get_checkpoint_result.return_value = mock_result
+    mock_state.durable_execution_arn = "test_arn"
+
+    config = StepConfig(
+        step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY, serdes=CustomDictSerDes()
+    )
+    complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
+    mock_callable = Mock(return_value=complex_result)
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    step_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier("step6", None, "test_step"),
+        config,
+        mock_logger,
+    )
+
+    expected_checkpoointed_result = (
+        '{"key": "VALUE", "number": "84", "list": [1, 2, 3]}'
+    )
+
+    success_call = mock_state.create_checkpoint.call_args_list[0]
+    success_operation = success_call[1]["operation_update"]
+    assert success_operation.payload == expected_checkpoointed_result
+
+
+def test_step_handler_custom_serdes_already_succeeded():
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    operation = Operation(
+        operation_id="step1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        step_details=StepDetails(
+            result='{"key": "VALUE", "number": "84", "list": [1, 2, 3]}'
+        ),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    mock_callable = Mock(return_value="should_not_call")
+    mock_logger = Mock(spec=Logger)
+
+    result = step_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier("step1", None, "test_step"),
+        StepConfig(serdes=CustomDictSerDes()),
+        mock_logger,
+    )
+
+    assert result == {"key": "value", "number": 42, "list": [1, 2, 3]}

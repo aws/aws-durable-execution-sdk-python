@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Generic, TypeVar
@@ -18,6 +17,8 @@ if TYPE_CHECKING:
     from concurrent.futures import Future
 
     from aws_durable_functions_sdk_python.lambda_service import OperationSubType
+    from aws_durable_functions_sdk_python.serdes import SerDes
+
 
 Numeric = int | float  # deliberately leaving off complex
 
@@ -80,16 +81,6 @@ class ParallelConfig:
         default_factory=CompletionConfig.all_successful
     )
     serdes: SerDes | None = None
-
-
-class SerDes(ABC, Generic[T]):
-    @abstractmethod
-    def serialize(self, value: T) -> str:
-        pass
-
-    @abstractmethod
-    def deserialize(self, data: str) -> T:
-        pass
 
 
 class StepSemantics(Enum):

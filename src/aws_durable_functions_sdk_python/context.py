@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from typing import TYPE_CHECKING, Any, Concatenate, Generic, ParamSpec, TypeVar
 
@@ -10,7 +9,6 @@ from aws_durable_functions_sdk_python.config import (
     ChildConfig,
     MapConfig,
     ParallelConfig,
-    SerDes,
     StepConfig,
     WaitForCallbackConfig,
     WaitForConditionConfig,
@@ -39,6 +37,7 @@ from aws_durable_functions_sdk_python.operation.wait import wait_handler
 from aws_durable_functions_sdk_python.operation.wait_for_condition import (
     wait_for_condition_handler,
 )
+from aws_durable_functions_sdk_python.serdes import SerDes, deserialize
 from aws_durable_functions_sdk_python.state import ExecutionState  # noqa: TCH001
 from aws_durable_functions_sdk_python.threading import OrderedCounter
 from aws_durable_functions_sdk_python.types import (
@@ -103,12 +102,12 @@ class Callback(Generic[T], CallbackProtocol[T]):
         callback_id: str,
         operation_id: str,
         state: ExecutionState,
-        serdes: SerDes | None = None,
+        serdes: SerDes[T] | None = None,
     ):
         self.callback_id: str = callback_id
         self.operation_id: str = operation_id
         self.state: ExecutionState = state
-        self.serdes: SerDes | None = serdes
+        self.serdes: SerDes[T] | None = serdes
 
     def result(self) -> T | None:
         """Return the result of the future. Will block until result is available.
@@ -132,11 +131,15 @@ class Callback(Generic[T], CallbackProtocol[T]):
             checkpointed_result.raise_callable_error()
 
         if checkpointed_result.is_succeeded():
-            # TODO: serdes
             if checkpointed_result.result is None:
                 return None  # type: ignore
 
-            return json.loads(checkpointed_result.result)
+            return deserialize(
+                serdes=self.serdes,
+                data=checkpointed_result.result,
+                operation_id=self.operation_id,
+                durable_execution_arn=self.state.durable_execution_arn,
+            )
 
         msg = "Callback must be started before you can await the result."
         raise FatalError(msg)
@@ -270,6 +273,8 @@ class DurableContext(LambdaContext, DurableContextProtocol):
         Return:
             Callback future. Use result() on this future to wait for the callback resuilt.
         """
+        if not config:
+            config = CallbackConfig()
         operation_id: str = self._create_step_id()
         callback_id: str = create_callback_handler(
             state=self.state,
@@ -280,7 +285,10 @@ class DurableContext(LambdaContext, DurableContextProtocol):
         )
 
         return Callback(
-            callback_id=callback_id, operation_id=operation_id, state=self.state
+            callback_id=callback_id,
+            operation_id=operation_id,
+            state=self.state,
+            serdes=config.serdes,
         )
 
     def map(

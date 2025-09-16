@@ -16,6 +16,7 @@ from aws_durable_functions_sdk_python.lambda_service import (
 )
 from aws_durable_functions_sdk_python.operation.child import child_handler
 from aws_durable_functions_sdk_python.state import ExecutionState
+from tests.serdes_test import CustomDictSerDes
 
 
 # region child_handler
@@ -35,6 +36,7 @@ def test_child_handler_not_started(
 ):
     """Test child_handler when operation not started."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
@@ -75,6 +77,7 @@ def test_child_handler_not_started(
 def test_child_handler_already_succeeded():
     """Test child_handler when operation already succeeded."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
     mock_result.is_succeeded.return_value = True
     mock_result.result = json.dumps("cached_result")
@@ -93,6 +96,7 @@ def test_child_handler_already_succeeded():
 def test_child_handler_already_succeeded_none_result():
     """Test child_handler when operation succeeded with None result."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
     mock_result.is_succeeded.return_value = True
     mock_result.result = None
@@ -146,6 +150,7 @@ def test_child_handler_already_started(
 ):
     """Test child_handler when operation already started."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
@@ -188,6 +193,7 @@ def test_child_handler_callable_exception(
 ):
     """Test child_handler when callable raises exception."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
@@ -229,6 +235,7 @@ def test_child_handler_callable_exception(
 def test_child_handler_fatal_error_propagated():
     """Test child_handler propagates FatalError without wrapping."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
@@ -249,6 +256,7 @@ def test_child_handler_fatal_error_propagated():
 def test_child_handler_with_config():
     """Test child_handler with config parameter."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
@@ -265,9 +273,10 @@ def test_child_handler_with_config():
     mock_callable.assert_called_once()
 
 
-def test_child_handler_json_serialization():
+def test_child_handler_default_serialization():
     """Test child_handler properly serializes complex result."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
@@ -288,6 +297,58 @@ def test_child_handler_json_serialization():
         if "SUCCEED" in str(call)
     ]
     assert len(success_call) == 1
+
+
+def test_child_handler_custom_serdes_not_start():
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = False
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = False
+    mock_state.get_checkpoint_result.return_value = mock_result
+    complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
+    mock_callable = Mock(return_value=complex_result)
+    child_config: ChildConfig = ChildConfig(serdes=CustomDictSerDes())
+
+    child_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier("op9", None, "test_name"),
+        child_config,
+    )
+
+    expected_checkpoointed_result = (
+        '{"key": "VALUE", "number": "84", "list": [1, 2, 3]}'
+    )
+
+    success_call = mock_state.create_checkpoint.call_args_list[1]
+    success_operation = success_call[1]["operation_update"]
+    assert success_operation.payload == expected_checkpoointed_result
+
+
+def test_child_handler_custom_serdes_already_succeeded():
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = True
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = False
+    mock_result.result = '{"key": "VALUE", "number": "84", "list": [1, 2, 3]}'
+    mock_state.get_checkpoint_result.return_value = mock_result
+    mock_callable = Mock()
+    child_config: ChildConfig = ChildConfig(serdes=CustomDictSerDes())
+
+    actual_result = child_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier("op9", None, "test_name"),
+        child_config,
+    )
+
+    expected_checkpoointed_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
+
+    assert actual_result == expected_checkpoointed_result
 
 
 # endregion child_handler

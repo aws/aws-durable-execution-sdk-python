@@ -3,8 +3,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
-import pytest
-
 from aws_durable_functions_sdk_python.config import (
     BatchedInput,
     CallbackConfig,
@@ -15,7 +13,6 @@ from aws_durable_functions_sdk_python.config import (
     ItemsPerBatchUnit,
     MapConfig,
     ParallelConfig,
-    SerDes,
     StepConfig,
     StepFuture,
     StepSemantics,
@@ -112,45 +109,6 @@ def test_wait_for_condition_config():
     assert config.wait_strategy is wait_strategy
     assert config.initial_state == "test_state"
     assert config.serdes is serdes
-
-
-def test_serdes_abstract():
-    """Test SerDes abstract base class."""
-
-    class TestSerDes(SerDes):
-        def serialize(self, value):
-            return str(value)
-
-        def deserialize(self, data):
-            return data
-
-    serdes = TestSerDes()
-    assert serdes.serialize(42) == "42"
-    assert serdes.deserialize("test") == "test"
-
-
-def test_serdes_abstract_methods():
-    """Test SerDes abstract methods must be implemented."""
-    with pytest.raises(TypeError):
-        SerDes()
-
-
-def test_serdes_abstract_methods_not_implemented():
-    """Test SerDes abstract methods raise NotImplementedError when not overridden."""
-
-    class IncompleteSerDes(SerDes):
-        pass
-
-    # This should raise TypeError because abstract methods are not implemented
-    with pytest.raises(TypeError):
-        IncompleteSerDes()
-
-
-def test_serdes_abstract_methods_coverage():
-    """Test to achieve coverage of abstract method pass statements."""
-    # To cover the pass statements, call the abstract methods directly
-    SerDes.serialize(None, None)  # Covers line 100
-    SerDes.deserialize(None, None)  # Covers line 104
 
 
 def test_step_semantics_enum():

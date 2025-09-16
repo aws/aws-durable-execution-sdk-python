@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import TYPE_CHECKING, TypeVar
@@ -13,6 +12,7 @@ from aws_durable_functions_sdk_python.exceptions import (
 )
 from aws_durable_functions_sdk_python.lambda_service import ErrorObject, OperationUpdate
 from aws_durable_functions_sdk_python.logger import LogInfo
+from aws_durable_functions_sdk_python.serdes import deserialize, serialize
 from aws_durable_functions_sdk_python.types import WaitForConditionCheckContext
 
 if TYPE_CHECKING:
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from aws_durable_functions_sdk_python.identifier import OperationIdentifier
     from aws_durable_functions_sdk_python.logger import Logger
     from aws_durable_functions_sdk_python.state import ExecutionState
+
 
 T = TypeVar("T")
 
@@ -57,10 +58,14 @@ def wait_for_condition_handler(
             operation_identifier.operation_id,
             operation_identifier.name,
         )
-        # TODO: use serdes from config
         if checkpointed_result.result is None:
             return None  # type: ignore
-        return json.loads(checkpointed_result.result)
+        return deserialize(
+            serdes=config.serdes,
+            data=checkpointed_result.result,
+            operation_id=operation_identifier.operation_id,
+            durable_execution_arn=state.durable_execution_arn,
+        )
 
     if checkpointed_result.is_failed():
         checkpointed_result.raise_callable_error()
@@ -69,9 +74,13 @@ def wait_for_condition_handler(
     if checkpointed_result.is_started_or_ready():
         # This is a retry - get state from previous checkpoint
         if checkpointed_result.result:
-            # TODO: serdes here
             try:
-                current_state = json.loads(checkpointed_result.result)
+                current_state = deserialize(
+                    serdes=config.serdes,
+                    data=checkpointed_result.result,
+                    operation_id=operation_identifier.operation_id,
+                    durable_execution_arn=state.durable_execution_arn,
+                )
             except Exception:
                 # default to initial state if there's an error getting checkpointed state
                 logger.exception(
@@ -117,8 +126,12 @@ def wait_for_condition_handler(
         # Check if condition is met with the wait strategy
         decision: WaitForConditionDecision = config.wait_strategy(new_state, attempt)
 
-        # TODO: SerDes here
-        serialized_state = json.dumps(new_state)
+        serialized_state = serialize(
+            serdes=config.serdes,
+            value=new_state,
+            operation_id=operation_identifier.operation_id,
+            durable_execution_arn=state.durable_execution_arn,
+        )
 
         logger.debug(
             "wait_for_condition check completed: %s, name: %s, attempt: %s",

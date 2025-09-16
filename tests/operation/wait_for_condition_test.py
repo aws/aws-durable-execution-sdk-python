@@ -27,6 +27,7 @@ from aws_durable_functions_sdk_python.operation.wait_for_condition import (
 )
 from aws_durable_functions_sdk_python.state import CheckpointedResult, ExecutionState
 from aws_durable_functions_sdk_python.types import WaitForConditionCheckContext
+from tests.serdes_test import CustomDictSerDes
 
 
 def test_wait_for_condition_first_execution_condition_met():
@@ -88,6 +89,7 @@ def test_wait_for_condition_first_execution_condition_not_met():
 def test_wait_for_condition_already_succeeded():
     """Test wait_for_condition when already completed successfully."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
@@ -119,6 +121,7 @@ def test_wait_for_condition_already_succeeded():
 def test_wait_for_condition_already_succeeded_none_result():
     """Test wait_for_condition when already completed with None result."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
@@ -149,6 +152,7 @@ def test_wait_for_condition_already_succeeded_none_result():
 def test_wait_for_condition_already_failed():
     """Test wait_for_condition when already failed."""
     mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
@@ -581,3 +585,69 @@ def test_wait_for_condition_zero_delay_seconds():
 
     with pytest.raises(SuspendExecution, match="will retry in 0 seconds"):
         wait_for_condition_handler(check_func, config, mock_state, op_id, mock_logger)
+
+
+def test_wait_for_condition_custom_serdes_first_execution_condition_met():
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "arn:aws:test"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    op_id = OperationIdentifier("op1", None, "test_wait")
+    complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
+
+    def check_func(state, context):
+        return complex_result
+
+    def wait_strategy(state, attempt):
+        return WaitForConditionDecision.stop_polling()
+
+    config = WaitForConditionConfig(
+        initial_state=5, wait_strategy=wait_strategy, serdes=CustomDictSerDes()
+    )
+
+    wait_for_condition_handler(check_func, config, mock_state, op_id, mock_logger)
+    expected_checkpoointed_result = (
+        '{"key": "VALUE", "number": "84", "list": [1, 2, 3]}'
+    )
+
+    success_call = mock_state.create_checkpoint.call_args_list[1]
+    success_operation = success_call[1]["operation_update"]
+    assert success_operation.payload == expected_checkpoointed_result
+
+
+def test_wait_for_condition_custom_serdes_already_succeeded():
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        step_details=StepDetails(
+            result='{"key": "VALUE", "number": "84", "list": [1, 2, 3]}'
+        ),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    mock_logger = Mock(spec=Logger)
+    op_id = OperationIdentifier("op1", None, "test_wait")
+
+    def check_func(state, context):
+        return state + 1
+
+    config = WaitForConditionConfig(
+        initial_state=5,
+        wait_strategy=lambda s, a: WaitForConditionDecision.stop_polling(),
+        serdes=CustomDictSerDes(),
+    )
+
+    result = wait_for_condition_handler(
+        check_func, config, mock_state, op_id, mock_logger
+    )
+
+    assert result == {"key": "value", "number": 42, "list": [1, 2, 3]}
