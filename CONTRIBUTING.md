@@ -6,6 +6,119 @@ documentation, we greatly value feedback and contributions from our community.
 Please read through this document before submitting any issues or pull requests to ensure we have all the necessary
 information to effectively respond to your bug report or contribution.
 
+## Dependencies
+Install [hatch](https://hatch.pypa.io/dev/install/).
+
+## Developer workflow
+These are all the checks you would typically do as you prepare a PR:
+```
+# just test
+hatch test
+
+# coverage
+hatch run test:cov
+
+# type checks
+hatch run types:check
+
+# static analysis
+hatch fmt
+```
+
+## Set up your IDE
+Point your IDE at the hatch virtual environment to have it recognize dependencies
+and imports.
+
+You can find the path to the hatch Python interpreter like this:
+```
+echo "$(hatch env find)/bin/python"
+```
+
+### VS Code
+If you're using VS Code, "Python: Select Interpreter" and use the hatch venv Python interpreter
+as found with the `hatch env find` command.
+
+Hatch uses Ruff for static analysis.
+
+You might want to install the [Ruff extension for VS Code](https://github.com/astral-sh/ruff-vscode)
+to have your IDE interactively warn of the same linting and formatting rules.
+
+These `settings.json` settings are useful:
+```
+{
+  "[python]": {
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "explicit",
+      "source.organizeImports": "explicit"
+    },
+    "editor.defaultFormatter": "charliermarsh.ruff"
+  }
+}
+"ruff.nativeServer": "on",
+```
+
+## Testing
+### How to run tests
+To run all tests:
+```
+hatch test
+```
+
+To run a single test file:
+```
+hatch test tests/path_to_test_module.py
+```
+
+To run a specific test in a module:
+```
+hatch test tests/path_to_test_module.py::test_mytestmethod
+```
+
+To run a single test, or a subset of tests:
+```
+$ hatch test -k TEST_PATTERN
+```
+
+This will run tests which contain names that match the given string expression (case-insensitive),
+which can include Python operators that use filenames, class names and function names as variables.
+
+### Debug
+To debug failing tests:
+
+```
+$ hatch test --pdb
+```
+
+This will drop you into the Python debugger on the failed test.
+
+### Writing tests
+Place test files in the `tests/` directory, using file names that end with `_test`.
+
+Mimic the package structure in the src/aws_durable_functions_sdk_python directory.
+Name your module so that src/mypackage/mymodule.py has a dedicated unit test file
+tests/mypackage/mymodule_test.py
+
+## Coverage
+```
+hatch run test:cov
+```
+
+## Linting and type checks
+Type checking:
+```
+hatch run types:check
+```
+
+Static analysis (with auto-fix of known issues):
+```
+hatch fmt
+```
+
+To do static analysis without auto-fixes:
+```
+hatch fmt --check
+```
 
 ## Reporting Bugs/Feature Requests
 
