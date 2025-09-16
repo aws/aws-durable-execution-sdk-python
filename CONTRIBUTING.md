@@ -53,9 +53,9 @@ These `settings.json` settings are useful:
       "source.organizeImports": "explicit"
     },
     "editor.defaultFormatter": "charliermarsh.ruff"
-  }
+  },
+  "ruff.nativeServer": "on"
 }
-"ruff.nativeServer": "on",
 ```
 
 ## Testing
