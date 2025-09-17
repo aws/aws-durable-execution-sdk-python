@@ -12,21 +12,21 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Generic, Self, TypeVar
 
-from aws_durable_functions_sdk_python.exceptions import (
+from aws_durable_execution_sdk_python.exceptions import (
     InvalidStateError,
     SuspendExecution,
     TimedSuspendExecution,
 )
-from aws_durable_functions_sdk_python.lambda_service import ErrorObject
-from aws_durable_functions_sdk_python.types import BatchResult as BatchResultProtocol
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
+from aws_durable_execution_sdk_python.types import BatchResult as BatchResultProtocol
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from aws_durable_functions_sdk_python.config import ChildConfig, CompletionConfig
-    from aws_durable_functions_sdk_python.lambda_service import OperationSubType
-    from aws_durable_functions_sdk_python.state import ExecutionState
-    from aws_durable_functions_sdk_python.types import DurableContext
+    from aws_durable_execution_sdk_python.config import ChildConfig, CompletionConfig
+    from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+    from aws_durable_execution_sdk_python.state import ExecutionState
+    from aws_durable_execution_sdk_python.types import DurableContext
 
 
 logger = logging.getLogger(__name__)
@@ -689,7 +689,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         executable: Executable[CallableType],
     ) -> ResultType:
         """Execute a single item in a child context."""
-        from aws_durable_functions_sdk_python.config import ChildConfig
+        from aws_durable_execution_sdk_python.config import ChildConfig
 
         def execute_in_child_context(child_context: DurableContext) -> ResultType:
             return self.execute_item(child_context, executable)

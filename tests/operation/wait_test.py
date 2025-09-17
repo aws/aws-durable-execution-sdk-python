@@ -4,17 +4,17 @@ from unittest.mock import Mock
 
 import pytest
 
-from aws_durable_functions_sdk_python.exceptions import SuspendExecution
-from aws_durable_functions_sdk_python.identifier import OperationIdentifier
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.exceptions import SuspendExecution
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+from aws_durable_execution_sdk_python.lambda_service import (
     OperationAction,
     OperationSubType,
     OperationType,
     OperationUpdate,
     WaitOptions,
 )
-from aws_durable_functions_sdk_python.operation.wait import wait_handler
-from aws_durable_functions_sdk_python.state import CheckpointedResult, ExecutionState
+from aws_durable_execution_sdk_python.operation.wait import wait_handler
+from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 
 
 def test_wait_handler_already_completed():

@@ -2,7 +2,7 @@
 
 import pytest
 
-from aws_durable_functions_sdk_python.exceptions import (
+from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     CallableRuntimeErrorSerializableDetails,
     CheckpointError,

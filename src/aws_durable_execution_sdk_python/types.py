@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from aws_durable_functions_sdk_python.config import (
+    from aws_durable_execution_sdk_python.config import (
         BatchedInput,
         CallbackConfig,
         ChildConfig,

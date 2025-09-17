@@ -6,14 +6,14 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from aws_durable_functions_sdk_python.context import DurableContext, ExecutionState
-from aws_durable_functions_sdk_python.exceptions import (
+from aws_durable_execution_sdk_python.context import DurableContext, ExecutionState
+from aws_durable_execution_sdk_python.exceptions import (
     CheckpointError,
     DurableExecutionsError,
     FatalError,
     SuspendExecution,
 )
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.lambda_service import (
     DurableServiceClient,
     ErrorObject,
     LambdaClient,
@@ -25,7 +25,7 @@ from aws_durable_functions_sdk_python.lambda_service import (
 if TYPE_CHECKING:
     from collections.abc import Callable, MutableMapping
 
-    from aws_durable_functions_sdk_python.lambda_context import LambdaContext
+    from aws_durable_execution_sdk_python.lambda_context import LambdaContext
 
 logger = logging.getLogger(__name__)
 

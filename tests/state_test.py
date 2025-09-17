@@ -4,8 +4,8 @@ from unittest.mock import Mock, call
 
 import pytest
 
-from aws_durable_functions_sdk_python.exceptions import DurableExecutionsError
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.exceptions import DurableExecutionsError
+from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
@@ -20,7 +20,7 @@ from aws_durable_functions_sdk_python.lambda_service import (
     StateOutput,
     StepDetails,
 )
-from aws_durable_functions_sdk_python.state import CheckpointedResult, ExecutionState
+from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 
 
 def test_checkpointed_result_create_from_operation_step():

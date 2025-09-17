@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from aws_durable_functions_sdk_python.exceptions import FatalError
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.exceptions import FatalError
+from aws_durable_execution_sdk_python.lambda_service import (
     CallbackOptions,
     OperationUpdate,
 )
@@ -13,16 +13,16 @@ from aws_durable_functions_sdk_python.lambda_service import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from aws_durable_functions_sdk_python.config import (
+    from aws_durable_execution_sdk_python.config import (
         CallbackConfig,
         WaitForCallbackConfig,
     )
-    from aws_durable_functions_sdk_python.identifier import OperationIdentifier
-    from aws_durable_functions_sdk_python.state import (
+    from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+    from aws_durable_execution_sdk_python.state import (
         CheckpointedResult,
         ExecutionState,
     )
-    from aws_durable_functions_sdk_python.types import Callback, DurableContext
+    from aws_durable_execution_sdk_python.types import Callback, DurableContext
 
 
 def create_callback_handler(

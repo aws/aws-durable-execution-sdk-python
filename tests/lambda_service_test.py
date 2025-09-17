@@ -5,12 +5,12 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from aws_durable_functions_sdk_python.exceptions import (
+from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     CheckpointError,
 )
-from aws_durable_functions_sdk_python.identifier import OperationIdentifier
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
     CallbackOptions,
     CheckpointOutput,
@@ -480,7 +480,7 @@ def test_operation_update_create_wait_start():
     assert update.sub_type is OperationSubType.WAIT
 
 
-@patch("aws_durable_functions_sdk_python.lambda_service.datetime")
+@patch("aws_durable_execution_sdk_python.lambda_service.datetime")
 def test_operation_update_create_execution_succeed(mock_datetime):
     """Test OperationUpdate.create_execution_succeed factory method."""
     mock_datetime.datetime.now.return_value = "2023-01-01"
@@ -775,7 +775,7 @@ def test_state_output_from_dict_empty_operations():
     assert output.next_marker == "marker123"
 
 
-@patch("aws_durable_functions_sdk_python.lambda_service.boto3")
+@patch("aws_durable_execution_sdk_python.lambda_service.boto3")
 def test_lambda_client_initialize_from_endpoint_and_region(mock_boto3):
     """Test LambdaClient.initialize_from_endpoint_and_region method."""
     mock_client = Mock()
@@ -795,7 +795,7 @@ def test_lambda_client_initialize_from_endpoint_and_region(mock_boto3):
     "os.environ",
     {"LOCAL_RUNNER_ENDPOINT": "http://test:5000", "LOCAL_RUNNER_REGION": "us-west-1"},
 )
-@patch("aws_durable_functions_sdk_python.lambda_service.boto3")
+@patch("aws_durable_execution_sdk_python.lambda_service.boto3")
 def test_lambda_client_initialize_local_runner_client(mock_boto3):
     """Test LambdaClient.initialize_local_runner_client method."""
     mock_client = Mock()
@@ -813,7 +813,7 @@ def test_lambda_client_initialize_local_runner_client(mock_boto3):
     "os.environ", {"DEX_ENDPOINT": "https://lambda.test.com", "DEX_REGION": "eu-west-1"}
 )
 @patch(
-    "aws_durable_functions_sdk_python.lambda_service.LambdaClient.initialize_from_endpoint_and_region"
+    "aws_durable_execution_sdk_python.lambda_service.LambdaClient.initialize_from_endpoint_and_region"
 )
 def test_lambda_client_initialize_from_env(mock_init):
     """Test LambdaClient.initialize_from_env method."""
@@ -1496,7 +1496,7 @@ def test_operation_update_to_dict_without_sub_type():
 
 # Additional tests for LambdaClient factory methods with environment variables
 @patch.dict("os.environ", {}, clear=True)
-@patch("aws_durable_functions_sdk_python.lambda_service.boto3")
+@patch("aws_durable_execution_sdk_python.lambda_service.boto3")
 def test_lambda_client_initialize_local_runner_client_defaults(mock_boto3):
     """Test LambdaClient.initialize_local_runner_client with default environment values."""
     mock_client = Mock()
@@ -1514,7 +1514,7 @@ def test_lambda_client_initialize_local_runner_client_defaults(mock_boto3):
 
 @patch.dict("os.environ", {}, clear=True)
 @patch(
-    "aws_durable_functions_sdk_python.lambda_service.LambdaClient.initialize_from_endpoint_and_region"
+    "aws_durable_execution_sdk_python.lambda_service.LambdaClient.initialize_from_endpoint_and_region"
 )
 def test_lambda_client_initialize_from_env_defaults(mock_init):
     """Test LambdaClient.initialize_from_env with default environment values."""

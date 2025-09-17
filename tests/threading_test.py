@@ -5,8 +5,8 @@ import time
 
 import pytest
 
-from aws_durable_functions_sdk_python.exceptions import OrderedLockError
-from aws_durable_functions_sdk_python.threading import OrderedCounter, OrderedLock
+from aws_durable_execution_sdk_python.exceptions import OrderedLockError
+from aws_durable_execution_sdk_python.threading import OrderedCounter, OrderedLock
 
 
 # region OrderedLock

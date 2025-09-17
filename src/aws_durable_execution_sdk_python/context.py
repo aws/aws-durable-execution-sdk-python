@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Concatenate, Generic, ParamSpec, TypeVar
 
-from aws_durable_functions_sdk_python.config import (
+from aws_durable_execution_sdk_python.config import (
     BatchedInput,
     CallbackConfig,
     ChildConfig,
@@ -13,48 +13,48 @@ from aws_durable_functions_sdk_python.config import (
     WaitForCallbackConfig,
     WaitForConditionConfig,
 )
-from aws_durable_functions_sdk_python.exceptions import (
+from aws_durable_execution_sdk_python.exceptions import (
     FatalError,
     SuspendExecution,
     ValidationError,
 )
-from aws_durable_functions_sdk_python.identifier import OperationIdentifier
-from aws_durable_functions_sdk_python.lambda_context import (
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+from aws_durable_execution_sdk_python.lambda_context import (
     LambdaContext,
     make_dict_from_obj,
 )
-from aws_durable_functions_sdk_python.lambda_service import OperationSubType
-from aws_durable_functions_sdk_python.logger import Logger, LogInfo
-from aws_durable_functions_sdk_python.operation.callback import (
+from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+from aws_durable_execution_sdk_python.logger import Logger, LogInfo
+from aws_durable_execution_sdk_python.operation.callback import (
     create_callback_handler,
     wait_for_callback_handler,
 )
-from aws_durable_functions_sdk_python.operation.child import child_handler
-from aws_durable_functions_sdk_python.operation.map import map_handler
-from aws_durable_functions_sdk_python.operation.parallel import parallel_handler
-from aws_durable_functions_sdk_python.operation.step import step_handler
-from aws_durable_functions_sdk_python.operation.wait import wait_handler
-from aws_durable_functions_sdk_python.operation.wait_for_condition import (
+from aws_durable_execution_sdk_python.operation.child import child_handler
+from aws_durable_execution_sdk_python.operation.map import map_handler
+from aws_durable_execution_sdk_python.operation.parallel import parallel_handler
+from aws_durable_execution_sdk_python.operation.step import step_handler
+from aws_durable_execution_sdk_python.operation.wait import wait_handler
+from aws_durable_execution_sdk_python.operation.wait_for_condition import (
     wait_for_condition_handler,
 )
-from aws_durable_functions_sdk_python.serdes import SerDes, deserialize
-from aws_durable_functions_sdk_python.state import ExecutionState  # noqa: TCH001
-from aws_durable_functions_sdk_python.threading import OrderedCounter
-from aws_durable_functions_sdk_python.types import (
+from aws_durable_execution_sdk_python.serdes import SerDes, deserialize
+from aws_durable_execution_sdk_python.state import ExecutionState  # noqa: TCH001
+from aws_durable_execution_sdk_python.threading import OrderedCounter
+from aws_durable_execution_sdk_python.types import (
     BatchResult,
     LoggerInterface,
     StepContext,
     WaitForConditionCheckContext,
 )
-from aws_durable_functions_sdk_python.types import Callback as CallbackProtocol
-from aws_durable_functions_sdk_python.types import (
+from aws_durable_execution_sdk_python.types import Callback as CallbackProtocol
+from aws_durable_execution_sdk_python.types import (
     DurableContext as DurableContextProtocol,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from aws_durable_functions_sdk_python.state import CheckpointedResult
+    from aws_durable_execution_sdk_python.state import CheckpointedResult
 
 R = TypeVar("R")
 T = TypeVar("T")

@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from aws_durable_functions_sdk_python.concurrency import (
+from aws_durable_execution_sdk_python.concurrency import (
     BatchItem,
     BatchItemStatus,
     BatchResult,
@@ -19,14 +19,14 @@ from aws_durable_functions_sdk_python.concurrency import (
     ExecutionCounters,
     TimerScheduler,
 )
-from aws_durable_functions_sdk_python.config import CompletionConfig
-from aws_durable_functions_sdk_python.exceptions import (
+from aws_durable_execution_sdk_python.config import CompletionConfig
+from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     InvalidStateError,
     SuspendExecution,
     TimedSuspendExecution,
 )
-from aws_durable_functions_sdk_python.lambda_service import ErrorObject
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 
 
 def test_batch_item_status_enum():
@@ -738,7 +738,7 @@ def test_concurrent_executor_full_execution_path():
 
     # Mock ChildConfig from the config module
     with patch(
-        "aws_durable_functions_sdk_python.config.ChildConfig"
+        "aws_durable_execution_sdk_python.config.ChildConfig"
     ) as mock_child_config:
         mock_child_config.return_value = Mock()
 

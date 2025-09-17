@@ -5,19 +5,19 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from aws_durable_functions_sdk_python.config import (
+from aws_durable_execution_sdk_python.config import (
     RetryDecision,
     StepConfig,
     StepSemantics,
 )
-from aws_durable_functions_sdk_python.exceptions import (
+from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     FatalError,
     StepInterruptedError,
     SuspendExecution,
 )
-from aws_durable_functions_sdk_python.identifier import OperationIdentifier
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     Operation,
     OperationAction,
@@ -26,9 +26,9 @@ from aws_durable_functions_sdk_python.lambda_service import (
     OperationType,
     StepDetails,
 )
-from aws_durable_functions_sdk_python.logger import Logger
-from aws_durable_functions_sdk_python.operation.step import step_handler
-from aws_durable_functions_sdk_python.state import CheckpointedResult, ExecutionState
+from aws_durable_execution_sdk_python.logger import Logger
+from aws_durable_execution_sdk_python.operation.step import step_handler
+from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 from tests.serdes_test import CustomDictSerDes
 
 
@@ -404,7 +404,7 @@ def test_step_handler_retry_with_existing_attempts():
     assert call_args[1] == 3  # retry_attempt + 1
 
 
-@patch("aws_durable_functions_sdk_python.operation.step.retry_handler")
+@patch("aws_durable_execution_sdk_python.operation.step.retry_handler")
 def test_step_handler_retry_handler_no_exception(mock_retry_handler):
     """Test step_handler when retry_handler doesn't raise an exception."""
     mock_state = Mock(spec=ExecutionState)

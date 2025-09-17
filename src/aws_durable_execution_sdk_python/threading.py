@@ -6,7 +6,7 @@ from collections import deque
 from threading import Event, Lock
 from typing import TYPE_CHECKING
 
-from aws_durable_functions_sdk_python.exceptions import OrderedLockError
+from aws_durable_execution_sdk_python.exceptions import OrderedLockError
 
 if TYPE_CHECKING:
     from typing import Self

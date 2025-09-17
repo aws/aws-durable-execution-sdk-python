@@ -5,23 +5,23 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock, patch
 
-from aws_durable_functions_sdk_python.context import (
+from aws_durable_execution_sdk_python.context import (
     DurableContext,
     durable_step,
     durable_with_child_context,
 )
-from aws_durable_functions_sdk_python.execution import InvocationStatus, durable_handler
-from aws_durable_functions_sdk_python.lambda_context import LambdaContext
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.execution import InvocationStatus, durable_handler
+from aws_durable_execution_sdk_python.lambda_context import LambdaContext
+from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
     OperationAction,
     OperationType,
 )
-from aws_durable_functions_sdk_python.logger import LoggerInterface
+from aws_durable_execution_sdk_python.logger import LoggerInterface
 
 if TYPE_CHECKING:
-    from aws_durable_functions_sdk_python.types import StepContext
+    from aws_durable_execution_sdk_python.types import StepContext
 
 
 def test_step_different_ways_to_pass_args():
@@ -57,7 +57,7 @@ def test_step_different_ways_to_pass_args():
         return results
 
     with patch(
-        "aws_durable_functions_sdk_python.execution.LambdaClient"
+        "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
         mock_client_class.initialize_local_runner_client.return_value = mock_client
@@ -134,7 +134,7 @@ def test_step_with_logger():
         assert result == "result"
 
     with patch(
-        "aws_durable_functions_sdk_python.execution.LambdaClient"
+        "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
         mock_client_class.initialize_local_runner_client.return_value = mock_client
@@ -216,7 +216,7 @@ def test_wait_inside_run_in_childcontext():
 
     # Mock the lambda client
     with patch(
-        "aws_durable_functions_sdk_python.execution.LambdaClient"
+        "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
         mock_client_class.initialize_local_runner_client.return_value = mock_client
@@ -302,7 +302,7 @@ def test_wait_not_caught_by_exception():
             raise CustomError(msg) from err
 
     with patch(
-        "aws_durable_functions_sdk_python.execution.LambdaClient"
+        "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
         mock_client_class.initialize_local_runner_client.return_value = mock_client

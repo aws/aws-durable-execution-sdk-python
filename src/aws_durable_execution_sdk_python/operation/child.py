@@ -5,20 +5,20 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, TypeVar
 
-from aws_durable_functions_sdk_python.config import ChildConfig
-from aws_durable_functions_sdk_python.exceptions import FatalError, SuspendExecution
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.config import ChildConfig
+from aws_durable_execution_sdk_python.exceptions import FatalError, SuspendExecution
+from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationSubType,
     OperationUpdate,
 )
-from aws_durable_functions_sdk_python.serdes import deserialize, serialize
+from aws_durable_execution_sdk_python.serdes import deserialize, serialize
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from aws_durable_functions_sdk_python.identifier import OperationIdentifier
-    from aws_durable_functions_sdk_python.state import ExecutionState
+    from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+    from aws_durable_execution_sdk_python.state import ExecutionState
 
 logger = logging.getLogger(__name__)
 

@@ -6,12 +6,12 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from aws_durable_functions_sdk_python.exceptions import TimedSuspendExecution
-from aws_durable_functions_sdk_python.lambda_service import OperationUpdate, WaitOptions
+from aws_durable_execution_sdk_python.exceptions import TimedSuspendExecution
+from aws_durable_execution_sdk_python.lambda_service import OperationUpdate, WaitOptions
 
 if TYPE_CHECKING:
-    from aws_durable_functions_sdk_python.identifier import OperationIdentifier
-    from aws_durable_functions_sdk_python.state import ExecutionState
+    from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+    from aws_durable_execution_sdk_python.state import ExecutionState
 
 logger = logging.getLogger(__name__)
 

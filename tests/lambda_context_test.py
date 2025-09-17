@@ -2,7 +2,7 @@
 
 from unittest.mock import Mock, patch
 
-from aws_durable_functions_sdk_python.lambda_context import (
+from aws_durable_execution_sdk_python.lambda_context import (
     Client,
     ClientContext,
     CognitoIdentity,

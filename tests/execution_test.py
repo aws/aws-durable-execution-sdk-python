@@ -7,17 +7,17 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from aws_durable_functions_sdk_python.context import DurableContext
-from aws_durable_functions_sdk_python.exceptions import CheckpointError, FatalError
-from aws_durable_functions_sdk_python.execution import (
+from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.exceptions import CheckpointError, FatalError
+from aws_durable_execution_sdk_python.execution import (
     DurableExecutionInvocationInput,
     DurableExecutionInvocationInputWithClient,
     InitialExecutionState,
     InvocationStatus,
     durable_handler,
 )
-from aws_durable_functions_sdk_python.lambda_context import LambdaContext
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.lambda_context import LambdaContext
+from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
     DurableServiceClient,
@@ -271,7 +271,7 @@ def test_operation_to_dict_minimal():
 def test_durable_handler_client_selection_env_normal_result():
     """Test durable_handler selects correct client from environment."""
     with patch(
-        "aws_durable_functions_sdk_python.execution.LambdaClient"
+        "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_lambda_client:
         mock_client = Mock(spec=DurableServiceClient)
         mock_lambda_client.initialize_from_env.return_value = mock_client
@@ -324,7 +324,7 @@ def test_durable_handler_client_selection_env_normal_result():
 def test_durable_handler_client_selection_env_large_result():
     """Test durable_handler selects correct client from environment."""
     with patch(
-        "aws_durable_functions_sdk_python.execution.LambdaClient"
+        "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_lambda_client:
         mock_client = Mock(spec=DurableServiceClient)
         mock_lambda_client.initialize_from_env.return_value = mock_client
@@ -617,7 +617,7 @@ def test_durable_handler_fatal_error_handling():
 def test_durable_handler_client_selection_local_runner():
     """Test durable_handler selects correct client for local runner."""
     with patch(
-        "aws_durable_functions_sdk_python.execution.LambdaClient"
+        "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_lambda_client:
         mock_client = Mock(spec=DurableServiceClient)
         mock_lambda_client.initialize_local_runner_client.return_value = mock_client

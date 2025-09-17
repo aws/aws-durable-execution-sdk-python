@@ -2,10 +2,10 @@
 
 from unittest.mock import Mock, patch
 
-from aws_durable_functions_sdk_python.concurrency import BatchResult, Executable
-from aws_durable_functions_sdk_python.config import CompletionConfig, MapConfig
-from aws_durable_functions_sdk_python.lambda_service import OperationSubType
-from aws_durable_functions_sdk_python.operation.map import MapExecutor, map_handler
+from aws_durable_execution_sdk_python.concurrency import BatchResult, Executable
+from aws_durable_execution_sdk_python.config import CompletionConfig, MapConfig
+from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+from aws_durable_execution_sdk_python.operation.map import MapExecutor, map_handler
 
 
 def test_map_executor_init():
@@ -57,7 +57,7 @@ def test_map_executor_from_items_default_config():
     assert executor.items == items
 
 
-@patch("aws_durable_functions_sdk_python.operation.map.logger")
+@patch("aws_durable_execution_sdk_python.operation.map.logger")
 def test_map_executor_execute_item(mock_logger):
     """Test MapExecutor.execute_item method with logging."""
     items = ["hello", "world"]

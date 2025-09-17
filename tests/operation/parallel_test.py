@@ -4,14 +4,14 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from aws_durable_functions_sdk_python.concurrency import BatchResult, Executable
-from aws_durable_functions_sdk_python.config import CompletionConfig, ParallelConfig
-from aws_durable_functions_sdk_python.lambda_service import OperationSubType
-from aws_durable_functions_sdk_python.operation.parallel import (
+from aws_durable_execution_sdk_python.concurrency import BatchResult, Executable
+from aws_durable_execution_sdk_python.config import CompletionConfig, ParallelConfig
+from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+from aws_durable_execution_sdk_python.operation.parallel import (
     ParallelExecutor,
     parallel_handler,
 )
-from aws_durable_functions_sdk_python.state import ExecutionState
+from aws_durable_execution_sdk_python.state import ExecutionState
 
 
 def test_parallel_executor_init():
@@ -235,7 +235,7 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
 
 def test_parallel_executor_inheritance():
     """Test that ParallelExecutor properly inherits from ConcurrentExecutor."""
-    from aws_durable_functions_sdk_python.concurrency import ConcurrentExecutor
+    from aws_durable_execution_sdk_python.concurrency import ConcurrentExecutor
 
     executables = [Executable(index=0, func=lambda x: x)]
     executor = ParallelExecutor(

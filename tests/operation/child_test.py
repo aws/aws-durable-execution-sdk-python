@@ -5,17 +5,17 @@ from unittest.mock import Mock
 
 import pytest
 
-from aws_durable_functions_sdk_python.config import ChildConfig
-from aws_durable_functions_sdk_python.exceptions import CallableRuntimeError, FatalError
-from aws_durable_functions_sdk_python.identifier import OperationIdentifier
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.config import ChildConfig
+from aws_durable_execution_sdk_python.exceptions import CallableRuntimeError, FatalError
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationAction,
     OperationSubType,
     OperationType,
 )
-from aws_durable_functions_sdk_python.operation.child import child_handler
-from aws_durable_functions_sdk_python.state import ExecutionState
+from aws_durable_execution_sdk_python.operation.child import child_handler
+from aws_durable_execution_sdk_python.state import ExecutionState
 from tests.serdes_test import CustomDictSerDes
 
 

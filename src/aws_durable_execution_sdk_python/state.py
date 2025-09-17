@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING
 
-from aws_durable_functions_sdk_python.exceptions import DurableExecutionsError
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.exceptions import DurableExecutionsError
+from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
     DurableServiceClient,
     ErrorObject,
@@ -17,7 +17,7 @@ from aws_durable_functions_sdk_python.lambda_service import (
     OperationUpdate,
     StateOutput,
 )
-from aws_durable_functions_sdk_python.threading import OrderedLock
+from aws_durable_execution_sdk_python.threading import OrderedLock
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping

@@ -13,7 +13,7 @@
 ## Installation
 
 ```console
-pip install aws-durable-executions-sdk-python
+pip install aws-durable-execution-sdk-python
 ```
 
 ## Developers

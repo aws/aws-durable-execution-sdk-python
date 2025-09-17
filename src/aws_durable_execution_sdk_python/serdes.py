@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from aws_durable_functions_sdk_python.exceptions import FatalError
+from aws_durable_execution_sdk_python.exceptions import FatalError
 
 logger = logging.getLogger(__name__)
 

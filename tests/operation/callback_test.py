@@ -4,10 +4,10 @@ from unittest.mock import ANY, Mock, patch
 
 import pytest
 
-from aws_durable_functions_sdk_python.config import CallbackConfig
-from aws_durable_functions_sdk_python.exceptions import FatalError
-from aws_durable_functions_sdk_python.identifier import OperationIdentifier
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.config import CallbackConfig
+from aws_durable_execution_sdk_python.exceptions import FatalError
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
     CallbackOptions,
     Operation,
@@ -17,12 +17,12 @@ from aws_durable_functions_sdk_python.lambda_service import (
     OperationType,
     OperationUpdate,
 )
-from aws_durable_functions_sdk_python.operation.callback import (
+from aws_durable_execution_sdk_python.operation.callback import (
     create_callback_handler,
     wait_for_callback_handler,
 )
-from aws_durable_functions_sdk_python.state import CheckpointedResult, ExecutionState
-from aws_durable_functions_sdk_python.types import DurableContext, StepContext
+from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
+from aws_durable_execution_sdk_python.types import DurableContext, StepContext
 
 
 # region create_callback_handler
@@ -945,7 +945,7 @@ def test_callback_name_variations():
         mock_context.reset_mock()
 
 
-@patch("aws_durable_functions_sdk_python.operation.callback.OperationUpdate")
+@patch("aws_durable_execution_sdk_python.operation.callback.OperationUpdate")
 def test_callback_operation_update_creation(mock_operation_update):
     """Test that OperationUpdate.create_callback is called with correct parameters."""
     mock_state = Mock(spec=ExecutionState)

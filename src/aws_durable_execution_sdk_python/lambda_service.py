@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import boto3  # type: ignore
 
-from aws_durable_functions_sdk_python.exceptions import (
+from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     CheckpointError,
 )
@@ -18,7 +18,7 @@ from aws_durable_functions_sdk_python.exceptions import (
 if TYPE_CHECKING:
     from collections.abc import MutableMapping
 
-    from aws_durable_functions_sdk_python.identifier import OperationIdentifier
+    from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 
 logger = logging.getLogger(__name__)
 

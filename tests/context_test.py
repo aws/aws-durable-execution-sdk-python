@@ -5,7 +5,7 @@ from unittest.mock import ANY, Mock, patch
 
 import pytest
 
-from aws_durable_functions_sdk_python.config import (
+from aws_durable_execution_sdk_python.config import (
     CallbackConfig,
     ChildConfig,
     MapConfig,
@@ -13,22 +13,22 @@ from aws_durable_functions_sdk_python.config import (
     StepConfig,
     WaitForConditionConfig,
 )
-from aws_durable_functions_sdk_python.context import Callback, DurableContext
-from aws_durable_functions_sdk_python.exceptions import (
+from aws_durable_execution_sdk_python.context import Callback, DurableContext
+from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     FatalError,
     SuspendExecution,
     ValidationError,
 )
-from aws_durable_functions_sdk_python.identifier import OperationIdentifier
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
     ErrorObject,
     Operation,
     OperationStatus,
     OperationType,
 )
-from aws_durable_functions_sdk_python.state import CheckpointedResult, ExecutionState
+from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 from tests.serdes_test import CustomDictSerDes
 
 
@@ -209,7 +209,7 @@ def test_callback_result_timed_out():
 
 
 # region create_callback
-@patch("aws_durable_functions_sdk_python.context.create_callback_handler")
+@patch("aws_durable_execution_sdk_python.context.create_callback_handler")
 def test_create_callback_basic(mock_handler):
     """Test create_callback with basic parameters."""
     mock_handler.return_value = "callback123"
@@ -234,7 +234,7 @@ def test_create_callback_basic(mock_handler):
     )
 
 
-@patch("aws_durable_functions_sdk_python.context.create_callback_handler")
+@patch("aws_durable_execution_sdk_python.context.create_callback_handler")
 def test_create_callback_with_name_and_config(mock_handler):
     """Test create_callback with name and config."""
     mock_handler.return_value = "callback456"
@@ -259,7 +259,7 @@ def test_create_callback_with_name_and_config(mock_handler):
     )
 
 
-@patch("aws_durable_functions_sdk_python.context.create_callback_handler")
+@patch("aws_durable_execution_sdk_python.context.create_callback_handler")
 def test_create_callback_with_parent_id(mock_handler):
     """Test create_callback with parent_id."""
     mock_handler.return_value = "callback789"
@@ -282,7 +282,7 @@ def test_create_callback_with_parent_id(mock_handler):
     )
 
 
-@patch("aws_durable_functions_sdk_python.context.create_callback_handler")
+@patch("aws_durable_execution_sdk_python.context.create_callback_handler")
 def test_create_callback_increments_counter(mock_handler):
     """Test create_callback increments step counter."""
     mock_handler.return_value = "callback_test"
@@ -306,7 +306,7 @@ def test_create_callback_increments_counter(mock_handler):
 
 
 # region step
-@patch("aws_durable_functions_sdk_python.context.step_handler")
+@patch("aws_durable_execution_sdk_python.context.step_handler")
 def test_step_basic(mock_handler):
     """Test step with basic parameters."""
     mock_handler.return_value = "step_result"
@@ -333,7 +333,7 @@ def test_step_basic(mock_handler):
     )
 
 
-@patch("aws_durable_functions_sdk_python.context.step_handler")
+@patch("aws_durable_execution_sdk_python.context.step_handler")
 def test_step_with_name_and_config(mock_handler):
     """Test step with name and config."""
     mock_handler.return_value = "configured_result"
@@ -362,7 +362,7 @@ def test_step_with_name_and_config(mock_handler):
     )
 
 
-@patch("aws_durable_functions_sdk_python.context.step_handler")
+@patch("aws_durable_execution_sdk_python.context.step_handler")
 def test_step_with_parent_id(mock_handler):
     """Test step with parent_id."""
     mock_handler.return_value = "parent_result"
@@ -389,7 +389,7 @@ def test_step_with_parent_id(mock_handler):
     )
 
 
-@patch("aws_durable_functions_sdk_python.context.step_handler")
+@patch("aws_durable_execution_sdk_python.context.step_handler")
 def test_step_increments_counter(mock_handler):
     """Test step increments step counter."""
     mock_handler.return_value = "result"
@@ -417,7 +417,7 @@ def test_step_increments_counter(mock_handler):
     ] == OperationIdentifier("12", None, None)
 
 
-@patch("aws_durable_functions_sdk_python.context.step_handler")
+@patch("aws_durable_execution_sdk_python.context.step_handler")
 def test_step_with_original_name(mock_handler):
     """Test step with callable that has _original_name attribute."""
     mock_handler.return_value = "named_result"
@@ -445,7 +445,7 @@ def test_step_with_original_name(mock_handler):
 
 
 # region wait
-@patch("aws_durable_functions_sdk_python.context.wait_handler")
+@patch("aws_durable_execution_sdk_python.context.wait_handler")
 def test_wait_basic(mock_handler):
     """Test wait with basic parameters."""
     mock_state = Mock(spec=ExecutionState)
@@ -464,7 +464,7 @@ def test_wait_basic(mock_handler):
     )
 
 
-@patch("aws_durable_functions_sdk_python.context.wait_handler")
+@patch("aws_durable_execution_sdk_python.context.wait_handler")
 def test_wait_with_name(mock_handler):
     """Test wait with name parameter."""
     mock_state = Mock(spec=ExecutionState)
@@ -484,7 +484,7 @@ def test_wait_with_name(mock_handler):
     )
 
 
-@patch("aws_durable_functions_sdk_python.context.wait_handler")
+@patch("aws_durable_execution_sdk_python.context.wait_handler")
 def test_wait_with_parent_id(mock_handler):
     """Test wait with parent_id."""
     mock_state = Mock(spec=ExecutionState)
@@ -504,7 +504,7 @@ def test_wait_with_parent_id(mock_handler):
     )
 
 
-@patch("aws_durable_functions_sdk_python.context.wait_handler")
+@patch("aws_durable_execution_sdk_python.context.wait_handler")
 def test_wait_increments_counter(mock_handler):
     """Test wait increments step counter."""
     mock_state = Mock(spec=ExecutionState)
@@ -527,7 +527,7 @@ def test_wait_increments_counter(mock_handler):
     ] == OperationIdentifier("12", None, None)
 
 
-@patch("aws_durable_functions_sdk_python.context.wait_handler")
+@patch("aws_durable_execution_sdk_python.context.wait_handler")
 def test_wait_returns_none(mock_handler):
     """Test wait returns None."""
     mock_state = Mock(spec=ExecutionState)
@@ -546,7 +546,7 @@ def test_wait_returns_none(mock_handler):
 
 
 # region run_in_child_context
-@patch("aws_durable_functions_sdk_python.context.child_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_run_in_child_context_basic(mock_handler):
     """Test run_in_child_context with basic parameters."""
     mock_handler.return_value = "child_result"
@@ -573,7 +573,7 @@ def test_run_in_child_context_basic(mock_handler):
     assert call_args[1]["config"] is None
 
 
-@patch("aws_durable_functions_sdk_python.context.child_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_run_in_child_context_with_name_and_config(mock_handler):
     """Test run_in_child_context with name and config."""
     mock_handler.return_value = "configured_child_result"
@@ -599,7 +599,7 @@ def test_run_in_child_context_with_name_and_config(mock_handler):
     assert call_args[1]["config"] is config
 
 
-@patch("aws_durable_functions_sdk_python.context.child_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_run_in_child_context_with_parent_id(mock_handler):
     """Test run_in_child_context with parent_id."""
     mock_handler.return_value = "parent_child_result"
@@ -623,7 +623,7 @@ def test_run_in_child_context_with_parent_id(mock_handler):
     )
 
 
-@patch("aws_durable_functions_sdk_python.context.child_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_run_in_child_context_creates_child_context(mock_handler):
     """Test run_in_child_context creates proper child context."""
     mock_state = Mock(spec=ExecutionState)
@@ -649,7 +649,7 @@ def test_run_in_child_context_creates_child_context(mock_handler):
     mock_callable.assert_called_once()
 
 
-@patch("aws_durable_functions_sdk_python.context.child_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_run_in_child_context_increments_counter(mock_handler):
     """Test run_in_child_context increments step counter."""
     mock_handler.return_value = "result"
@@ -677,7 +677,7 @@ def test_run_in_child_context_increments_counter(mock_handler):
     ] == OperationIdentifier("7", None, None)
 
 
-@patch("aws_durable_functions_sdk_python.context.child_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_run_in_child_context_resolves_name_from_callable(mock_handler):
     """Test run_in_child_context resolves name from callable._original_name."""
     mock_handler.return_value = "named_result"
@@ -700,7 +700,7 @@ def test_run_in_child_context_resolves_name_from_callable(mock_handler):
 
 
 # region wait_for_callback
-@patch("aws_durable_functions_sdk_python.context.wait_for_callback_handler")
+@patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
 def test_wait_for_callback_basic(mock_handler):
     """Test wait_for_callback with basic parameters."""
     mock_handler.return_value = "callback_result"
@@ -727,7 +727,7 @@ def test_wait_for_callback_basic(mock_handler):
         assert call_args[0][1] is None  # name should be None
 
 
-@patch("aws_durable_functions_sdk_python.context.wait_for_callback_handler")
+@patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
 def test_wait_for_callback_with_name_and_config(mock_handler):
     """Test wait_for_callback with name and config."""
     mock_handler.return_value = "configured_callback_result"
@@ -752,7 +752,7 @@ def test_wait_for_callback_with_name_and_config(mock_handler):
         )  # name should be from _original_name
 
 
-@patch("aws_durable_functions_sdk_python.context.wait_for_callback_handler")
+@patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
 def test_wait_for_callback_resolves_name_from_submitter(mock_handler):
     """Test wait_for_callback resolves name from submitter._original_name."""
     mock_handler.return_value = "named_callback_result"
@@ -773,7 +773,7 @@ def test_wait_for_callback_resolves_name_from_submitter(mock_handler):
         assert call_args[0][1] == "submit_task"
 
 
-@patch("aws_durable_functions_sdk_python.context.wait_for_callback_handler")
+@patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
 def test_wait_for_callback_passes_child_context(mock_handler):
     """Test wait_for_callback passes child context to handler."""
     mock_state = Mock(spec=ExecutionState)
@@ -809,7 +809,7 @@ def test_wait_for_callback_passes_child_context(mock_handler):
 
 
 # region map
-@patch("aws_durable_functions_sdk_python.context.map_handler")
+@patch("aws_durable_execution_sdk_python.context.map_handler")
 def test_map_basic(mock_handler):
     """Test map with basic parameters."""
     mock_handler.return_value = "map_result"
@@ -838,10 +838,10 @@ def test_map_basic(mock_handler):
         assert call_args[1]["config"].sub_type.value == "Map"
 
 
-@patch("aws_durable_functions_sdk_python.context.map_handler")
+@patch("aws_durable_execution_sdk_python.context.map_handler")
 def test_map_with_name_and_config(mock_handler):
     """Test map with name and config."""
-    from aws_durable_functions_sdk_python.config import MapConfig
+    from aws_durable_execution_sdk_python.config import MapConfig
 
     mock_handler.return_value = "configured_map_result"
     mock_state = Mock(spec=ExecutionState)
@@ -868,7 +868,7 @@ def test_map_with_name_and_config(mock_handler):
         assert call_args[1]["name"] == "custom_map"  # name should be custom_map
 
 
-@patch("aws_durable_functions_sdk_python.context.map_handler")
+@patch("aws_durable_execution_sdk_python.context.map_handler")
 def test_map_calls_handler_correctly(mock_handler):
     """Test map calls map_handler with correct parameters."""
     mock_handler.return_value = "handler_result"
@@ -892,7 +892,7 @@ def test_map_calls_handler_correctly(mock_handler):
         mock_run_in_child.assert_called_once()
 
 
-@patch("aws_durable_functions_sdk_python.context.map_handler")
+@patch("aws_durable_execution_sdk_python.context.map_handler")
 def test_map_with_empty_inputs(mock_handler):
     """Test map with empty inputs."""
     mock_handler.return_value = "empty_map_result"
@@ -915,7 +915,7 @@ def test_map_with_empty_inputs(mock_handler):
         assert result == "empty_map_result"
 
 
-@patch("aws_durable_functions_sdk_python.context.map_handler")
+@patch("aws_durable_execution_sdk_python.context.map_handler")
 def test_map_with_different_input_types(mock_handler):
     """Test map with different input types."""
     mock_handler.return_value = "mixed_map_result"
@@ -942,7 +942,7 @@ def test_map_with_different_input_types(mock_handler):
 
 
 # region parallel
-@patch("aws_durable_functions_sdk_python.context.parallel_handler")
+@patch("aws_durable_execution_sdk_python.context.parallel_handler")
 def test_parallel_basic(mock_handler):
     """Test parallel with basic parameters."""
     mock_handler.return_value = "parallel_result"
@@ -974,10 +974,10 @@ def test_parallel_basic(mock_handler):
         assert call_args[1]["config"].sub_type.value == "Parallel"
 
 
-@patch("aws_durable_functions_sdk_python.context.parallel_handler")
+@patch("aws_durable_execution_sdk_python.context.parallel_handler")
 def test_parallel_with_name_and_config(mock_handler):
     """Test parallel with name and config."""
-    from aws_durable_functions_sdk_python.config import ParallelConfig
+    from aws_durable_execution_sdk_python.config import ParallelConfig
 
     mock_handler.return_value = "configured_parallel_result"
     mock_state = Mock(spec=ExecutionState)
@@ -1007,7 +1007,7 @@ def test_parallel_with_name_and_config(mock_handler):
         )  # name should be custom_parallel
 
 
-@patch("aws_durable_functions_sdk_python.context.parallel_handler")
+@patch("aws_durable_execution_sdk_python.context.parallel_handler")
 def test_parallel_resolves_name_from_callable(mock_handler):
     """Test parallel resolves name from callable._original_name."""
     mock_handler.return_value = "named_parallel_result"
@@ -1044,7 +1044,7 @@ def test_parallel_resolves_name_from_callable(mock_handler):
         )  # name should be None since callables don't have _original_name
 
 
-@patch("aws_durable_functions_sdk_python.context.parallel_handler")
+@patch("aws_durable_execution_sdk_python.context.parallel_handler")
 def test_parallel_calls_handler_correctly(mock_handler):
     """Test parallel calls parallel_handler with correct parameters."""
     mock_handler.return_value = "handler_result"
@@ -1071,7 +1071,7 @@ def test_parallel_calls_handler_correctly(mock_handler):
         mock_run_in_child.assert_called_once()
 
 
-@patch("aws_durable_functions_sdk_python.context.parallel_handler")
+@patch("aws_durable_execution_sdk_python.context.parallel_handler")
 def test_parallel_with_empty_callables(mock_handler):
     """Test parallel with empty callables."""
     mock_handler.return_value = "empty_parallel_result"
@@ -1091,7 +1091,7 @@ def test_parallel_with_empty_callables(mock_handler):
         assert result == "empty_parallel_result"
 
 
-@patch("aws_durable_functions_sdk_python.context.parallel_handler")
+@patch("aws_durable_execution_sdk_python.context.parallel_handler")
 def test_parallel_with_single_callable(mock_handler):
     """Test parallel with single callable."""
     mock_handler.return_value = "single_parallel_result"
@@ -1114,7 +1114,7 @@ def test_parallel_with_single_callable(mock_handler):
         assert result == "single_parallel_result"
 
 
-@patch("aws_durable_functions_sdk_python.context.parallel_handler")
+@patch("aws_durable_execution_sdk_python.context.parallel_handler")
 def test_parallel_with_many_callables(mock_handler):
     """Test parallel with many callables."""
     mock_handler.return_value = "many_parallel_result"
@@ -1144,7 +1144,7 @@ def test_parallel_with_many_callables(mock_handler):
 
 
 # region map
-@patch("aws_durable_functions_sdk_python.context.map_handler")
+@patch("aws_durable_execution_sdk_python.context.map_handler")
 def test_map_calls_handler(mock_handler):
     """Test map calls map_handler through run_in_child_context."""
     mock_handler.return_value = "map_result"
@@ -1169,7 +1169,7 @@ def test_map_calls_handler(mock_handler):
         mock_run_in_child.assert_called_once()
 
 
-@patch("aws_durable_functions_sdk_python.context.parallel_handler")
+@patch("aws_durable_execution_sdk_python.context.parallel_handler")
 def test_parallel_calls_handler(mock_handler):
     """Test parallel calls parallel_handler through run_in_child_context."""
     mock_handler.return_value = "parallel_result"
@@ -1245,7 +1245,7 @@ def test_context_map_handler_call():
 
     # Mock the handlers to track calls
     with patch(
-        "aws_durable_functions_sdk_python.context.map_handler"
+        "aws_durable_execution_sdk_python.context.map_handler"
     ) as mock_map_handler:
         mock_map_handler.return_value = Mock()
 
@@ -1285,7 +1285,7 @@ def test_context_parallel_handler_call():
 
     # Mock the handlers to track calls
     with patch(
-        "aws_durable_functions_sdk_python.context.parallel_handler"
+        "aws_durable_execution_sdk_python.context.parallel_handler"
     ) as mock_parallel_handler:
         mock_parallel_handler.return_value = Mock()
 
@@ -1314,7 +1314,7 @@ def test_context_wait_for_condition_handler_call():
         return state
 
     def test_wait_strategy(state, attempt):
-        from aws_durable_functions_sdk_python.config import WaitForConditionDecision
+        from aws_durable_execution_sdk_python.config import WaitForConditionDecision
 
         return WaitForConditionDecision.STOP
 
@@ -1331,7 +1331,7 @@ def test_context_wait_for_condition_handler_call():
 
     # Mock the handler to track calls
     with patch(
-        "aws_durable_functions_sdk_python.context.wait_for_condition_handler"
+        "aws_durable_execution_sdk_python.context.wait_for_condition_handler"
     ) as mock_handler:
         mock_handler.return_value = "final_state"
 

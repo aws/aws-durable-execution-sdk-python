@@ -3,8 +3,8 @@
 from collections.abc import Mapping
 from unittest.mock import Mock
 
-from aws_durable_functions_sdk_python.identifier import OperationIdentifier
-from aws_durable_functions_sdk_python.logger import Logger, LoggerInterface, LogInfo
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+from aws_durable_execution_sdk_python.logger import Logger, LoggerInterface, LogInfo
 
 
 class PowertoolsLoggerStub:

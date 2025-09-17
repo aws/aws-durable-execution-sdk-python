@@ -6,27 +6,27 @@ import logging
 import time
 from typing import TYPE_CHECKING, TypeVar
 
-from aws_durable_functions_sdk_python.config import (
+from aws_durable_execution_sdk_python.config import (
     RetryDecision,
     StepConfig,
     StepSemantics,
 )
-from aws_durable_functions_sdk_python.exceptions import (
+from aws_durable_execution_sdk_python.exceptions import (
     FatalError,
     StepInterruptedError,
     TimedSuspendExecution,
 )
-from aws_durable_functions_sdk_python.lambda_service import ErrorObject, OperationUpdate
-from aws_durable_functions_sdk_python.logger import Logger, LogInfo
-from aws_durable_functions_sdk_python.retries import RetryPresets
-from aws_durable_functions_sdk_python.serdes import deserialize, serialize
-from aws_durable_functions_sdk_python.types import StepContext
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject, OperationUpdate
+from aws_durable_execution_sdk_python.logger import Logger, LogInfo
+from aws_durable_execution_sdk_python.retries import RetryPresets
+from aws_durable_execution_sdk_python.serdes import deserialize, serialize
+from aws_durable_execution_sdk_python.types import StepContext
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from aws_durable_functions_sdk_python.identifier import OperationIdentifier
-    from aws_durable_functions_sdk_python.state import (
+    from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+    from aws_durable_execution_sdk_python.state import (
         CheckpointedResult,
         ExecutionState,
     )

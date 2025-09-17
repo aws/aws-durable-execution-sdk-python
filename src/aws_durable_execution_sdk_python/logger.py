@@ -5,12 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from aws_durable_functions_sdk_python.types import LoggerInterface
+from aws_durable_execution_sdk_python.types import LoggerInterface
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, MutableMapping
 
-    from aws_durable_functions_sdk_python.identifier import OperationIdentifier
+    from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 
 
 @dataclass(frozen=True)

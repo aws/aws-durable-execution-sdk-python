@@ -6,18 +6,18 @@ import logging
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from aws_durable_functions_sdk_python.concurrency import (
+from aws_durable_execution_sdk_python.concurrency import (
     BatchResult,
     ConcurrentExecutor,
     Executable,
 )
-from aws_durable_functions_sdk_python.config import MapConfig
-from aws_durable_functions_sdk_python.lambda_service import OperationSubType
+from aws_durable_execution_sdk_python.config import MapConfig
+from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 
 if TYPE_CHECKING:
-    from aws_durable_functions_sdk_python.config import ChildConfig
-    from aws_durable_functions_sdk_python.state import ExecutionState
-    from aws_durable_functions_sdk_python.types import DurableContext
+    from aws_durable_execution_sdk_python.config import ChildConfig
+    from aws_durable_execution_sdk_python.state import ExecutionState
+    from aws_durable_execution_sdk_python.types import DurableContext
 
 
 logger = logging.getLogger(__name__)

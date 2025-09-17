@@ -3,7 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
-from aws_durable_functions_sdk_python.config import (
+from aws_durable_execution_sdk_python.config import (
     BatchedInput,
     CallbackConfig,
     CheckpointMode,

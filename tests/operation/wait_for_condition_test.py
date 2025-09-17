@@ -5,28 +5,28 @@ from unittest.mock import Mock
 
 import pytest
 
-from aws_durable_functions_sdk_python.config import (
+from aws_durable_execution_sdk_python.config import (
     WaitForConditionConfig,
     WaitForConditionDecision,
 )
-from aws_durable_functions_sdk_python.exceptions import (
+from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     SuspendExecution,
 )
-from aws_durable_functions_sdk_python.identifier import OperationIdentifier
-from aws_durable_functions_sdk_python.lambda_service import (
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     Operation,
     OperationStatus,
     OperationType,
     StepDetails,
 )
-from aws_durable_functions_sdk_python.logger import Logger, LogInfo
-from aws_durable_functions_sdk_python.operation.wait_for_condition import (
+from aws_durable_execution_sdk_python.logger import Logger, LogInfo
+from aws_durable_execution_sdk_python.operation.wait_for_condition import (
     wait_for_condition_handler,
 )
-from aws_durable_functions_sdk_python.state import CheckpointedResult, ExecutionState
-from aws_durable_functions_sdk_python.types import WaitForConditionCheckContext
+from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
+from aws_durable_execution_sdk_python.types import WaitForConditionCheckContext
 from tests.serdes_test import CustomDictSerDes
 
 

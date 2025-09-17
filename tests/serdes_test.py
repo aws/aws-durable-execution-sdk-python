@@ -3,8 +3,8 @@ from typing import Any
 
 import pytest
 
-from aws_durable_functions_sdk_python.exceptions import FatalError
-from aws_durable_functions_sdk_python.serdes import (
+from aws_durable_execution_sdk_python.exceptions import FatalError
+from aws_durable_execution_sdk_python.serdes import (
     SerDes,
     SerDesContext,
     deserialize,

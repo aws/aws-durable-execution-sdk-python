@@ -95,7 +95,7 @@ This will drop you into the Python debugger on the failed test.
 ### Writing tests
 Place test files in the `tests/` directory, using file names that end with `_test`.
 
-Mimic the package structure in the src/aws_durable_functions_sdk_python directory.
+Mimic the package structure in the src/aws_durable_execution_sdk_python directory.
 Name your module so that src/mypackage/mymodule.py has a dedicated unit test file
 tests/mypackage/mymodule_test.py
 

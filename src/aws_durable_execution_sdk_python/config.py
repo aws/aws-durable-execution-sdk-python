@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from aws_durable_functions_sdk_python.retries import RetryDecision  # noqa: TCH001
+from aws_durable_execution_sdk_python.retries import RetryDecision  # noqa: TCH001
 
 R = TypeVar("R")
 T = TypeVar("T")
@@ -16,8 +16,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from concurrent.futures import Future
 
-    from aws_durable_functions_sdk_python.lambda_service import OperationSubType
-    from aws_durable_functions_sdk_python.serdes import SerDes
+    from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+    from aws_durable_execution_sdk_python.serdes import SerDes
 
 
 Numeric = int | float  # deliberately leaving off complex
