@@ -57,7 +57,7 @@ jobs:
           fi
     - name: Copy whl build file to s3
       run: |
-        aws s3 cp ./dist/aws_durable_execution_sdk_python-0.0.1-py3-none-any.wh \
+        aws s3 cp ./dist/aws_durable_execution_sdk_python-0.0.1-py3-none-any.whl \
           s3://${{ env.BUCKET_NAME }}/
     - name: commit whl to Gitfarm
       run: |
