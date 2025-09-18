@@ -6,6 +6,8 @@ from aws_durable_execution_sdk_python.concurrency import BatchResult, Executable
 from aws_durable_execution_sdk_python.config import CompletionConfig, MapConfig
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.operation.map import MapExecutor, map_handler
+from aws_durable_execution_sdk_python.serdes import serialize
+from tests.serdes_test import CustomStrSerDes
 
 
 def test_map_executor_init():
@@ -21,6 +23,7 @@ def test_map_executor_init():
         top_level_sub_type=OperationSubType.MAP,
         iteration_sub_type=OperationSubType.MAP_ITERATION,
         name_prefix="test-",
+        serdes=None,
     )
 
     assert executor.items == items
@@ -275,3 +278,34 @@ def test_map_handler_with_none_config_creates_default():
             assert isinstance(call_args.kwargs["config"], MapConfig)
 
         assert result == mock_batch_result
+
+
+def test_map_handler_with_serdes():
+    """Test that map_handler calls executor.execute method."""
+    items = ["test_item"]
+
+    def callable_func(ctx, item, idx, items):
+        return f"result_{item}"
+
+    # Mock the executor.execute method
+
+    def mock_run_in_child_context(func, name, config):
+        return serialize(
+            serdes=config.serdes,
+            value=func("mock_context"),
+            operation_id="op_id",
+            durable_execution_arn="durable_execution_arn",
+        )
+
+    class MockExecutionState:
+        pass
+
+    execution_state = MockExecutionState()
+    config = MapConfig(serdes=CustomStrSerDes())
+
+    result = map_handler(
+        items, callable_func, config, execution_state, mock_run_in_child_context
+    )
+
+    # Verify execute was called
+    assert result.all[0].result == "RESULT_TEST_ITEM"
