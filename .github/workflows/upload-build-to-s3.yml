@@ -55,21 +55,3 @@ jobs:
             cat output.txt
             exit 1
           fi
-    - name: Copy whl build file to s3
-      run: |
-        aws s3 cp ./dist/aws_durable_execution_sdk_python-0.0.1-py3-none-any.whl \
-          s3://${{ env.BUCKET_NAME }}/
-    - name: commit whl to Gitfarm
-      run: |
-        aws lambda invoke \
-          --function-name ${{ secrets.SYNC_LAMBDA_ARN }} \
-          --payload '{"gitFarmRepo":"${{ secrets.GITFARM_LAN_SDK_REPO }}","gitFarmBranch":"${{ secrets.GITFARM_LAN_SDK_BRANCH }}","gitFarmFilepath":"aws_durable_execution_sdk_python-0.0.1-py3-none-any.whl","s3Bucket":"${{ secrets.S3_BUCKET_NAME }}","s3FilePath":"aws_durable_execution_sdk_python-0.0.1-py3-none-any.whl"}' \
-          --cli-binary-format raw-in-base64-out \
-          output.txt
-    - name: Check for error in lambda invoke
-      id: check_text_whl
-      run: |
-          if grep -q "Error" output.txt; then
-            cat output.txt
-            exit 1
-          fi
