@@ -110,6 +110,7 @@ class ChildConfig:
     # checkpoint_mode: CheckpointMode = CheckpointMode.CHECKPOINT_AT_START_AND_FINISH
     serdes: SerDes | None = None
     sub_type: OperationSubType | None = None
+    summary_generator: Callable[[T], str] | None = None
 
 
 class ItemsPerBatchUnit(Enum):

@@ -41,6 +41,7 @@ def test_child_handler_not_started(
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
+    mock_result.is_replay_children.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(return_value="fresh_result")
 
@@ -80,6 +81,7 @@ def test_child_handler_already_succeeded():
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
     mock_result.is_succeeded.return_value = True
+    mock_result.is_replay_children.return_value = False
     mock_result.result = json.dumps("cached_result")
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock()
@@ -99,6 +101,7 @@ def test_child_handler_already_succeeded_none_result():
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
     mock_result.is_succeeded.return_value = True
+    mock_result.is_replay_children.return_value = False
     mock_result.result = None
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock()
@@ -155,6 +158,7 @@ def test_child_handler_already_started(
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = True
+    mock_result.is_replay_children.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(return_value="started_result")
 
@@ -281,6 +285,7 @@ def test_child_handler_default_serialization():
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
+    mock_result.is_replay_children.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
     mock_callable = Mock(return_value=complex_result)
@@ -306,6 +311,7 @@ def test_child_handler_custom_serdes_not_start():
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
+    mock_result.is_replay_children.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
     mock_callable = Mock(return_value=complex_result)
@@ -334,6 +340,7 @@ def test_child_handler_custom_serdes_already_succeeded():
     mock_result.is_succeeded.return_value = True
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
+    mock_result.is_replay_children.return_value = False
     mock_result.result = '{"key": "VALUE", "number": "84", "list": [1, 2, 3]}'
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock()
@@ -352,3 +359,90 @@ def test_child_handler_custom_serdes_already_succeeded():
 
 
 # endregion child_handler
+
+
+# large payload with summary generator
+def test_child_handler_large_payload_with_summary_generator():
+    """Test child_handler with large payload and summary generator."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = False
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = False
+    mock_result.is_replay_children.return_value = False
+    mock_state.get_checkpoint_result.return_value = mock_result
+    large_result = "large" * 256 * 1024
+    mock_callable = Mock(return_value=large_result)
+    child_config: ChildConfig = ChildConfig(summary_generator=lambda x: "summary")
+
+    actual_result = child_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier("op9", None, "test_name"),
+        child_config,
+    )
+
+    assert large_result == actual_result
+    success_call = mock_state.create_checkpoint.call_args_list[1]
+    success_operation = success_call[1]["operation_update"]
+    assert success_operation.context_options.replay_children
+    expected_checkpoointed_result = "summary"
+    assert success_operation.payload == expected_checkpoointed_result
+
+
+# large payload without summary generator
+def test_child_handler_large_payload_without_summary_generator():
+    """Test child_handler with large payload and no summary generator."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = False
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = False
+    mock_result.is_replay_children.return_value = False
+    mock_state.get_checkpoint_result.return_value = mock_result
+    large_result = "large" * 256 * 1024
+    mock_callable = Mock(return_value=large_result)
+    child_config: ChildConfig = ChildConfig()
+
+    actual_result = child_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier("op9", None, "test_name"),
+        child_config,
+    )
+
+    assert large_result == actual_result
+    success_call = mock_state.create_checkpoint.call_args_list[1]
+    success_operation = success_call[1]["operation_update"]
+    assert success_operation.context_options.replay_children
+    expected_checkpoointed_result = ""
+    assert success_operation.payload == expected_checkpoointed_result
+
+
+# mocked children replay mode execute the function again
+def test_child_handler_replay_children_mode():
+    """Test child_handler in ReplayChildren mode."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = True
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = True
+    mock_result.is_replay_children.return_value = True
+    mock_state.get_checkpoint_result.return_value = mock_result
+    complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
+    mock_callable = Mock(return_value=complex_result)
+    child_config: ChildConfig = ChildConfig()
+
+    actual_result = child_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier("op9", None, "test_name"),
+        child_config,
+    )
+
+    assert actual_result == complex_result
+
+    mock_state.create_checkpoint.assert_not_called()

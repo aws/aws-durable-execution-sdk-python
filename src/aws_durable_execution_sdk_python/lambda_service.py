@@ -344,7 +344,11 @@ class OperationUpdate:
 
     @classmethod
     def create_context_succeed(
-        cls, identifier: OperationIdentifier, payload: str, sub_type: OperationSubType
+        cls,
+        identifier: OperationIdentifier,
+        payload: str,
+        sub_type: OperationSubType,
+        context_options: ContextOptions | None = None,
     ) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: CONTEXT, action: SUCCEED."""
         return cls(
@@ -355,6 +359,7 @@ class OperationUpdate:
             action=OperationAction.SUCCEED,
             name=identifier.name,
             payload=payload,
+            context_options=context_options,
         )
 
     @classmethod

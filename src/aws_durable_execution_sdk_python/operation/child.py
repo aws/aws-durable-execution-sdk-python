@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, TypeVar
 from aws_durable_execution_sdk_python.config import ChildConfig
 from aws_durable_execution_sdk_python.exceptions import FatalError, SuspendExecution
 from aws_durable_execution_sdk_python.lambda_service import (
+    ContextOptions,
     ErrorObject,
     OperationSubType,
     OperationUpdate,
@@ -23,6 +24,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+# Checkpoint size limit in bytes (256KB)
+CHECKPOINT_SIZE_LIMIT = 256 * 1024
 
 
 def child_handler(
@@ -40,9 +44,11 @@ def child_handler(
     if not config:
         config = ChildConfig()
 
-    # TODO: ReplayChildren
     checkpointed_result = state.get_checkpoint_result(operation_identifier.operation_id)
-    if checkpointed_result.is_succeeded():
+    if (
+        checkpointed_result.is_succeeded()
+        and not checkpointed_result.is_replay_children()
+    ):
         logger.debug(
             "Child context already completed, skipping execution for id: %s, name: %s",
             operation_identifier.operation_id,
@@ -71,17 +77,37 @@ def child_handler(
 
     try:
         raw_result: T = func()
+        if checkpointed_result.is_replay_children():
+            logger.debug(
+                "ReplayChildren mode: Re-executing child context due to large payload: id: %s, name: %s",
+                operation_identifier.operation_id,
+                operation_identifier.name,
+            )
+            return raw_result
         serialized_result: str = serialize(
             serdes=config.serdes,
             value=raw_result,
             operation_id=operation_identifier.operation_id,
             durable_execution_arn=state.durable_execution_arn,
         )
+        payload_to_checkpoint = serialized_result
+        replay_children = False
+        if len(serialized_result) > CHECKPOINT_SIZE_LIMIT:
+            logger.debug(
+                "Large payload detected, using ReplayChildren mode: id: %s, name: %s",
+                operation_identifier.operation_id,
+                operation_identifier.name,
+            )
+            replay_children = True
+            payload_to_checkpoint = (
+                config.summary_generator(raw_result) if config.summary_generator else ""
+            )
 
         success_operation = OperationUpdate.create_context_succeed(
             identifier=operation_identifier,
-            payload=serialized_result,
+            payload=payload_to_checkpoint,
             sub_type=sub_type,
+            context_options=ContextOptions(replay_children=replay_children),
         )
         state.create_checkpoint(operation_update=success_operation)
 
