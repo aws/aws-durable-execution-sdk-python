@@ -42,6 +42,7 @@ def test_child_handler_not_started(
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
     mock_result.is_replay_children.return_value = False
+    mock_result.is_replay_children.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(return_value="fresh_result")
 
@@ -374,7 +375,11 @@ def test_child_handler_large_payload_with_summary_generator():
     mock_state.get_checkpoint_result.return_value = mock_result
     large_result = "large" * 256 * 1024
     mock_callable = Mock(return_value=large_result)
-    child_config: ChildConfig = ChildConfig(summary_generator=lambda x: "summary")
+
+    def my_summary(result: str) -> str:
+        return "summary"
+
+    child_config: ChildConfig = ChildConfig[str](summary_generator=my_summary)
 
     actual_result = child_handler(
         mock_callable,

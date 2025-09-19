@@ -79,7 +79,7 @@ def child_handler(
         raw_result: T = func()
         if checkpointed_result.is_replay_children():
             logger.debug(
-                "ReplayChildren mode: Re-executing child context due to large payload: id: %s, name: %s",
+                "ReplayChildren mode: Executed child context again on replay due to large payload. Exiting child context without creating another checkpoint. id: %s, name: %s",
                 operation_identifier.operation_id,
                 operation_identifier.name,
             )
@@ -90,8 +90,7 @@ def child_handler(
             operation_id=operation_identifier.operation_id,
             durable_execution_arn=state.durable_execution_arn,
         )
-        payload_to_checkpoint = serialized_result
-        replay_children = False
+        replay_children: bool = False
         if len(serialized_result) > CHECKPOINT_SIZE_LIMIT:
             logger.debug(
                 "Large payload detected, using ReplayChildren mode: id: %s, name: %s",
@@ -99,13 +98,13 @@ def child_handler(
                 operation_identifier.name,
             )
             replay_children = True
-            payload_to_checkpoint = (
+            serialized_result = (
                 config.summary_generator(raw_result) if config.summary_generator else ""
             )
 
         success_operation = OperationUpdate.create_context_succeed(
             identifier=operation_identifier,
-            payload=payload_to_checkpoint,
+            payload=serialized_result,
             sub_type=sub_type,
             context_options=ContextOptions(replay_children=replay_children),
         )

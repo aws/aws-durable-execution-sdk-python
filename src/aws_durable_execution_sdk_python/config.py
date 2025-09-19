@@ -104,7 +104,7 @@ class CheckpointMode(Enum):
 
 
 @dataclass(frozen=True)
-class ChildConfig:
+class ChildConfig(Generic[T]):
     """Options when running inside a child context."""
 
     # checkpoint_mode: CheckpointMode = CheckpointMode.CHECKPOINT_AT_START_AND_FINISH

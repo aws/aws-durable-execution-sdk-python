@@ -117,10 +117,7 @@ class CheckpointedResult:
         op = self.operation
         if not op:
             return False
-        context_details = op.context_details
-        if not context_details:
-            return False
-        return context_details.replay_children
+        return op.context_details.replay_children if op.context_details else False
 
     def raise_callable_error(self) -> None:
         if self.error is None:
