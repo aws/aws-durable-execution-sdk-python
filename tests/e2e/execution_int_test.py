@@ -65,7 +65,12 @@ def test_step_different_ways_to_pass_args():
         # Mock the checkpoint method to track calls
         checkpoint_calls = []
 
-        def mock_checkpoint(checkpoint_token, updates, client_token="token"):  # noqa: S107
+        def mock_checkpoint(
+            durable_execution_arn,
+            checkpoint_token,
+            updates,
+            client_token="token",  # noqa: S107
+        ):
             checkpoint_calls.append(updates)
 
             return CheckpointOutput(
@@ -142,7 +147,12 @@ def test_step_with_logger():
         # Mock the checkpoint method to track calls
         checkpoint_calls = []
 
-        def mock_checkpoint(checkpoint_token, updates, client_token="token"):  # noqa: S107
+        def mock_checkpoint(
+            durable_execution_arn,
+            checkpoint_token,
+            updates,
+            client_token="token",  # noqa: S107
+        ):
             checkpoint_calls.append(updates)
 
             return CheckpointOutput(
@@ -224,7 +234,12 @@ def test_wait_inside_run_in_childcontext():
         # Mock the checkpoint method to track calls
         checkpoint_calls = []
 
-        def mock_checkpoint(checkpoint_token, updates, client_token="token"):  # noqa: S107
+        def mock_checkpoint(
+            durable_execution_arn,
+            checkpoint_token,
+            updates,
+            client_token="token",  # noqa: S107
+        ):
             checkpoint_calls.append(updates)
 
             return CheckpointOutput(
@@ -310,7 +325,12 @@ def test_wait_not_caught_by_exception():
         # Mock the checkpoint method to track calls
         checkpoint_calls = []
 
-        def mock_checkpoint(checkpoint_token, updates, client_token="token"):  # noqa: S107
+        def mock_checkpoint(
+            durable_execution_arn,
+            checkpoint_token,
+            updates,
+            client_token="token",  # noqa: S107
+        ):
             checkpoint_calls.append(updates)
 
             return CheckpointOutput(

@@ -162,6 +162,7 @@ class ExecutionState:
         )
         while next_marker:
             output: StateOutput = self._service_client.get_execution_state(
+                durable_execution_arn=self.durable_execution_arn,
                 checkpoint_token=checkpoint_token,
                 next_marker=next_marker,
             )
@@ -227,6 +228,7 @@ class ExecutionState:
                 [operation_update] if operation_update is not None else []
             )
             output: CheckpointOutput = self._service_client.checkpoint(
+                durable_execution_arn=self.durable_execution_arn,
                 checkpoint_token=self._current_checkpoint_token,
                 updates=updates,
                 client_token=None,

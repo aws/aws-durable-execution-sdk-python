@@ -780,13 +780,18 @@ class DurableServiceClient(Protocol):
 
     def checkpoint(
         self,
+        durable_execution_arn: str,
         checkpoint_token: str,
         updates: list[OperationUpdate],
         client_token: str | None,
     ) -> CheckpointOutput: ...  # pragma: no cover
 
     def get_execution_state(
-        self, checkpoint_token: str, next_marker: str, max_items: int = 1000
+        self,
+        durable_execution_arn: str,
+        checkpoint_token: str,
+        next_marker: str,
+        max_items: int = 1000,
     ) -> StateOutput: ...  # pragma: no cover
 
     def stop(
@@ -866,12 +871,14 @@ class LambdaClient(DurableServiceClient):
 
     def checkpoint(
         self,
+        durable_execution_arn: str,
         checkpoint_token: str,
         updates: list[OperationUpdate],
         client_token: str | None,
     ) -> CheckpointOutput:
         try:
             params = {
+                "DurableExecutionArn": durable_execution_arn,
                 "CheckpointToken": checkpoint_token,
                 "Updates": [o.to_dict() for o in updates],
             }
@@ -888,10 +895,17 @@ class LambdaClient(DurableServiceClient):
             raise CheckpointError(e) from e
 
     def get_execution_state(
-        self, checkpoint_token: str, next_marker: str, max_items: int = 1000
+        self,
+        durable_execution_arn: str,
+        checkpoint_token: str,
+        next_marker: str,
+        max_items: int = 1000,
     ) -> StateOutput:
         result: MutableMapping[str, Any] = self.client.get_durable_execution_state(
-            CheckpointToken=checkpoint_token, Marker=next_marker, MaxItems=max_items
+            DurableExecutionArn=durable_execution_arn,
+            CheckpointToken=checkpoint_token,
+            Marker=next_marker,
+            MaxItems=max_items,
         )
         return StateOutput.from_dict(result)
 

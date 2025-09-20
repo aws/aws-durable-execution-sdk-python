@@ -384,6 +384,7 @@ def test_create_checkpoint():
 
     # Verify the checkpoint was called
     mock_lambda_client.checkpoint.assert_called_once_with(
+        durable_execution_arn="test_arn",
         checkpoint_token="token123",  # noqa: S106
         updates=[operation_update],
         client_token=None,
@@ -416,6 +417,7 @@ def test_create_checkpoint_with_none():
 
     # Verify the checkpoint was called with empty updates
     mock_lambda_client.checkpoint.assert_called_once_with(
+        durable_execution_arn="test_arn",
         checkpoint_token="token123",  # noqa: S106
         updates=[],
         client_token=None,
@@ -444,6 +446,7 @@ def test_create_checkpoint_with_no_args():
 
     # Verify the checkpoint was called with empty updates
     mock_lambda_client.checkpoint.assert_called_once_with(
+        durable_execution_arn="test_arn",
         checkpoint_token="token123",  # noqa: S106
         updates=[],
         client_token=None,
@@ -514,7 +517,7 @@ def test_checkpointed_result_is_timed_out_false_for_other_statuses():
 def test_fetch_paginated_operations_with_marker():
     mock_lambda_client = Mock(spec=LambdaClient)
 
-    def mock_get_execution_state(checkpoint_token, next_marker):
+    def mock_get_execution_state(durable_execution_arn, checkpoint_token, next_marker):
         resp = {
             "marker1": StateOutput(
                 operations=[
@@ -573,9 +576,21 @@ def test_fetch_paginated_operations_with_marker():
     assert mock_lambda_client.get_execution_state.call_count == 3
     mock_lambda_client.get_execution_state.assert_has_calls(
         [
-            call(checkpoint_token="test_token", next_marker="marker1"),  # noqa: S106
-            call(checkpoint_token="test_token", next_marker="marker2"),  # noqa: S106
-            call(checkpoint_token="test_token", next_marker="marker3"),  # noqa: S106
+            call(
+                durable_execution_arn="test_arn",
+                checkpoint_token="test_token",  # noqa: S106
+                next_marker="marker1",
+            ),
+            call(
+                durable_execution_arn="test_arn",
+                checkpoint_token="test_token",  # noqa: S106
+                next_marker="marker2",
+            ),
+            call(
+                durable_execution_arn="test_arn",
+                checkpoint_token="test_token",  # noqa: S106
+                next_marker="marker3",
+            ),
         ]
     )
 

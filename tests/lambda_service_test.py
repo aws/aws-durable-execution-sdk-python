@@ -838,10 +838,12 @@ def test_lambda_client_checkpoint():
         action=OperationAction.START,
     )
 
-    result = lambda_client.checkpoint("token123", [update], None)
+    result = lambda_client.checkpoint("arn123", "token123", [update], None)
 
     mock_client.checkpoint_durable_execution.assert_called_once_with(
-        CheckpointToken="token123", Updates=[update.to_dict()]
+        DurableExecutionArn="arn123",
+        CheckpointToken="token123",
+        Updates=[update.to_dict()],
     )
     assert isinstance(result, CheckpointOutput)
     assert result.checkpoint_token == "new_token"  # noqa: S105
@@ -862,9 +864,12 @@ def test_lambda_client_checkpoint_with_client_token():
         action=OperationAction.START,
     )
 
-    result = lambda_client.checkpoint("token123", [update], "client-token-123")
+    result = lambda_client.checkpoint(
+        "arn123", "token123", [update], "client-token-123"
+    )
 
     mock_client.checkpoint_durable_execution.assert_called_once_with(
+        DurableExecutionArn="arn123",
         CheckpointToken="token123",
         Updates=[update.to_dict()],
         ClientToken="client-token-123",
@@ -888,10 +893,12 @@ def test_lambda_client_checkpoint_with_explicit_none_client_token():
         action=OperationAction.START,
     )
 
-    result = lambda_client.checkpoint("token123", [update], None)
+    result = lambda_client.checkpoint("arn123", "token123", [update], None)
 
     mock_client.checkpoint_durable_execution.assert_called_once_with(
-        CheckpointToken="token123", Updates=[update.to_dict()]
+        DurableExecutionArn="arn123",
+        CheckpointToken="token123",
+        Updates=[update.to_dict()],
     )
     assert isinstance(result, CheckpointOutput)
     assert result.checkpoint_token == "new_token"  # noqa: S105
@@ -912,10 +919,13 @@ def test_lambda_client_checkpoint_with_empty_string_client_token():
         action=OperationAction.START,
     )
 
-    result = lambda_client.checkpoint("token123", [update], "")
+    result = lambda_client.checkpoint("arn123", "token123", [update], "")
 
     mock_client.checkpoint_durable_execution.assert_called_once_with(
-        CheckpointToken="token123", Updates=[update.to_dict()], ClientToken=""
+        DurableExecutionArn="arn123",
+        CheckpointToken="token123",
+        Updates=[update.to_dict()],
+        ClientToken="",
     )
     assert isinstance(result, CheckpointOutput)
     assert result.checkpoint_token == "new_token"  # noqa: S105
@@ -936,9 +946,10 @@ def test_lambda_client_checkpoint_with_string_value_client_token():
         action=OperationAction.START,
     )
 
-    result = lambda_client.checkpoint("token123", [update], "my-client-token")
+    result = lambda_client.checkpoint("arn123", "token123", [update], "my-client-token")
 
     mock_client.checkpoint_durable_execution.assert_called_once_with(
+        DurableExecutionArn="arn123",
         CheckpointToken="token123",
         Updates=[update.to_dict()],
         ClientToken="my-client-token",
@@ -960,7 +971,7 @@ def test_lambda_client_checkpoint_with_exception():
     )
 
     with pytest.raises(CheckpointError):
-        lambda_client.checkpoint("token123", [update], None)
+        lambda_client.checkpoint("arn123", "token123", [update], None)
 
 
 def test_lambda_client_get_execution_state():
@@ -971,10 +982,13 @@ def test_lambda_client_get_execution_state():
     }
 
     lambda_client = LambdaClient(mock_client)
-    result = lambda_client.get_execution_state("token123", "marker", 500)
+    result = lambda_client.get_execution_state("arn123", "token123", "marker", 500)
 
     mock_client.get_durable_execution_state.assert_called_once_with(
-        CheckpointToken="token123", Marker="marker", MaxItems=500
+        DurableExecutionArn="arn123",
+        CheckpointToken="token123",
+        Marker="marker",
+        MaxItems=500,
     )
     assert len(result.operations) == 1
 
@@ -1018,9 +1032,11 @@ def test_durable_service_client_protocol_checkpoint():
         )
     ]
 
-    result = mock_client.checkpoint("token", updates, "client_token")
+    result = mock_client.checkpoint("arn123", "token", updates, "client_token")
 
-    mock_client.checkpoint.assert_called_once_with("token", updates, "client_token")
+    mock_client.checkpoint.assert_called_once_with(
+        "arn123", "token", updates, "client_token"
+    )
     assert result == mock_output
 
 
@@ -1030,9 +1046,11 @@ def test_durable_service_client_protocol_get_execution_state():
     mock_output = StateOutput(operations=[], next_marker="marker")
     mock_client.get_execution_state.return_value = mock_output
 
-    result = mock_client.get_execution_state("token", "marker", 1000)
+    result = mock_client.get_execution_state("arn123", "token", "marker", 1000)
 
-    mock_client.get_execution_state.assert_called_once_with("token", "marker", 1000)
+    mock_client.get_execution_state.assert_called_once_with(
+        "arn123", "token", "marker", 1000
+    )
     assert result == mock_output
 
 
