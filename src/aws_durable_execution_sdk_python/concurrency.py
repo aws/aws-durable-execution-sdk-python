@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
     from aws_durable_execution_sdk_python.config import ChildConfig, CompletionConfig
     from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+    from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.state import ExecutionState
     from aws_durable_execution_sdk_python.types import DurableContext
 
@@ -478,6 +479,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         sub_type_top: OperationSubType,
         sub_type_iteration: OperationSubType,
         name_prefix: str,
+        serdes: SerDes | None,
     ):
         self.executables = executables
         self.max_concurrency = max_concurrency
@@ -508,6 +510,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
             tolerated_failure_percentage,
         )
         self.executables_with_state: list[ExecutableWithState] = []
+        self.serdes = serdes
 
     @abstractmethod
     def execute_item(
@@ -697,7 +700,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         return run_in_child_context(
             execute_in_child_context,
             f"{self.name_prefix}{executable.index}",
-            ChildConfig(sub_type=self.sub_type_iteration),
+            ChildConfig(serdes=self.serdes, sub_type=self.sub_type_iteration),
         )
 
 

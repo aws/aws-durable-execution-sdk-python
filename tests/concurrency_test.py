@@ -700,6 +700,7 @@ def test_concurrent_executor_properties():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     # Test basic properties
@@ -731,6 +732,7 @@ def test_concurrent_executor_full_execution_path():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     execution_state = Mock()
@@ -791,6 +793,7 @@ def test_concurrent_executor_on_task_complete_timed_suspend():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     exe_state = ExecutableWithState(executables[0])
@@ -827,6 +830,7 @@ def test_concurrent_executor_on_task_complete_suspend():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     exe_state = ExecutableWithState(executables[0])
@@ -861,6 +865,7 @@ def test_concurrent_executor_on_task_complete_exception():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     exe_state = ExecutableWithState(executables[0])
@@ -905,6 +910,7 @@ def test_concurrent_executor_create_result_with_failed_branches():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     execution_state = Mock()
@@ -942,6 +948,7 @@ def test_concurrent_executor_execute_item_in_child_context():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     def mock_run_in_child_context(func, name, config):
@@ -990,6 +997,7 @@ def test_concurrent_executor_create_result_failure_tolerance_exceeded():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     execution_state = Mock()
@@ -1024,6 +1032,7 @@ def test_single_task_suspend_bubbles_up():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     execution_state = Mock()
@@ -1068,6 +1077,7 @@ def test_multiple_tasks_one_suspends_execution_continues():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     execution_state = Mock()
@@ -1111,6 +1121,7 @@ def test_concurrent_executor_with_single_task_resubmit():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     execution_state = Mock()
@@ -1182,6 +1193,7 @@ def test_concurrent_executor_with_timed_resubmit_while_other_task_running():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     execution_state = Mock()
@@ -1244,6 +1256,7 @@ def test_concurrent_executor_should_execution_suspend_with_timeout():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     # Create executable with state in SUSPENDED_WITH_TIMEOUT
@@ -1281,6 +1294,7 @@ def test_concurrent_executor_should_execution_suspend_indefinite():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     # Create executable with state in SUSPENDED (indefinite)
@@ -1321,6 +1335,7 @@ def test_concurrent_executor_create_result_with_failed_status():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     execution_state = Mock()
@@ -1379,6 +1394,7 @@ def test_concurrent_executor_mixed_suspend_states():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     # Create one with timed suspend and one with indefinite suspend
@@ -1419,6 +1435,7 @@ def test_concurrent_executor_multiple_timed_suspends():
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
+        serdes=None,
     )
 
     # Create two with different timed suspends
@@ -1487,7 +1504,15 @@ def test_should_execution_suspend_earliest_timestamp_comparison():
         tolerated_failure_percentage=None,
     )
 
-    executor = TestExecutor(executables, 3, completion_config, "TOP", "ITER", "test_")
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=3,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
 
     # Create three executables with different suspend times
     exe_state1 = ExecutableWithState(executables[0])
@@ -1527,7 +1552,15 @@ def test_concurrent_executor_execute_with_failing_task():
         min_successful=1, tolerated_failure_count=0, tolerated_failure_percentage=None
     )
 
-    executor = TestExecutor(executables, 1, completion_config, "TOP", "ITER", "test_")
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
@@ -1580,7 +1613,15 @@ def test_create_result_no_failed_executables():
         tolerated_failure_percentage=None,
     )
 
-    executor = TestExecutor(executables, 1, completion_config, "TOP", "ITER", "test_")
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
@@ -1613,7 +1654,15 @@ def test_create_result_with_suspended_executable():
         tolerated_failure_percentage=None,
     )
 
-    executor = TestExecutor(executables, 1, completion_config, "TOP", "ITER", "test_")
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()

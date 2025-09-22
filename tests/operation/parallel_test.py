@@ -11,7 +11,9 @@ from aws_durable_execution_sdk_python.operation.parallel import (
     ParallelExecutor,
     parallel_handler,
 )
+from aws_durable_execution_sdk_python.serdes import serialize
 from aws_durable_execution_sdk_python.state import ExecutionState
+from tests.serdes_test import CustomStrSerDes
 
 
 def test_parallel_executor_init():
@@ -26,6 +28,7 @@ def test_parallel_executor_init():
         top_level_sub_type=OperationSubType.PARALLEL,
         iteration_sub_type=OperationSubType.PARALLEL_BRANCH,
         name_prefix="test-",
+        serdes=None,
     )
 
     assert executor.executables == executables
@@ -91,6 +94,7 @@ def test_parallel_executor_execute_item():
         top_level_sub_type=OperationSubType.PARALLEL,
         iteration_sub_type=OperationSubType.PARALLEL_BRANCH,
         name_prefix="test-",
+        serdes=None,
     )
 
     child_context = "test-context"
@@ -114,6 +118,7 @@ def test_parallel_executor_execute_item_with_exception():
         top_level_sub_type=OperationSubType.PARALLEL,
         iteration_sub_type=OperationSubType.PARALLEL_BRANCH,
         name_prefix="test-",
+        serdes=None,
     )
 
     child_context = "test-context"
@@ -245,6 +250,7 @@ def test_parallel_executor_inheritance():
         top_level_sub_type=OperationSubType.PARALLEL,
         iteration_sub_type=OperationSubType.PARALLEL_BRANCH,
         name_prefix="test-",
+        serdes=None,
     )
 
     assert isinstance(executor, ConcurrentExecutor)
@@ -280,6 +286,7 @@ def test_parallel_executor_execute_item_return_type():
         top_level_sub_type=OperationSubType.PARALLEL,
         iteration_sub_type=OperationSubType.PARALLEL_BRANCH,
         name_prefix="test-",
+        serdes=None,
     )
 
     # Test different return types
@@ -290,3 +297,30 @@ def test_parallel_executor_execute_item_return_type():
     assert executor.execute_item("ctx", int_executable) == 42
     assert executor.execute_item("ctx", str_executable) == "hello"
     assert executor.execute_item("ctx", dict_executable) == {"key": "value"}
+
+
+def test_parallel_handler_with_serdes():
+    """Test that parallel_handler with serdes"""
+
+    def func1(ctx):
+        return "result1"
+
+    callables = [func1]
+    execution_state = Mock(spec=ExecutionState)
+
+    def mock_run_in_child_context(callable_func, name, child_config):
+        return serialize(
+            serdes=child_config.serdes,
+            value=callable_func("mock-context"),
+            operation_id="op_id",
+            durable_execution_arn="exec_arn",
+        )
+
+    result = parallel_handler(
+        callables,
+        ParallelConfig(serdes=CustomStrSerDes()),
+        execution_state,
+        mock_run_in_child_context,
+    )
+
+    assert result.all[0].result == "RESULT1"

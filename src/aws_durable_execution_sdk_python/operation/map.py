@@ -16,6 +16,7 @@ from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 
 if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.config import ChildConfig
+    from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.state import ExecutionState
     from aws_durable_execution_sdk_python.types import DurableContext
 
@@ -38,6 +39,7 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):
         top_level_sub_type: OperationSubType,
         iteration_sub_type: OperationSubType,
         name_prefix: str,
+        serdes: SerDes | None,
     ):
         super().__init__(
             executables=executables,
@@ -46,6 +48,7 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):
             sub_type_top=top_level_sub_type,
             sub_type_iteration=iteration_sub_type,
             name_prefix=name_prefix,
+            serdes=serdes,
         )
         self.items = items
 
@@ -69,6 +72,7 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):
             top_level_sub_type=OperationSubType.MAP,
             iteration_sub_type=OperationSubType.MAP_ITERATION,
             name_prefix="map-item-",
+            serdes=config.serdes,
         )
 
     def execute_item(self, child_context, executable: Executable[Callable]) -> R:
