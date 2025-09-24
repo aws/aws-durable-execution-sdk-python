@@ -1,0 +1,62 @@
+name: Sync package
+
+on:
+  push:
+    branches: [ "main" ]
+env:
+  AWS_REGION : "us-west-2"
+
+# permission can be added at job level or workflow level
+permissions:
+  id-token: write   # This is required for requesting the JWT
+  contents: read    # This is required for actions/checkout
+
+jobs:
+  on-success:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13"]
+
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Hatch
+        run: |
+          python -m pip install --upgrade hatch
+      - name: Build distribution
+        run: hatch build
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: "${{ secrets.ACTIONS_SYNC_ROLE_NAME }}"
+          role-session-name: gh-python
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Get tar gz name
+        id: tar_gz_name
+        run: |
+          TAR_GZ_NAME=$(ls *.tar.gz)
+          echo "tar_gz_name=$TAR_GZ_NAME" >> $GITHUB_OUTPUT
+        working-directory: dist
+      - name: Copy tar gz build file to s3
+        run: |
+          aws s3 cp ./dist/${{steps.tar_gz_name.outputs.tar_gz_name}} \
+            s3://${{ secrets.S3_BUCKET_NAME }}/
+      - name: commit tar gz to Gitfarm
+        run: |
+          aws lambda invoke \
+            --function-name ${{ secrets.SYNC_LAMBDA_ARN }} \
+            --payload '{"gitFarmRepo":"${{ secrets.GITFARM_LAN_SDK_REPO }}","gitFarmBranch":"${{ secrets.GITFARM_LAN_SDK_BRANCH }}","gitFarmFilepath":"${{ steps.tar_gz_name.outputs.tar_gz_name }}","s3Bucket":"${{ secrets.S3_BUCKET_NAME }}","s3FilePath":"${{ steps.tar_gz_name.outputs.tar_gz_name }}"}' \
+            --cli-binary-format raw-in-base64-out \
+            output.txt
+      - name: Check for error in lambda invoke
+        id: check_text_tar_gz
+        run: |
+          if grep -q "Error" output.txt; then
+            cat output.txt
+            exit 1
+          fi
