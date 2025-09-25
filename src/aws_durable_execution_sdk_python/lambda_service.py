@@ -3,9 +3,9 @@ from __future__ import annotations
 import datetime
 import logging
 import os
-import sys
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 import boto3  # type: ignore
@@ -834,17 +834,9 @@ class LambdaClient(DurableServiceClient):
         """
         Load boto3 models from the Python path for custom preview client.
         """
-        data_paths = set()
-        for path in sys.path:
-            botocore_dir = os.path.join(path, "botocore")
-            if os.path.isdir(botocore_dir):
-                data_paths.add(os.path.join(botocore_dir, "data"))
-
-        new_data_path = [
-            p for p in os.environ.get("AWS_DATA_PATH", "").split(os.pathsep) if p
-        ]
-        new_data_path = list(set(new_data_path).union(data_paths))
-        os.environ["AWS_DATA_PATH"] = os.pathsep.join(new_data_path)
+        os.environ["AWS_DATA_PATH"] = str(
+            Path(__file__).parent.joinpath("botocore", "data")
+        )
 
     @staticmethod
     def initialize_local_runner_client() -> LambdaClient:
