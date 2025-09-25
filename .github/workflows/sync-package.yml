@@ -54,7 +54,29 @@ jobs:
             --cli-binary-format raw-in-base64-out \
             output.txt
       - name: Check for error in lambda invoke
-        id: check_text_tar_gz
+        run: |
+          if grep -q "Error" output.txt; then
+            cat output.txt
+            exit 1
+          fi
+      - name: Get whl name
+        id: whl_name
+        run: |
+          WHL_NAME=$(ls *.whl)
+          echo "whl_name=$WHL_NAME" >> $GITHUB_OUTPUT
+        working-directory: dist
+      - name: Copy whl build file to s3
+        run: |
+          aws s3 cp ./dist/${{steps.whl_name.outputs.whl_name}} \
+            s3://${{ secrets.S3_BUCKET_NAME }}/
+      - name: commit whl to Gitfarm
+        run: |
+          aws lambda invoke \
+            --function-name ${{ secrets.SYNC_LAMBDA_ARN }} \
+            --payload '{"gitFarmRepo":"${{ secrets.GITFARM_LAN_SDK_REPO }}","gitFarmBranch":"${{ secrets.GITFARM_LAN_SDK_BRANCH }}","gitFarmFilepath":"${{ steps.whl_name.outputs.whl_name }}","s3Bucket":"${{ secrets.S3_BUCKET_NAME }}","s3FilePath":"${{ steps.whl_name.outputs.whl_name }}"}' \
+            --cli-binary-format raw-in-base64-out \
+            output.txt
+      - name: Check for error in lambda invoke
         run: |
           if grep -q "Error" output.txt; then
             cat output.txt
