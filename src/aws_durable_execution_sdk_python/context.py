@@ -7,6 +7,7 @@ from aws_durable_execution_sdk_python.config import (
     BatchedInput,
     CallbackConfig,
     ChildConfig,
+    InvokeConfig,
     MapConfig,
     ParallelConfig,
     StepConfig,
@@ -30,6 +31,7 @@ from aws_durable_execution_sdk_python.operation.callback import (
     wait_for_callback_handler,
 )
 from aws_durable_execution_sdk_python.operation.child import child_handler
+from aws_durable_execution_sdk_python.operation.invoke import invoke_handler
 from aws_durable_execution_sdk_python.operation.map import map_handler
 from aws_durable_execution_sdk_python.operation.parallel import parallel_handler
 from aws_durable_execution_sdk_python.operation.step import step_handler
@@ -56,17 +58,19 @@ if TYPE_CHECKING:
 
     from aws_durable_execution_sdk_python.state import CheckpointedResult
 
-R = TypeVar("R")
+P = TypeVar("P")  # Payload type
+R = TypeVar("R")  # Result type
 T = TypeVar("T")
 U = TypeVar("U")
-P = ParamSpec("P")
+Params = ParamSpec("Params")
+
 
 logger = logging.getLogger(__name__)
 
 
 def durable_step(
-    func: Callable[Concatenate[StepContext, P], T],
-) -> Callable[P, Callable[[StepContext], T]]:
+    func: Callable[Concatenate[StepContext, Params], T],
+) -> Callable[Params, Callable[[StepContext], T]]:
     """Wrap your callable into a named function that a Durable step can run."""
 
     def wrapper(*args, **kwargs):
@@ -80,8 +84,8 @@ def durable_step(
 
 
 def durable_with_child_context(
-    func: Callable[Concatenate[DurableContext, P], T],
-) -> Callable[P, Callable[[DurableContext], T]]:
+    func: Callable[Concatenate[DurableContext, Params], T],
+) -> Callable[Params, Callable[[DurableContext], T]]:
     """Wrap your callable into a Durable child context."""
 
     def wrapper(*args, **kwargs):
@@ -289,6 +293,36 @@ class DurableContext(LambdaContext, DurableContextProtocol):
             operation_id=operation_id,
             state=self.state,
             serdes=config.serdes,
+        )
+
+    def invoke(
+        self,
+        function_name: str,
+        payload: P,
+        name: str | None = None,
+        config: InvokeConfig[P, R] | None = None,
+    ) -> R:
+        """Invoke another Durable Function.
+
+        Args:
+            function_name: Name of the function to invoke
+            payload: Input payload to send to the function
+            name: Optional name for the operation
+            config: Optional configuration for the invoke operation
+
+        Returns:
+            The result of the invoked function
+        """
+        return invoke_handler(
+            function_name=function_name,
+            payload=payload,
+            state=self.state,
+            operation_identifier=OperationIdentifier(
+                operation_id=self._create_step_id(),
+                parent_id=self._parent_id,
+                name=name,
+            ),
+            config=config,
         )
 
     def map(

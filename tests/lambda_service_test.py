@@ -339,14 +339,12 @@ def test_invoke_options_to_dict():
     """Test InvokeOptions.to_dict method."""
     options = InvokeOptions(
         function_name="test_function",
-        function_qualifier="$LATEST",
-        durable_execution_name="test_execution",
+        timeout_seconds=30,
     )
     result = options.to_dict()
     expected = {
         "FunctionName": "test_function",
-        "FunctionQualifier": "$LATEST",
-        "DurableExecutionName": "test_execution",
+        "TimeoutSeconds": 30,
     }
     assert result == expected
 
@@ -355,7 +353,7 @@ def test_invoke_options_to_dict_minimal():
     """Test InvokeOptions.to_dict with minimal fields."""
     options = InvokeOptions(function_name="test_function")
     result = options.to_dict()
-    assert result == {"FunctionName": "test_function"}
+    assert result == {"FunctionName": "test_function", "TimeoutSeconds": 0}
 
 
 def test_operation_update_to_dict():
@@ -400,9 +398,7 @@ def test_operation_update_to_dict_complete():
     callback_options = CallbackOptions(
         timeout_seconds=300, heartbeat_timeout_seconds=60
     )
-    invoke_options = InvokeOptions(
-        function_name="test_func", function_qualifier="$LATEST"
-    )
+    invoke_options = InvokeOptions(function_name="test_func", timeout_seconds=60)
 
     update = OperationUpdate(
         operation_id="op1",
@@ -430,7 +426,7 @@ def test_operation_update_to_dict_complete():
         "StepOptions": {"NextAttemptDelaySeconds": 30},
         "WaitOptions": {"WaitSeconds": 60},
         "CallbackOptions": {"TimeoutSeconds": 300, "HeartbeatTimeoutSeconds": 60},
-        "InvokeOptions": {"FunctionName": "test_func", "FunctionQualifier": "$LATEST"},
+        "InvokeOptions": {"FunctionName": "test_func", "TimeoutSeconds": 60},
     }
     assert result == expected
 
@@ -1377,9 +1373,7 @@ def test_operation_update_complete_with_new_fields():
     callback_options = CallbackOptions(
         timeout_seconds=300, heartbeat_timeout_seconds=60
     )
-    invoke_options = InvokeOptions(
-        function_name="test_func", function_qualifier="$LATEST"
-    )
+    invoke_options = InvokeOptions(function_name="test_func", timeout_seconds=60)
 
     update = OperationUpdate(
         operation_id="op1",
@@ -1411,7 +1405,7 @@ def test_operation_update_complete_with_new_fields():
         "StepOptions": {"NextAttemptDelaySeconds": 30},
         "WaitOptions": {"WaitSeconds": 60},
         "CallbackOptions": {"TimeoutSeconds": 300, "HeartbeatTimeoutSeconds": 60},
-        "InvokeOptions": {"FunctionName": "test_func", "FunctionQualifier": "$LATEST"},
+        "InvokeOptions": {"FunctionName": "test_func", "TimeoutSeconds": 60},
     }
     assert result == expected
 

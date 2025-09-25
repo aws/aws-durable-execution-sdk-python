@@ -444,6 +444,170 @@ def test_step_with_original_name(mock_handler):
 # endregion step
 
 
+# region invoke
+@patch("aws_durable_execution_sdk_python.context.invoke_handler")
+def test_invoke_basic(mock_handler):
+    """Test invoke with basic parameters."""
+    mock_handler.return_value = "invoke_result"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    context = DurableContext(state=mock_state)
+
+    result = context.invoke("test_function", "test_payload")
+
+    assert result == "invoke_result"
+
+    mock_handler.assert_called_once_with(
+        function_name="test_function",
+        payload="test_payload",
+        state=mock_state,
+        operation_identifier=OperationIdentifier("1", None, None),
+        config=None,
+    )
+
+
+@patch("aws_durable_execution_sdk_python.context.invoke_handler")
+def test_invoke_with_name_and_config(mock_handler):
+    """Test invoke with name and config."""
+    from aws_durable_execution_sdk_python.config import InvokeConfig
+
+    mock_handler.return_value = "configured_result"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    config = InvokeConfig[str, str](timeout_seconds=30)
+
+    context = DurableContext(state=mock_state)
+    [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
+
+    result = context.invoke(
+        "test_function", {"key": "value"}, name="named_invoke", config=config
+    )
+
+    assert result == "configured_result"
+    mock_handler.assert_called_once_with(
+        function_name="test_function",
+        payload={"key": "value"},
+        state=mock_state,
+        operation_identifier=OperationIdentifier("6", None, "named_invoke"),
+        config=config,
+    )
+
+
+@patch("aws_durable_execution_sdk_python.context.invoke_handler")
+def test_invoke_with_parent_id(mock_handler):
+    """Test invoke with parent_id."""
+    mock_handler.return_value = "parent_result"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    context = DurableContext(state=mock_state, parent_id="parent123")
+    [context._create_step_id() for _ in range(2)]  # Set counter to 2 # noqa: SLF001
+
+    context.invoke("test_function", None)
+
+    mock_handler.assert_called_once_with(
+        function_name="test_function",
+        payload=None,
+        state=mock_state,
+        operation_identifier=OperationIdentifier("parent123-3", "parent123", None),
+        config=None,
+    )
+
+
+@patch("aws_durable_execution_sdk_python.context.invoke_handler")
+def test_invoke_increments_counter(mock_handler):
+    """Test invoke increments step counter."""
+    mock_handler.return_value = "result"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    context = DurableContext(state=mock_state)
+    [context._create_step_id() for _ in range(10)]  # Set counter to 10 # noqa: SLF001
+
+    context.invoke("function1", "payload1")
+    context.invoke("function2", "payload2")
+
+    assert context._step_counter.get_current() == 12  # noqa: SLF001
+    assert mock_handler.call_args_list[0][1][
+        "operation_identifier"
+    ] == OperationIdentifier("11", None, None)
+    assert mock_handler.call_args_list[1][1][
+        "operation_identifier"
+    ] == OperationIdentifier("12", None, None)
+
+
+@patch("aws_durable_execution_sdk_python.context.invoke_handler")
+def test_invoke_with_none_payload(mock_handler):
+    """Test invoke with None payload."""
+    mock_handler.return_value = None
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    context = DurableContext(state=mock_state)
+
+    result = context.invoke("test_function", None)
+
+    assert result is None
+
+    mock_handler.assert_called_once_with(
+        function_name="test_function",
+        payload=None,
+        state=mock_state,
+        operation_identifier=OperationIdentifier("1", None, None),
+        config=None,
+    )
+
+
+@patch("aws_durable_execution_sdk_python.context.invoke_handler")
+def test_invoke_with_custom_serdes(mock_handler):
+    """Test invoke with custom serialization config."""
+    mock_handler.return_value = {"transformed": "data"}
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    from aws_durable_execution_sdk_python.config import InvokeConfig
+
+    config = InvokeConfig[dict, dict](
+        serdes_payload=CustomDictSerDes(),
+        serdes_result=CustomDictSerDes(),
+        timeout_seconds=60,
+    )
+
+    context = DurableContext(state=mock_state)
+
+    result = context.invoke(
+        "test_function",
+        {"original": "data"},
+        name="custom_serdes_invoke",
+        config=config,
+    )
+
+    assert result == {"transformed": "data"}
+    mock_handler.assert_called_once_with(
+        function_name="test_function",
+        payload={"original": "data"},
+        state=mock_state,
+        operation_identifier=OperationIdentifier("1", None, "custom_serdes_invoke"),
+        config=config,
+    )
+
+
+# endregion invoke
+
+
 # region wait
 @patch("aws_durable_execution_sdk_python.context.wait_handler")
 def test_wait_basic(mock_handler):

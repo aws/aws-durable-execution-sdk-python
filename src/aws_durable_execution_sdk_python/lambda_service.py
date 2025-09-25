@@ -63,6 +63,7 @@ class OperationSubType(Enum):
     PARALLEL_BRANCH = "ParallelBranch"
     WAIT_FOR_CALLBACK = "WaitForCallback"
     WAIT_FOR_CONDITION = "WaitForCondition"
+    INVOKE = "Invoke"
 
 
 @dataclass(frozen=True)
@@ -241,15 +242,11 @@ class CallbackOptions:
 @dataclass(frozen=True)
 class InvokeOptions:
     function_name: str
-    function_qualifier: str | None = None
-    durable_execution_name: str | None = None
+    timeout_seconds: int = 0
 
     def to_dict(self) -> MutableMapping[str, Any]:
-        result = {"FunctionName": self.function_name}
-        if self.function_qualifier:
-            result["FunctionQualifier"] = self.function_qualifier
-        if self.durable_execution_name:
-            result["DurableExecutionName"] = self.durable_execution_name
+        result: MutableMapping[str, Any] = {"FunctionName": self.function_name}
+        result["TimeoutSeconds"] = self.timeout_seconds
         return result
 
 
@@ -470,6 +467,28 @@ class OperationUpdate:
         )
 
     # endregion step
+
+    # region invoke
+    @classmethod
+    def create_invoke_start(
+        cls,
+        identifier: OperationIdentifier,
+        payload: str,
+        invoke_options: InvokeOptions,
+    ) -> OperationUpdate:
+        """Create an instance of OperationUpdate for type: INVOKE, action: START."""
+        return cls(
+            operation_id=identifier.operation_id,
+            parent_id=identifier.parent_id,
+            operation_type=OperationType.INVOKE,
+            sub_type=OperationSubType.INVOKE,
+            action=OperationAction.START,
+            name=identifier.name,
+            payload=payload,
+            invoke_options=invoke_options,
+        )
+
+    # endregion invoke
 
     # region wait for condition
     @classmethod

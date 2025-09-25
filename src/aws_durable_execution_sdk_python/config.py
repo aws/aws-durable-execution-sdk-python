@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 from aws_durable_execution_sdk_python.retries import RetryDecision  # noqa: TCH001
 
-R = TypeVar("R")
+P = TypeVar("P")  # Payload type
+R = TypeVar("R")  # Result type
 T = TypeVar("T")
 U = TypeVar("U")
 
@@ -131,6 +132,14 @@ class MapConfig:
     item_batcher: ItemBatcher = field(default_factory=ItemBatcher)
     completion_config: CompletionConfig = field(default_factory=CompletionConfig)
     serdes: SerDes | None = None
+
+
+@dataclass
+class InvokeConfig(Generic[P, R]):
+    # retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
+    timeout_seconds: int = 0
+    serdes_payload: SerDes[P] | None = None
+    serdes_result: SerDes[R] | None = None
 
 
 @dataclass(frozen=True)

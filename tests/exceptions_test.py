@@ -1,5 +1,8 @@
 """Unit tests for exceptions module."""
 
+import time
+from unittest.mock import patch
+
 import pytest
 
 from aws_durable_execution_sdk_python.exceptions import (
@@ -11,6 +14,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     OrderedLockError,
     StepInterruptedError,
     SuspendExecution,
+    TimedSuspendExecution,
     UserlandError,
     ValidationError,
 )
@@ -122,3 +126,87 @@ def test_callable_runtime_error_serializable_details_frozen():
     details = CallableRuntimeErrorSerializableDetails("Error", "message")
     with pytest.raises(AttributeError):
         details.type = "NewError"
+
+
+def test_timed_suspend_execution():
+    """Test TimedSuspendExecution exception."""
+    scheduled_time = 1234567890.0
+    error = TimedSuspendExecution("timed suspend", scheduled_time)
+    assert str(error) == "timed suspend"
+    assert error.scheduled_timestamp == scheduled_time
+    assert isinstance(error, SuspendExecution)
+    assert isinstance(error, BaseException)
+
+
+def test_timed_suspend_execution_from_delay():
+    """Test TimedSuspendExecution.from_delay factory method."""
+    message = "Waiting for callback"
+    delay_seconds = 30
+
+    # Mock time.time() to get predictable results
+    with patch("time.time", return_value=1000.0):
+        error = TimedSuspendExecution.from_delay(message, delay_seconds)
+
+    assert str(error) == message
+    assert error.scheduled_timestamp == 1030.0  # 1000.0 + 30
+    assert isinstance(error, TimedSuspendExecution)
+    assert isinstance(error, SuspendExecution)
+
+
+def test_timed_suspend_execution_from_delay_zero_delay():
+    """Test TimedSuspendExecution.from_delay with zero delay."""
+    message = "Immediate suspension"
+    delay_seconds = 0
+
+    with patch("time.time", return_value=500.0):
+        error = TimedSuspendExecution.from_delay(message, delay_seconds)
+
+    assert str(error) == message
+    assert error.scheduled_timestamp == 500.0  # 500.0 + 0
+    assert isinstance(error, TimedSuspendExecution)
+
+
+def test_timed_suspend_execution_from_delay_negative_delay():
+    """Test TimedSuspendExecution.from_delay with negative delay."""
+    message = "Past suspension"
+    delay_seconds = -10
+
+    with patch("time.time", return_value=100.0):
+        error = TimedSuspendExecution.from_delay(message, delay_seconds)
+
+    assert str(error) == message
+    assert error.scheduled_timestamp == 90.0  # 100.0 + (-10)
+    assert isinstance(error, TimedSuspendExecution)
+
+
+def test_timed_suspend_execution_from_delay_large_delay():
+    """Test TimedSuspendExecution.from_delay with large delay."""
+    message = "Long suspension"
+    delay_seconds = 3600  # 1 hour
+
+    with patch("time.time", return_value=0.0):
+        error = TimedSuspendExecution.from_delay(message, delay_seconds)
+
+    assert str(error) == message
+    assert error.scheduled_timestamp == 3600.0  # 0.0 + 3600
+    assert isinstance(error, TimedSuspendExecution)
+
+
+def test_timed_suspend_execution_from_delay_calculation_accuracy():
+    """Test that TimedSuspendExecution.from_delay calculates time accurately."""
+    message = "Accurate timing test"
+    delay_seconds = 42
+
+    # Test with actual time.time() to ensure the calculation works in real scenarios
+    before_time = time.time()
+    error = TimedSuspendExecution.from_delay(message, delay_seconds)
+    after_time = time.time()
+
+    # The scheduled timestamp should be within a reasonable range
+    # (accounting for the small time difference between calls)
+    expected_min = before_time + delay_seconds
+    expected_max = after_time + delay_seconds
+
+    assert expected_min <= error.scheduled_timestamp <= expected_max
+    assert str(error) == message
+    assert isinstance(error, TimedSuspendExecution)

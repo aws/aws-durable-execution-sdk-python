@@ -10,9 +10,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 license = "Apache-2.0"
 keywords = []
-authors = [
-  { name = "yaythomas", email = "tgaigher@amazon.com" },
-]
+authors = [{ name = "yaythomas", email = "tgaigher@amazon.com" }]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python",
@@ -20,9 +18,7 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
-dependencies = [
-  "boto3>=1.40.30"
-]
+dependencies = ["boto3>=1.40.30"]
 
 [project.urls]
 Documentation = "https://github.com/aws/aws-durable-execution-sdk-python#readme"
@@ -38,48 +34,31 @@ packages = ["src/aws_durable_execution_sdk_python"]
 [tool.hatch.version]
 path = "src/aws_durable_execution_sdk_python/__about__.py"
 
-# [tool.hatch.envs.default]
-# dependencies=["pytest"]
-
-# [tool.hatch.envs.default.scripts]
-# test="pytest"
-
 [tool.hatch.envs.test]
-dependencies = [
-    "coverage[toml]",
-    "pytest",
-    "pytest-cov",
-]
+dependencies = ["coverage[toml]", "pytest", "pytest-cov"]
 
 [tool.hatch.envs.test.scripts]
-cov="pytest --cov-report=term-missing --cov-config=pyproject.toml --cov=src/aws_durable_execution_sdk_python --cov=tests --cov-fail-under=98"
+cov = "pytest --cov-report=term-missing --cov-config=pyproject.toml --cov=src/aws_durable_execution_sdk_python --cov-fail-under=98"
 
 [tool.hatch.envs.types]
-extra-dependencies = [
-  "mypy>=1.0.0",
-  "pytest"
-]
+extra-dependencies = ["mypy>=1.0.0", "pytest"]
 [tool.hatch.envs.types.scripts]
 check = "mypy --install-types --non-interactive {args:src/aws_durable_execution_sdk_python tests}"
 
 [tool.coverage.run]
-source_pkgs = ["aws_durable_execution_sdk_python", "tests"]
+source_pkgs = ["aws_durable_execution_sdk_python"]
 branch = true
 parallel = true
-omit = [
-  "src/aws_durable_execution_sdk_python/__about__.py",
-]
+omit = ["src/aws_durable_execution_sdk_python/__about__.py"]
 
 [tool.coverage.paths]
-aws_durable_execution_sdk_python = ["src/aws_durable_execution_sdk_python", "*/aws-durable-execution-sdk-python/src/aws_durable_execution_sdk_python"]
-tests = ["tests", "*/aws-durable-execution-sdk-python/tests"]
+aws_durable_execution_sdk_python = [
+  "src/aws_durable_execution_sdk_python",
+  "*/aws-durable-execution-sdk-python/src/aws_durable_execution_sdk_python",
+]
 
 [tool.coverage.report]
-exclude_lines = [
-  "no cov",
-  "if __name__ == .__main__.:",
-  "if TYPE_CHECKING:",
-]
+exclude_lines = ["no cov", "if __name__ == .__main__.:", "if TYPE_CHECKING:"]
 
 [tool.ruff]
 line-length = 88
@@ -88,4 +67,12 @@ line-length = 88
 preview = false
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["ARG001", "ARG002", "ARG005", "S101", "PLR2004", "SIM117", "TRY301"]
+"tests/**" = [
+  "ARG001",
+  "ARG002",
+  "ARG005",
+  "S101",
+  "PLR2004",
+  "SIM117",
+  "TRY301",
+]

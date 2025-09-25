@@ -5,6 +5,7 @@ Avoid any non-stdlib references in this module, it is at the bottom of the depen
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 
@@ -76,6 +77,24 @@ class TimedSuspendExecution(SuspendExecution):
     def __init__(self, message: str, scheduled_timestamp: float):
         super().__init__(message)
         self.scheduled_timestamp = scheduled_timestamp
+
+    @classmethod
+    def from_delay(cls, message: str, delay_seconds: int) -> TimedSuspendExecution:
+        """Create a timed suspension with the delay calculated from now.
+
+        Args:
+            message: Descriptive message for the suspension
+            delay_seconds: Duration to suspend in seconds from current time
+
+        Returns:
+            TimedSuspendExecution: Instance with calculated resume time
+
+        Example:
+            >>> exception = TimedSuspendExecution.from_delay("Waiting for callback", 30)
+            >>> # Will suspend for 30 seconds from now
+        """
+        resume_time = time.time() + delay_seconds
+        return cls(message, scheduled_timestamp=resume_time)
 
 
 class OrderedLockError(DurableExecutionsError):

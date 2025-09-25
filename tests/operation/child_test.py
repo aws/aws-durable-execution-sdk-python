@@ -305,7 +305,7 @@ def test_child_handler_default_serialization():
     assert len(success_call) == 1
 
 
-def test_child_handler_custom_serdes_not_start():
+def test_child_handler_custom_serdes_not_start() -> None:
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
@@ -334,7 +334,7 @@ def test_child_handler_custom_serdes_not_start():
     assert success_operation.payload == expected_checkpoointed_result
 
 
-def test_child_handler_custom_serdes_already_succeeded():
+def test_child_handler_custom_serdes_already_succeeded() -> None:
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
@@ -363,7 +363,7 @@ def test_child_handler_custom_serdes_already_succeeded():
 
 
 # large payload with summary generator
-def test_child_handler_large_payload_with_summary_generator():
+def test_child_handler_large_payload_with_summary_generator() -> None:
     """Test child_handler with large payload and summary generator."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
@@ -397,7 +397,7 @@ def test_child_handler_large_payload_with_summary_generator():
 
 
 # large payload without summary generator
-def test_child_handler_large_payload_without_summary_generator():
+def test_child_handler_large_payload_without_summary_generator() -> None:
     """Test child_handler with large payload and no summary generator."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
@@ -427,7 +427,7 @@ def test_child_handler_large_payload_without_summary_generator():
 
 
 # mocked children replay mode execute the function again
-def test_child_handler_replay_children_mode():
+def test_child_handler_replay_children_mode() -> None:
     """Test child_handler in ReplayChildren mode."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
