@@ -1,5 +1,6 @@
 """Unit tests for step handler."""
 
+import datetime
 import json
 from unittest.mock import Mock, patch
 
@@ -375,7 +376,12 @@ def test_step_handler_retry_with_existing_attempts():
         operation_id="step12",
         operation_type=OperationType.STEP,
         status=OperationStatus.PENDING,
-        step_details=StepDetails(attempt=2),
+        step_details=StepDetails(
+            attempt=2,
+            next_attempt_timestamp=datetime.datetime.fromtimestamp(
+                1764547200, tz=datetime.UTC
+            ),
+        ),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
@@ -398,10 +404,44 @@ def test_step_handler_retry_with_existing_attempts():
             mock_logger,
         )
 
-    # Verify retry strategy was called with correct attempt count (2 + 1 = 3)
-    mock_retry_strategy.assert_called_once()
-    call_args = mock_retry_strategy.call_args[0]
-    assert call_args[1] == 3  # retry_attempt + 1
+    # Verify retry strategy was not called because we already have attempt timestamp in the checkpointed location
+    mock_retry_strategy.assert_not_called()
+
+
+def test_step_handler_pending_without_existing_attempts():
+    """Test step_handler retry logic with existing attempt count."""
+    mock_state = Mock(spec=ExecutionState)
+
+    # Simulate a retry operation that was previously checkpointed
+    operation = Operation(
+        operation_id="step12",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.PENDING,
+        step_details=StepDetails(attempt=2),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+    mock_state.durable_execution_arn = "test_arn"
+
+    mock_retry_strategy = Mock(
+        return_value=RetryDecision(should_retry=True, delay_seconds=10)
+    )
+    config = StepConfig(retry_strategy=mock_retry_strategy)
+    mock_callable = Mock(side_effect=RuntimeError("Test error"))
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    with pytest.raises(SuspendExecution, match="suspending without retry timestamp"):
+        step_handler(
+            mock_callable,
+            mock_state,
+            OperationIdentifier("step12", None, "test_step"),
+            config,
+            mock_logger,
+        )
+
+    # Verify retry strategy was not called because we already have attempt timestamp in the checkpointed location
+    mock_retry_strategy.assert_not_called()
 
 
 @patch("aws_durable_execution_sdk_python.operation.step.retry_handler")

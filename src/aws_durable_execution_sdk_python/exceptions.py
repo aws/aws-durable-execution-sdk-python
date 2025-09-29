@@ -7,6 +7,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import datetime
 
 
 class DurableExecutionsError(Exception):
@@ -95,6 +99,21 @@ class TimedSuspendExecution(SuspendExecution):
         """
         resume_time = time.time() + delay_seconds
         return cls(message, scheduled_timestamp=resume_time)
+
+    @classmethod
+    def from_datetime(
+        cls, message: str, datetime_timestamp: datetime.datetime
+    ) -> TimedSuspendExecution:
+        """Create a timed suspension with the delay calculated from now.
+
+        Args:
+            message: Descriptive message for the suspension
+            datetime_timestamp: Unix datetime timestamp in seconds at which to resume
+
+        Returns:
+            TimedSuspendExecution: Instance with calculated resume time
+        """
+        return cls(message, scheduled_timestamp=datetime_timestamp.timestamp())
 
 
 class OrderedLockError(DurableExecutionsError):

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from typing import TYPE_CHECKING, TypeVar
 
 from aws_durable_execution_sdk_python.config import (
@@ -14,12 +13,18 @@ from aws_durable_execution_sdk_python.config import (
 from aws_durable_execution_sdk_python.exceptions import (
     FatalError,
     StepInterruptedError,
-    TimedSuspendExecution,
 )
-from aws_durable_execution_sdk_python.lambda_service import ErrorObject, OperationUpdate
+from aws_durable_execution_sdk_python.lambda_service import (
+    ErrorObject,
+    OperationUpdate,
+)
 from aws_durable_execution_sdk_python.logger import Logger, LogInfo
 from aws_durable_execution_sdk_python.retries import RetryPresets
 from aws_durable_execution_sdk_python.serdes import deserialize, serialize
+from aws_durable_execution_sdk_python.suspend import (
+    suspend_with_optional_timeout,
+    suspend_with_optional_timestamp,
+)
 from aws_durable_execution_sdk_python.types import StepContext
 
 if TYPE_CHECKING:
@@ -52,7 +57,9 @@ def step_handler(
     if not config:
         config = StepConfig()
 
-    checkpointed_result = state.get_checkpoint_result(operation_identifier.operation_id)
+    checkpointed_result: CheckpointedResult = state.get_checkpoint_result(
+        operation_identifier.operation_id
+    )
     if checkpointed_result.is_succeeded():
         logger.debug(
             "Step already completed, skipping execution for id: %s, name: %s",
@@ -72,6 +79,13 @@ def step_handler(
     if checkpointed_result.is_failed():
         # have to throw the exact same error on replay as the checkpointed failure
         checkpointed_result.raise_callable_error()
+
+    if checkpointed_result.is_pending():
+        scheduled_timestamp = checkpointed_result.get_next_attempt_timestamp()
+        suspend_with_optional_timestamp(
+            msg=f"Retry scheduled for {operation_identifier.name or operation_identifier.operation_id} will retry at timestamp {scheduled_timestamp}",
+            datetime_timestamp=scheduled_timestamp,
+        )
 
     if checkpointed_result.is_started():
         # step was previously interrupted
@@ -193,7 +207,10 @@ def retry_handler(
 
         state.create_checkpoint(operation_update=retry_operation)
 
-        _suspend(operation_identifier, retry_decision)
+        suspend_with_optional_timeout(
+            msg=f"Retry scheduled for {operation_identifier.operation_id} in {retry_decision.delay_seconds} seconds",
+            timeout_seconds=retry_decision.delay_seconds,
+        )
 
     # no retry
     fail_operation: OperationUpdate = OperationUpdate.create_step_fail(
@@ -206,12 +223,3 @@ def retry_handler(
         raise error
 
     raise error_object.to_callable_runtime_error()
-
-
-def _suspend(operation_identifier: OperationIdentifier, retry_decision: RetryDecision):
-    scheduled_timestamp = time.time() + retry_decision.delay_seconds
-    msg = f"Retry scheduled for {operation_identifier.operation_id} in {retry_decision.delay_seconds} seconds"
-    raise TimedSuspendExecution(
-        msg,
-        scheduled_timestamp=scheduled_timestamp,
-    )

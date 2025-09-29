@@ -8,18 +8,15 @@ from typing import TYPE_CHECKING, TypeVar
 from aws_durable_execution_sdk_python.config import InvokeConfig
 from aws_durable_execution_sdk_python.exceptions import (
     FatalError,
-    SuspendExecution,
-    TimedSuspendExecution,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
     InvokeOptions,
     OperationUpdate,
 )
 from aws_durable_execution_sdk_python.serdes import deserialize, serialize
+from aws_durable_execution_sdk_python.suspend import suspend_with_optional_timeout
 
 if TYPE_CHECKING:
-    from typing import NoReturn
-
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
     from aws_durable_execution_sdk_python.state import ExecutionState
 
@@ -108,21 +105,3 @@ def invoke_handler(
     # This line should never be reached since suspend_with_optional_timeout always raises
     msg = "suspend_with_optional_timeout should have raised an exception, but did not."
     raise FatalError(msg) from None
-
-
-def suspend_with_optional_timeout(
-    msg: str, timeout_seconds: int | None = None
-) -> NoReturn:
-    """Suspend execution with optional timeout.
-
-    Args:
-        msg: Descriptive message for the suspension
-        timeout_seconds: Duration to suspend in seconds, or None/0 for indefinite
-
-    Raises:
-        TimedSuspendExecution: When timeout_seconds > 0
-        SuspendExecution: When timeout_seconds is None or <= 0
-    """
-    if timeout_seconds and timeout_seconds > 0:
-        raise TimedSuspendExecution.from_delay(msg, timeout_seconds)
-    raise SuspendExecution(msg)

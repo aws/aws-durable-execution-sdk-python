@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import logging
-import time
 from typing import TYPE_CHECKING, TypeVar
 
 from aws_durable_execution_sdk_python.exceptions import (
     FatalError,
-    TimedSuspendExecution,
 )
-from aws_durable_execution_sdk_python.lambda_service import ErrorObject, OperationUpdate
+from aws_durable_execution_sdk_python.lambda_service import (
+    ErrorObject,
+    OperationUpdate,
+)
 from aws_durable_execution_sdk_python.logger import LogInfo
 from aws_durable_execution_sdk_python.serdes import deserialize, serialize
+from aws_durable_execution_sdk_python.suspend import (
+    suspend_with_optional_timeout,
+    suspend_with_optional_timestamp,
+)
 from aws_durable_execution_sdk_python.types import WaitForConditionCheckContext
 
 if TYPE_CHECKING:
@@ -24,7 +29,10 @@ if TYPE_CHECKING:
     )
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
     from aws_durable_execution_sdk_python.logger import Logger
-    from aws_durable_execution_sdk_python.state import ExecutionState
+    from aws_durable_execution_sdk_python.state import (
+        CheckpointedResult,
+        ExecutionState,
+    )
 
 
 T = TypeVar("T")
@@ -49,7 +57,9 @@ def wait_for_condition_handler(
         operation_identifier.name,
     )
 
-    checkpointed_result = state.get_checkpoint_result(operation_identifier.operation_id)
+    checkpointed_result: CheckpointedResult = state.get_checkpoint_result(
+        operation_identifier.operation_id
+    )
 
     # Check if already completed
     if checkpointed_result.is_succeeded():
@@ -69,6 +79,13 @@ def wait_for_condition_handler(
 
     if checkpointed_result.is_failed():
         checkpointed_result.raise_callable_error()
+
+    if checkpointed_result.is_pending():
+        scheduled_timestamp = checkpointed_result.get_next_attempt_timestamp()
+        suspend_with_optional_timestamp(
+            msg=f"wait_for_condition {operation_identifier.name or operation_identifier.operation_id} will retry at timestamp {scheduled_timestamp}",
+            datetime_timestamp=scheduled_timestamp,
+        )
 
     attempt: int = 1
     if checkpointed_result.is_started_or_ready():
@@ -164,7 +181,10 @@ def wait_for_condition_handler(
 
         state.create_checkpoint(operation_update=retry_operation)
 
-        _suspend_execution(operation_identifier, decision)
+        suspend_with_optional_timeout(
+            msg=f"wait_for_condition {operation_identifier.name or operation_identifier.operation_id} will retry in {decision.delay_seconds} seconds",
+            timeout_seconds=decision.delay_seconds,
+        )
 
     except Exception as e:
         # Mark as failed - waitForCondition doesn't have its own retry logic for errors
@@ -184,14 +204,3 @@ def wait_for_condition_handler(
 
     msg: str = "wait_for_condition should never reach this point"
     raise FatalError(msg)
-
-
-def _suspend_execution(
-    operation_identifier: OperationIdentifier, decision: WaitForConditionDecision
-) -> None:
-    scheduled_timestamp = time.time() + (decision.delay_seconds or 0)
-    msg = f"wait_for_condition {operation_identifier.name or operation_identifier.operation_id} will retry in {decision.delay_seconds} seconds"
-    raise TimedSuspendExecution(
-        msg,
-        scheduled_timestamp=scheduled_timestamp,
-    )
