@@ -214,6 +214,21 @@ def test_checkpointed_result_is_failed():
     assert result_no_op.is_failed() is False
 
 
+def test_checkpointerd_result_is_pending():
+    """Test CheckpointedResult.is_pending method."""
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.PENDING,
+    )
+    result = CheckpointedResult.create_from_operation(operation)
+    assert result.is_pending() is True
+
+    # Test with no operation
+    result_no_op = CheckpointedResult.create_not_found()
+    assert result_no_op.is_pending() is False
+
+
 def test_checkpointed_result_is_started():
     """Test CheckpointedResult.is_started method."""
     operation = Operation(

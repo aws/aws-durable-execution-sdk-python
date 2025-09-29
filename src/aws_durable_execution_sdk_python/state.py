@@ -20,6 +20,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python.threading import OrderedLock
 
 if TYPE_CHECKING:
+    import datetime
     from collections.abc import MutableMapping
 
 
@@ -106,6 +107,13 @@ class CheckpointedResult:
             return False
         return op.status in (OperationStatus.STARTED, OperationStatus.READY)
 
+    def is_pending(self) -> bool:
+        """Return True if the checkpointed operation is PENDING."""
+        op = self.operation
+        if not op:
+            return False
+        return op.status is OperationStatus.PENDING
+
     def is_timed_out(self) -> bool:
         """Return True if the checkpointed operation is TIMED_OUT."""
         op = self.operation
@@ -125,6 +133,11 @@ class CheckpointedResult:
             raise DurableExecutionsError(msg)
 
         raise self.error.to_callable_runtime_error()
+
+    def get_next_attempt_timestamp(self) -> datetime.datetime | None:
+        if self.operation and self.operation.step_details:
+            return self.operation.step_details.next_attempt_timestamp
+        return None
 
 
 # shared so don't need to create an instance for each not found check

@@ -149,9 +149,7 @@ class ErrorObject:
 @dataclass(frozen=True)
 class StepDetails:
     attempt: int = 0
-    next_attempt_timestamp: str | None = (
-        None  # TODO: confirm type, depending on how serialized
-    )
+    next_attempt_timestamp: datetime.datetime | None = None
     result: str | None = None
     error: ErrorObject | None = None
 

@@ -1,5 +1,6 @@
 """Unit tests for wait_for_condition operation."""
 
+import datetime
 import json
 from unittest.mock import Mock
 
@@ -11,6 +12,7 @@ from aws_durable_execution_sdk_python.config import (
 )
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
+    FatalError,
     SuspendExecution,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -372,6 +374,7 @@ def test_wait_for_condition_no_operation_in_checkpoint():
     mock_result = Mock()
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
+    mock_result.is_pending.return_value = False
     mock_result.is_started_or_ready.return_value = True
     mock_result.is_existent.return_value = True
     mock_result.result = json.dumps(10)
@@ -416,6 +419,7 @@ def test_wait_for_condition_operation_no_step_details():
     mock_result = Mock()
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
+    mock_result.is_pending.return_value = False
     mock_result.is_started_or_ready.return_value = True
     mock_result.is_existent.return_value = True
     mock_result.result = json.dumps(10)
@@ -651,3 +655,74 @@ def test_wait_for_condition_custom_serdes_already_succeeded():
     )
 
     assert result == {"key": "value", "number": 42, "list": [1, 2, 3]}
+
+
+def test_wait_for_condition_pending():
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "arn:aws:test"
+    operation = Operation(
+        operation_id="XXX",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.PENDING,
+        step_details=StepDetails(
+            result='{"key": "VALUE", "number": "84", "list": [1, 2, 3]}',
+            next_attempt_timestamp=datetime.datetime.fromtimestamp(
+                1764547200, tz=datetime.UTC
+            ),
+        ),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    op_id = OperationIdentifier("op1", None, "test_wait")
+
+    def check_func(state, context):
+        msg = "Should not be called"
+        raise FatalError(msg)
+
+    config = WaitForConditionConfig(
+        initial_state=5,
+        wait_strategy=lambda s, a: WaitForConditionDecision.stop_polling(),
+        serdes=CustomDictSerDes(),
+    )
+
+    with pytest.raises(
+        SuspendExecution, match="wait_for_condition test_wait will retry at timestamp"
+    ):
+        wait_for_condition_handler(check_func, config, mock_state, op_id, mock_logger)
+
+
+def test_wait_for_condition_pending_without_next_attempt():
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "arn:aws:test"
+    operation = Operation(
+        operation_id="XXX",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.PENDING,
+        step_details=StepDetails(
+            result='{"key": "VALUE", "number": "84", "list": [1, 2, 3]}',
+        ),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    op_id = OperationIdentifier("op1", None, "test_wait")
+
+    def check_func(state, context):
+        msg = "Should not be called"
+        raise FatalError(msg)
+
+    config = WaitForConditionConfig(
+        initial_state=5,
+        wait_strategy=lambda s, a: WaitForConditionDecision.stop_polling(),
+        serdes=CustomDictSerDes(),
+    )
+
+    with pytest.raises(SuspendExecution, match="suspending without retry timestamp"):
+        wait_for_condition_handler(check_func, config, mock_state, op_id, mock_logger)
