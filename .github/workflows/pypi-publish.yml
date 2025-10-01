@@ -56,7 +56,7 @@ jobs:
       #
       # ALTERNATIVE: if your GitHub Release name is the PyPI project version string
       # ALTERNATIVE: exactly, uncomment the following line instead:
-      url: https://pypi.org/project/aws-durable-execution-sdk-python/${{ github.event.release.name }}
+      url: https://test.pypi.org/project/aws-durable-execution-sdk-python/${{ github.event.release.name }}
 
     steps:
       - name: Retrieve release distributions
