@@ -117,7 +117,7 @@ def wait_for_condition_handler(
         current_state = config.initial_state
 
     # Checkpoint START for observability.
-    if not checkpointed_result.is_existent():
+    if not checkpointed_result.is_started():
         start_operation: OperationUpdate = (
             OperationUpdate.create_wait_for_condition_start(
                 identifier=operation_identifier,

@@ -11,7 +11,10 @@ from aws_durable_execution_sdk_python.lambda_service import OperationUpdate, Wai
 
 if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
-    from aws_durable_execution_sdk_python.state import ExecutionState
+    from aws_durable_execution_sdk_python.state import (
+        CheckpointedResult,
+        ExecutionState,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +28,11 @@ def wait_handler(
         operation_identifier.name,
     )
 
-    if state.get_checkpoint_result(operation_identifier.operation_id).is_succeeded():
+    checkpointed_result: CheckpointedResult = state.get_checkpoint_result(
+        operation_identifier.operation_id
+    )
+
+    if checkpointed_result.is_succeeded():
         logger.debug(
             "Wait already completed, skipping wait for id: %s, name: %s",
             operation_identifier.operation_id,
@@ -33,12 +40,12 @@ def wait_handler(
         )
         return
 
-    operation = OperationUpdate.create_wait_start(
-        identifier=operation_identifier,
-        wait_options=WaitOptions(seconds=seconds),
-    )
-
-    state.create_checkpoint(operation_update=operation)
+    if not checkpointed_result.is_existent():
+        operation = OperationUpdate.create_wait_start(
+            identifier=operation_identifier,
+            wait_options=WaitOptions(seconds=seconds),
+        )
+        state.create_checkpoint(operation_update=operation)
 
     # Calculate when to resume
     resume_time = time.time() + seconds

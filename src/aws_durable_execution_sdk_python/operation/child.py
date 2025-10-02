@@ -68,7 +68,7 @@ def child_handler(
         config.sub_type if config.sub_type else OperationSubType.RUN_IN_CHILD_CONTEXT
     )
 
-    if not checkpointed_result.is_started():
+    if not checkpointed_result.is_existent():
         start_operation = OperationUpdate.create_context_start(
             identifier=operation_identifier,
             sub_type=sub_type,
