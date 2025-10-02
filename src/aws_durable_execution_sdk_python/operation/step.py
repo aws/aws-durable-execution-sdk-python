@@ -87,26 +87,31 @@ def step_handler(
             datetime_timestamp=scheduled_timestamp,
         )
 
-    if checkpointed_result.is_started():
+    if (
+        checkpointed_result.is_started()
+        and config.step_semantics is StepSemantics.AT_MOST_ONCE_PER_RETRY
+    ):
         # step was previously interrupted
-        if config.step_semantics is StepSemantics.AT_MOST_ONCE_PER_RETRY:
-            msg = f"Step operation_id={operation_identifier.operation_id} name={operation_identifier.name} was previously interrupted"
-            retry_handler(
-                StepInterruptedError(msg),
-                state,
-                operation_identifier,
-                config,
-                checkpointed_result,
-            )
+        msg = f"Step operation_id={operation_identifier.operation_id} name={operation_identifier.name} was previously interrupted"
+        retry_handler(
+            StepInterruptedError(msg),
+            state,
+            operation_identifier,
+            config,
+            checkpointed_result,
+        )
 
         checkpointed_result.raise_callable_error()
 
-    if config.step_semantics is StepSemantics.AT_MOST_ONCE_PER_RETRY:
-        # At least once needs checkpoint at the start
+    if not (
+        checkpointed_result.is_started()
+        and config.step_semantics is StepSemantics.AT_LEAST_ONCE_PER_RETRY
+    ):
+        # Do not checkpoint start for started & AT_LEAST_ONCE execution
+        # Checkpoint start for the other
         start_operation: OperationUpdate = OperationUpdate.create_step_start(
             identifier=operation_identifier,
         )
-
         state.create_checkpoint(operation_update=start_operation)
 
     attempt: int = 0

@@ -39,6 +39,7 @@ def test_wait_handler_not_completed():
     mock_state = Mock(spec=ExecutionState)
     mock_result = Mock(spec=CheckpointedResult)
     mock_result.is_succeeded.return_value = False
+    mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
 
     with pytest.raises(SuspendExecution, match="Wait for 30 seconds"):
@@ -68,6 +69,7 @@ def test_wait_handler_with_none_name():
     mock_state = Mock(spec=ExecutionState)
     mock_result = Mock(spec=CheckpointedResult)
     mock_result.is_succeeded.return_value = False
+    mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
 
     with pytest.raises(SuspendExecution, match="Wait for 5 seconds"):
@@ -88,3 +90,22 @@ def test_wait_handler_with_none_name():
     mock_state.create_checkpoint.assert_called_once_with(
         operation_update=expected_operation
     )
+
+
+def test_wait_handler_with_existent():
+    """Test wait_handler with existent operation."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_result = Mock(spec=CheckpointedResult)
+    mock_result.is_succeeded.return_value = False
+    mock_result.is_existent.return_value = True
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    with pytest.raises(SuspendExecution, match="Wait for 5 seconds"):
+        wait_handler(
+            seconds=5,
+            state=mock_state,
+            operation_identifier=OperationIdentifier("wait4", None),
+        )
+
+    mock_state.get_checkpoint_result.assert_called_once_with("wait4")
+    mock_state.create_checkpoint.assert_not_called()

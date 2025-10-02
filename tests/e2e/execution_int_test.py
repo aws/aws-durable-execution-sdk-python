@@ -120,7 +120,8 @@ def test_step_different_ways_to_pass_args():
             == '["from step 123 str", "from step no args", "from step plain"]'
         )
 
-        assert len(checkpoint_calls) == 3
+        # 3 START checkpoint, 3 SUCCEED checkpoint
+        assert len(checkpoint_calls) == 6
 
         checkpoint = checkpoint_calls[-1][0]
         assert checkpoint.operation_type is OperationType.STEP
@@ -205,10 +206,15 @@ def test_step_with_logger():
 
         assert result["Status"] == InvocationStatus.SUCCEEDED.value
 
-        assert len(checkpoint_calls) == 1
+        # 1 START checkpoint, 1 SUCCEED checkpoint
+        assert len(checkpoint_calls) == 2
 
-        # Check the wait checkpoint
         checkpoint = checkpoint_calls[0][0]
+        assert checkpoint.operation_type == OperationType.STEP
+        assert checkpoint.action == OperationAction.START
+        assert checkpoint.operation_id == "1"
+        # Check the wait checkpoint
+        checkpoint = checkpoint_calls[1][0]
         assert checkpoint.operation_type == OperationType.STEP
         assert checkpoint.action == OperationAction.SUCCEED
         assert checkpoint.operation_id == "1"

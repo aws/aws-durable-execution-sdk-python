@@ -165,17 +165,16 @@ def test_step_handler_started_at_least_once():
     mock_state.get_checkpoint_result.return_value = mock_result
 
     config = StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY)
-    mock_callable = Mock()
+    mock_callable = Mock(return_value="success_result")
     mock_logger = Mock(spec=Logger)
 
-    with pytest.raises(CallableRuntimeError):
-        step_handler(
-            mock_callable,
-            mock_state,
-            OperationIdentifier("step5", None, "test_step"),
-            config,
-            mock_logger,
-        )
+    step_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier("step5", None, "test_step"),
+        config,
+        mock_logger,
+    )
 
 
 def test_step_handler_success_at_least_once():
@@ -200,10 +199,18 @@ def test_step_handler_success_at_least_once():
 
     assert result == "success_result"
 
-    assert mock_state.create_checkpoint.call_count == 1
+    assert mock_state.create_checkpoint.call_count == 2
 
-    # Verify only success checkpoint
-    success_call = mock_state.create_checkpoint.call_args_list[0]
+    # Verify start checkpoint
+    start_call = mock_state.create_checkpoint.call_args_list[0]
+    start_operation = start_call[1]["operation_update"]
+    assert start_operation.operation_id == "step6"
+    assert start_operation.operation_type is OperationType.STEP
+    assert start_operation.sub_type is OperationSubType.STEP
+    assert start_operation.action is OperationAction.START
+
+    # Verify success checkpoint
+    success_call = mock_state.create_checkpoint.call_args_list[1]
     success_operation = success_call[1]["operation_update"]
     assert success_operation.operation_id == "step6"
     assert success_operation.payload == json.dumps("success_result")
@@ -299,8 +306,18 @@ def test_step_handler_retry_success():
             mock_logger,
         )
 
+    assert mock_state.create_checkpoint.call_count == 2
+
+    # Verify start checkpoint
+    start_call = mock_state.create_checkpoint.call_args_list[0]
+    start_operation = start_call[1]["operation_update"]
+    assert start_operation.operation_id == "step9"
+    assert start_operation.operation_type is OperationType.STEP
+    assert start_operation.sub_type is OperationSubType.STEP
+    assert start_operation.action is OperationAction.START
+
     # Verify retry checkpoint
-    retry_call = mock_state.create_checkpoint.call_args_list[0]
+    retry_call = mock_state.create_checkpoint.call_args_list[1]
     retry_operation = retry_call[1]["operation_update"]
     assert retry_operation.operation_id == "step9"
     assert retry_operation.operation_type is OperationType.STEP
@@ -332,8 +349,18 @@ def test_step_handler_retry_exhausted():
             mock_logger,
         )
 
+    assert mock_state.create_checkpoint.call_count == 2
+
+    # Verify start checkpoint
+    start_call = mock_state.create_checkpoint.call_args_list[0]
+    start_operation = start_call[1]["operation_update"]
+    assert start_operation.operation_id == "step10"
+    assert start_operation.operation_type is OperationType.STEP
+    assert start_operation.sub_type is OperationSubType.STEP
+    assert start_operation.action is OperationAction.START
+
     # Verify fail checkpoint
-    fail_call = mock_state.create_checkpoint.call_args_list[0]
+    fail_call = mock_state.create_checkpoint.call_args_list[1]
     fail_operation = fail_call[1]["operation_update"]
     assert fail_operation.operation_id == "step10"
     assert fail_operation.operation_type is OperationType.STEP
@@ -499,7 +526,7 @@ def test_step_handler_custom_serdes_success():
         '{"key": "VALUE", "number": "84", "list": [1, 2, 3]}'
     )
 
-    success_call = mock_state.create_checkpoint.call_args_list[0]
+    success_call = mock_state.create_checkpoint.call_args_list[1]
     success_operation = success_call[1]["operation_update"]
     assert success_operation.payload == expected_checkpoointed_result
 

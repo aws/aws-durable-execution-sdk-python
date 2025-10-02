@@ -43,6 +43,7 @@ def test_child_handler_not_started(
     mock_result.is_started.return_value = False
     mock_result.is_replay_children.return_value = False
     mock_result.is_replay_children.return_value = False
+    mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(return_value="fresh_result")
 
@@ -203,6 +204,7 @@ def test_child_handler_callable_exception(
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
+    mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(side_effect=ValueError("Test error"))
 
@@ -313,6 +315,7 @@ def test_child_handler_custom_serdes_not_start() -> None:
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
     mock_result.is_replay_children.return_value = False
+    mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
     mock_callable = Mock(return_value=complex_result)
@@ -372,6 +375,7 @@ def test_child_handler_large_payload_with_summary_generator() -> None:
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
     mock_result.is_replay_children.return_value = False
+    mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     large_result = "large" * 256 * 1024
     mock_callable = Mock(return_value=large_result)
@@ -406,6 +410,7 @@ def test_child_handler_large_payload_without_summary_generator() -> None:
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
     mock_result.is_replay_children.return_value = False
+    mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     large_result = "large" * 256 * 1024
     mock_callable = Mock(return_value=large_result)
