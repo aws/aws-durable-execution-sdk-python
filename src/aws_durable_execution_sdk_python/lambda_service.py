@@ -839,9 +839,9 @@ class LambdaClient(DurableServiceClient):
     @staticmethod
     def initialize_local_runner_client() -> LambdaClient:
         endpoint = os.getenv(
-            "LOCAL_RUNNER_ENDPOINT", "http://host.docker.internal:5000"
+            "DURABLE_LOCAL_RUNNER_ENDPOINT", "http://host.docker.internal:5000"
         )
-        region = os.getenv("LOCAL_RUNNER_REGION", "us-west-2")
+        region = os.getenv("DURABLE_LOCAL_RUNNER_REGION", "us-west-2")
 
         # The local runner client needs execute-api as the signing service name,
         # so we have a second `lambdainternal-local` boto model with this.
@@ -860,28 +860,14 @@ class LambdaClient(DurableServiceClient):
         return LambdaClient(client=client)
 
     @staticmethod
-    def initialize_from_endpoint_and_region(endpoint: str, region: str) -> LambdaClient:
+    def initialize_from_env() -> LambdaClient:
         LambdaClient.load_preview_botocore_models()
         client = boto3.client(
             "lambdainternal",
-            endpoint_url=endpoint,
-            region_name=region,
         )
 
-        logger.debug(
-            "Initialized lambda client with endpoint: '%s', region: '%s'",
-            endpoint,
-            region,
-        )
+        logger.debug("Initialized lambda client")
         return LambdaClient(client=client)
-
-    @staticmethod
-    def initialize_from_env() -> LambdaClient:
-        return LambdaClient.initialize_from_endpoint_and_region(
-            # it'll prob end up being https://lambda.us-east-1.amazonaws.com or similar
-            endpoint=os.getenv("DEX_ENDPOINT", "http://host.docker.internal:5000"),
-            region=os.getenv("DEX_REGION", "us-east-1"),
-        )
 
     def checkpoint(
         self,
