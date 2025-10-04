@@ -43,7 +43,7 @@ def wait_handler(
     if not checkpointed_result.is_existent():
         operation = OperationUpdate.create_wait_start(
             identifier=operation_identifier,
-            wait_options=WaitOptions(seconds=seconds),
+            wait_options=WaitOptions(wait_seconds=seconds),
         )
         state.create_checkpoint(operation_update=operation)
 

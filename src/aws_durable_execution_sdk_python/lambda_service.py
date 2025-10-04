@@ -219,10 +219,14 @@ class StepOptions:
 
 @dataclass(frozen=True)
 class WaitOptions:
-    seconds: int = 0
+    wait_seconds: int = 0
+
+    @classmethod
+    def from_dict(cls, data: MutableMapping[str, Any]) -> WaitOptions:
+        return cls(wait_seconds=data.get("WaitSeconds", 0))
 
     def to_dict(self) -> MutableMapping[str, Any]:
-        return {"WaitSeconds": self.seconds}
+        return {"WaitSeconds": self.wait_seconds}
 
 
 @dataclass(frozen=True)
