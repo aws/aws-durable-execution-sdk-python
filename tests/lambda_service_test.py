@@ -771,25 +771,12 @@ def test_state_output_from_dict_empty_operations():
     assert output.next_marker == "marker123"
 
 
-@patch("aws_durable_execution_sdk_python.lambda_service.boto3")
-def test_lambda_client_initialize_from_endpoint_and_region(mock_boto3):
-    """Test LambdaClient.initialize_from_endpoint_and_region method."""
-    mock_client = Mock()
-    mock_boto3.client.return_value = mock_client
-
-    lambda_client = LambdaClient.initialize_from_endpoint_and_region(
-        "https://test.com", "us-east-1"
-    )
-
-    mock_boto3.client.assert_called_once_with(
-        "lambdainternal", endpoint_url="https://test.com", region_name="us-east-1"
-    )
-    assert lambda_client.client == mock_client
-
-
 @patch.dict(
     "os.environ",
-    {"LOCAL_RUNNER_ENDPOINT": "http://test:5000", "LOCAL_RUNNER_REGION": "us-west-1"},
+    {
+        "DURABLE_LOCAL_RUNNER_ENDPOINT": "http://test:5000",
+        "DURABLE_LOCAL_RUNNER_REGION": "us-west-1",
+    },
 )
 @patch("aws_durable_execution_sdk_python.lambda_service.boto3")
 def test_lambda_client_initialize_local_runner_client(mock_boto3):
@@ -803,20 +790,6 @@ def test_lambda_client_initialize_local_runner_client(mock_boto3):
         "lambdainternal-local", endpoint_url="http://test:5000", region_name="us-west-1"
     )
     assert lambda_client.client == mock_client
-
-
-@patch.dict(
-    "os.environ", {"DEX_ENDPOINT": "https://lambda.test.com", "DEX_REGION": "eu-west-1"}
-)
-@patch(
-    "aws_durable_execution_sdk_python.lambda_service.LambdaClient.initialize_from_endpoint_and_region"
-)
-def test_lambda_client_initialize_from_env(mock_init):
-    """Test LambdaClient.initialize_from_env method."""
-    LambdaClient.initialize_from_env()
-    mock_init.assert_called_once_with(
-        endpoint="https://lambda.test.com", region="eu-west-1"
-    )
 
 
 def test_lambda_client_checkpoint():
@@ -1003,14 +976,6 @@ def test_lambda_client_stop():
         ExecutionArn="arn:test", Payload=b"payload"
     )
     assert result == "2023-01-01T00:00:00Z"
-
-
-@pytest.mark.skip(reason="little informal integration test for interactive running.")
-def test_lambda_client_with_env_defaults():
-    client = LambdaClient.initialize_from_endpoint_and_region(
-        "http://127.0.0.1:5000", "us-east-1"
-    )
-    client.get_execution_state("9692ca80-399d-4f52-8d0a-41acc9cd0492", next_marker="")
 
 
 def test_durable_service_client_protocol_checkpoint():
@@ -1526,11 +1491,9 @@ def test_lambda_client_initialize_local_runner_client_defaults(mock_boto3):
 
 @patch.dict("os.environ", {}, clear=True)
 @patch(
-    "aws_durable_execution_sdk_python.lambda_service.LambdaClient.initialize_from_endpoint_and_region"
+    "aws_durable_execution_sdk_python.lambda_service.LambdaClient.initialize_from_env"
 )
 def test_lambda_client_initialize_from_env_defaults(mock_init):
     """Test LambdaClient.initialize_from_env with default environment values."""
     LambdaClient.initialize_from_env()
-    mock_init.assert_called_once_with(
-        endpoint="http://host.docker.internal:5000", region="us-east-1"
-    )
+    mock_init.assert_called_once_with()

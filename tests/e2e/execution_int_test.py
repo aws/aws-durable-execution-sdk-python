@@ -18,7 +18,6 @@ from aws_durable_execution_sdk_python.lambda_context import LambdaContext
 from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
-    LambdaClient,
     OperationAction,
     OperationType,
 )
@@ -392,14 +391,3 @@ def test_wait_not_caught_by_exception():
         assert checkpoint.action is OperationAction.START
         assert checkpoint.operation_id == "1"
         assert checkpoint.wait_options.seconds == 1
-
-
-def test_lambda_client_initialization():
-    """Test initialization of real Lambda client with specified endpoint and region."""
-    endpoint = "https://durable.durable-functions.devo.us-west-2.lambda.aws.a2z.com"
-    region = "us-west-2"
-
-    client = LambdaClient.initialize_from_endpoint_and_region(endpoint, region)
-
-    assert client is not None
-    assert client.client is not None
