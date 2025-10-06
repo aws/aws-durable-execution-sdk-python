@@ -18,7 +18,6 @@ from aws_durable_execution_sdk_python.lambda_context import LambdaContext
 from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
-    LambdaClient,
     OperationAction,
     OperationType,
 )
@@ -403,3 +402,4 @@ def test_lambda_client_initialization():
 
     assert client is not None
     assert client.client is not None
+        assert checkpoint.wait_options.seconds == 1
