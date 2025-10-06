@@ -315,7 +315,7 @@ def test_step_options_to_dict():
 
 def test_wait_options_to_dict():
     """Test WaitOptions.to_dict method."""
-    options = WaitOptions(seconds=60)
+    options = WaitOptions(wait_seconds=60)
     result = options.to_dict()
     assert result == {"WaitSeconds": 60}
 
@@ -394,7 +394,7 @@ def test_operation_update_to_dict_complete():
         message="Test error", type="TestError", data=None, stack_trace=None
     )
     step_options = StepOptions(next_attempt_delay_seconds=30)
-    wait_options = WaitOptions(seconds=60)
+    wait_options = WaitOptions(wait_seconds=60)
     callback_options = CallbackOptions(
         timeout_seconds=300, heartbeat_timeout_seconds=60
     )
@@ -463,7 +463,7 @@ def test_operation_update_create_callback():
 
 def test_operation_update_create_wait_start():
     """Test OperationUpdate.create_wait_start factory method."""
-    wait_options = WaitOptions(seconds=30)
+    wait_options = WaitOptions(wait_seconds=30)
     update = OperationUpdate.create_wait_start(
         OperationIdentifier("wait1", "parent1", "test_wait"), wait_options
     )
@@ -581,7 +581,7 @@ def test_operation_update_with_parent_id():
 def test_operation_update_wait_and_invoke_types():
     """Test OperationUpdate with WAIT and INVOKE operation types."""
     # Test WAIT operation
-    wait_options = WaitOptions(seconds=30)
+    wait_options = WaitOptions(wait_seconds=30)
     wait_update = OperationUpdate(
         operation_id="wait_op",
         operation_type=OperationType.WAIT,
@@ -1064,7 +1064,7 @@ def test_durable_service_client_protocol_stop():
 
 def test_operation_update_create_wait():
     """Test OperationUpdate factory method for WAIT operations."""
-    wait_options = WaitOptions(seconds=30)
+    wait_options = WaitOptions(wait_seconds=30)
     update = OperationUpdate(
         operation_id="wait1",
         operation_type=OperationType.WAIT,
@@ -1369,7 +1369,7 @@ def test_operation_update_complete_with_new_fields():
     )
     context_options = ContextOptions(replay_children=True)
     step_options = StepOptions(next_attempt_delay_seconds=30)
-    wait_options = WaitOptions(seconds=60)
+    wait_options = WaitOptions(wait_seconds=60)
     callback_options = CallbackOptions(
         timeout_seconds=300, heartbeat_timeout_seconds=60
     )

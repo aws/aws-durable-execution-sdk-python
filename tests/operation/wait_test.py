@@ -57,7 +57,7 @@ def test_wait_handler_not_completed():
         operation_type=OperationType.WAIT,
         action=OperationAction.START,
         sub_type=OperationSubType.WAIT,
-        wait_options=WaitOptions(seconds=30),
+        wait_options=WaitOptions(wait_seconds=30),
     )
     mock_state.create_checkpoint.assert_called_once_with(
         operation_update=expected_operation
@@ -85,7 +85,7 @@ def test_wait_handler_with_none_name():
         operation_type=OperationType.WAIT,
         action=OperationAction.START,
         sub_type=OperationSubType.WAIT,
-        wait_options=WaitOptions(seconds=5),
+        wait_options=WaitOptions(wait_seconds=5),
     )
     mock_state.create_checkpoint.assert_called_once_with(
         operation_update=expected_operation

@@ -306,7 +306,7 @@ def test_wait_inside_run_in_childcontext():
         assert second_checkpoint.operation_type is OperationType.WAIT
         assert second_checkpoint.action is OperationAction.START
         assert second_checkpoint.operation_id == "1-1"
-        assert second_checkpoint.wait_options.seconds == 1
+        assert second_checkpoint.wait_options.wait_seconds == 1
 
         mock_inside_child.assert_called_once_with(10, 20)
 
@@ -391,7 +391,7 @@ def test_wait_not_caught_by_exception():
         assert checkpoint.operation_type is OperationType.WAIT
         assert checkpoint.action is OperationAction.START
         assert checkpoint.operation_id == "1"
-        assert checkpoint.wait_options.seconds == 1
+        assert checkpoint.wait_options.wait_seconds == 1
 
 
 def test_lambda_client_initialization():
