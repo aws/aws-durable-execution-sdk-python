@@ -37,3 +37,29 @@ jobs:
       run: hatch run test:cov
     - name: Build distribution
       run: hatch build
+
+  trigger-tests:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: aws-durable-execution-sdk-python-testing
+      
+      - name: Trigger tests in aws-durable-execution-sdk-python-testing
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: aws/aws-durable-execution-sdk-python-testing
+          event-type: test-pr
+          client-payload: |
+            {
+              "pr_number": "${{ github.event.number }}",
+              "pr_sha": "${{ github.event.pull_request.head.sha }}",
+              "pr_ref": "${{ github.event.pull_request.head.ref }}",
+              "source_repo": "${{ github.repository }}"
+            }
