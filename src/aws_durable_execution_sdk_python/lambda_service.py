@@ -211,6 +211,10 @@ class InvokeDetails:
 class StepOptions:
     next_attempt_delay_seconds: int = 0
 
+    @classmethod
+    def from_dict(cls, data: MutableMapping[str, Any]) -> StepOptions:
+        return cls(next_attempt_delay_seconds=data.get("NextAttemptDelaySeconds", 0))
+
     def to_dict(self) -> MutableMapping[str, Any]:
         return {
             "NextAttemptDelaySeconds": self.next_attempt_delay_seconds,
@@ -234,6 +238,13 @@ class CallbackOptions:
     timeout_seconds: int = 0
     heartbeat_timeout_seconds: int = 0
 
+    @classmethod
+    def from_dict(cls, data: MutableMapping[str, Any]) -> CallbackOptions:
+        return cls(
+            timeout_seconds=data.get("TimeoutSeconds", 0),
+            heartbeat_timeout_seconds=data.get("HeartbeatTimeoutSeconds", 0),
+        )
+
     def to_dict(self) -> MutableMapping[str, Any]:
         return {
             "TimeoutSeconds": self.timeout_seconds,
@@ -246,6 +257,13 @@ class InvokeOptions:
     function_name: str
     timeout_seconds: int = 0
 
+    @classmethod
+    def from_dict(cls, data: MutableMapping[str, Any]) -> InvokeOptions:
+        return cls(
+            function_name=data["FunctionName"],
+            timeout_seconds=data.get("TimeoutSeconds", 0),
+        )
+
     def to_dict(self) -> MutableMapping[str, Any]:
         result: MutableMapping[str, Any] = {"FunctionName": self.function_name}
         result["TimeoutSeconds"] = self.timeout_seconds
@@ -255,6 +273,10 @@ class InvokeOptions:
 @dataclass(frozen=True)
 class ContextOptions:
     replay_children: bool = False
+
+    @classmethod
+    def from_dict(cls, data: MutableMapping[str, Any]) -> ContextOptions:
+        return cls(replay_children=data.get("ReplayChildren", False))
 
     def to_dict(self) -> MutableMapping[str, Any]:
         return {"ReplayChildren": self.replay_children}
