@@ -334,6 +334,47 @@ class OperationUpdate:
         return result
 
     @classmethod
+    def from_dict(cls, data: MutableMapping[str, Any]) -> OperationUpdate:
+        """Create OperationUpdate from dictionary data."""
+        error = ErrorObject.from_dict(data["Error"]) if data.get("Error") else None
+
+        context_options = None
+        if context_data := data.get("ContextOptions"):
+            context_options = ContextOptions.from_dict(context_data)
+
+        step_options = None
+        if step_data := data.get("StepOptions"):
+            step_options = StepOptions.from_dict(step_data)
+
+        wait_options = None
+        if wait_data := data.get("WaitOptions"):
+            wait_options = WaitOptions.from_dict(wait_data)
+
+        callback_options = None
+        if callback_data := data.get("CallbackOptions"):
+            callback_options = CallbackOptions.from_dict(callback_data)
+
+        invoke_options = None
+        if invoke_data := data.get("InvokeOptions"):
+            invoke_options = InvokeOptions.from_dict(invoke_data)
+
+        return cls(
+            operation_id=data["Id"],
+            operation_type=OperationType(data["Type"]),
+            action=OperationAction(data["Action"]),
+            parent_id=data.get("ParentId"),
+            name=data.get("Name"),
+            sub_type=OperationSubType(data["SubType"]) if data.get("SubType") else None,
+            payload=data.get("Payload"),
+            error=error,
+            context_options=context_options,
+            step_options=step_options,
+            wait_options=wait_options,
+            callback_options=callback_options,
+            invoke_options=invoke_options,
+        )
+
+    @classmethod
     def create_callback(
         cls, identifier: OperationIdentifier, callback_options: CallbackOptions
     ) -> OperationUpdate:
