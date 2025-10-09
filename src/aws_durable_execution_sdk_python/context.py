@@ -431,9 +431,12 @@ class DurableContext(LambdaContext, DurableContextProtocol):
         """Wait for a specified amount of time.
 
         Args:
-            millis: Time to wait in milliseconds
+            seconds: Time to wait in seconds
             name: Optional name for the wait step
         """
+        if seconds < 1:
+            msg = "seconds must be an integer greater than 0"
+            raise ValidationError(msg)
         wait_handler(
             seconds=seconds,
             state=self.state,

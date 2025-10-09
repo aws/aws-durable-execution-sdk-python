@@ -706,6 +706,20 @@ def test_wait_returns_none(mock_handler):
     assert result is None
 
 
+@patch("aws_durable_execution_sdk_python.context.wait_handler")
+def test_wait_with_time_less_than_one(mock_handler):
+    """Test wait with time less than one."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    context = DurableContext(state=mock_state)
+
+    with pytest.raises(ValidationError):
+        context.wait(0)
+
+
 # endregion wait
 
 
