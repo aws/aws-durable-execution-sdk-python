@@ -25,7 +25,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
 if TYPE_CHECKING:
     from collections.abc import Callable, MutableMapping
 
-    from aws_durable_execution_sdk_python.lambda_context import LambdaContext
 
 logger = logging.getLogger(__name__)
 
@@ -188,10 +187,10 @@ class DurableExecutionInvocationOutput:
 
 def durable_handler(
     func: Callable[[Any, DurableContext], Any],
-) -> Callable[[Any, LambdaContext], Any]:
+) -> Callable[[Any, Any], Any]:
     logger.debug("Starting durable execution handler...")
 
-    def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
+    def wrapper(event: Any, context: Any) -> MutableMapping[str, Any]:
         invocation_input: DurableExecutionInvocationInput
         service_client: DurableServiceClient
 

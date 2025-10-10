@@ -20,10 +20,6 @@ from aws_durable_execution_sdk_python.exceptions import (
     ValidationError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
-from aws_durable_execution_sdk_python.lambda_context import (
-    LambdaContext,
-    make_dict_from_obj,
-)
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.logger import Logger, LogInfo
 from aws_durable_execution_sdk_python.operation.callback import (
@@ -149,32 +145,16 @@ class Callback(Generic[T], CallbackProtocol[T]):
         raise FatalError(msg)
 
 
-# It really would be great NOT to have to inherit from the LambdaContext.
-# lot of noise here that we're not actually using. Alternative is to include
-# via composition rather than inheritance
-class DurableContext(LambdaContext, DurableContextProtocol):
+class DurableContext(DurableContextProtocol):
     def __init__(
         self,
         state: ExecutionState,
+        lambda_context: Any | None = None,
         parent_id: str | None = None,
         logger: Logger | None = None,
-        # LambdaContext members follow
-        invoke_id=None,
-        client_context=None,
-        cognito_identity=None,
-        epoch_deadline_time_in_ms=0,
-        invoked_function_arn=None,
-        tenant_id=None,
     ) -> None:
-        super().__init__(
-            invoke_id=invoke_id,
-            client_context=client_context,
-            cognito_identity=cognito_identity,
-            epoch_deadline_time_in_ms=epoch_deadline_time_in_ms,
-            invoked_function_arn=invoked_function_arn,
-            tenant_id=tenant_id,
-        )
         self.state: ExecutionState = state
+        self.lambda_context = lambda_context
         self._parent_id: str | None = parent_id
         self._step_counter: OrderedCounter = OrderedCounter()
 
@@ -195,18 +175,12 @@ class DurableContext(LambdaContext, DurableContextProtocol):
     @staticmethod
     def from_lambda_context(
         state: ExecutionState,
-        lambda_context: LambdaContext,
+        lambda_context: Any,
     ):
         return DurableContext(
             state=state,
+            lambda_context=lambda_context,
             parent_id=None,
-            invoke_id=lambda_context.aws_request_id,
-            client_context=make_dict_from_obj(lambda_context.client_context),
-            cognito_identity=make_dict_from_obj(lambda_context.identity),
-            # not great to have to use the private-ish accessor here, but for the moment not messing with LambdaContext signature
-            epoch_deadline_time_in_ms=lambda_context._epoch_deadline_time_in_ms,  # noqa: SLF001
-            invoked_function_arn=lambda_context.invoked_function_arn,
-            tenant_id=lambda_context.tenant_id,
         )
 
     def create_child_context(self, parent_id: str) -> DurableContext:
@@ -214,18 +188,13 @@ class DurableContext(LambdaContext, DurableContextProtocol):
         logger.debug("Creating child context for parent %s", parent_id)
         return DurableContext(
             state=self.state,
+            lambda_context=self.lambda_context,
             parent_id=parent_id,
             logger=self.logger.with_log_info(
                 LogInfo(
                     execution_arn=self.state.durable_execution_arn, parent_id=parent_id
                 )
             ),
-            invoke_id=self.aws_request_id,
-            client_context=make_dict_from_obj(self.client_context),
-            cognito_identity=make_dict_from_obj(self.identity),
-            epoch_deadline_time_in_ms=self._epoch_deadline_time_in_ms,
-            invoked_function_arn=self.invoked_function_arn,
-            tenant_id=self.tenant_id,
         )
 
     # endregion factories

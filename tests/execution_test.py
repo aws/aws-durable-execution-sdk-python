@@ -16,7 +16,8 @@ from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
     durable_handler,
 )
-from aws_durable_execution_sdk_python.lambda_context import LambdaContext
+
+# LambdaContext no longer needed - using duck typing
 from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
@@ -305,7 +306,7 @@ def test_durable_handler_client_selection_env_normal_result():
             "LocalRunner": False,
         }
 
-        lambda_context = Mock(spec=LambdaContext)
+        lambda_context = Mock()
         lambda_context.aws_request_id = "test-request"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -358,7 +359,7 @@ def test_durable_handler_client_selection_env_large_result():
             "LocalRunner": False,
         }
 
-        lambda_context = Mock(spec=LambdaContext)
+        lambda_context = Mock()
         lambda_context.aws_request_id = "test-request"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -407,7 +408,7 @@ def test_durable_handler_with_injected_client_success_normal_result():
         service_client=mock_client,
     )
 
-    lambda_context = Mock(spec=LambdaContext)
+    lambda_context = Mock()
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -455,7 +456,7 @@ def test_durable_handler_with_injected_client_success_large_result():
         service_client=mock_client,
     )
 
-    lambda_context = Mock(spec=LambdaContext)
+    lambda_context = Mock()
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -511,7 +512,7 @@ def test_durable_handler_with_injected_client_failure():
         service_client=mock_client,
     )
 
-    lambda_context = Mock(spec=LambdaContext)
+    lambda_context = Mock()
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -562,7 +563,7 @@ def test_durable_handler_checkpoint_error_propagation():
         service_client=mock_client,
     )
 
-    lambda_context = Mock(spec=LambdaContext)
+    lambda_context = Mock()
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -600,7 +601,7 @@ def test_durable_handler_fatal_error_handling():
         service_client=mock_client,
     )
 
-    lambda_context = Mock(spec=LambdaContext)
+    lambda_context = Mock()
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -651,7 +652,7 @@ def test_durable_handler_client_selection_local_runner():
             "LocalRunner": True,
         }
 
-        lambda_context = Mock(spec=LambdaContext)
+        lambda_context = Mock()
         lambda_context.aws_request_id = "test-request"
         lambda_context.client_context = None
         lambda_context.identity = None

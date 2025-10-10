@@ -14,7 +14,8 @@ from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
     durable_handler,
 )
-from aws_durable_execution_sdk_python.lambda_context import LambdaContext
+
+# LambdaContext no longer needed - using duck typing
 from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
@@ -102,7 +103,7 @@ def test_step_different_ways_to_pass_args():
         }
 
         # Create mock lambda context
-        lambda_context = Mock(spec=LambdaContext)
+        lambda_context = Mock()
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -185,7 +186,7 @@ def test_step_with_logger():
         }
 
         # Create mock lambda context
-        lambda_context = Mock(spec=LambdaContext)
+        lambda_context = Mock()
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -277,7 +278,7 @@ def test_wait_inside_run_in_childcontext():
         }
 
         # Create mock lambda context
-        lambda_context = Mock(spec=LambdaContext)
+        lambda_context = Mock()
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -368,7 +369,7 @@ def test_wait_not_caught_by_exception():
         }
 
         # Create mock lambda context
-        lambda_context = Mock(spec=LambdaContext)
+        lambda_context = Mock()
         lambda_context.aws_request_id = "test-request-id"
         lambda_context.client_context = None
         lambda_context.identity = None
