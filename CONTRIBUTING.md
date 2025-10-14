@@ -25,6 +25,102 @@ hatch run types:check
 hatch fmt
 ```
 
+There is a convenience script for the above that you can run from the root of the repo as you prepare your PR:
+```
+ops/ci-checks.sh
+```
+
+## Coding Standards
+Consistency is important for maintainability. Please adhere to the house-style of the repo, unless there's a really
+good reason to break pattern.
+
+### General style
+1. Follow the [Python Style Guide by Google](https://google.github.io/styleguide/pyguide.html) in general.
+2. Standardize to [ruff](https://docs.astral.sh/ruff/) formatting and linting rules. CI checks enforce these too.
+3. Avoid pulling in extra runtime dependencies. The only dependency is [boto3](https://boto3.amazonaws.com/). The
+   reason is that this SDK adds size to the AWS Lambda function of the consumer, so we should keep it as light as
+   possible.
+4. Never use `RLock` when `Lock` would do. The reason is to highlight recursive calls that have the potential for deadlocking
+   immediately, so that RLock is a deliberate and considered decision after having considered deadlocking concerns, rather
+   than just the default.
+
+### Organization
+1. Do not allow circular references, even if you can get away with it by using `if TYPE_CHECKING`. Circular references are a
+   sign that the structure of the code is not clear enough. It makes for inefficient memory management and it makes the
+   code harder to understand and follow. Do use `config` and `types` as the lowest-level import if you run into circular
+   reference issues.
+2. Do not use `__init__` files for any meaningful code or even just type declarations. Why? Because the purpose of init is not
+   to serve as a grab-bag of code that doesn't otherwise have a home.
+3. Do not introduce `utils` or `helper` style modules as a grab-bag of ad hoc functions. Introduce domain-specific classes to
+   encapsulate and model logic.
+
+### Data Structures & Typing
+1. Model data structure with immutable classes and precise type hints. (In other words, use frozen dataclasses with exact,
+   narrow type hints.) Do not rely on unstructured dicts. Why immutable? These are inherently thread-safe, and it forces you
+   to think carefully about when and where you need to mutate values.
+
+2. A rare exception to the general rule to prefer immutable classes wherever possible, is `state.ExecutionState`, which maintains
+   the state of the on-going Durable Execution and encapsulates thread-safe state mutations as the execution progresses.
+
+3. Rely on exact and explicit type declarations rather than duck typing. Why? Yes, duck typing is very pythonic. However, this
+   is a complex code-base, and exact and explicit type declarations signal intent clearly so that the type checker can help
+   you catch errors more quickly. LLMs have an easier time understanding the intent of the code with the type hints, and it makes
+   it easier for you to spot mistaken assumptions that the LLMs might make about the code. The other reason is that it makes the
+   experience of developers much easier with intelligent and context-aware autocomplete hints in an IDE.
+
+4. Declare a type definition wherever you declare a variable, even within a function scope and even where it's implied. For example,
+   even though the `str` might be _implied_ because of the `call` return type, make it explicit:
+
+```
+def my_function() -> str:
+  my_var: str = arb.call(1, 2, 3)
+  return f"arb result: {my_var}"
+```
+
+5. To update a field in a frozen dataclass, prefer to use a `clone` or `with_field` class method constructor or reinitialization,
+   rather than dataclass `replace`. There is no big technical reason for this, it's more a soft pattern. The philosophy of an update
+   should be more about thoughfully and purposefully creating a _new_ instance than "in-place editing" an existing one.
+
+
+### Initialization and conversion
+1. Class constructors must be light and not do more than initialize the class. In a dataclass you shouldn't even need an `__init__`.
+   Use a `@classmethod` factory method instead to encapsulate more advanced logic. For example, if a class depends on logic that
+   might fail, encapsulate this in a `create` classmethod:
+
+```python
+@dataclass(frozen=True)
+class MyClass:
+    id: str
+    name: str
+    timeout: int
+    
+    @classmethod
+    def create(cls, name: str, timeout: int = 30) -> Config:
+        """Factory contains """
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        
+        # Generate unique ID
+        config_id: str = f"cfg_{uuid.uuid4().hex[:8]}"
+        
+        return cls(id=config_id, name=name, timeout=timeout)
+```
+
+2. Encapsulate conversion logic in a `from_x` factory and `to_x` method on a class.
+
+```python
+@dataclass(frozen=True)
+class WaitOptions:
+    wait_seconds: int = 0
+
+    @classmethod
+    def from_dict(cls, data: MutableMapping[str, Any]) -> WaitOptions:
+        return cls(wait_seconds=data.get("WaitSeconds", 0))
+
+    def to_dict(self) -> MutableMapping[str, Any]:
+        return {"WaitSeconds": self.wait_seconds}
+```
+
 ## Set up your IDE
 Point your IDE at the hatch virtual environment to have it recognize dependencies
 and imports.
