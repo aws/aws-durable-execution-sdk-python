@@ -883,10 +883,6 @@ class DurableServiceClient(Protocol):
         max_items: int = 1000,
     ) -> StateOutput: ...  # pragma: no cover
 
-    def stop(
-        self, execution_arn: str, payload: bytes | None
-    ) -> datetime.datetime: ...  # pragma: no cover
-
 
 class LambdaClient(DurableServiceClient):
     """Persist durable operations to the Lambda Durable Function APIs."""
@@ -983,14 +979,6 @@ class LambdaClient(DurableServiceClient):
             MaxItems=max_items,
         )
         return StateOutput.from_dict(result)
-
-    def stop(self, execution_arn: str, payload: bytes | None) -> datetime.datetime:
-        result: MutableMapping[str, Any] = self.client.stop_durable_execution(
-            ExecutionArn=execution_arn, Payload=payload
-        )
-
-        # presumably lambda throws if execution_arn not found? this line will throw if stopDate isn't in response
-        return result["StopDate"]
 
 
 # endregion client

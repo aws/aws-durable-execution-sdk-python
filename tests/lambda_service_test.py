@@ -1897,22 +1897,6 @@ def test_lambda_client_get_execution_state():
     assert len(result.operations) == 1
 
 
-def test_lambda_client_stop():
-    """Test LambdaClient.stop method."""
-    mock_client = Mock()
-    mock_client.stop_durable_execution.return_value = {
-        "StopDate": "2023-01-01T00:00:00Z"
-    }
-
-    lambda_client = LambdaClient(mock_client)
-    result = lambda_client.stop("arn:test", b"payload")
-
-    mock_client.stop_durable_execution.assert_called_once_with(
-        ExecutionArn="arn:test", Payload=b"payload"
-    )
-    assert result == "2023-01-01T00:00:00Z"
-
-
 def test_durable_service_client_protocol_get_execution_state():
     """Test DurableServiceClient protocol get_execution_state method signature."""
     mock_client = Mock(spec=DurableServiceClient)
@@ -1925,18 +1909,6 @@ def test_durable_service_client_protocol_get_execution_state():
         "arn123", "token", "marker", 1000
     )
     assert result == mock_output
-
-
-def test_durable_service_client_protocol_stop():
-    """Test DurableServiceClient protocol stop method signature."""
-    mock_client = Mock(spec=DurableServiceClient)
-    stop_time = datetime.datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
-    mock_client.stop.return_value = stop_time
-
-    result = mock_client.stop("arn:test", b"payload")
-
-    mock_client.stop.assert_called_once_with("arn:test", b"payload")
-    assert result == stop_time
 
 
 @patch("aws_durable_execution_sdk_python.lambda_service.boto3")
