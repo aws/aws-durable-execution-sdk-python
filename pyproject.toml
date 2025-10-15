@@ -65,6 +65,7 @@ line-length = 88
 
 [tool.ruff.lint]
 preview = false
+select = ["E402", "PLC0415"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
