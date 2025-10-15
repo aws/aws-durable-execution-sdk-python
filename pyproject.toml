@@ -18,7 +18,11 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
-dependencies = ["boto3>=1.40.30"]
+dependencies = [
+  # TODO replace following with `"boto3>=1.40.30"` when we switch bundled botocore with publically available one
+  "botocore @ file:src/aws_durable_execution_sdk_python/lib/botocore-1.40.51-py3-none-any.whl",
+  "boto3 @ file:src/aws_durable_execution_sdk_python/lib/boto3-1.40.51-py3-none-any.whl"
+]
 
 [project.urls]
 Documentation = "https://github.com/aws/aws-durable-execution-sdk-python#readme"
@@ -33,6 +37,10 @@ packages = ["src/aws_durable_execution_sdk_python"]
 
 [tool.hatch.version]
 path = "src/aws_durable_execution_sdk_python/__about__.py"
+
+# TODO remove this when we switch bundled botocore with publically available one
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.envs.test]
 dependencies = ["coverage[toml]", "pytest", "pytest-cov"]
