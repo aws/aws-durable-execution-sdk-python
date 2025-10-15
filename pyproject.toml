@@ -64,7 +64,7 @@ exclude_lines = ["no cov", "if __name__ == .__main__.:", "if TYPE_CHECKING:"]
 line-length = 88
 
 [tool.ruff.lint]
-preview = false
+preview = true
 select = ["E402", "PLC0415"]
 
 [tool.ruff.lint.per-file-ignores]
