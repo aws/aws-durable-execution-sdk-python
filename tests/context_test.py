@@ -8,10 +8,12 @@ import pytest
 from aws_durable_execution_sdk_python.config import (
     CallbackConfig,
     ChildConfig,
+    InvokeConfig,
     MapConfig,
     ParallelConfig,
     StepConfig,
     WaitForConditionConfig,
+    WaitForConditionDecision,
 )
 from aws_durable_execution_sdk_python.context import Callback, DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
@@ -472,8 +474,6 @@ def test_invoke_basic(mock_handler):
 @patch("aws_durable_execution_sdk_python.context.invoke_handler")
 def test_invoke_with_name_and_config(mock_handler):
     """Test invoke with name and config."""
-    from aws_durable_execution_sdk_python.config import InvokeConfig
-
     mock_handler.return_value = "configured_result"
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
@@ -577,8 +577,6 @@ def test_invoke_with_custom_serdes(mock_handler):
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
-
-    from aws_durable_execution_sdk_python.config import InvokeConfig
 
     config = InvokeConfig[dict, dict](
         serdes_payload=CustomDictSerDes(),
@@ -1019,8 +1017,6 @@ def test_map_basic(mock_handler):
 @patch("aws_durable_execution_sdk_python.context.map_handler")
 def test_map_with_name_and_config(mock_handler):
     """Test map with name and config."""
-    from aws_durable_execution_sdk_python.config import MapConfig
-
     mock_handler.return_value = "configured_map_result"
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
@@ -1155,8 +1151,6 @@ def test_parallel_basic(mock_handler):
 @patch("aws_durable_execution_sdk_python.context.parallel_handler")
 def test_parallel_with_name_and_config(mock_handler):
     """Test parallel with name and config."""
-    from aws_durable_execution_sdk_python.config import ParallelConfig
-
     mock_handler.return_value = "configured_parallel_result"
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
@@ -1492,8 +1486,6 @@ def test_context_wait_for_condition_handler_call():
         return state
 
     def test_wait_strategy(state, attempt):
-        from aws_durable_execution_sdk_python.config import WaitForConditionDecision
-
         return WaitForConditionDecision.STOP
 
     # Create mock state and context

@@ -17,13 +17,14 @@ from aws_durable_execution_sdk_python.exceptions import (
     SuspendExecution,
     TimedSuspendExecution,
 )
+from aws_durable_execution_sdk_python.config import ChildConfig
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from aws_durable_execution_sdk_python.types import BatchResult as BatchResultProtocol
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from aws_durable_execution_sdk_python.config import ChildConfig, CompletionConfig
+    from aws_durable_execution_sdk_python.config import CompletionConfig
     from aws_durable_execution_sdk_python.lambda_service import OperationSubType
     from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.state import ExecutionState
@@ -692,7 +693,6 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         executable: Executable[CallableType],
     ) -> ResultType:
         """Execute a single item in a child context."""
-        from aws_durable_execution_sdk_python.config import ChildConfig
 
         def execute_in_child_context(child_context: DurableContext) -> ResultType:
             return self.execute_item(child_context, executable)
