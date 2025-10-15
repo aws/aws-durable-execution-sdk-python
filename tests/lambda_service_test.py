@@ -1839,9 +1839,10 @@ def test_lambda_client_initialize_from_env_default(mock_boto_client):
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
 
-    client = LambdaClient.initialize_from_env()
+    with patch.object(LambdaClient, "load_preview_botocore_models"):
+        client = LambdaClient.initialize_from_env()
 
-    mock_boto_client.assert_called_with("lambda")
+    mock_boto_client.assert_called_with("lambdainternal")
     assert isinstance(client, LambdaClient)
 
 
@@ -1852,9 +1853,12 @@ def test_lambda_client_initialize_from_env_with_endpoint(mock_boto_client):
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
 
-    client = LambdaClient.initialize_from_env()
+    with patch.object(LambdaClient, "load_preview_botocore_models"):
+        client = LambdaClient.initialize_from_env()
 
-    mock_boto_client.assert_called_with("lambda", endpoint_url="http://localhost:3000")
+    mock_boto_client.assert_called_with(
+        "lambdainternal", endpoint_url="http://localhost:3000"
+    )
     assert isinstance(client, LambdaClient)
 
 
@@ -1964,9 +1968,10 @@ def test_lambda_client_initialize_from_env_no_endpoint(mock_boto_client):
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
 
-    client = LambdaClient.initialize_from_env()
+    with patch.object(LambdaClient, "load_preview_botocore_models"):
+        client = LambdaClient.initialize_from_env()
 
-    mock_boto_client.assert_called_with("lambda")
+    mock_boto_client.assert_called_with("lambdainternal")
     assert isinstance(client, LambdaClient)
 
 

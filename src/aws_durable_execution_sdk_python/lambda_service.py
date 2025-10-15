@@ -924,13 +924,19 @@ class LambdaClient(DurableServiceClient):
 
     @staticmethod
     def initialize_from_env() -> LambdaClient:
+        LambdaClient.load_preview_botocore_models()
+
+        """
+        TODO - we can remove this when were using the actual lambda client,
+        but we need this with the preview model because boto won't match against lambdainternal.
+        """
         endpoint_url = os.getenv("AWS_ENDPOINT_URL_LAMBDA", None)
         if not endpoint_url:
             client = boto3.client(
-                "lambda",
+                "lambdainternal",
             )
         else:
-            client = boto3.client("lambda", endpoint_url=endpoint_url)
+            client = boto3.client("lambdainternal", endpoint_url=endpoint_url)
 
         return LambdaClient(client=client)
 
