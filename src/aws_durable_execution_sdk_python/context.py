@@ -94,7 +94,7 @@ def durable_with_child_context(
     return wrapper
 
 
-class Callback(Generic[T], CallbackProtocol[T]):
+class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
     """A future that will block on result() until callback_id returns."""
 
     def __init__(
@@ -162,13 +162,9 @@ class DurableContext(DurableContextProtocol):
             execution_arn=state.durable_execution_arn, parent_id=parent_id
         )
         self._log_info = log_info
-        self.logger: Logger = (
-            logger
-            if logger
-            else Logger.from_log_info(
-                logger=logging.getLogger(),
-                info=log_info,
-            )
+        self.logger: Logger = logger or Logger.from_log_info(
+            logger=logging.getLogger(),
+            info=log_info,
         )
 
     # region factories
@@ -207,7 +203,7 @@ class DurableContext(DurableContextProtocol):
             str | None: The provided name, and if that doesn't exist the callable function's name if it has one.
         """
         # callable's name will override name if name is falsy ('' or None)
-        return name if name else getattr(func, "_original_name", None)
+        return name or getattr(func, "_original_name", None)
 
     def set_logger(self, new_logger: LoggerInterface):
         """Set the logger for the current context."""

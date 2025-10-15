@@ -64,7 +64,7 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
             serdes=config.serdes,
         )
 
-    def execute_item(self, child_context, executable: Executable[Callable]) -> R:
+    def execute_item(self, child_context, executable: Executable[Callable]) -> R:  # noqa: PLR6301
         logger.debug("🔀 Processing parallel branch: %s", executable.index)
         result: R = executable.func(child_context)
         logger.debug("✅ Processed parallel branch: %s", executable.index)
@@ -80,7 +80,5 @@ def parallel_handler(
     ],
 ) -> BatchResult[R]:
     """Execute multiple operations in parallel."""
-    executor = ParallelExecutor.from_callables(
-        callables, config if config else ParallelConfig()
-    )
+    executor = ParallelExecutor.from_callables(callables, config or ParallelConfig())
     return executor.execute(execution_state, run_in_child_context)

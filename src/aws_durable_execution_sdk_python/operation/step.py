@@ -183,9 +183,7 @@ def retry_handler(
     """Checkpoint and suspend for replay if retry required, otherwise raise error."""
     error_object = ErrorObject.from_exception(error)
 
-    retry_strategy = (
-        config.retry_strategy if config.retry_strategy else RetryPresets.default()
-    )
+    retry_strategy = config.retry_strategy or RetryPresets.default()
 
     retry_attempt: int = (
         checkpointed_result.operation.step_details.attempt

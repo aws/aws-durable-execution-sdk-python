@@ -65,7 +65,6 @@ line-length = 88
 
 [tool.ruff.lint]
 preview = true
-select = ["E402", "PLC0415"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
@@ -74,6 +73,7 @@ select = ["E402", "PLC0415"]
   "ARG005",
   "S101",
   "PLR2004",
+  "PLR6301",
   "SIM117",
   "TRY301",
 ]

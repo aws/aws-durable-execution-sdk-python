@@ -169,7 +169,7 @@ def test_empty_string_serialization():
 
 def test_empty_string_deserialization():
     result = deserialize(None, '""', "test-op", "test-arn")
-    assert result == ""
+    assert not result
 
 
 def test_none_value_handling():

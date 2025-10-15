@@ -235,7 +235,7 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
 
         assert result == mock_batch_result
         # Verify that a default ParallelConfig was created
-        args, kwargs = mock_from_callables.call_args
+        args, _ = mock_from_callables.call_args
         assert args[0] == callables
         assert isinstance(args[1], ParallelConfig)
         assert args[1].max_concurrency is None

@@ -29,7 +29,7 @@ T = TypeVar("T")
 R = TypeVar("R")
 
 
-class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):
+class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI059
     def __init__(
         self,
         executables: list[Executable[Callable]],
@@ -94,6 +94,6 @@ def map_handler(
 ) -> BatchResult[R]:
     """Execute a callable for each item in parallel."""
     executor: MapExecutor[T, R] = MapExecutor.from_items(
-        items=items, func=func, config=config if config else MapConfig()
+        items=items, func=func, config=config or MapConfig()
     )
     return executor.execute(execution_state, run_in_child_context)

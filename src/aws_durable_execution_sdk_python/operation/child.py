@@ -64,9 +64,7 @@ def child_handler(
         )
     if checkpointed_result.is_failed():
         checkpointed_result.raise_callable_error()
-    sub_type = (
-        config.sub_type if config.sub_type else OperationSubType.RUN_IN_CHILD_CONTEXT
-    )
+    sub_type = config.sub_type or OperationSubType.RUN_IN_CHILD_CONTEXT
 
     if not checkpointed_result.is_existent():
         start_operation = OperationUpdate.create_context_start(

@@ -60,7 +60,7 @@ def test_durable_execution_invocation_input_from_dict():
     assert result.checkpoint_token == "9692ca80-399d-4f52-8d0a-41acc9cd0492"  # noqa: S105
     assert isinstance(result.initial_execution_state, InitialExecutionState)
     assert len(result.initial_execution_state.operations) == 1
-    assert result.initial_execution_state.next_marker == ""
+    assert not result.initial_execution_state.next_marker
     assert (
         result.initial_execution_state.operations[0].operation_id
         == "9692ca80-399d-4f52-8d0a-41acc9cd0492"
@@ -370,7 +370,7 @@ def test_durable_handler_client_selection_env_large_result():
         result = test_handler(event, lambda_context)
 
         assert result["Status"] == InvocationStatus.SUCCEEDED.value
-        assert result["Result"] == ""
+        assert not result["Result"]
         mock_lambda_client.initialize_from_env.assert_called_once()
         mock_client.checkpoint.assert_called_once()
 
@@ -467,7 +467,7 @@ def test_durable_handler_with_injected_client_success_large_result():
     result = test_handler(invocation_input, lambda_context)
 
     assert result["Status"] == InvocationStatus.SUCCEEDED.value
-    assert result.get("Result") == ""
+    assert not result.get("Result")
     mock_client.checkpoint.assert_called_once()
 
     # Verify the checkpoint call was for execution success

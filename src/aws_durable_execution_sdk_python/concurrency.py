@@ -12,12 +12,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Generic, Self, TypeVar
 
+from aws_durable_execution_sdk_python.config import ChildConfig
 from aws_durable_execution_sdk_python.exceptions import (
     InvalidStateError,
     SuspendExecution,
     TimedSuspendExecution,
 )
-from aws_durable_execution_sdk_python.config import ChildConfig
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from aws_durable_execution_sdk_python.types import BatchResult as BatchResultProtocol
 
@@ -93,7 +93,7 @@ class BatchItem(Generic[R]):
 
 
 @dataclass(frozen=True)
-class BatchResult(Generic[R], BatchResultProtocol[R]):
+class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
     all: list[BatchItem[R]]
     completion_reason: CompletionReason
 
@@ -354,10 +354,7 @@ class ExecutionCounters:
             # Impossible to succeed condition
             # TODO: should this keep running? TS doesn't currently handle this either.
             remaining_tasks = self.total_tasks - self.success_count - self.failure_count
-            if self.success_count + remaining_tasks < self.min_successful:
-                return True
-
-            return False
+            return self.success_count + remaining_tasks < self.min_successful
 
     def is_all_completed(self) -> bool:
         """True if all tasks completed successfully."""
@@ -494,11 +491,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         self._suspend_exception: SuspendExecution | None = None
 
         # ExecutionCounters will keep track of completion criteria and on-going counters
-        min_successful = (
-            self.completion_config.min_successful
-            if self.completion_config.min_successful
-            else len(self.executables)
-        )
+        min_successful = self.completion_config.min_successful or len(self.executables)
         tolerated_failure_count = self.completion_config.tolerated_failure_count
         tolerated_failure_percentage = (
             self.completion_config.tolerated_failure_percentage
@@ -533,9 +526,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
             "▶️ Executing concurrent operation, items: %d", len(self.executables)
         )
 
-        max_workers = (
-            self.max_concurrency if self.max_concurrency else len(self.executables)
-        )
+        max_workers = self.max_concurrency or len(self.executables)
 
         self.executables_with_state = [
             ExecutableWithState(executable=exe) for exe in self.executables
@@ -589,7 +580,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         ) = None
 
         for exe_state in self.executables_with_state:
-            if exe_state.status in (BranchStatus.PENDING, BranchStatus.RUNNING):
+            if exe_state.status in {BranchStatus.PENDING, BranchStatus.RUNNING}:
                 # Exit here! Still have tasks that can make progress, don't suspend.
                 return SuspendResult.do_not_suspend()
             if exe_state.status is BranchStatus.SUSPENDED_WITH_TIMEOUT:

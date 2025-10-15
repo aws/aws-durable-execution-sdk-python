@@ -1,5 +1,6 @@
 """Unit tests for callback handler."""
 
+import math
 from unittest.mock import ANY, Mock, patch
 
 import pytest
@@ -688,7 +689,7 @@ def test_wait_for_callback_handler_config_propagation():
 
 def test_wait_for_callback_handler_with_various_result_types():
     """Test wait_for_callback_handler with various result types."""
-    result_types = [None, True, False, 0, 3.14, "", "string", [], {"key": "value"}]
+    result_types = [None, True, False, 0, math.pi, "", "string", [], {"key": "value"}]
 
     for i, expected_result in enumerate(result_types):
         mock_context = Mock(spec=DurableContext)

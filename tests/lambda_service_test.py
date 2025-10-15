@@ -153,7 +153,7 @@ def test_error_object_from_exception_empty_message():
     """Test ErrorObject.from_exception with exception that has no message."""
     empty_error = ValueError()
     error = ErrorObject.from_exception(empty_error)
-    assert error.message == ""
+    assert not error.message
     assert error.type == "ValueError"
     assert error.data is None
     assert error.stack_trace is None
@@ -171,7 +171,7 @@ def test_error_object_from_message_regular():
 def test_error_object_from_message_empty():
     """Test ErrorObject.from_message with empty message."""
     error = ErrorObject.from_message("")
-    assert error.message == ""
+    assert not error.message
     assert error.type is None
     assert error.data is None
     assert error.stack_trace is None
@@ -1539,7 +1539,7 @@ def test_checkpoint_output_from_dict_empty():
     """Test CheckpointOutput.from_dict with empty data."""
     data = {}
     output = CheckpointOutput.from_dict(data)
-    assert output.checkpoint_token == ""
+    assert not output.checkpoint_token
     assert len(output.new_execution_state.operations) == 0
     assert output.new_execution_state.next_marker is None
 

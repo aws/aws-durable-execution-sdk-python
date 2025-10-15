@@ -30,10 +30,10 @@ class SerDes(ABC, Generic[T]):
 
 
 class JsonSerDes(SerDes[T]):
-    def serialize(self, value: T, _: SerDesContext) -> str:
+    def serialize(self, value: T, _: SerDesContext) -> str:  # noqa: PLR6301
         return json.dumps(value)
 
-    def deserialize(self, data: str, _: SerDesContext) -> T:
+    def deserialize(self, data: str, _: SerDesContext) -> T:  # noqa: PLR6301
         return json.loads(data)
 
 

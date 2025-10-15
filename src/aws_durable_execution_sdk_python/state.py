@@ -105,7 +105,7 @@ class CheckpointedResult:
         op = self.operation
         if not op:
             return False
-        return op.status in (OperationStatus.STARTED, OperationStatus.READY)
+        return op.status in {OperationStatus.STARTED, OperationStatus.READY}
 
     def is_pending(self) -> bool:
         """Return True if the checkpointed operation is PENDING."""
