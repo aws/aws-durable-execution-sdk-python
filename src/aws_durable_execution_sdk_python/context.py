@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from aws_durable_execution_sdk_python.state import CheckpointedResult
+    from aws_durable_execution_sdk_python.types import LambdaContext
 
 P = TypeVar("P")  # Payload type
 R = TypeVar("R")  # Result type
@@ -149,7 +150,7 @@ class DurableContext(DurableContextProtocol):
     def __init__(
         self,
         state: ExecutionState,
-        lambda_context: Any | None = None,
+        lambda_context: LambdaContext | None = None,
         parent_id: str | None = None,
         logger: Logger | None = None,
     ) -> None:
@@ -171,7 +172,7 @@ class DurableContext(DurableContextProtocol):
     @staticmethod
     def from_lambda_context(
         state: ExecutionState,
-        lambda_context: Any,
+        lambda_context: LambdaContext,
     ):
         return DurableContext(
             state=state,
