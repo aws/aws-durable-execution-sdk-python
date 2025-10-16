@@ -5,7 +5,11 @@ from unittest.mock import ANY, Mock, patch
 
 import pytest
 
-from aws_durable_execution_sdk_python.config import CallbackConfig
+from aws_durable_execution_sdk_python.config import (
+    CallbackConfig,
+    StepConfig,
+    WaitForCallbackConfig,
+)
 from aws_durable_execution_sdk_python.exceptions import FatalError
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -22,6 +26,8 @@ from aws_durable_execution_sdk_python.operation.callback import (
     create_callback_handler,
     wait_for_callback_handler,
 )
+from aws_durable_execution_sdk_python.retries import RetryDecision
+from aws_durable_execution_sdk_python.serdes import SerDes
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 from aws_durable_execution_sdk_python.types import DurableContext, StepContext
 
@@ -269,7 +275,7 @@ def test_wait_for_callback_handler_with_name_and_config():
     mock_callback.result.return_value = "named_callback_result"
     mock_context.create_callback.return_value = mock_callback
     mock_submitter = Mock()
-    config = CallbackConfig()
+    config = WaitForCallbackConfig()
 
     result = wait_for_callback_handler(
         mock_context, mock_submitter, "test_callback", config
@@ -291,7 +297,7 @@ def test_wait_for_callback_handler_submitter_called_with_callback_id():
     mock_context.create_callback.return_value = mock_callback
     mock_submitter = Mock()
 
-    def capture_step_call(func, name):
+    def capture_step_call(func, name, config=None):
         # Execute the step callable to verify submitter is called correctly
         step_context = Mock(spec=StepContext)
         func(step_context)
@@ -357,7 +363,7 @@ def test_wait_for_callback_handler_with_none_callback_id():
     mock_context.create_callback.return_value = mock_callback
     mock_submitter = Mock()
 
-    def execute_step(func, name):
+    def execute_step(func, name, config=None):
         step_context = Mock(spec=StepContext)
         return func(step_context)
 
@@ -378,7 +384,7 @@ def test_wait_for_callback_handler_with_empty_string_callback_id():
     mock_context.create_callback.return_value = mock_callback
     mock_submitter = Mock()
 
-    def execute_step(func, name):
+    def execute_step(func, name, config=None):
         step_context = Mock(spec=StepContext)
         return func(step_context)
 
@@ -426,7 +432,9 @@ def test_wait_for_callback_handler_with_unicode_names():
 
         assert result == f"result_for_{name}"
         expected_name = f"{name} submitter"
-        mock_context.step.assert_called_once_with(func=ANY, name=expected_name)
+        mock_context.step.assert_called_once_with(
+            func=ANY, name=expected_name, config=None
+        )
         mock_context.reset_mock()
 
 
@@ -591,7 +599,7 @@ def test_wait_for_callback_handler_submitter_exception_handling():
         msg = "Submitter failed"
         raise ValueError(msg)
 
-    def step_side_effect(func, name):
+    def step_side_effect(func, name, config=None):
         step_context = Mock(spec=StepContext)
         func(step_context)
 
@@ -675,7 +683,7 @@ def test_wait_for_callback_handler_config_propagation():
     mock_context.create_callback.return_value = mock_callback
     mock_submitter = Mock()
 
-    config = CallbackConfig(timeout_seconds=120, heartbeat_timeout_seconds=30)
+    config = WaitForCallbackConfig(timeout_seconds=120, heartbeat_timeout_seconds=30)
 
     result = wait_for_callback_handler(
         mock_context, mock_submitter, "config_test", config
@@ -685,6 +693,41 @@ def test_wait_for_callback_handler_config_propagation():
     mock_context.create_callback.assert_called_once_with(
         name="config_test create callback id", config=config
     )
+
+
+def test_wait_for_callback_handler_step_config_propagation():
+    """Test wait_for_callback_handler properly passes retry_strategy and serdes to step config."""
+
+    mock_context = Mock(spec=DurableContext)
+    mock_callback = Mock()
+    mock_callback.callback_id = "step_config_test"
+    mock_callback.result.return_value = "step_config_result"
+    mock_context.create_callback.return_value = mock_callback
+    mock_submitter = Mock()
+
+    def test_retry_strategy(exception, attempt):
+        return RetryDecision.retry_after_delay(1)
+
+    mock_serdes = Mock(spec=SerDes)
+
+    config = WaitForCallbackConfig(
+        retry_strategy=test_retry_strategy, serdes=mock_serdes
+    )
+
+    result = wait_for_callback_handler(
+        mock_context, mock_submitter, "step_config_test", config
+    )
+
+    assert result == "step_config_result"
+
+    # Verify step was called with correct StepConfig
+    mock_context.step.assert_called_once()
+    call_args = mock_context.step.call_args
+    step_config = call_args.kwargs["config"]
+
+    assert isinstance(step_config, StepConfig)
+    assert step_config.retry_strategy == test_retry_strategy
+    assert step_config.serdes == mock_serdes
 
 
 def test_wait_for_callback_handler_with_various_result_types():
@@ -729,7 +772,7 @@ def test_callback_lifecycle_complete_flow():
     mock_callback.result.return_value = {"status": "completed", "data": "test_data"}
     mock_context.create_callback.return_value = mock_callback
 
-    config = CallbackConfig(timeout_seconds=300, heartbeat_timeout_seconds=60)
+    config = WaitForCallbackConfig(timeout_seconds=300, heartbeat_timeout_seconds=60)
     callback_id = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier("lifecycle_callback", None),
@@ -742,7 +785,7 @@ def test_callback_lifecycle_complete_flow():
         assert cb_id == "lifecycle_cb123"
         return "submitted"
 
-    def execute_step(func, name):
+    def execute_step(func, name, config=None):
         step_context = Mock(spec=StepContext)
         return func(step_context)
 
@@ -862,7 +905,7 @@ def test_callback_with_complex_submitter():
         msg = "Invalid callback ID"
         raise ValueError(msg)
 
-    def execute_step(func, name):
+    def execute_step(func, name, config):
         step_context = Mock(spec=StepContext)
         return func(step_context)
 
@@ -942,7 +985,9 @@ def test_callback_name_variations():
 
         assert result == f"result_for_{name}"
         expected_name = f"{name} submitter" if name else "submitter"
-        mock_context.step.assert_called_once_with(func=ANY, name=expected_name)
+        mock_context.step.assert_called_once_with(
+            func=ANY, name=expected_name, config=None
+        )
         mock_context.reset_mock()
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from aws_durable_execution_sdk_python.config import StepConfig
 from aws_durable_execution_sdk_python.exceptions import FatalError
 from aws_durable_execution_sdk_python.lambda_service import (
     CallbackOptions,
@@ -97,6 +98,16 @@ def wait_for_callback_handler(
     def submitter_step(step_context):  # noqa: ARG001
         return submitter(callback.callback_id)
 
-    context.step(func=submitter_step, name=f"{name_with_space}submitter")
+    step_config = (
+        StepConfig(
+            retry_strategy=config.retry_strategy,
+            serdes=config.serdes,
+        )
+        if config
+        else None
+    )
+    context.step(
+        func=submitter_step, name=f"{name_with_space}submitter", config=step_config
+    )
 
     return callback.result()
