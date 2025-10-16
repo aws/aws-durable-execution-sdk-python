@@ -23,6 +23,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
 )
 from aws_durable_execution_sdk_python.logger import LoggerInterface
+from tests.test_helpers import operation_id_sequence
 
 if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.types import StepContext
@@ -208,16 +209,17 @@ def test_step_with_logger():
 
         # 1 START checkpoint, 1 SUCCEED checkpoint
         assert len(checkpoint_calls) == 2
+        operation_id = next(operation_id_sequence())
 
         checkpoint = checkpoint_calls[0][0]
         assert checkpoint.operation_type == OperationType.STEP
         assert checkpoint.action == OperationAction.START
-        assert checkpoint.operation_id == "1"
+        assert checkpoint.operation_id == operation_id
         # Check the wait checkpoint
         checkpoint = checkpoint_calls[1][0]
         assert checkpoint.operation_type == OperationType.STEP
         assert checkpoint.action == OperationAction.SUCCEED
-        assert checkpoint.operation_id == "1"
+        assert checkpoint.operation_id == operation_id
 
 
 def test_wait_inside_run_in_childcontext():
@@ -295,18 +297,23 @@ def test_wait_inside_run_in_childcontext():
         # Assert that checkpoints were created
         assert len(checkpoint_calls) == 2  # One for child context start, one for wait
 
+        expected_parent_id = next(operation_id_sequence())
+        expected_child_id = next(operation_id_sequence(expected_parent_id))
+
         # Check first checkpoint (child context start)
         first_checkpoint = checkpoint_calls[0][0]
         assert first_checkpoint.operation_type is OperationType.CONTEXT
         assert first_checkpoint.action is OperationAction.START
-        assert first_checkpoint.operation_id == "1"
+        assert first_checkpoint.operation_id == expected_parent_id
 
         # Check second checkpoint (wait operation)
         second_checkpoint = checkpoint_calls[1][0]
         assert second_checkpoint.operation_type is OperationType.WAIT
         assert second_checkpoint.action is OperationAction.START
-        assert second_checkpoint.operation_id == "1-1"
+        assert second_checkpoint.operation_id == expected_child_id
         assert second_checkpoint.wait_options.wait_seconds == 1
+
+        assert second_checkpoint.operation_id != first_checkpoint.operation_id
 
         mock_inside_child.assert_called_once_with(10, 20)
 
@@ -379,6 +386,7 @@ def test_wait_not_caught_by_exception():
 
         # Execute the handler
         result = my_handler(event, lambda_context)
+        operation_ids = operation_id_sequence()
 
         # Assert the execution returns PENDING status
         assert result["Status"] == InvocationStatus.PENDING.value
@@ -390,5 +398,5 @@ def test_wait_not_caught_by_exception():
         checkpoint = checkpoint_calls[0][0]
         assert checkpoint.operation_type is OperationType.WAIT
         assert checkpoint.action is OperationAction.START
-        assert checkpoint.operation_id == "1"
+        assert checkpoint.operation_id == next(operation_ids)
         assert checkpoint.wait_options.wait_seconds == 1
