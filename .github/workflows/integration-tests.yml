@@ -1,0 +1,62 @@
+name: Integration Tests
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  integration-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13"]
+
+    steps:
+    - name: Parse testing SDK branch from PR body
+      id: parse
+      run: |
+        BODY="${{ github.event.pull_request.body }}"
+        # Look for a line like: TESTING_SDK_BRANCH: feature/foo
+        REF=$(printf "%s\n" "$BODY" | sed -n 's/^TESTING_SDK_BRANCH:[[:space:]]*//p' | head -n1)
+        if [ -z "$REF" ]; then REF="main"; fi
+        echo "testing_ref=$REF" >> "$GITHUB_OUTPUT"
+        echo "Using testing SDK branch: $REF"
+
+    - name: Checkout Language SDK (this PR)
+      uses: actions/checkout@v5
+      with:
+        path: language-sdk
+
+    - name: Checkout Testing SDK
+      uses: actions/checkout@v5
+      with:
+        repository: aws/aws-durable-execution-sdk-python-testing
+        ref: ${{ steps.parse.outputs.testing_ref }}
+        token: ${{ secrets.CROSS_REPO_PAT }}
+        path: testing-sdk
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install Hatch
+      run: python -m pip install --upgrade hatch
+
+    - name: Setup and run Testing SDK
+      working-directory: testing-sdk
+      env:
+        AWS_DURABLE_SDK_URL: file://${{ github.workspace }}/language-sdk
+      run: |
+        echo "Running Testing SDK tests against Language SDK PR changes..."
+        echo "Using Language SDK from: $AWS_DURABLE_SDK_URL"
+        python -m pip install -e .
+        hatch fmt --check
+        hatch run types:check
+        hatch run test:cov
+        hatch run test:examples
+        hatch build
