@@ -61,7 +61,11 @@ def invoke_handler(
             )
         return None  # type: ignore
 
-    if checkpointed_result.is_failed() or checkpointed_result.is_timed_out():
+    if (
+        checkpointed_result.is_failed()
+        or checkpointed_result.is_timed_out()
+        or checkpointed_result.is_stopped()
+    ):
         # Operation failed, throw the exact same error on replay as the checkpointed failure
         checkpointed_result.raise_callable_error()
 

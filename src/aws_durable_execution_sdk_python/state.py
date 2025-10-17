@@ -93,6 +93,14 @@ class CheckpointedResult:
 
         return op.status is OperationStatus.FAILED
 
+    def is_stopped(self) -> bool:
+        """Return True if the checkpointed operation is STOPPED"""
+        op = self.operation
+        if not op:
+            return False
+
+        return op.status is OperationStatus.STOPPED
+
     def is_started(self) -> bool:
         """Return True if the checkpointed operation is STARTED."""
         op = self.operation

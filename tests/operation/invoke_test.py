@@ -107,7 +107,10 @@ def test_invoke_handler_already_succeeded_no_chained_invoke_details():
     assert result is None
 
 
-def test_invoke_handler_already_failed():
+@pytest.mark.parametrize(
+    "kind", [OperationStatus.FAILED, OperationStatus.STOPPED, OperationStatus.TIMED_OUT]
+)
+def test_invoke_handler_already_terminated(kind: OperationStatus):
     """Test invoke_handler when operation already failed."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
@@ -118,7 +121,7 @@ def test_invoke_handler_already_failed():
     operation = Operation(
         operation_id="invoke4",
         operation_type=OperationType.CHAINED_INVOKE,
-        status=OperationStatus.FAILED,
+        status=kind,
         chained_invoke_details=ChainedInvokeDetails(error=error),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
