@@ -158,9 +158,7 @@ class StepDetails:
         error_raw = data.get("Error")
         return cls(
             attempt=data.get("Attempt", 0),
-            next_attempt_timestamp=data.get(
-                "NextAttemptTimestamp"
-            ),  # TODO: how is this serialized? Unix or ISO 8601?
+            next_attempt_timestamp=data.get("NextAttemptTimestamp"),
             result=data.get("Result"),
             error=ErrorObject.from_dict(error_raw) if error_raw else None,
         )

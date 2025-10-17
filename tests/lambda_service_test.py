@@ -230,13 +230,17 @@ def test_step_details_from_dict():
     error_data = {"ErrorMessage": "Step error"}
     data = {
         "Attempt": 2,
-        "NextAttemptTimestamp": "2023-01-01T00:00:00Z",
+        "NextAttemptTimestamp": datetime.datetime(
+            2023, 1, 1, 0, 0, 0, tzinfo=datetime.UTC
+        ),
         "Result": "step_result",
         "Error": error_data,
     }
     details = StepDetails.from_dict(data)
     assert details.attempt == 2
-    assert details.next_attempt_timestamp == "2023-01-01T00:00:00Z"
+    assert details.next_attempt_timestamp == datetime.datetime(
+        2023, 1, 1, 0, 0, 0, tzinfo=datetime.UTC
+    )
     assert details.result == "step_result"
     assert details.error.message == "Step error"
 
@@ -246,13 +250,17 @@ def test_step_details_all_fields():
     error_data = {"ErrorMessage": "Step failed", "ErrorType": "StepError"}
     data = {
         "Attempt": 3,
-        "NextAttemptTimestamp": "2023-01-01T12:00:00Z",
+        "NextAttemptTimestamp": datetime.datetime(
+            2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC
+        ),
         "Result": "step_success",
         "Error": error_data,
     }
     details = StepDetails.from_dict(data)
     assert details.attempt == 3
-    assert details.next_attempt_timestamp == "2023-01-01T12:00:00Z"
+    assert details.next_attempt_timestamp == datetime.datetime(
+        2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC
+    )
     assert details.result == "step_success"
     assert details.error.message == "Step failed"
     assert details.error.type == "StepError"
