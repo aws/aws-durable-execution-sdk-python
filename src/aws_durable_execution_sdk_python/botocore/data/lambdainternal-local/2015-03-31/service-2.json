@@ -7321,10 +7321,9 @@
         "Error":{"shape":"EventError"}
       }
     },
-    "InvokeDetails":{
+    "ChainedInvokeDetails":{
       "type":"structure",
       "members":{
-        "DurableExecutionArn":{"shape":"DurableExecutionArn"},
         "Result":{"shape":"OperationPayload"},
         "Error":{"shape":"ErrorObject"}
       }
@@ -7343,12 +7342,11 @@
         "RESPONSE_STREAM"
       ]
     },
-    "InvokeOptions":{
+    "ChainedInvokeOptions":{
       "type":"structure",
       "members":{
         "FunctionName":{"shape":"FunctionName"},
-        "FunctionQualifier":{"shape":"Version"},
-        "DurableExecutionName":{"shape":"DurableExecutionName"}
+        "TimeoutSeconds":{"shape":"DurationSeconds"}
       }
     },
     "InvokeResponseStreamUpdate":{
@@ -9332,7 +9330,7 @@
         "StepDetails":{"shape":"StepDetails"},
         "WaitDetails":{"shape":"WaitDetails"},
         "CallbackDetails":{"shape":"CallbackDetails"},
-        "InvokeDetails":{"shape":"InvokeDetails"}
+        "ChainedInvokeDetails":{"shape":"ChainedInvokeDetails"}
       }
     },
     "OperationAction":{
@@ -9405,7 +9403,7 @@
         "StepOptions":{"shape":"StepOptions"},
         "WaitOptions":{"shape":"WaitOptions"},
         "CallbackOptions":{"shape":"CallbackOptions"},
-        "InvokeOptions":{"shape":"InvokeOptions"}
+        "ChainedInvokeOptions":{"shape":"ChainedInvokeOptions"}
       }
     },
     "OperationUpdates":{

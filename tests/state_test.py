@@ -10,7 +10,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
     ErrorObject,
-    InvokeDetails,
+    ChainedInvokeDetails,
     LambdaClient,
     Operation,
     OperationAction,
@@ -57,14 +57,12 @@ def test_checkpointed_result_create_from_operation_callback():
 
 def test_checkpointed_result_create_from_operation_invoke():
     """Test CheckpointedResult.create_from_operation with INVOKE operation."""
-    invoke_details = InvokeDetails(
-        durable_execution_arn="arn:test", result="invoke_result"
-    )
+    chained_invoke_details = ChainedInvokeDetails(result="invoke_result")
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.SUCCEEDED,
-        invoke_details=invoke_details,
+        chained_invoke_details=chained_invoke_details,
     )
     result = CheckpointedResult.create_from_operation(operation)
     assert result.operation == operation
@@ -78,12 +76,12 @@ def test_checkpointed_result_create_from_operation_invoke_with_error():
     error = ErrorObject(
         message="Invoke error", type="InvokeError", data=None, stack_trace=None
     )
-    invoke_details = InvokeDetails(durable_execution_arn="arn:test", error=error)
+    chained_invoke_details = ChainedInvokeDetails(error=error)
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.FAILED,
-        invoke_details=invoke_details,
+        chained_invoke_details=chained_invoke_details,
     )
     result = CheckpointedResult.create_from_operation(operation)
     assert result.operation == operation
@@ -93,7 +91,7 @@ def test_checkpointed_result_create_from_operation_invoke_with_error():
 
 
 def test_checkpointed_result_create_from_operation_invoke_no_details():
-    """Test CheckpointedResult.create_from_operation with INVOKE operation but no invoke_details."""
+    """Test CheckpointedResult.create_from_operation with INVOKE operation but no chained_invoke_details."""
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.CHAINED_INVOKE,
@@ -111,14 +109,12 @@ def test_checkpointed_result_create_from_operation_invoke_with_both_result_and_e
     error = ErrorObject(
         message="Invoke error", type="InvokeError", data=None, stack_trace=None
     )
-    invoke_details = InvokeDetails(
-        durable_execution_arn="arn:test", result="invoke_result", error=error
-    )
+    chained_invoke_details = ChainedInvokeDetails(result="invoke_result", error=error)
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.FAILED,
-        invoke_details=invoke_details,
+        chained_invoke_details=chained_invoke_details,
     )
     result = CheckpointedResult.create_from_operation(operation)
     assert result.operation == operation

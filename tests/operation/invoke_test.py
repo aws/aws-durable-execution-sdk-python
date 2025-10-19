@@ -17,7 +17,7 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
-    InvokeDetails,
+    ChainedInvokeDetails,
     Operation,
     OperationAction,
     OperationStatus,
@@ -40,9 +40,7 @@ def test_invoke_handler_already_succeeded():
         operation_id="invoke1",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.SUCCEEDED,
-        invoke_details=InvokeDetails(
-            durable_execution_arn="invoked_arn", result=json.dumps("test_result")
-        ),
+        chained_invoke_details=ChainedInvokeDetails(result=json.dumps("test_result")),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
@@ -68,7 +66,7 @@ def test_invoke_handler_already_succeeded_none_result():
         operation_id="invoke2",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.SUCCEEDED,
-        invoke_details=InvokeDetails(durable_execution_arn="invoked_arn", result=None),
+        chained_invoke_details=ChainedInvokeDetails(result=None),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
@@ -84,8 +82,8 @@ def test_invoke_handler_already_succeeded_none_result():
     assert result is None
 
 
-def test_invoke_handler_already_succeeded_no_invoke_details():
-    """Test invoke_handler when operation succeeded but has no invoke_details."""
+def test_invoke_handler_already_succeeded_no_chained_invoke_details():
+    """Test invoke_handler when operation succeeded but has no chained_invoke_details."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
 
@@ -93,7 +91,7 @@ def test_invoke_handler_already_succeeded_no_invoke_details():
         operation_id="invoke3",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.SUCCEEDED,
-        invoke_details=None,
+        chained_invoke_details=None,
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
@@ -121,7 +119,7 @@ def test_invoke_handler_already_failed():
         operation_id="invoke4",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.FAILED,
-        invoke_details=InvokeDetails(durable_execution_arn="invoked_arn", error=error),
+        chained_invoke_details=ChainedInvokeDetails(error=error),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
@@ -148,7 +146,7 @@ def test_invoke_handler_already_timed_out():
         operation_id="invoke5",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.TIMED_OUT,
-        invoke_details=InvokeDetails(durable_execution_arn="invoked_arn", error=error),
+        chained_invoke_details=ChainedInvokeDetails(error=error),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
@@ -172,7 +170,7 @@ def test_invoke_handler_already_started():
         operation_id="invoke6",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.STARTED,
-        invoke_details=InvokeDetails(durable_execution_arn="invoked_arn"),
+        chained_invoke_details=ChainedInvokeDetails(),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
@@ -196,7 +194,7 @@ def test_invoke_handler_already_started_with_timeout():
         operation_id="invoke7",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.STARTED,
-        invoke_details=InvokeDetails(durable_execution_arn="invoked_arn"),
+        chained_invoke_details=ChainedInvokeDetails(),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
@@ -243,8 +241,8 @@ def test_invoke_handler_new_operation():
     assert operation_update.action == OperationAction.START
     assert operation_update.name == "test_invoke"
     assert operation_update.payload == json.dumps("test_input")
-    assert operation_update.invoke_options.function_name == "test_function"
-    assert operation_update.invoke_options.timeout_seconds == 60
+    assert operation_update.chained_invoke_options.function_name == "test_function"
+    assert operation_update.chained_invoke_options.timeout_seconds == 60
 
 
 def test_invoke_handler_new_operation_with_timeout():
@@ -306,7 +304,7 @@ def test_invoke_handler_no_config():
 
     # Verify default config was used
     operation_update = mock_state.create_checkpoint.call_args[1]["operation_update"]
-    assert operation_update.invoke_options.timeout_seconds == 0
+    assert operation_update.chained_invoke_options.timeout_seconds == 0
 
 
 def test_invoke_handler_custom_serdes():
@@ -318,8 +316,7 @@ def test_invoke_handler_custom_serdes():
         operation_id="invoke12",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.SUCCEEDED,
-        invoke_details=InvokeDetails(
-            durable_execution_arn="invoked_arn",
+        chained_invoke_details=ChainedInvokeDetails(
             result='{"key": "VALUE", "number": "84", "list": [1, 2, 3]}',
         ),
     )
@@ -411,7 +408,7 @@ def test_invoke_handler_with_operation_name():
         operation_id="invoke14",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.STARTED,
-        invoke_details=InvokeDetails(durable_execution_arn="invoked_arn"),
+        chained_invoke_details=ChainedInvokeDetails(),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
@@ -435,7 +432,7 @@ def test_invoke_handler_without_operation_name():
         operation_id="invoke15",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.STARTED,
-        invoke_details=InvokeDetails(durable_execution_arn="invoked_arn"),
+        chained_invoke_details=ChainedInvokeDetails(),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
@@ -482,9 +479,7 @@ def test_invoke_handler_already_succeeded_with_none_payload():
         operation_id="invoke17",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.SUCCEEDED,
-        invoke_details=InvokeDetails(
-            durable_execution_arn="invoked_arn", result=json.dumps("test_result")
-        ),
+        chained_invoke_details=ChainedInvokeDetails(result=json.dumps("test_result")),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result

@@ -20,8 +20,8 @@ from aws_durable_execution_sdk_python.lambda_service import (
     DurableServiceClient,
     ErrorObject,
     ExecutionDetails,
-    InvokeDetails,
-    InvokeOptions,
+    ChainedInvokeDetails,
+    ChainedInvokeOptions,
     LambdaClient,
     Operation,
     OperationAction,
@@ -330,42 +330,35 @@ def test_callback_details_minimal():
 
 
 def test_invoke_details_from_dict():
-    """Test InvokeDetails.from_dict method."""
+    """Test ChainedInvokeDetails.from_dict method."""
     error_data = {"ErrorMessage": "Invoke error"}
     data = {
-        "DurableExecutionArn": "arn:test",
         "Result": "invoke_result",
         "Error": error_data,
     }
-    details = InvokeDetails.from_dict(data)
-    assert details.durable_execution_arn == "arn:test"
+    details = ChainedInvokeDetails.from_dict(data)
     assert details.result == "invoke_result"
     assert details.error.message == "Invoke error"
 
 
 def test_invoke_details_all_fields():
-    """Test InvokeDetails.from_dict with all fields."""
+    """Test ChainedInvokeDetails.from_dict with all fields."""
     error_data = {"ErrorMessage": "Invoke failed", "ErrorType": "InvokeError"}
     data = {
-        "DurableExecutionArn": "arn:aws:lambda:us-west-2:123456789012:function:test",
         "Result": "invoke_success",
         "Error": error_data,
     }
-    details = InvokeDetails.from_dict(data)
-    assert (
-        details.durable_execution_arn
-        == "arn:aws:lambda:us-west-2:123456789012:function:test"
-    )
+    details = ChainedInvokeDetails.from_dict(data)
     assert details.result == "invoke_success"
     assert details.error.message == "Invoke failed"
     assert details.error.type == "InvokeError"
 
 
 def test_invoke_details_minimal():
-    """Test InvokeDetails.from_dict with minimal required data."""
+    """Test ChainedInvokeDetails.from_dict with minimal required data."""
     data = {"DurableExecutionArn": "arn:minimal"}
-    details = InvokeDetails.from_dict(data)
-    assert details.durable_execution_arn == "arn:minimal"
+    details = ChainedInvokeDetails.from_dict(data)
+    assert hasattr(details, "durable_execution_arn") == False
     assert details.result is None
     assert details.error is None
 
@@ -405,17 +398,17 @@ def test_callback_options_from_dict_partial():
 
 
 def test_invoke_options_from_dict():
-    """Test InvokeOptions.from_dict method."""
+    """Test ChainedInvokeOptions.from_dict method."""
     data = {"FunctionName": "test-function", "TimeoutSeconds": 120}
-    options = InvokeOptions.from_dict(data)
+    options = ChainedInvokeOptions.from_dict(data)
     assert options.function_name == "test-function"
     assert options.timeout_seconds == 120
 
 
 def test_invoke_options_from_dict_required_only():
-    """Test InvokeOptions.from_dict with only required field."""
+    """Test ChainedInvokeOptions.from_dict with only required field."""
     data = {"FunctionName": "test-function"}
-    options = InvokeOptions.from_dict(data)
+    options = ChainedInvokeOptions.from_dict(data)
     assert options.function_name == "test-function"
     assert options.timeout_seconds == 0
 
@@ -450,10 +443,10 @@ def test_callback_options_roundtrip():
 
 
 def test_invoke_options_roundtrip():
-    """Test InvokeOptions to_dict -> from_dict roundtrip."""
-    original = InvokeOptions(function_name="test-func", timeout_seconds=120)
+    """Test ChainedInvokeOptions to_dict -> from_dict roundtrip."""
+    original = ChainedInvokeOptions(function_name="test-func", timeout_seconds=120)
     data = original.to_dict()
-    restored = InvokeOptions.from_dict(data)
+    restored = ChainedInvokeOptions.from_dict(data)
     assert restored == original
 
 
@@ -502,8 +495,8 @@ def test_callback_options_all_fields():
 
 
 def test_invoke_options_to_dict():
-    """Test InvokeOptions.to_dict method."""
-    options = InvokeOptions(
+    """Test ChainedInvokeOptions.to_dict method."""
+    options = ChainedInvokeOptions(
         function_name="test_function",
         timeout_seconds=30,
     )
@@ -516,8 +509,8 @@ def test_invoke_options_to_dict():
 
 
 def test_invoke_options_to_dict_minimal():
-    """Test InvokeOptions.to_dict with minimal fields."""
-    options = InvokeOptions(function_name="test_function")
+    """Test ChainedInvokeOptions.to_dict with minimal fields."""
+    options = ChainedInvokeOptions(function_name="test_function")
     result = options.to_dict()
     assert result == {"FunctionName": "test_function", "TimeoutSeconds": 0}
 
@@ -544,16 +537,16 @@ def test_context_options_to_dict_false():
 
 
 def test_invoke_options_from_dict_missing_function_name():
-    """Test InvokeOptions.from_dict with missing required FunctionName."""
+    """Test ChainedInvokeOptions.from_dict with missing required FunctionName."""
     data = {"TimeoutSeconds": 60}
 
     with pytest.raises(KeyError):
-        InvokeOptions.from_dict(data)
+        ChainedInvokeOptions.from_dict(data)
 
 
 def test_invoke_options_to_dict_complete():
-    """Test InvokeOptions.to_dict with all fields."""
-    options = InvokeOptions(function_name="test_func", timeout_seconds=120)
+    """Test ChainedInvokeOptions.to_dict with all fields."""
+    options = ChainedInvokeOptions(function_name="test_func", timeout_seconds=120)
 
     result = options.to_dict()
 
@@ -569,7 +562,7 @@ def test_invoke_options_to_dict_complete():
 def test_operation_update_create_invoke_start():
     """Test OperationUpdate.create_invoke_start method to cover line 545."""
     identifier = OperationIdentifier("test-id", "parent-id")
-    invoke_options = InvokeOptions("test-func", 120)
+    invoke_options = ChainedInvokeOptions("test-func", 120)
     update = OperationUpdate.create_invoke_start(identifier, "payload", invoke_options)
     assert update.operation_id == "test-id"
 
@@ -616,7 +609,9 @@ def test_operation_update_to_dict_complete():
     callback_options = CallbackOptions(
         timeout_seconds=300, heartbeat_timeout_seconds=60
     )
-    invoke_options = InvokeOptions(function_name="test_func", timeout_seconds=60)
+    chained_invoke_options = ChainedInvokeOptions(
+        function_name="test_func", timeout_seconds=60
+    )
 
     update = OperationUpdate(
         operation_id="op1",
@@ -629,7 +624,7 @@ def test_operation_update_to_dict_complete():
         step_options=step_options,
         wait_options=wait_options,
         callback_options=callback_options,
-        invoke_options=invoke_options,
+        chained_invoke_options=chained_invoke_options,
     )
 
     result = update.to_dict()
@@ -644,7 +639,7 @@ def test_operation_update_to_dict_complete():
         "StepOptions": {"NextAttemptDelaySeconds": 30},
         "WaitOptions": {"WaitSeconds": 60},
         "CallbackOptions": {"TimeoutSeconds": 300, "HeartbeatTimeoutSeconds": 60},
-        "InvokeOptions": {"FunctionName": "test_func", "TimeoutSeconds": 60},
+        "ChainedInvokeOptions": {"FunctionName": "test_func", "TimeoutSeconds": 60},
     }
     assert result == expected
 
@@ -812,17 +807,17 @@ def test_operation_update_wait_and_invoke_types():
     assert result["WaitOptions"]["WaitSeconds"] == 30
 
     # Test INVOKE operation
-    invoke_options = InvokeOptions(function_name="test_func")
+    chained_invoke_options = ChainedInvokeOptions(function_name="test_func")
     invoke_update = OperationUpdate(
         operation_id="invoke_op",
         operation_type=OperationType.CHAINED_INVOKE,
         action=OperationAction.START,
-        invoke_options=invoke_options,
+        chained_invoke_options=chained_invoke_options,
     )
 
     result = invoke_update.to_dict()
     assert result["Type"] == "CHAINED_INVOKE"
-    assert result["InvokeOptions"]["FunctionName"] == "test_func"
+    assert result["ChainedInvokeOptions"]["FunctionName"] == "test_func"
 
 
 def test_operation_update_create_wait():
@@ -841,16 +836,16 @@ def test_operation_update_create_wait():
 
 def test_operation_update_create_invoke():
     """Test OperationUpdate factory method for INVOKE operations."""
-    invoke_options = InvokeOptions(function_name="test-function")
+    chained_invoke_options = ChainedInvokeOptions(function_name="test-function")
     update = OperationUpdate(
         operation_id="invoke1",
         operation_type=OperationType.CHAINED_INVOKE,
         action=OperationAction.START,
-        invoke_options=invoke_options,
+        chained_invoke_options=chained_invoke_options,
     )
 
     assert update.operation_type == OperationType.CHAINED_INVOKE
-    assert update.invoke_options == invoke_options
+    assert update.chained_invoke_options == chained_invoke_options
 
 
 def test_operation_update_with_sub_type():
@@ -889,7 +884,9 @@ def test_operation_update_complete_with_new_fields():
     callback_options = CallbackOptions(
         timeout_seconds=300, heartbeat_timeout_seconds=60
     )
-    invoke_options = InvokeOptions(function_name="test_func", timeout_seconds=60)
+    chained_invoke_options = ChainedInvokeOptions(
+        function_name="test_func", timeout_seconds=60
+    )
 
     update = OperationUpdate(
         operation_id="op1",
@@ -904,7 +901,7 @@ def test_operation_update_complete_with_new_fields():
         step_options=step_options,
         wait_options=wait_options,
         callback_options=callback_options,
-        invoke_options=invoke_options,
+        chained_invoke_options=chained_invoke_options,
     )
 
     result = update.to_dict()
@@ -921,7 +918,7 @@ def test_operation_update_complete_with_new_fields():
         "StepOptions": {"NextAttemptDelaySeconds": 30},
         "WaitOptions": {"WaitSeconds": 60},
         "CallbackOptions": {"TimeoutSeconds": 300, "HeartbeatTimeoutSeconds": 60},
-        "InvokeOptions": {"FunctionName": "test_func", "TimeoutSeconds": 60},
+        "ChainedInvokeOptions": {"FunctionName": "test_func", "TimeoutSeconds": 60},
     }
     assert result == expected
 
@@ -1078,7 +1075,7 @@ def test_operation_update_from_dict_with_all_options():
         "StepOptions": {"NextAttemptDelaySeconds": 30},
         "WaitOptions": {"WaitSeconds": 60},
         "CallbackOptions": {"TimeoutSeconds": 300, "HeartbeatTimeoutSeconds": 60},
-        "InvokeOptions": {"FunctionName": "test_func", "TimeoutSeconds": 120},
+        "ChainedInvokeOptions": {"FunctionName": "test_func", "TimeoutSeconds": 120},
     }
 
     update = OperationUpdate.from_dict(data)
@@ -1089,7 +1086,7 @@ def test_operation_update_from_dict_with_all_options():
     assert update.step_options is not None
     assert update.wait_options is not None
     assert update.callback_options is not None
-    assert update.invoke_options is not None
+    assert update.chained_invoke_options is not None
 
 
 # =============================================================================
@@ -1109,7 +1106,7 @@ def test_operation_from_dict_with_all_options():
         "StepOptions": {"NextAttemptDelaySeconds": 30},
         "WaitOptions": {"WaitSeconds": 60},
         "CallbackOptions": {"TimeoutSeconds": 300, "HeartbeatTimeoutSeconds": 60},
-        "InvokeOptions": {"FunctionName": "test-func", "TimeoutSeconds": 120},
+        "ChainedInvokeOptions": {"FunctionName": "test-func", "TimeoutSeconds": 120},
     }
     operation = Operation.from_dict(data)
     assert operation.operation_id == "test-id"
@@ -1173,13 +1170,13 @@ def test_operation_from_dict_individual_options():
     op4 = Operation.from_dict(data4)
     assert op4.operation_id == "test4"
 
-    # Test with just InvokeOptions
+    # Test with just ChainedInvokeOptions
     data5 = {
         "Id": "test5",
         "Type": "STEP",
         "Action": "START",
         "Status": "PENDING",
-        "InvokeOptions": {"FunctionName": "test-func"},
+        "ChainedInvokeOptions": {"FunctionName": "test-func"},
     }
     op5 = Operation.from_dict(data5)
     assert op5.operation_id == "test5"
@@ -1195,7 +1192,7 @@ def test_operation_from_dict_with_all_option_types():
         "StepOptions": {"NextAttemptDelaySeconds": 30},
         "WaitOptions": {"WaitSeconds": 60},
         "CallbackOptions": {"TimeoutSeconds": 300, "HeartbeatTimeoutSeconds": 60},
-        "InvokeOptions": {"FunctionName": "test_func", "TimeoutSeconds": 120},
+        "ChainedInvokeOptions": {"FunctionName": "test_func", "TimeoutSeconds": 120},
     }
 
     operation = Operation.from_dict(data)
@@ -1219,9 +1216,7 @@ def test_operation_to_dict_with_all_details():
     callback_details = CallbackDetails(
         callback_id="cb123", result="callback_result", error=None
     )
-    invoke_details = InvokeDetails(
-        durable_execution_arn="arn:test", result="invoke_result", error=None
-    )
+    chained_invoke_details = ChainedInvokeDetails(result="invoke_result", error=None)
 
     operation = Operation(
         operation_id="test",
@@ -1236,7 +1231,7 @@ def test_operation_to_dict_with_all_details():
         step_details=step_details,
         wait_details=wait_details,
         callback_details=callback_details,
-        invoke_details=invoke_details,
+        chained_invoke_details=chained_invoke_details,
         sub_type=OperationSubType.STEP,
     )
 
@@ -1249,7 +1244,7 @@ def test_operation_to_dict_with_all_details():
         2023, 1, 1, tzinfo=datetime.UTC
     )
     assert result["CallbackDetails"]["CallbackId"] == "cb123"
-    assert result["InvokeDetails"]["DurableExecutionArn"] == "arn:test"
+    assert result["ChainedInvokeDetails"]["Result"] == "invoke_result"
 
 
 def test_operation_to_dict_with_step_details_partial():
@@ -1293,20 +1288,17 @@ def test_operation_to_dict_with_callback_details_partial():
 
 def test_operation_to_dict_with_invoke_details_partial():
     """Test Operation.to_dict with invoke_details having some None fields."""
-    invoke_details = InvokeDetails(
-        durable_execution_arn="arn:test", result=None, error=None
-    )
+    chained_invoke_details = ChainedInvokeDetails(result=None, error=None)
 
     operation = Operation(
         operation_id="test",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.PENDING,
-        invoke_details=invoke_details,
+        chained_invoke_details=chained_invoke_details,
     )
 
     result = operation.to_dict()
-    invoke_dict = result["InvokeDetails"]
-    assert invoke_dict["DurableExecutionArn"] == "arn:test"
+    invoke_dict = result["ChainedInvokeDetails"]
     assert "Result" not in invoke_dict
     assert "Error" not in invoke_dict
 
@@ -1392,23 +1384,21 @@ def test_operation_to_dict_with_callback_details_error():
 
 
 def test_operation_to_dict_with_invoke_details_error():
-    """Test Operation.to_dict with invoke_details having error."""
+    """Test Operation.to_dict with chained_invoke_details having error."""
     error = ErrorObject(
         message="Invoke failed", type="InvokeError", data=None, stack_trace=None
     )
-    invoke_details = InvokeDetails(
-        durable_execution_arn="arn:test", result=None, error=error
-    )
+    chained_invoke_details = ChainedInvokeDetails(result=None, error=error)
 
     operation = Operation(
         operation_id="test",
         operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.FAILED,
-        invoke_details=invoke_details,
+        chained_invoke_details=chained_invoke_details,
     )
 
     result = operation.to_dict()
-    invoke_dict = result["InvokeDetails"]
+    invoke_dict = result["ChainedInvokeDetails"]
     assert invoke_dict["Error"]["ErrorMessage"] == "Invoke failed"
     assert invoke_dict["Error"]["ErrorType"] == "InvokeError"
 
@@ -1467,7 +1457,10 @@ def test_operation_from_dict_complete():
         "StepDetails": {"Result": "step_result", "Attempt": 1},
         "WaitDetails": {"ScheduledTimestamp": start_time},
         "CallbackDetails": {"CallbackId": "cb1", "Result": "callback_result"},
-        "InvokeDetails": {"DurableExecutionArn": "arn:test", "Result": "invoke_result"},
+        "ChainedInvokeDetails": {
+            "DurableExecutionArn": "arn:test",
+            "Result": "invoke_result",
+        },
     }
     operation = Operation.from_dict(data)
     assert operation.operation_id == "op1"
@@ -1483,7 +1476,6 @@ def test_operation_from_dict_complete():
     assert operation.step_details.result == "step_result"
     assert operation.wait_details.scheduled_timestamp == start_time
     assert operation.callback_details.callback_id == "cb1"
-    assert operation.invoke_details.durable_execution_arn == "arn:test"
 
 
 def test_operation_to_dict_with_subtype():

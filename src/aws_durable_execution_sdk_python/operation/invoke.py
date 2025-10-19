@@ -10,7 +10,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     FatalError,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
-    InvokeOptions,
+    ChainedInvokeOptions,
     OperationUpdate,
 )
 from aws_durable_execution_sdk_python.serdes import deserialize, serialize
@@ -50,12 +50,12 @@ def invoke_handler(
         # Return persisted result - no need to check for errors in successful operations
         if (
             checkpointed_result.operation
-            and checkpointed_result.operation.invoke_details
-            and checkpointed_result.operation.invoke_details.result
+            and checkpointed_result.operation.chained_invoke_details
+            and checkpointed_result.operation.chained_invoke_details.result
         ):
             return deserialize(
                 serdes=config.serdes_result,
-                data=checkpointed_result.operation.invoke_details.result,
+                data=checkpointed_result.operation.chained_invoke_details.result,
                 operation_id=operation_identifier.operation_id,
                 durable_execution_arn=state.durable_execution_arn,
             )
@@ -85,7 +85,7 @@ def invoke_handler(
     start_operation: OperationUpdate = OperationUpdate.create_invoke_start(
         identifier=operation_identifier,
         payload=serialized_payload,
-        invoke_options=InvokeOptions(
+        chained_invoke_options=ChainedInvokeOptions(
             function_name=function_name, timeout_seconds=config.timeout_seconds
         ),
     )

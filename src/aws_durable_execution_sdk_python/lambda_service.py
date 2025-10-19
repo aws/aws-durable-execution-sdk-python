@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ReplayChildren: TypeAlias = bool
+OperationPayload: TypeAlias = str
+TimeoutSeconds: TypeAlias = int
 
 
 # region model
@@ -97,7 +99,7 @@ class ExecutionDetails:
 @dataclass(frozen=True)
 class ContextDetails:
     replay_children: ReplayChildren = False
-    result: str | None = None
+    result: OperationPayload | None = None
     error: ErrorObject | None = None
 
     @classmethod
@@ -169,7 +171,7 @@ class ErrorObject:
 class StepDetails:
     attempt: int = 0
     next_attempt_timestamp: datetime.datetime | None = None
-    result: str | None = None
+    result: OperationPayload | None = None
     error: ErrorObject | None = None
 
     @classmethod
@@ -209,16 +211,14 @@ class CallbackDetails:
 
 
 @dataclass(frozen=True)
-class InvokeDetails:
-    durable_execution_arn: str
+class ChainedInvokeDetails:
     result: str | None = None
     error: ErrorObject | None = None
 
     @classmethod
-    def from_dict(cls, data: MutableMapping[str, Any]) -> InvokeDetails:
+    def from_dict(cls, data: MutableMapping[str, Any]) -> ChainedInvokeDetails:
         error_raw = data.get("Error")
         return cls(
-            durable_execution_arn=data["DurableExecutionArn"],
             result=data.get("Result"),
             error=ErrorObject.from_dict(error_raw) if error_raw else None,
         )
@@ -252,7 +252,7 @@ class WaitOptions:
 
 @dataclass(frozen=True)
 class CallbackOptions:
-    timeout_seconds: int = 0
+    timeout_seconds: TimeoutSeconds = 0
     heartbeat_timeout_seconds: int = 0
 
     @classmethod
@@ -270,20 +270,22 @@ class CallbackOptions:
 
 
 @dataclass(frozen=True)
-class InvokeOptions:
+class ChainedInvokeOptions:
     function_name: str
-    timeout_seconds: int = 0
+    timeout_seconds: TimeoutSeconds = 0
 
     @classmethod
-    def from_dict(cls, data: MutableMapping[str, Any]) -> InvokeOptions:
+    def from_dict(cls, data: MutableMapping[str, Any]) -> ChainedInvokeOptions:
         return cls(
             function_name=data["FunctionName"],
             timeout_seconds=data.get("TimeoutSeconds", 0),
         )
 
     def to_dict(self) -> MutableMapping[str, Any]:
-        result: MutableMapping[str, Any] = {"FunctionName": self.function_name}
-        result["TimeoutSeconds"] = self.timeout_seconds
+        result: MutableMapping[str, Any] = {
+            "FunctionName": self.function_name,
+            "TimeoutSeconds": self.timeout_seconds,
+        }
         return result
 
 
@@ -318,7 +320,7 @@ class OperationUpdate:
     step_options: StepOptions | None = None
     wait_options: WaitOptions | None = None
     callback_options: CallbackOptions | None = None
-    invoke_options: InvokeOptions | None = None
+    chained_invoke_options: ChainedInvokeOptions | None = None
 
     def to_dict(self) -> MutableMapping[str, Any]:
         result: MutableMapping[str, Any] = {
@@ -345,8 +347,8 @@ class OperationUpdate:
             result["WaitOptions"] = self.wait_options.to_dict()
         if self.callback_options:
             result["CallbackOptions"] = self.callback_options.to_dict()
-        if self.invoke_options:
-            result["InvokeOptions"] = self.invoke_options.to_dict()
+        if self.chained_invoke_options:
+            result["ChainedInvokeOptions"] = self.chained_invoke_options.to_dict()
 
         return result
 
@@ -371,9 +373,9 @@ class OperationUpdate:
         if callback_data := data.get("CallbackOptions"):
             callback_options = CallbackOptions.from_dict(callback_data)
 
-        invoke_options = None
-        if invoke_data := data.get("InvokeOptions"):
-            invoke_options = InvokeOptions.from_dict(invoke_data)
+        chained_invoke_options = None
+        if invoke_data := data.get("ChainedInvokeOptions"):
+            chained_invoke_options = ChainedInvokeOptions.from_dict(invoke_data)
 
         return cls(
             operation_id=data["Id"],
@@ -388,7 +390,7 @@ class OperationUpdate:
             step_options=step_options,
             wait_options=wait_options,
             callback_options=callback_options,
-            invoke_options=invoke_options,
+            chained_invoke_options=chained_invoke_options,
         )
 
     @classmethod
@@ -556,7 +558,7 @@ class OperationUpdate:
         cls,
         identifier: OperationIdentifier,
         payload: str,
-        invoke_options: InvokeOptions,
+        chained_invoke_options: ChainedInvokeOptions,
     ) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: INVOKE, action: START."""
         return cls(
@@ -567,7 +569,7 @@ class OperationUpdate:
             action=OperationAction.START,
             name=identifier.name,
             payload=payload,
-            invoke_options=invoke_options,
+            chained_invoke_options=chained_invoke_options,
         )
 
     # endregion invoke
@@ -676,7 +678,7 @@ class Operation:
     step_details: StepDetails | None = None
     wait_details: WaitDetails | None = None
     callback_details: CallbackDetails | None = None
-    invoke_details: InvokeDetails | None = None
+    chained_invoke_details: ChainedInvokeDetails | None = None
 
     @classmethod
     def from_dict(cls, data: MutableMapping[str, Any]) -> Operation:
@@ -715,9 +717,11 @@ class Operation:
         if callback_details_input := data.get("CallbackDetails"):
             callback_details = CallbackDetails.from_dict(callback_details_input)
 
-        invoke_details = None
-        if invoke_details_input := data.get("InvokeDetails"):
-            invoke_details = InvokeDetails.from_dict(invoke_details_input)
+        chained_invoke_details = None
+        if chained_invoke_details := data.get("chained_invoke_details"):
+            chained_invoke_details = ChainedInvokeDetails.from_dict(
+                chained_invoke_details
+            )
 
         return cls(
             operation_id=data["Id"],
@@ -733,7 +737,7 @@ class Operation:
             step_details=step_details,
             wait_details=wait_details,
             callback_details=callback_details,
-            invoke_details=invoke_details,
+            chained_invoke_details=chained_invoke_details,
         )
 
     def to_dict(self) -> MutableMapping[str, Any]:
@@ -782,15 +786,13 @@ class Operation:
             if self.callback_details.error:
                 callback_dict["Error"] = self.callback_details.error.to_dict()
             result["CallbackDetails"] = callback_dict
-        if self.invoke_details:
-            invoke_dict: MutableMapping[str, Any] = {
-                "DurableExecutionArn": self.invoke_details.durable_execution_arn
-            }
-            if self.invoke_details.result:
-                invoke_dict["Result"] = self.invoke_details.result
-            if self.invoke_details.error:
-                invoke_dict["Error"] = self.invoke_details.error.to_dict()
-            result["InvokeDetails"] = invoke_dict
+        if self.chained_invoke_details:
+            invoke_dict: MutableMapping[str, Any] = {}
+            if self.chained_invoke_details.result:
+                invoke_dict["Result"] = self.chained_invoke_details.result
+            if self.chained_invoke_details.error:
+                invoke_dict["Error"] = self.chained_invoke_details.error.to_dict()
+            result["ChainedInvokeDetails"] = invoke_dict
         return result
 
 
