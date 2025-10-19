@@ -38,7 +38,7 @@ def test_invoke_handler_already_succeeded():
 
     operation = Operation(
         operation_id="invoke1",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.SUCCEEDED,
         invoke_details=InvokeDetails(
             durable_execution_arn="invoked_arn", result=json.dumps("test_result")
@@ -66,7 +66,7 @@ def test_invoke_handler_already_succeeded_none_result():
 
     operation = Operation(
         operation_id="invoke2",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.SUCCEEDED,
         invoke_details=InvokeDetails(durable_execution_arn="invoked_arn", result=None),
     )
@@ -91,7 +91,7 @@ def test_invoke_handler_already_succeeded_no_invoke_details():
 
     operation = Operation(
         operation_id="invoke3",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.SUCCEEDED,
         invoke_details=None,
     )
@@ -119,7 +119,7 @@ def test_invoke_handler_already_failed():
     )
     operation = Operation(
         operation_id="invoke4",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.FAILED,
         invoke_details=InvokeDetails(durable_execution_arn="invoked_arn", error=error),
     )
@@ -146,7 +146,7 @@ def test_invoke_handler_already_timed_out():
     )
     operation = Operation(
         operation_id="invoke5",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.TIMED_OUT,
         invoke_details=InvokeDetails(durable_execution_arn="invoked_arn", error=error),
     )
@@ -170,7 +170,7 @@ def test_invoke_handler_already_started():
 
     operation = Operation(
         operation_id="invoke6",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.STARTED,
         invoke_details=InvokeDetails(durable_execution_arn="invoked_arn"),
     )
@@ -194,7 +194,7 @@ def test_invoke_handler_already_started_with_timeout():
 
     operation = Operation(
         operation_id="invoke7",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.STARTED,
         invoke_details=InvokeDetails(durable_execution_arn="invoked_arn"),
     )
@@ -239,7 +239,7 @@ def test_invoke_handler_new_operation():
     operation_update = mock_state.create_checkpoint.call_args[1]["operation_update"]
 
     assert operation_update.operation_id == "invoke8"
-    assert operation_update.operation_type == OperationType.INVOKE
+    assert operation_update.operation_type == OperationType.CHAINED_INVOKE
     assert operation_update.action == OperationAction.START
     assert operation_update.name == "test_invoke"
     assert operation_update.payload == json.dumps("test_input")
@@ -316,7 +316,7 @@ def test_invoke_handler_custom_serdes():
 
     operation = Operation(
         operation_id="invoke12",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.SUCCEEDED,
         invoke_details=InvokeDetails(
             durable_execution_arn="invoked_arn",
@@ -409,7 +409,7 @@ def test_invoke_handler_with_operation_name():
 
     operation = Operation(
         operation_id="invoke14",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.STARTED,
         invoke_details=InvokeDetails(durable_execution_arn="invoked_arn"),
     )
@@ -433,7 +433,7 @@ def test_invoke_handler_without_operation_name():
 
     operation = Operation(
         operation_id="invoke15",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.STARTED,
         invoke_details=InvokeDetails(durable_execution_arn="invoked_arn"),
     )
@@ -480,7 +480,7 @@ def test_invoke_handler_already_succeeded_with_none_payload():
 
     operation = Operation(
         operation_id="invoke17",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.SUCCEEDED,
         invoke_details=InvokeDetails(
             durable_execution_arn="invoked_arn", result=json.dumps("test_result")

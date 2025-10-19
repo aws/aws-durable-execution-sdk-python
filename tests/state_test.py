@@ -62,7 +62,7 @@ def test_checkpointed_result_create_from_operation_invoke():
     )
     operation = Operation(
         operation_id="op1",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.SUCCEEDED,
         invoke_details=invoke_details,
     )
@@ -81,7 +81,7 @@ def test_checkpointed_result_create_from_operation_invoke_with_error():
     invoke_details = InvokeDetails(durable_execution_arn="arn:test", error=error)
     operation = Operation(
         operation_id="op1",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.FAILED,
         invoke_details=invoke_details,
     )
@@ -96,7 +96,7 @@ def test_checkpointed_result_create_from_operation_invoke_no_details():
     """Test CheckpointedResult.create_from_operation with INVOKE operation but no invoke_details."""
     operation = Operation(
         operation_id="op1",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.STARTED,
     )
     result = CheckpointedResult.create_from_operation(operation)
@@ -116,7 +116,7 @@ def test_checkpointed_result_create_from_operation_invoke_with_both_result_and_e
     )
     operation = Operation(
         operation_id="op1",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.FAILED,
         invoke_details=invoke_details,
     )
@@ -524,9 +524,9 @@ def test_checkpointed_result_is_timed_out_false_for_other_statuses():
             status=status,
         )
         result = CheckpointedResult.create_from_operation(operation)
-        assert (
-            result.is_timed_out() is False
-        ), f"is_timed_out should be False for status {status}"
+        assert result.is_timed_out() is False, (
+            f"is_timed_out should be False for status {status}"
+        )
 
 
 def test_fetch_paginated_operations_with_marker():

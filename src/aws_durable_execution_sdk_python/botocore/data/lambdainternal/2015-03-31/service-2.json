@@ -9386,7 +9386,7 @@
         "STEP",
         "WAIT",
         "CALLBACK",
-        "INVOKE"
+        "CHAINED_INVOKE"
       ]
     },
     "OperationUpdate":{

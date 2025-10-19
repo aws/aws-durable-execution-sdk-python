@@ -49,7 +49,24 @@ class OperationType(Enum):
     STEP = "STEP"
     WAIT = "WAIT"
     CALLBACK = "CALLBACK"
-    INVOKE = "INVOKE"
+    CHAINED_INVOKE = "CHAINED_INVOKE"
+
+
+class CallbackTimeoutType(Enum):
+    TIMEOUT = "Callback.Timeout"
+    HEARTBEAT = "Callback.Heartbeat"
+
+
+class ChainedInvokeFailedToStartType(Enum):
+    FAILED_TO_START = "ChainedInvoke.FailedToStart"
+
+
+class ChainedInvokeTimeoutType(Enum):
+    TIMEOUT = "ChainedInvoke.Timeout"
+
+
+class ChainedInvokeStopType(Enum):
+    STOPPED = "ChainedInvoke.Stopped"
 
 
 class OperationSubType(Enum):
@@ -543,7 +560,7 @@ class OperationUpdate:
         return cls(
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
-            operation_type=OperationType.INVOKE,
+            operation_type=OperationType.CHAINED_INVOKE,
             sub_type=OperationSubType.INVOKE,
             action=OperationAction.START,
             name=identifier.name,

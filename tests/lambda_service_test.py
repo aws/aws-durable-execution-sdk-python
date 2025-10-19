@@ -815,13 +815,13 @@ def test_operation_update_wait_and_invoke_types():
     invoke_options = InvokeOptions(function_name="test_func")
     invoke_update = OperationUpdate(
         operation_id="invoke_op",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         action=OperationAction.START,
         invoke_options=invoke_options,
     )
 
     result = invoke_update.to_dict()
-    assert result["Type"] == "INVOKE"
+    assert result["Type"] == "CHAINED_INVOKE"
     assert result["InvokeOptions"]["FunctionName"] == "test_func"
 
 
@@ -844,12 +844,12 @@ def test_operation_update_create_invoke():
     invoke_options = InvokeOptions(function_name="test-function")
     update = OperationUpdate(
         operation_id="invoke1",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         action=OperationAction.START,
         invoke_options=invoke_options,
     )
 
-    assert update.operation_type == OperationType.INVOKE
+    assert update.operation_type == OperationType.CHAINED_INVOKE
     assert update.invoke_options == invoke_options
 
 
@@ -1299,7 +1299,7 @@ def test_operation_to_dict_with_invoke_details_partial():
 
     operation = Operation(
         operation_id="test",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.PENDING,
         invoke_details=invoke_details,
     )
@@ -1402,7 +1402,7 @@ def test_operation_to_dict_with_invoke_details_error():
 
     operation = Operation(
         operation_id="test",
-        operation_type=OperationType.INVOKE,
+        operation_type=OperationType.CHAINED_INVOKE,
         status=OperationStatus.FAILED,
         invoke_details=invoke_details,
     )

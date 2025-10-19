@@ -59,7 +59,7 @@ class CheckpointedResult:
                 result = callback_details.result if callback_details else None
                 error = callback_details.error if callback_details else None
 
-            case OperationType.INVOKE:
+            case OperationType.CHAINED_INVOKE:
                 invoke_details = operation.invoke_details
                 result = invoke_details.result if invoke_details else None
                 error = invoke_details.error if invoke_details else None
