@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 import boto3  # type: ignore
 
@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 
 logger = logging.getLogger(__name__)
+
+ReplayChildren: TypeAlias = bool
 
 
 # region model
@@ -94,7 +96,7 @@ class ExecutionDetails:
 
 @dataclass(frozen=True)
 class ContextDetails:
-    replay_children: bool = False
+    replay_children: ReplayChildren = False
     result: str | None = None
     error: ErrorObject | None = None
 
@@ -287,7 +289,7 @@ class InvokeOptions:
 
 @dataclass(frozen=True)
 class ContextOptions:
-    replay_children: bool = False
+    replay_children: ReplayChildren = False
 
     @classmethod
     def from_dict(cls, data: MutableMapping[str, Any]) -> ContextOptions:
