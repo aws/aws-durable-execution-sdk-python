@@ -16,8 +16,8 @@ from aws_durable_execution_sdk_python.exceptions import (
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
-    ErrorObject,
     ChainedInvokeDetails,
+    ErrorObject,
     Operation,
     OperationAction,
     OperationStatus,

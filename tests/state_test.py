@@ -7,10 +7,10 @@ import pytest
 from aws_durable_execution_sdk_python.exceptions import DurableExecutionsError
 from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
+    ChainedInvokeDetails,
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
     ErrorObject,
-    ChainedInvokeDetails,
     LambdaClient,
     Operation,
     OperationAction,
@@ -520,9 +520,9 @@ def test_checkpointed_result_is_timed_out_false_for_other_statuses():
             status=status,
         )
         result = CheckpointedResult.create_from_operation(operation)
-        assert result.is_timed_out() is False, (
-            f"is_timed_out should be False for status {status}"
-        )
+        assert (
+            result.is_timed_out() is False
+        ), f"is_timed_out should be False for status {status}"
 
 
 def test_fetch_paginated_operations_with_marker():

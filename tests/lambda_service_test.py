@@ -13,6 +13,8 @@ from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
     CallbackOptions,
+    ChainedInvokeDetails,
+    ChainedInvokeOptions,
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
     ContextDetails,
@@ -20,8 +22,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
     DurableServiceClient,
     ErrorObject,
     ExecutionDetails,
-    ChainedInvokeDetails,
-    ChainedInvokeOptions,
     LambdaClient,
     Operation,
     OperationAction,
@@ -358,7 +358,7 @@ def test_invoke_details_minimal():
     """Test ChainedInvokeDetails.from_dict with minimal required data."""
     data = {"DurableExecutionArn": "arn:minimal"}
     details = ChainedInvokeDetails.from_dict(data)
-    assert hasattr(details, "durable_execution_arn") == False
+    assert hasattr(details, "durable_execution_arn") is False
     assert details.result is None
     assert details.error is None
 
