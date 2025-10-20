@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
@@ -98,15 +99,68 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
     completion_reason: CompletionReason
 
     @classmethod
-    def from_dict(cls, data: dict) -> BatchResult[R]:
+    def from_dict(
+        cls, data: dict, completion_config: CompletionConfig | None = None
+    ) -> BatchResult[R]:
         batch_items: list[BatchItem[R]] = [
             BatchItem.from_dict(item) for item in data["all"]
         ]
-        # TODO: is this valid? assuming completion reason is ALL_COMPLETED?
-        completion_reason = CompletionReason(
-            data.get("completionReason", "ALL_COMPLETED")
-        )
+
+        completion_reason_value = data.get("completionReason")
+        if completion_reason_value is None:
+            # Infer completion reason from batch item statuses and completion config
+            # This aligns with the TypeScript implementation that uses completion config
+            # to accurately reconstruct the completion reason during replay
+            result = cls.from_items(batch_items, completion_config)
+            logger.warning(
+                "Missing completionReason in BatchResult deserialization, "
+                "inferred '%s' from batch item statuses. "
+                "This may indicate incomplete serialization data.",
+                result.completion_reason.value,
+            )
+            return result
+
+        completion_reason = CompletionReason(completion_reason_value)
         return cls(batch_items, completion_reason)
+
+    @classmethod
+    def from_items(
+        cls,
+        items: list[BatchItem[R]],
+        completion_config: CompletionConfig | None = None,
+    ):
+        """
+        Infer completion reason based on batch item statuses and completion config.
+
+        This follows the same logic as the TypeScript implementation:
+        - If all items completed: ALL_COMPLETED
+        - If minSuccessful threshold met and not all completed: MIN_SUCCESSFUL_REACHED
+        - Otherwise: FAILURE_TOLERANCE_EXCEEDED
+        """
+
+        statuses = (item.status for item in items)
+        counts = Counter(statuses)
+        succeeded_count = counts.get(BatchItemStatus.SUCCEEDED, 0)
+        failed_count = counts.get(BatchItemStatus.FAILED, 0)
+        started_count = counts.get(BatchItemStatus.STARTED, 0)
+
+        completed_count = succeeded_count + failed_count
+        total_count = started_count + completed_count
+
+        # If all items completed (no started items), it's ALL_COMPLETED
+        if completed_count == total_count:
+            completion_reason = CompletionReason.ALL_COMPLETED
+        elif (  # If we have completion config and minSuccessful threshold is met
+            completion_config
+            and (min_successful := completion_config.min_successful) is not None
+            and succeeded_count >= min_successful
+        ):
+            completion_reason = CompletionReason.MIN_SUCCESSFUL_REACHED
+        else:
+            # Otherwise, assume failure tolerance was exceeded
+            completion_reason = CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+        return cls(items, completion_reason)
 
     def to_dict(self) -> dict:
         return {
@@ -163,19 +217,15 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
 
     @property
     def success_count(self) -> int:
-        return len(
-            [item for item in self.all if item.status is BatchItemStatus.SUCCEEDED]
-        )
+        return sum(1 for item in self.all if item.status is BatchItemStatus.SUCCEEDED)
 
     @property
     def failure_count(self) -> int:
-        return len([item for item in self.all if item.status is BatchItemStatus.FAILED])
+        return sum(1 for item in self.all if item.status is BatchItemStatus.FAILED)
 
     @property
     def started_count(self) -> int:
-        return len(
-            [item for item in self.all if item.status is BatchItemStatus.STARTED]
-        )
+        return sum(1 for item in self.all if item.status is BatchItemStatus.STARTED)
 
     @property
     def total_count(self) -> int:
