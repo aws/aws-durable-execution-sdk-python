@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 import boto3  # type: ignore
 
@@ -20,11 +20,12 @@ if TYPE_CHECKING:
 
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 
-logger = logging.getLogger(__name__)
+ReplayChildren: TypeAlias = bool  # noqa UP040 ignore due to python3.11 minimum version
+OperationPayload: TypeAlias = str  # noqa UP040 ignore due to python3.11 minimum version
+TimeoutSeconds: TypeAlias = int  # noqa UP040 ignore due to python3.11 minimum version
 
-type ReplayChildren = bool
-type OperationPayload = str
-type TimeoutSeconds = int
+
+logger = logging.getLogger(__name__)
 
 
 # region model
