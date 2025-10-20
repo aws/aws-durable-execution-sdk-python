@@ -69,7 +69,7 @@ def invoke_handler(
         # Operation failed, throw the exact same error on replay as the checkpointed failure
         checkpointed_result.raise_callable_error()
 
-    if checkpointed_result.is_started():
+    if checkpointed_result.is_started() or checkpointed_result.is_pending():
         # Operation is still running, suspend until completion
         logger.debug(
             "⏳ Invoke %s still in progress, suspending",

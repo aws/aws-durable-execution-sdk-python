@@ -164,7 +164,8 @@ def test_invoke_handler_already_timed_out():
         )
 
 
-def test_invoke_handler_already_started():
+@pytest.mark.parametrize("status", [OperationStatus.STARTED, OperationStatus.PENDING])
+def test_invoke_handler_already_started(status):
     """Test invoke_handler when operation is already started."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
@@ -172,7 +173,7 @@ def test_invoke_handler_already_started():
     operation = Operation(
         operation_id="invoke6",
         operation_type=OperationType.CHAINED_INVOKE,
-        status=OperationStatus.STARTED,
+        status=status,
         chained_invoke_details=ChainedInvokeDetails(),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
@@ -188,7 +189,8 @@ def test_invoke_handler_already_started():
         )
 
 
-def test_invoke_handler_already_started_with_timeout():
+@pytest.mark.parametrize("status", [OperationStatus.STARTED, OperationStatus.PENDING])
+def test_invoke_handler_already_started_with_timeout(status):
     """Test invoke_handler when operation is already started with timeout config."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
@@ -196,7 +198,7 @@ def test_invoke_handler_already_started_with_timeout():
     operation = Operation(
         operation_id="invoke7",
         operation_type=OperationType.CHAINED_INVOKE,
-        status=OperationStatus.STARTED,
+        status=status,
         chained_invoke_details=ChainedInvokeDetails(),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
@@ -402,7 +404,8 @@ def test_suspend_with_optional_timeout_negative_timeout():
     assert "test message" in str(exc_info.value)
 
 
-def test_invoke_handler_with_operation_name():
+@pytest.mark.parametrize("status", [OperationStatus.STARTED, OperationStatus.PENDING])
+def test_invoke_handler_with_operation_name(status: OperationStatus):
     """Test invoke_handler uses operation name in logs when available."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
@@ -410,7 +413,7 @@ def test_invoke_handler_with_operation_name():
     operation = Operation(
         operation_id="invoke14",
         operation_type=OperationType.CHAINED_INVOKE,
-        status=OperationStatus.STARTED,
+        status=status,
         chained_invoke_details=ChainedInvokeDetails(),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
@@ -426,7 +429,8 @@ def test_invoke_handler_with_operation_name():
         )
 
 
-def test_invoke_handler_without_operation_name():
+@pytest.mark.parametrize("status", [OperationStatus.STARTED, OperationStatus.PENDING])
+def test_invoke_handler_without_operation_name(status: OperationStatus):
     """Test invoke_handler uses function name in logs when no operation name."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
@@ -434,7 +438,7 @@ def test_invoke_handler_without_operation_name():
     operation = Operation(
         operation_id="invoke15",
         operation_type=OperationType.CHAINED_INVOKE,
-        status=OperationStatus.STARTED,
+        status=status,
         chained_invoke_details=ChainedInvokeDetails(),
     )
     mock_result = CheckpointedResult.create_from_operation(operation)
