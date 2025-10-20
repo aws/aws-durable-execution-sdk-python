@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Any, Protocol
 
 import boto3  # type: ignore
 
@@ -22,9 +22,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ReplayChildren: TypeAlias = bool
-OperationPayload: TypeAlias = str
-TimeoutSeconds: TypeAlias = int
+type ReplayChildren = bool
+type OperationPayload = str
+type TimeoutSeconds = int
 
 
 # region model
