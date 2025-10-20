@@ -102,11 +102,61 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
         batch_items: list[BatchItem[R]] = [
             BatchItem.from_dict(item) for item in data["all"]
         ]
-        # TODO: is this valid? assuming completion reason is ALL_COMPLETED?
-        completion_reason = CompletionReason(
-            data.get("completionReason", "ALL_COMPLETED")
-        )
+
+        completion_reason_value = data.get("completionReason")
+        if completion_reason_value is None:
+            # Mix of success and failure, but all completed
+            # By default TS when not given assumes all_completed
+            # assignment stacktrace
+            # 3. https://github.com/aws/aws-durable-execution-sdk-js/blob/ff8b72ef888dd47a840f36d4eb0ee84dd3b55a30/packages/aws-durable-execution-sdk-js/src/handlers/concurrent-execution-handler/batch-result.ts#L34-L41
+            # 2. https://github.com/aws/aws-durable-execution-sdk-js/blob/ff8b72ef888dd47a840f36d4eb0ee84dd3b55a30/packages/aws-durable-execution-sdk-js/src/handlers/concurrent-execution-handler/batch-result.ts#L146-L149
+            # 1. https://github.com/aws/aws-durable-execution-sdk-js/blob/ff8b72ef888dd47a840f36d4eb0ee84dd3b55a30/packages/aws-durable-execution-sdk-js/src/handlers/concurrent-execution-handler/batch-result.ts#L127
+            # 0. https://github.com/aws/aws-durable-execution-sdk-js/blob/ff8b72ef888dd47a840f36d4eb0ee84dd3b55a30/packages/aws-durable-execution-sdk-js/src/handlers/concurrent-execution-handler/concurrent-execution-handler.ts#L518-L528
+            # When deserializing objects, we branch on 0, where we assume object has the field if it was not serialized
+            # properly.
+            completion_reason = cls._infer_completion_reason(batch_items)
+            logger.warning(
+                "Missing completionReason in BatchResult deserialization, "
+                "inferred '%s' from batch item statuses. "
+                "This may indicate incomplete serialization data.",
+                completion_reason.value,
+            )
+        else:
+            completion_reason = CompletionReason(completion_reason_value)
+
         return cls(batch_items, completion_reason)
+
+    @classmethod
+    def _infer_completion_reason(
+        cls, batch_items: list[BatchItem[R]]
+    ) -> CompletionReason:
+        """Infer completion reason based on batch item statuses."""
+        if not batch_items:
+            return CompletionReason.ALL_COMPLETED
+
+        succeeded_count = sum(
+            1 for item in batch_items if item.status == BatchItemStatus.SUCCEEDED
+        )
+        failed_count = sum(
+            1 for item in batch_items if item.status == BatchItemStatus.FAILED
+        )
+        started_count = sum(
+            1 for item in batch_items if item.status == BatchItemStatus.STARTED
+        )
+
+        # If there are started items, execution was terminated early
+        if started_count > 0:
+            return CompletionReason.MIN_SUCCESSFUL_REACHED
+
+        # All items completed (succeeded or failed)
+        if failed_count == 0:
+            # All succeeded
+            return CompletionReason.ALL_COMPLETED
+        if succeeded_count == 0:
+            # All failed - likely hit failure tolerance
+            return CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+        return CompletionReason.ALL_COMPLETED
 
     def to_dict(self) -> dict:
         return {
@@ -163,19 +213,15 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
 
     @property
     def success_count(self) -> int:
-        return len(
-            [item for item in self.all if item.status is BatchItemStatus.SUCCEEDED]
-        )
+        return sum(1 for item in self.all if item.status is BatchItemStatus.SUCCEEDED)
 
     @property
     def failure_count(self) -> int:
-        return len([item for item in self.all if item.status is BatchItemStatus.FAILED])
+        return sum(1 for item in self.all if item.status is BatchItemStatus.FAILED)
 
     @property
     def started_count(self) -> int:
-        return len(
-            [item for item in self.all if item.status is BatchItemStatus.STARTED]
-        )
+        return sum(1 for item in self.all if item.status is BatchItemStatus.STARTED)
 
     @property
     def total_count(self) -> int:

@@ -319,8 +319,160 @@ def test_batch_result_from_dict_default_completion_reason():
         # No completionReason provided
     }
 
-    result = BatchResult.from_dict(data)
-    assert result.completion_reason == CompletionReason.ALL_COMPLETED
+    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+        result = BatchResult.from_dict(data)
+        assert result.completion_reason == CompletionReason.ALL_COMPLETED
+        # Verify warning was logged
+        mock_logger.warning.assert_called_once()
+        assert "Missing completionReason" in mock_logger.warning.call_args[0][0]
+
+
+def test_batch_result_from_dict_infer_all_completed_all_succeeded():
+    """Test BatchResult from_dict infers ALL_COMPLETED when all items succeeded."""
+    data = {
+        "all": [
+            {"index": 0, "status": "SUCCEEDED", "result": "result1", "error": None},
+            {"index": 1, "status": "SUCCEEDED", "result": "result2", "error": None},
+        ],
+        # No completionReason provided
+    }
+
+    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+        result = BatchResult.from_dict(data)
+        assert result.completion_reason == CompletionReason.ALL_COMPLETED
+        mock_logger.warning.assert_called_once()
+
+
+def test_batch_result_from_dict_infer_failure_tolerance_exceeded_all_failed():
+    """Test BatchResult from_dict infers FAILURE_TOLERANCE_EXCEEDED when all items failed."""
+    error_data = {
+        "message": "Test error",
+        "type": "TestError",
+        "data": None,
+        "stackTrace": None,
+    }
+    data = {
+        "all": [
+            {"index": 0, "status": "FAILED", "result": None, "error": error_data},
+            {"index": 1, "status": "FAILED", "result": None, "error": error_data},
+        ],
+        # No completionReason provided
+    }
+
+    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+        result = BatchResult.from_dict(data)
+        assert result.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+        mock_logger.warning.assert_called_once()
+
+
+def test_batch_result_from_dict_infer_all_completed_mixed_success_failure():
+    """Test BatchResult from_dict infers ALL_COMPLETED when mix of success/failure but no started items."""
+    error_data = {
+        "message": "Test error",
+        "type": "TestError",
+        "data": None,
+        "stackTrace": None,
+    }
+    data = {
+        "all": [
+            {"index": 0, "status": "SUCCEEDED", "result": "result1", "error": None},
+            {"index": 1, "status": "FAILED", "result": None, "error": error_data},
+            {"index": 2, "status": "SUCCEEDED", "result": "result2", "error": None},
+        ],
+        # No completionReason provided
+    }
+
+    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+        result = BatchResult.from_dict(data)
+        assert result.completion_reason == CompletionReason.ALL_COMPLETED
+        mock_logger.warning.assert_called_once()
+
+
+def test_batch_result_from_dict_infer_min_successful_reached_has_started():
+    """Test BatchResult from_dict infers MIN_SUCCESSFUL_REACHED when items are still started."""
+    data = {
+        "all": [
+            {"index": 0, "status": "SUCCEEDED", "result": "result1", "error": None},
+            {"index": 1, "status": "STARTED", "result": None, "error": None},
+            {"index": 2, "status": "SUCCEEDED", "result": "result2", "error": None},
+        ],
+        # No completionReason provided
+    }
+
+    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+        result = BatchResult.from_dict(data)
+        assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
+        mock_logger.warning.assert_called_once()
+
+
+def test_batch_result_from_dict_infer_empty_items():
+    """Test BatchResult from_dict infers ALL_COMPLETED for empty items."""
+    data = {
+        "all": [],
+        # No completionReason provided
+    }
+
+    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+        result = BatchResult.from_dict(data)
+        assert result.completion_reason == CompletionReason.ALL_COMPLETED
+        mock_logger.warning.assert_called_once()
+
+
+def test_batch_result_from_dict_with_explicit_completion_reason():
+    """Test BatchResult from_dict uses explicit completionReason when provided."""
+    data = {
+        "all": [
+            {"index": 0, "status": "SUCCEEDED", "result": "result1", "error": None}
+        ],
+        "completionReason": "MIN_SUCCESSFUL_REACHED",
+    }
+
+    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+        result = BatchResult.from_dict(data)
+        assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
+        # No warning should be logged when completionReason is provided
+        mock_logger.warning.assert_not_called()
+
+
+def test_batch_result_infer_completion_reason_edge_cases():
+    """Test _infer_completion_reason method with various edge cases."""
+    # Test with only started items
+    started_items = [
+        BatchItem(0, BatchItemStatus.STARTED),
+        BatchItem(1, BatchItemStatus.STARTED),
+    ]
+    reason = BatchResult._infer_completion_reason(started_items)  # noqa SLF001
+    assert reason == CompletionReason.MIN_SUCCESSFUL_REACHED
+
+    # Test with only failed items
+    failed_items = [
+        BatchItem(
+            0, BatchItemStatus.FAILED, error=ErrorObject("msg", "Error", None, None)
+        ),
+        BatchItem(
+            1, BatchItemStatus.FAILED, error=ErrorObject("msg", "Error", None, None)
+        ),
+    ]
+    reason = BatchResult._infer_completion_reason(failed_items)  # noqa SLF001
+    assert reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+    # Test with only succeeded items
+    succeeded_items = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, "result1"),
+        BatchItem(1, BatchItemStatus.SUCCEEDED, "result2"),
+    ]
+    reason = BatchResult._infer_completion_reason(succeeded_items)  # noqa SLF001
+    assert reason == CompletionReason.ALL_COMPLETED
+
+    # Test with mixed but no started (all completed)
+    mixed_items = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, "result1"),
+        BatchItem(
+            1, BatchItemStatus.FAILED, error=ErrorObject("msg", "Error", None, None)
+        ),
+    ]
+    reason = BatchResult._infer_completion_reason(mixed_items)  # noqa SLF001
+    assert reason == CompletionReason.ALL_COMPLETED
 
 
 def test_batch_result_get_results_empty():
