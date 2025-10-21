@@ -9,6 +9,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
+    ContextDetails,
     ErrorObject,
     InvokeDetails,
     LambdaClient,
@@ -124,6 +125,74 @@ def test_checkpointed_result_create_from_operation_invoke_with_both_result_and_e
     assert result.operation == operation
     assert result.status == OperationStatus.FAILED
     assert result.result == "invoke_result"
+    assert result.error == error
+
+
+def test_checkpointed_result_create_from_operation_context():
+    """Test CheckpointedResult.create_from_operation with CONTEXT operation."""
+    context_details = ContextDetails(result="context_result")
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.CONTEXT,
+        status=OperationStatus.SUCCEEDED,
+        context_details=context_details,
+    )
+    result = CheckpointedResult.create_from_operation(operation)
+    assert result.operation == operation
+    assert result.status == OperationStatus.SUCCEEDED
+    assert result.result == "context_result"
+    assert result.error is None
+
+
+def test_checkpointed_result_create_from_operation_context_with_error():
+    """Test CheckpointedResult.create_from_operation with CONTEXT operation and error."""
+    error = ErrorObject(
+        message="Context error", type="ContextError", data=None, stack_trace=None
+    )
+    context_details = ContextDetails(error=error)
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.CONTEXT,
+        status=OperationStatus.FAILED,
+        context_details=context_details,
+    )
+    result = CheckpointedResult.create_from_operation(operation)
+    assert result.operation == operation
+    assert result.status == OperationStatus.FAILED
+    assert result.result is None
+    assert result.error == error
+
+
+def test_checkpointed_result_create_from_operation_context_no_details():
+    """Test CheckpointedResult.create_from_operation with CONTEXT operation but no context_details."""
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.CONTEXT,
+        status=OperationStatus.STARTED,
+    )
+    result = CheckpointedResult.create_from_operation(operation)
+    assert result.operation == operation
+    assert result.status == OperationStatus.STARTED
+    assert result.result is None
+    assert result.error is None
+
+
+def test_checkpointed_result_create_from_operation_context_with_both_result_and_error():
+    """Test CheckpointedResult.create_from_operation with CONTEXT operation having both result and error."""
+    error = ErrorObject(
+        message="Context error", type="ContextError", data=None, stack_trace=None
+    )
+    context_details = ContextDetails(result="context_result", error=error)
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.CONTEXT,
+        status=OperationStatus.FAILED,
+        context_details=context_details,
+    )
+    result = CheckpointedResult.create_from_operation(operation)
+    assert result.operation == operation
+    assert result.status == OperationStatus.FAILED
+    assert result.result == "context_result"
     assert result.error == error
 
 

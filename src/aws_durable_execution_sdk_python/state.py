@@ -64,6 +64,11 @@ class CheckpointedResult:
                 result = invoke_details.result if invoke_details else None
                 error = invoke_details.error if invoke_details else None
 
+            case OperationType.CONTEXT:
+                context_details = operation.context_details
+                result = context_details.result if context_details else None
+                error = context_details.error if context_details else None
+
         return cls(
             operation=operation, status=operation.status, result=result, error=error
         )
