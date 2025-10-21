@@ -174,6 +174,22 @@ def test_child_config_with_sub_type():
     assert config.sub_type is sub_type
 
 
+def test_child_config_with_summary_generator():
+    """Test ChildConfig with summary_generator."""
+
+    def mock_summary_generator(result):
+        return f"Summary of {result}"
+
+    config = ChildConfig(summary_generator=mock_summary_generator)
+    assert config.serdes is None
+    assert config.sub_type is None
+    assert config.summary_generator is mock_summary_generator
+
+    # Test that the summary generator works
+    result = config.summary_generator("test_data")
+    assert result == "Summary of test_data"
+
+
 def test_items_per_batch_unit_enum():
     """Test ItemsPerBatchUnit enum."""
     assert ItemsPerBatchUnit.COUNT.value == ("COUNT",)

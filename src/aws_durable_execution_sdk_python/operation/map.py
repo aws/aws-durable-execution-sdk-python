@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Generic, TypeVar
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.config import ChildConfig
     from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.state import ExecutionState
-    from aws_durable_execution_sdk_python.types import DurableContext
+    from aws_durable_execution_sdk_python.types import DurableContext, SummaryGenerator
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI0
         iteration_sub_type: OperationSubType,
         name_prefix: str,
         serdes: SerDes | None,
+        summary_generator: SummaryGenerator | None = None,
     ):
         super().__init__(
             executables=executables,
@@ -49,6 +51,7 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI0
             sub_type_iteration=iteration_sub_type,
             name_prefix=name_prefix,
             serdes=serdes,
+            summary_generator=summary_generator,
         )
         self.items = items
 
@@ -73,6 +76,7 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI0
             iteration_sub_type=OperationSubType.MAP_ITERATION,
             name_prefix="map-item-",
             serdes=config.serdes,
+            summary_generator=config.summary_generator,
         )
 
     def execute_item(self, child_context, executable: Executable[Callable]) -> R:
@@ -93,7 +97,28 @@ def map_handler(
     ],
 ) -> BatchResult[R]:
     """Execute a callable for each item in parallel."""
+    # Summary Generator Construction (matches TypeScript implementation):
+    # Construct the summary generator at the handler level, just like TypeScript does in map-handler.ts.
+    # This matches the pattern where handlers are responsible for configuring operation-specific behavior.
+    #
+    # See TypeScript reference: aws-durable-execution-sdk-js/src/handlers/map-handler/map-handler.ts (~line 79)
+
     executor: MapExecutor[T, R] = MapExecutor.from_items(
-        items=items, func=func, config=config or MapConfig()
+        items=items,
+        func=func,
+        config=config or MapConfig(summary_generator=MapSummaryGenerator()),
     )
     return executor.execute(execution_state, run_in_child_context)
+
+
+class MapSummaryGenerator:
+    def __call__(self, result: BatchResult) -> str:
+        fields = {
+            "totalCount": result.total_count,
+            "successCount": result.success_count,
+            "failureCount": result.failure_count,
+            "completionReason": result.completion_reason.value,
+            "status": result.status.value,
+            "type": "MapResult",
+        }
+        return json.dumps(fields)
