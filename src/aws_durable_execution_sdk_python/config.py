@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
     from aws_durable_execution_sdk_python.lambda_service import OperationSubType
     from aws_durable_execution_sdk_python.serdes import SerDes
+    from aws_durable_execution_sdk_python.types import SummaryGenerator
 
 
 Numeric = int | float  # deliberately leaving off complex
@@ -39,6 +40,38 @@ class TerminationMode(Enum):
 
 @dataclass(frozen=True)
 class CompletionConfig:
+    """Configuration for determining when parallel/map operations complete.
+
+    This class defines the success/failure criteria for operations that process
+    multiple items or branches concurrently.
+
+    Args:
+        min_successful: Minimum number of successful completions required.
+            If None, no minimum is enforced. Use this to implement "at least N
+            must succeed" semantics.
+
+        tolerated_failure_count: Maximum number of failures allowed before
+            the operation is considered failed. If None, no limit on failure count.
+            Use this to implement "fail fast after N failures" semantics.
+
+        tolerated_failure_percentage: Maximum percentage of failures allowed
+            (0.0 to 100.0). If None, no percentage limit is enforced.
+            Use this to implement "fail if more than X% fail" semantics.
+
+    Note:
+        The operation completes when any of the completion criteria are met:
+        - Enough successes (min_successful reached)
+        - Too many failures (tolerated limits exceeded)
+        - All items/branches completed
+
+    Example:
+        # Succeed if at least 3 succeed, fail if more than 2 fail
+        config = CompletionConfig(
+            min_successful=3,
+            tolerated_failure_count=2
+        )
+    """
+
     min_successful: int | None = None
     tolerated_failure_count: int | None = None
     tolerated_failure_percentage: int | float | None = None
@@ -77,11 +110,47 @@ class CompletionConfig:
 
 @dataclass(frozen=True)
 class ParallelConfig:
+    """Configuration options for parallel execution operations.
+
+    This class configures how parallel operations are executed, including
+    concurrency limits, completion criteria, and serialization behavior.
+
+    Args:
+        max_concurrency: Maximum number of parallel branches to execute concurrently.
+            If None, no limit is imposed and all branches run concurrently.
+            Use this to control resource usage and prevent overwhelming the system.
+
+        completion_config: Defines when the parallel operation should complete.
+            Controls success/failure criteria for the overall parallel operation.
+            Default is CompletionConfig.all_successful() which requires all branches
+            to succeed. Other options include first_successful() and all_completed().
+
+        serdes: Custom serialization/deserialization configuration for parallel results.
+            If None, uses the default serializer. This allows custom handling of
+            complex result types or optimization for large result sets.
+
+        summary_generator: Function to generate compact summaries for large results (>256KB).
+            When the serialized result exceeds CHECKPOINT_SIZE_LIMIT, this generator
+            creates a JSON summary instead of checkpointing the full result. The operation
+            is marked with ReplayChildren=true to reconstruct the full result during replay.
+
+            Used internally by map/parallel operations to handle large BatchResult payloads.
+            Signature: (result: T) -> str
+
+    Example:
+        # Run at most 3 branches concurrently, succeed if any one succeeds
+        config = ParallelConfig(
+            max_concurrency=3,
+            completion_config=CompletionConfig.first_successful()
+        )
+    """
+
     max_concurrency: int | None = None
     completion_config: CompletionConfig = field(
         default_factory=CompletionConfig.all_successful
     )
     serdes: SerDes | None = None
+    summary_generator: SummaryGenerator | None = None
 
 
 class StepSemantics(Enum):
@@ -106,12 +175,41 @@ class CheckpointMode(Enum):
 
 @dataclass(frozen=True)
 class ChildConfig(Generic[T]):
-    """Options when running inside a child context."""
+    """Configuration options for child context operations.
+
+    This class configures how child contexts are executed and checkpointed,
+    matching the TypeScript ChildConfig interface behavior.
+
+    Args:
+        serdes: Custom serialization/deserialization configuration for the child context data.
+            If None, uses the default serializer. This allows different serialization
+            strategies for child operations vs parent operations.
+
+        sub_type: Operation subtype identifier used for tracking and debugging.
+            Examples: OperationSubType.MAP_ITERATION, OperationSubType.PARALLEL_BRANCH.
+            Used internally by the execution engine for operation classification.
+
+        summary_generator: Function to generate compact summaries for large results (>256KB).
+            When the serialized result exceeds CHECKPOINT_SIZE_LIMIT, this generator
+            creates a JSON summary instead of checkpointing the full result. The operation
+            is marked with ReplayChildren=true to reconstruct the full result during replay.
+
+            Used internally by map/parallel operations to handle large BatchResult payloads.
+            Signature: (result: T) -> str
+    Note:
+        checkpoint_mode field is commented out as it's not currently implemented.
+        When implemented, it will control when checkpoints are created:
+        - CHECKPOINT_AT_START_AND_FINISH: Checkpoint at both start and completion (default)
+        - CHECKPOINT_AT_FINISH: Only checkpoint when operation completes
+        - NO_CHECKPOINT: No automatic checkpointing
+
+    See TypeScript reference: aws-durable-execution-sdk-js/src/types/index.ts
+    """
 
     # checkpoint_mode: CheckpointMode = CheckpointMode.CHECKPOINT_AT_START_AND_FINISH
     serdes: SerDes | None = None
     sub_type: OperationSubType | None = None
-    summary_generator: Callable[[T], str] | None = None
+    summary_generator: SummaryGenerator | None = None
 
 
 class ItemsPerBatchUnit(Enum):
@@ -121,6 +219,34 @@ class ItemsPerBatchUnit(Enum):
 
 @dataclass(frozen=True)
 class ItemBatcher(Generic[T]):
+    """Configuration for batching items in map operations.
+
+    This class defines how individual items should be grouped together into batches
+    for more efficient processing in map operations.
+
+    Args:
+        max_items_per_batch: Maximum number of items to include in a single batch.
+            If 0 (default), no item count limit is applied. Use this to control
+            batch size when processing many small items.
+
+        max_item_bytes_per_batch: Maximum total size in bytes for items in a batch.
+            If 0 (default), no size limit is applied. Use this to control memory
+            usage when processing large items or when items vary significantly in size.
+
+        batch_input: Additional data to include with each batch.
+            This data is passed to the processing function along with the batched items.
+            Useful for providing context or configuration that applies to all items
+            in the batch.
+
+    Example:
+        # Batch up to 100 items or 1MB, whichever comes first
+        batcher = ItemBatcher(
+            max_items_per_batch=100,
+            max_item_bytes_per_batch=1024*1024,
+            batch_input={"processing_mode": "fast"}
+        )
+    """
+
     max_items_per_batch: int = 0
     max_item_bytes_per_batch: int | float = 0
     batch_input: T | None = None
@@ -128,10 +254,51 @@ class ItemBatcher(Generic[T]):
 
 @dataclass(frozen=True)
 class MapConfig:
+    """Configuration options for map operations over collections.
+
+    This class configures how map operations process collections of items,
+    including concurrency, batching, completion criteria, and serialization.
+
+    Args:
+        max_concurrency: Maximum number of items to process concurrently.
+            If None, no limit is imposed and all items are processed concurrently.
+            Use this to control resource usage when processing large collections.
+
+        item_batcher: Configuration for batching multiple items together for processing.
+            Allows grouping items by count or size to optimize processing efficiency.
+            Default is no batching (each item processed individually).
+
+        completion_config: Defines when the map operation should complete.
+            Controls success/failure criteria for the overall map operation.
+            Default allows any number of failures. Use CompletionConfig.all_successful()
+            to require all items to succeed.
+
+        serdes: Custom serialization/deserialization configuration for map results.
+            If None, uses the default serializer. This allows custom handling of
+            complex item types or optimization for large result collections.
+
+        summary_generator: Function to generate compact summaries for large results (>256KB).
+            When the serialized result exceeds CHECKPOINT_SIZE_LIMIT, this generator
+            creates a JSON summary instead of checkpointing the full result. The operation
+            is marked with ReplayChildren=true to reconstruct the full result during replay.
+
+            Used internally by map/parallel operations to handle large BatchResult payloads.
+            Signature: (result: T) -> str
+
+    Example:
+        # Process 5 items at a time, batch by count, require all to succeed
+        config = MapConfig(
+            max_concurrency=5,
+            item_batcher=ItemBatcher(max_items_per_batch=10),
+            completion_config=CompletionConfig.all_successful()
+        )
+    """
+
     max_concurrency: int | None = None
     item_batcher: ItemBatcher = field(default_factory=ItemBatcher)
     completion_config: CompletionConfig = field(default_factory=CompletionConfig)
     serdes: SerDes | None = None
+    summary_generator: SummaryGenerator | None = None
 
 
 @dataclass

@@ -456,3 +456,76 @@ def test_child_handler_replay_children_mode() -> None:
     assert actual_result == complex_result
 
     mock_state.create_checkpoint.assert_not_called()
+
+
+def test_small_payload_with_summary_generator():
+    """Test: Small payload with summary_generator -> replay_children = False"""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = False
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = False
+    mock_result.is_replay_children.return_value = False
+    mock_result.is_existent.return_value = False
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    # Small payload (< 256KB)
+    small_result = "small_payload"
+    mock_callable = Mock(return_value=small_result)
+
+    def my_summary(result: str) -> str:
+        return "summary_of_small_payload"
+
+    child_config = ChildConfig[str](summary_generator=my_summary)
+
+    actual_result = child_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier("op1", None, "test_name"),
+        child_config,
+    )
+
+    assert actual_result == small_result
+    success_call = mock_state.create_checkpoint.call_args_list[1]
+    success_operation = success_call[1]["operation_update"]
+
+    # Small payload should NOT trigger replay_children, even with summary_generator
+    assert not success_operation.context_options.replay_children
+    # Should checkpoint the actual result, not the summary
+    assert success_operation.payload == '"small_payload"'  # JSON serialized
+
+
+def test_small_payload_without_summary_generator():
+    """Test: Small payload without summary_generator -> replay_children = False"""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = False
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = False
+    mock_result.is_replay_children.return_value = False
+    mock_result.is_existent.return_value = False
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    # Small payload (< 256KB)
+    small_result = "small_payload"
+    mock_callable = Mock(return_value=small_result)
+
+    child_config = ChildConfig[str]()  # No summary_generator
+
+    actual_result = child_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier("op2", None, "test_name"),
+        child_config,
+    )
+
+    assert actual_result == small_result
+    success_call = mock_state.create_checkpoint.call_args_list[1]
+    success_operation = success_call[1]["operation_update"]
+
+    # Small payload should NOT trigger replay_children
+    assert not success_operation.context_options.replay_children
+    # Should checkpoint the actual result
+    assert success_operation.payload == '"small_payload"'  # JSON serialized
