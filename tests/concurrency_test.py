@@ -1094,7 +1094,10 @@ def test_concurrent_executor_create_result_with_failed_branches():
     assert len(result.all) == 2
     assert result.all[0].status == BatchItemStatus.SUCCEEDED
     assert result.all[1].status == BatchItemStatus.FAILED
-    assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
+    # WHEN all items complete, THEN completion reason is ALL_COMPLETED.
+    # we don't consider thresholds and limits.
+    # https://github.com/aws/aws-durable-execution-sdk-js/blob/ff8b72ef888dd47a840f36d4eb0ee84dd3b55a30/packages/aws-durable-execution-sdk-js/src/handlers/concurrent-execution-handler/concurrent-execution-handler.test.ts#L630-L655
+    assert result.completion_reason == CompletionReason.ALL_COMPLETED
 
 
 def test_concurrent_executor_execute_item_in_child_context():
@@ -1177,7 +1180,10 @@ def test_concurrent_executor_create_result_failure_tolerance_exceeded():
         return func(Mock())
 
     result = executor.execute(execution_state, mock_run_in_child_context)
-    assert result.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+    # WHEN all items complete, THEN completion reason is ALL_COMPLETED.
+    # we don't consider thresholds and limits.
+    # https://github.com/aws/aws-durable-execution-sdk-js/blob/ff8b72ef888dd47a840f36d4eb0ee84dd3b55a30/packages/aws-durable-execution-sdk-js/src/handlers/concurrent-execution-handler/concurrent-execution-handler.test.ts#L630-L655
+    assert result.completion_reason == CompletionReason.ALL_COMPLETED
 
 
 def test_single_task_suspend_bubbles_up():

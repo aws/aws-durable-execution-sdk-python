@@ -397,25 +397,66 @@ class ExecutionCounters:
         with self._lock:
             self.failure_count += 1
 
-    def should_complete(self) -> bool:
-        """Check if execution should complete."""
+    def should_continue(self) -> bool:
+        """
+        Check if we should continue starting new tasks (based on failure tolerance).
+        Matches TypeScript shouldContinue() logic.
+        """
         with self._lock:
-            # Success condition
+            # If no completion config, only continue if no failures
+            if (
+                self.tolerated_failure_count is None
+                and self.tolerated_failure_percentage is None
+            ):
+                return self.failure_count == 0
+
+            # Check failure count tolerance
+            if (
+                self.tolerated_failure_count is not None
+                and self.failure_count > self.tolerated_failure_count
+            ):
+                return False
+
+            # Check failure percentage tolerance
+            if self.tolerated_failure_percentage is not None and self.total_tasks > 0:
+                failure_percentage = (self.failure_count / self.total_tasks) * 100
+                if failure_percentage > self.tolerated_failure_percentage:
+                    return False
+
+            return True
+
+    def is_complete(self) -> bool:
+        """
+        Check if execution should complete (based on completion criteria).
+        Matches TypeScript isComplete() logic.
+        """
+        with self._lock:
+            completed_count = self.success_count + self.failure_count
+
+            # All tasks completed
+            if completed_count == self.total_tasks:
+                # Complete if no failure tolerance OR no failures OR min successful reached
+                return (
+                    (
+                        self.tolerated_failure_count is None
+                        and self.tolerated_failure_percentage is None
+                    )
+                    or self.failure_count == 0
+                    or self.success_count >= self.min_successful
+                )
+
+            # Min successful reached (even if not all tasks completed)
             if self.success_count >= self.min_successful:
                 return True
 
-            # Failure conditions
-            if self._is_failure_condition_reached(
-                tolerated_count=self.tolerated_failure_count,
-                tolerated_percentage=self.tolerated_failure_percentage,
-                failure_count=self.failure_count,
-            ):
-                return True
+            return False
 
-            # Impossible to succeed condition
-            # TODO: should this keep running? TS doesn't currently handle this either.
-            remaining_tasks = self.total_tasks - self.success_count - self.failure_count
-            return self.success_count + remaining_tasks < self.min_successful
+    def should_complete(self) -> bool:
+        """
+        Check if execution should complete.
+        Combines TypeScript shouldContinue() and isComplete() logic.
+        """
+        return self.is_complete() or not self.should_continue()
 
     def is_all_completed(self) -> bool:
         """True if all tasks completed successfully."""
@@ -724,15 +765,9 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
                     )
                 )
 
-        completion_reason: CompletionReason = (
-            CompletionReason.ALL_COMPLETED
-            if self.counters.is_all_completed()
-            else (
-                CompletionReason.MIN_SUCCESSFUL_REACHED
-                if self.counters.is_min_successful_reached()
-                else CompletionReason.FAILURE_TOLERANCE_EXCEEDED
-            )
-        )
+        # Use the same completion reason logic as _get_completion_reason for consistency
+        statuses = (item.status for item in batch_items)
+        completion_reason = _get_completion_reason(statuses, self.completion_config)
 
         return BatchResult(batch_items, completion_reason)
 
