@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.lambda_service import OperationSubType
     from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.state import ExecutionState
-    from aws_durable_execution_sdk_python.types import DurableContext
+    from aws_durable_execution_sdk_python.types import DurableContext, SummaryGenerator
 
 
 logger = logging.getLogger(__name__)
@@ -566,13 +566,24 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         sub_type_iteration: OperationSubType,
         name_prefix: str,
         serdes: SerDes | None,
+        summary_generator: SummaryGenerator | None = None,
     ):
+        """Initialize ConcurrentExecutor.
+
+        Args:
+            summary_generator: Optional function to generate compact summaries for large results.
+                When the serialized result exceeds 256KB, this generator creates a JSON summary
+                instead of checkpointing the full result. Used by map/parallel operations to
+                handle large BatchResult payloads efficiently. Matches TypeScript behavior in
+                run-in-child-context-handler.ts.
+        """
         self.executables = executables
         self.max_concurrency = max_concurrency
         self.completion_config = completion_config
         self.sub_type_top = sub_type_top
         self.sub_type_iteration = sub_type_iteration
         self.name_prefix = name_prefix
+        self.summary_generator = summary_generator
 
         # Event-driven state tracking for when the executor is done
         self._completion_event = threading.Event()
@@ -785,7 +796,11 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         return run_in_child_context(
             execute_in_child_context,
             f"{self.name_prefix}{executable.index}",
-            ChildConfig(serdes=self.serdes, sub_type=self.sub_type_iteration),
+            ChildConfig(
+                serdes=self.serdes,
+                sub_type=self.sub_type_iteration,
+                summary_generator=self.summary_generator,
+            ),
         )
 
 
