@@ -168,3 +168,7 @@ class CallableRuntimeErrorSerializableDetails:
             A string in the format "type: message"
         """
         return f"{self.type}: {self.message}"
+
+
+class SerDesError(DurableExecutionsError):
+    """Raised when serialization fails."""
