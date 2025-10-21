@@ -326,7 +326,7 @@ class DurableContext(DurableContextProtocol):
     ) -> BatchResult[T]:
         """Execute multiple callables in parallel."""
 
-        def parallel_in_child_context(child_context):
+        def parallel_in_child_context(child_context) -> BatchResult[T]:
             return parallel_handler(
                 callables=functions,
                 config=config,
