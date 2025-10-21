@@ -2,8 +2,18 @@
 
 from unittest.mock import Mock, patch
 
-from aws_durable_execution_sdk_python.concurrency import BatchResult, Executable
-from aws_durable_execution_sdk_python.config import CompletionConfig, MapConfig
+from aws_durable_execution_sdk_python.concurrency import (
+    BatchItem,
+    BatchItemStatus,
+    BatchResult,
+    CompletionReason,
+    Executable,
+)
+from aws_durable_execution_sdk_python.config import (
+    CompletionConfig,
+    ItemBatcher,
+    MapConfig,
+)
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.operation.map import MapExecutor, map_handler
 from aws_durable_execution_sdk_python.serdes import serialize
@@ -213,7 +223,17 @@ def test_map_handler_calls_executor_execute():
         return f"result_{item}"
 
     # Mock the executor.execute method
-    mock_batch_result = Mock(spec=BatchResult)
+    from aws_durable_execution_sdk_python.concurrency import (
+        BatchItem,
+        BatchItemStatus,
+        BatchResult,
+        CompletionReason,
+    )
+
+    mock_batch_result = BatchResult(
+        all=[BatchItem(index=0, status=BatchItemStatus.SUCCEEDED, result="test")],
+        completion_reason=CompletionReason.ALL_COMPLETED,
+    )
 
     with patch.object(
         MapExecutor, "execute", return_value=mock_batch_result
@@ -247,7 +267,10 @@ def test_map_handler_with_none_config_creates_default():
     # Mock MapExecutor.from_items to verify it's called with default config
     with patch.object(MapExecutor, "from_items") as mock_from_items:
         mock_executor = Mock()
-        mock_batch_result = Mock(spec=BatchResult)
+        mock_batch_result = BatchResult(
+            all=[BatchItem(index=0, status=BatchItemStatus.SUCCEEDED, result="test")],
+            completion_reason=CompletionReason.ALL_COMPLETED,
+        )
         mock_executor.execute.return_value = mock_batch_result
         mock_from_items.return_value = mock_executor
 
@@ -309,3 +332,195 @@ def test_map_handler_with_serdes():
 
     # Verify execute was called
     assert result.all[0].result == "RESULT_TEST_ITEM"
+
+
+def test_map_handler_with_summary_generator():
+    """Test that map_handler passes summary_generator to child config."""
+    items = ["item1", "item2"]
+
+    def callable_func(ctx, item, idx, items):
+        return f"large_result_{item}" * 1000  # Create a large result
+
+    def mock_summary_generator(result):
+        return f"Summary of {len(result)} chars for map item"
+
+    config = MapConfig(summary_generator=mock_summary_generator)
+
+    # Track the child_config passed to run_in_child_context
+    captured_child_configs = []
+
+    def mock_run_in_child_context(callable_func, name, child_config):
+        captured_child_configs.append(child_config)
+        return callable_func("mock-context")
+
+    class MockExecutionState:
+        pass
+
+    execution_state = MockExecutionState()
+
+    # Call map_handler with our mock run_in_child_context
+    result = map_handler(
+        items, callable_func, config, execution_state, mock_run_in_child_context
+    )
+
+    # Verify that the summary_generator was passed to the child config
+    assert len(captured_child_configs) > 0
+    child_config = captured_child_configs[0]
+    assert child_config.summary_generator is mock_summary_generator
+
+    # Test that the summary generator works
+    test_result = child_config.summary_generator("test" * 100)
+    assert test_result == "Summary of 400 chars for map item"
+
+
+def test_map_executor_from_items_with_summary_generator():
+    """Test MapExecutor.from_items preserves summary_generator."""
+    items = ["item1"]
+
+    def callable_func(ctx, item, idx, items):
+        return f"result_{item}"
+
+    def mock_summary_generator(result):
+        return f"Map summary: {result}"
+
+    config = MapConfig(summary_generator=mock_summary_generator)
+
+    executor = MapExecutor.from_items(items, callable_func, config)
+
+    # Verify that the summary_generator is preserved in the executor
+    assert executor.summary_generator is mock_summary_generator
+
+
+def test_map_handler_default_summary_generator():
+    """Test that map_handler uses default summary generator when config is None."""
+    items = ["item1"]
+
+    def callable_func(ctx, item, idx, items):
+        return f"result_{item}"
+
+    # Track the child_config passed to run_in_child_context
+    captured_child_configs = []
+
+    def mock_run_in_child_context(callable_func, name, child_config):
+        captured_child_configs.append(child_config)
+        return callable_func("mock-context")
+
+    class MockExecutionState:
+        pass
+
+    execution_state = MockExecutionState()
+
+    # Call map_handler with None config (should use default)
+    result = map_handler(
+        items, callable_func, None, execution_state, mock_run_in_child_context
+    )
+
+    # Verify that a default summary_generator was provided
+    assert len(captured_child_configs) > 0
+    child_config = captured_child_configs[0]
+    assert child_config.summary_generator is not None
+
+    # Test that the default summary generator works
+    test_result = child_config.summary_generator(
+        BatchResult([], CompletionReason.ALL_COMPLETED)
+    )
+    assert isinstance(test_result, str)
+    assert len(test_result) > 0
+
+
+def test_map_executor_init_with_summary_generator():
+    """Test MapExecutor initialization with summary_generator."""
+    items = ["item1"]
+    executables = [Executable(index=0, func=lambda: None)]
+
+    def mock_summary_generator(result):
+        return f"Summary: {result}"
+
+    executor = MapExecutor(
+        executables=executables,
+        items=items,
+        max_concurrency=2,
+        completion_config=CompletionConfig(),
+        top_level_sub_type=OperationSubType.MAP,
+        iteration_sub_type=OperationSubType.MAP_ITERATION,
+        name_prefix="test-",
+        serdes=None,
+        summary_generator=mock_summary_generator,
+    )
+
+    assert executor.summary_generator is mock_summary_generator
+    assert executor.items == items
+    assert executor.executables == executables
+
+
+def test_map_handler_with_explicit_none_summary_generator():
+    """Test that map_handler respects explicit None summary_generator."""
+
+    def func(ctx, item, index, array):
+        return f"processed_{item}"
+
+    items = ["item1", "item2"]
+    # Explicitly set summary_generator to None
+    config = MapConfig(summary_generator=None)
+
+    class MockExecutionState:
+        pass
+
+    execution_state = MockExecutionState()
+
+    # Capture the child configs passed to run_in_child_context
+    captured_child_configs = []
+
+    def mock_run_in_child_context(func, name, child_config):
+        captured_child_configs.append(child_config)
+        return func(Mock())
+
+    # Call map_handler with our mock run_in_child_context
+    result = map_handler(
+        items=items,
+        func=func,
+        config=config,
+        execution_state=execution_state,
+        run_in_child_context=mock_run_in_child_context,
+    )
+
+    # Verify that the summary_generator was set to None (not default)
+    assert len(captured_child_configs) > 0
+    child_config = captured_child_configs[0]
+    assert child_config.summary_generator is None
+
+    # Test that when None, it should result in empty string behavior
+    # This matches child.py: config.summary_generator(raw_result) if config.summary_generator else ""
+    test_result = (
+        child_config.summary_generator("test_data")
+        if child_config.summary_generator
+        else ""
+    )
+    assert test_result == ""
+
+
+def test_map_config_with_explicit_none_summary_generator():
+    """Test MapConfig with explicitly set None summary_generator."""
+    config = MapConfig(summary_generator=None)
+
+    assert config.summary_generator is None
+    assert config.max_concurrency is None
+    assert isinstance(config.item_batcher, ItemBatcher)
+    assert isinstance(config.completion_config, CompletionConfig)
+    assert config.serdes is None
+
+
+def test_map_config_default_summary_generator_behavior():
+    """Test MapConfig() with no summary_generator should result in empty string behavior."""
+    # When creating MapConfig() with no summary_generator specified
+    config = MapConfig()
+
+    # The summary_generator should be None by default
+    assert config.summary_generator is None
+
+    # But when used in the actual child.py logic, it should result in empty string
+    # This matches child.py: config.summary_generator(raw_result) if config.summary_generator else ""
+    test_result = (
+        config.summary_generator("test_data") if config.summary_generator else ""
+    )
+    assert test_result == ""

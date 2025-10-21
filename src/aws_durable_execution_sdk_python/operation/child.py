@@ -88,14 +88,28 @@ def child_handler(
             operation_id=operation_identifier.operation_id,
             durable_execution_arn=state.durable_execution_arn,
         )
+        # Summary Generator Logic:
+        # When the serialized result exceeds 256KB, we use ReplayChildren mode to avoid
+        # checkpointing large payloads. Instead, we checkpoint a compact summary and mark
+        # the operation for replay. This matches the TypeScript implementation behavior.
+        #
+        # See TypeScript reference:
+        # - aws-durable-execution-sdk-js/src/handlers/run-in-child-context-handler/run-in-child-context-handler.ts (lines ~200-220)
+        #
+        # The summary generator creates a JSON summary with metadata (type, counts, status)
+        # instead of the full BatchResult. During replay, the child context is re-executed
+        # to reconstruct the full result rather than deserializing from the checkpoint.
         replay_children: bool = False
         if len(serialized_result) > CHECKPOINT_SIZE_LIMIT:
             logger.debug(
-                "Large payload detected, using ReplayChildren mode: id: %s, name: %s",
+                "Large payload detected, using ReplayChildren mode: id: %s, name: %s, payload_size: %d, limit: %d",
                 operation_identifier.operation_id,
                 operation_identifier.name,
+                len(serialized_result),
+                CHECKPOINT_SIZE_LIMIT,
             )
             replay_children = True
+            # Use summary generator if provided, otherwise use empty string (matches TypeScript)
             serialized_result = (
                 config.summary_generator(raw_result) if config.summary_generator else ""
             )

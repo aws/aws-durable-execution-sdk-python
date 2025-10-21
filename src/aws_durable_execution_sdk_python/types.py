@@ -151,3 +151,23 @@ class LambdaContext(Protocol):  # pragma: no cover
 
     def get_remaining_time_in_millis(self) -> int: ...
     def log(self, msg) -> None: ...
+
+
+# region Summary
+
+"""Summary generators for concurrent operations.
+
+Summary generators create compact JSON representations of large BatchResult objects
+when the serialized result exceeds the 256KB checkpoint size limit. This prevents
+large payloads from being stored in checkpoints while maintaining operation metadata.
+
+When a summary is used, the operation is marked with ReplayChildren=true, causing
+the child context to be re-executed during replay to reconstruct the full result.
+"""
+
+
+class SummaryGenerator(Protocol):
+    def __call__(self, result: BatchResult) -> str: ...
+
+
+# endregion Summary
