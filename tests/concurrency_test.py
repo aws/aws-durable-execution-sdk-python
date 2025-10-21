@@ -1094,7 +1094,10 @@ def test_concurrent_executor_create_result_with_failed_branches():
     assert len(result.all) == 2
     assert result.all[0].status == BatchItemStatus.SUCCEEDED
     assert result.all[1].status == BatchItemStatus.FAILED
-    assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
+    # WHEN all items complete, THEN completion reason is ALL_COMPLETED.
+    # we don't consider thresholds and limits.
+    # https://github.com/aws/aws-durable-execution-sdk-js/blob/ff8b72ef888dd47a840f36d4eb0ee84dd3b55a30/packages/aws-durable-execution-sdk-js/src/handlers/concurrent-execution-handler/concurrent-execution-handler.test.ts#L630-L655
+    assert result.completion_reason == CompletionReason.ALL_COMPLETED
 
 
 def test_concurrent_executor_execute_item_in_child_context():
@@ -1177,7 +1180,10 @@ def test_concurrent_executor_create_result_failure_tolerance_exceeded():
         return func(Mock())
 
     result = executor.execute(execution_state, mock_run_in_child_context)
-    assert result.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+    # WHEN all items complete, THEN completion reason is ALL_COMPLETED.
+    # we don't consider thresholds and limits.
+    # https://github.com/aws/aws-durable-execution-sdk-js/blob/ff8b72ef888dd47a840f36d4eb0ee84dd3b55a30/packages/aws-durable-execution-sdk-js/src/handlers/concurrent-execution-handler/concurrent-execution-handler.test.ts#L630-L655
+    assert result.completion_reason == CompletionReason.ALL_COMPLETED
 
 
 def test_single_task_suspend_bubbles_up():
@@ -1843,6 +1849,482 @@ def test_create_result_with_suspended_executable():
     # Should raise SuspendExecution since single task suspends
     with pytest.raises(SuspendExecution):
         executor.execute(execution_state, mock_run_in_child_context)
+
+
+# Tests for _create_result method match statement branches
+def test_create_result_completed_branch():
+    """Test _create_result with COMPLETED status branch."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [Executable(0, lambda: "test")]
+    completion_config = CompletionConfig(min_successful=1)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    # Create executable with COMPLETED status
+    exe_state = ExecutableWithState(executables[0])
+    exe_state.complete("test_result")
+    executor.executables_with_state = [exe_state]
+
+    result = executor._create_result()  # noqa: SLF001
+
+    assert len(result.all) == 1
+    assert result.all[0].status == BatchItemStatus.SUCCEEDED
+    assert result.all[0].result == "test_result"
+    assert result.all[0].error is None
+    assert result.all[0].index == 0
+
+
+def test_create_result_failed_branch():
+    """Test _create_result with FAILED status branch."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [Executable(0, lambda: "test")]
+    completion_config = CompletionConfig(min_successful=1)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    # Create executable with FAILED status
+    exe_state = ExecutableWithState(executables[0])
+    test_error = ValueError("Test error message")
+    exe_state.fail(test_error)
+    executor.executables_with_state = [exe_state]
+
+    result = executor._create_result()  # noqa: SLF001
+
+    assert len(result.all) == 1
+    assert result.all[0].status == BatchItemStatus.FAILED
+    assert result.all[0].result is None
+    assert result.all[0].error is not None
+    assert result.all[0].error.message == "Test error message"
+    assert result.all[0].error.type == "ValueError"
+    assert result.all[0].index == 0
+
+
+def test_create_result_pending_branch():
+    """Test _create_result with PENDING status branch."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [Executable(0, lambda: "test")]
+    completion_config = CompletionConfig(min_successful=1)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    # Create executable with PENDING status (default state)
+    exe_state = ExecutableWithState(executables[0])
+    # PENDING is the default state, no need to change it
+    executor.executables_with_state = [exe_state]
+
+    result = executor._create_result()  # noqa: SLF001
+
+    assert len(result.all) == 1
+    assert result.all[0].status == BatchItemStatus.STARTED
+    assert result.all[0].result is None
+    assert result.all[0].error is None
+    assert result.all[0].index == 0
+    # By default, if we've terminated the reasoning is failure tolerance exceeded
+    # according to the spec
+    assert result.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+
+def test_create_result_running_branch():
+    """Test _create_result with RUNNING status branch."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [Executable(0, lambda: "test")]
+    completion_config = CompletionConfig(min_successful=1)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    # Create executable with RUNNING status
+    exe_state = ExecutableWithState(executables[0])
+    future = Future()
+    exe_state.run(future)
+    executor.executables_with_state = [exe_state]
+
+    result = executor._create_result()  # noqa: SLF001
+
+    assert len(result.all) == 1
+    assert result.all[0].status == BatchItemStatus.STARTED
+    assert result.all[0].result is None
+    assert result.all[0].error is None
+    assert result.all[0].index == 0
+    # By default, if we've terminated the reasoning is failure tolerance exceeded
+    # according to the spec
+    assert result.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+
+def test_create_result_suspended_branch():
+    """Test _create_result with SUSPENDED status branch."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [Executable(0, lambda: "test")]
+    completion_config = CompletionConfig(min_successful=1)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    # Create executable with SUSPENDED status
+    exe_state = ExecutableWithState(executables[0])
+    exe_state.suspend()
+    executor.executables_with_state = [exe_state]
+
+    result = executor._create_result()  # noqa: SLF001
+
+    assert len(result.all) == 1
+    assert result.all[0].status == BatchItemStatus.STARTED
+    assert result.all[0].result is None
+    assert result.all[0].error is None
+    assert result.all[0].index == 0
+    # By default, if we've terminated the reasoning is failure tolerance exceeded
+    # according to the spec
+    assert result.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+
+def test_create_result_suspended_with_timeout_branch():
+    """Test _create_result with SUSPENDED_WITH_TIMEOUT status branch."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [Executable(0, lambda: "test")]
+    completion_config = CompletionConfig(min_successful=1)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    # Create executable with SUSPENDED_WITH_TIMEOUT status
+    exe_state = ExecutableWithState(executables[0])
+    future_time = time.time() + 10
+    exe_state.suspend_with_timeout(future_time)
+    executor.executables_with_state = [exe_state]
+
+    result = executor._create_result()  # noqa: SLF001
+
+    assert len(result.all) == 1
+    assert result.all[0].status == BatchItemStatus.STARTED
+    assert result.all[0].result is None
+    assert result.all[0].error is None
+    assert result.all[0].index == 0
+    # By default, if we've terminated the reasoning is failure tolerance exceeded
+    # according to the spec
+    assert result.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+
+def test_create_result_mixed_statuses():
+    """Test _create_result with mixed executable statuses covering all branches."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [
+        Executable(0, lambda: "test0"),  # Will be COMPLETED
+        Executable(1, lambda: "test1"),  # Will be FAILED
+        Executable(2, lambda: "test2"),  # Will be PENDING
+        Executable(3, lambda: "test3"),  # Will be RUNNING
+        Executable(4, lambda: "test4"),  # Will be SUSPENDED
+        Executable(5, lambda: "test5"),  # Will be SUSPENDED_WITH_TIMEOUT
+    ]
+    completion_config = CompletionConfig(min_successful=1)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=6,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    # Create executables with different statuses
+    exe_states = [ExecutableWithState(exe) for exe in executables]
+
+    # COMPLETED
+    exe_states[0].complete("completed_result")
+
+    # FAILED
+    exe_states[1].fail(RuntimeError("Test failure"))
+
+    # PENDING (default state, no change needed)
+
+    # RUNNING
+    future = Future()
+    exe_states[3].run(future)
+
+    # SUSPENDED
+    exe_states[4].suspend()
+
+    # SUSPENDED_WITH_TIMEOUT
+    exe_states[5].suspend_with_timeout(time.time() + 10)
+
+    executor.executables_with_state = exe_states
+
+    result = executor._create_result()  # noqa: SLF001
+
+    assert len(result.all) == 6
+
+    # Check COMPLETED -> SUCCEEDED
+    assert result.all[0].status == BatchItemStatus.SUCCEEDED
+    assert result.all[0].result == "completed_result"
+    assert result.all[0].error is None
+
+    # Check FAILED -> FAILED
+    assert result.all[1].status == BatchItemStatus.FAILED
+    assert result.all[1].result is None
+    assert result.all[1].error is not None
+    assert result.all[1].error.message == "Test failure"
+
+    # Check PENDING -> STARTED
+    assert result.all[2].status == BatchItemStatus.STARTED
+    assert result.all[2].result is None
+    assert result.all[2].error is None
+
+    # Check RUNNING -> STARTED
+    assert result.all[3].status == BatchItemStatus.STARTED
+    assert result.all[3].result is None
+    assert result.all[3].error is None
+
+    # Check SUSPENDED -> STARTED
+    assert result.all[4].status == BatchItemStatus.STARTED
+    assert result.all[4].result is None
+    assert result.all[4].error is None
+
+    # Check SUSPENDED_WITH_TIMEOUT -> STARTED
+    assert result.all[5].status == BatchItemStatus.STARTED
+    assert result.all[5].result is None
+    assert result.all[5].error is None
+
+    # we've a min succ set to 1.
+    assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
+
+
+def test_create_result_multiple_completed():
+    """Test _create_result with multiple COMPLETED executables."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [
+        Executable(0, lambda: "test0"),
+        Executable(1, lambda: "test1"),
+        Executable(2, lambda: "test2"),
+    ]
+    completion_config = CompletionConfig(min_successful=3)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=3,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    # Create all executables with COMPLETED status
+    exe_states = [ExecutableWithState(exe) for exe in executables]
+    exe_states[0].complete("result_0")
+    exe_states[1].complete("result_1")
+    exe_states[2].complete("result_2")
+
+    executor.executables_with_state = exe_states
+
+    result = executor._create_result()  # noqa: SLF001
+
+    assert len(result.all) == 3
+    assert all(item.status == BatchItemStatus.SUCCEEDED for item in result.all)
+    assert result.all[0].result == "result_0"
+    assert result.all[1].result == "result_1"
+    assert result.all[2].result == "result_2"
+    assert result.completion_reason == CompletionReason.ALL_COMPLETED
+
+
+def test_create_result_multiple_failed():
+    """Test _create_result with multiple FAILED executables."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [
+        Executable(0, lambda: "test0"),
+        Executable(1, lambda: "test1"),
+        Executable(2, lambda: "test2"),
+    ]
+    completion_config = CompletionConfig(min_successful=1)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=3,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    # Create all executables with FAILED status
+    exe_states = [ExecutableWithState(exe) for exe in executables]
+    exe_states[0].fail(ValueError("Error 0"))
+    exe_states[1].fail(RuntimeError("Error 1"))
+    exe_states[2].fail(TypeError("Error 2"))
+
+    executor.executables_with_state = exe_states
+
+    result = executor._create_result()  # noqa: SLF001
+
+    assert len(result.all) == 3
+    assert all(item.status == BatchItemStatus.FAILED for item in result.all)
+    assert result.all[0].error.message == "Error 0"
+    assert result.all[1].error.message == "Error 1"
+    assert result.all[2].error.message == "Error 2"
+    assert result.completion_reason == CompletionReason.ALL_COMPLETED
+
+
+def test_create_result_multiple_started_states():
+    """Test _create_result with multiple executables in STARTED states."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [
+        Executable(0, lambda: "test0"),  # PENDING
+        Executable(1, lambda: "test1"),  # RUNNING
+        Executable(2, lambda: "test2"),  # SUSPENDED
+        Executable(3, lambda: "test3"),  # SUSPENDED_WITH_TIMEOUT
+    ]
+    completion_config = CompletionConfig(min_successful=1)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=4,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    # Create executables with different STARTED states
+    exe_states = [ExecutableWithState(exe) for exe in executables]
+
+    # PENDING (default state)
+
+    # RUNNING
+    future = Future()
+    exe_states[1].run(future)
+
+    # SUSPENDED
+    exe_states[2].suspend()
+
+    # SUSPENDED_WITH_TIMEOUT
+    exe_states[3].suspend_with_timeout(time.time() + 5)
+
+    executor.executables_with_state = exe_states
+
+    result = executor._create_result()  # noqa: SLF001
+
+    assert len(result.all) == 4
+    assert all(item.status == BatchItemStatus.STARTED for item in result.all)
+    assert all(item.result is None for item in result.all)
+    assert all(item.error is None for item in result.all)
+    # With completion config min_successful=1 and no completed items,
+    # this should be FAILURE_TOLERANCE_EXCEEDED
+    assert result.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+
+def test_create_result_empty_executables():
+    """Test _create_result with no executables."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = []
+    completion_config = CompletionConfig(min_successful=0)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    executor.executables_with_state = []
+
+    result = executor._create_result()  # noqa: SLF001
+
+    assert len(result.all) == 0
+    assert result.completion_reason == CompletionReason.ALL_COMPLETED
 
 
 def test_timer_scheduler_future_time_condition_false():
