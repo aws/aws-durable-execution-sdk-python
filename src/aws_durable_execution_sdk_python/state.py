@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING
 
-from aws_durable_execution_sdk_python.exceptions import DurableExecutionsError
+from aws_durable_execution_sdk_python.exceptions import (
+    CallableRuntimeError,
+)
 from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
     DurableServiceClient,
@@ -140,10 +142,18 @@ class CheckpointedResult:
             return False
         return op.context_details.replay_children if op.context_details else False
 
-    def raise_callable_error(self) -> None:
+    def raise_callable_error(self, msg: str | None = None) -> None:
         if self.error is None:
-            msg: str = "Attempted to throw exception, but no ErrorObject exists on the Checkpoint Operation."
-            raise DurableExecutionsError(msg)
+            err_msg = (
+                msg
+                or "Unknown error. No ErrorObject exists on the Checkpoint Operation."
+            )
+            raise CallableRuntimeError(
+                message=err_msg,
+                error_type=None,
+                data=None,
+                stack_trace=None,
+            )
 
         raise self.error.to_callable_runtime_error()
 

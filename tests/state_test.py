@@ -4,7 +4,9 @@ from unittest.mock import Mock, call
 
 import pytest
 
-from aws_durable_execution_sdk_python.exceptions import DurableExecutionsError
+from aws_durable_execution_sdk_python.exceptions import (
+    CallableRuntimeError,
+)
 from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
     ChainedInvokeDetails,
@@ -325,8 +327,16 @@ def test_checkpointed_result_raise_callable_error_no_error():
     """Test CheckpointedResult.raise_callable_error with no error."""
     result = CheckpointedResult()
 
-    with pytest.raises(DurableExecutionsError, match="no ErrorObject exists"):
+    with pytest.raises(CallableRuntimeError, match="Unknown error"):
         result.raise_callable_error()
+
+
+def test_checkpointed_result_raise_callable_error_no_error_with_message():
+    """Test CheckpointedResult.raise_callable_error with no error and custom message."""
+    result = CheckpointedResult()
+
+    with pytest.raises(CallableRuntimeError, match="Custom error message"):
+        result.raise_callable_error("Custom error message")
 
 
 def test_checkpointed_result_immutable():
