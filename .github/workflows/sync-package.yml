@@ -50,7 +50,7 @@ jobs:
         run: |
           aws lambda invoke \
             --function-name ${{ secrets.SYNC_LAMBDA_ARN }} \
-            --payload '{"gitFarmRepo":"${{ secrets.GITFARM_LAN_SDK_REPO }}","gitFarmBranch":"${{ secrets.GITFARM_LAN_SDK_BRANCH }}","gitFarmFilepath":"${{ steps.tar_gz_name.outputs.tar_gz_name }}","s3Bucket":"${{ secrets.S3_BUCKET_NAME }}","s3FilePath":"${{ steps.tar_gz_name.outputs.tar_gz_name }}"}' \
+            --payload '{"gitFarmRepo":"${{ secrets.GITFARM_LAN_SDK_REPO }}","gitFarmBranch":"${{ secrets.GITFARM_LAN_SDK_BRANCH }}","gitFarmFilepath":"${{ steps.tar_gz_name.outputs.tar_gz_name }}","s3Bucket":"${{ secrets.S3_BUCKET_NAME }}","s3FilePath":"${{ steps.tar_gz_name.outputs.tar_gz_name }}", "gitHubRepo": "aws-durable-execution-sdk-python", "gitHubCommit":"${{ github.sha }}"}' \
             --cli-binary-format raw-in-base64-out \
             output.txt
       - name: Check for error in lambda invoke
@@ -73,7 +73,7 @@ jobs:
         run: |
           aws lambda invoke \
             --function-name ${{ secrets.SYNC_LAMBDA_ARN }} \
-            --payload '{"gitFarmRepo":"${{ secrets.GITFARM_LAN_SDK_REPO }}","gitFarmBranch":"${{ secrets.GITFARM_LAN_SDK_BRANCH }}","gitFarmFilepath":"${{ steps.whl_name.outputs.whl_name }}","s3Bucket":"${{ secrets.S3_BUCKET_NAME }}","s3FilePath":"${{ steps.whl_name.outputs.whl_name }}"}' \
+            --payload '{"gitFarmRepo":"${{ secrets.GITFARM_LAN_SDK_REPO }}","gitFarmBranch":"${{ secrets.GITFARM_LAN_SDK_BRANCH }}","gitFarmFilepath":"${{ steps.whl_name.outputs.whl_name }}","s3Bucket":"${{ secrets.S3_BUCKET_NAME }}","s3FilePath":"${{ steps.whl_name.outputs.whl_name }}", "gitHubRepo": "aws-durable-execution-sdk-python", "gitHubCommit":"${{ github.sha }}"}' \
             --cli-binary-format raw-in-base64-out \
             output.txt
       - name: Check for error in lambda invoke
