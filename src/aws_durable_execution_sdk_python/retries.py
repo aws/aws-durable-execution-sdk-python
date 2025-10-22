@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 import random
 import re
 import sys
@@ -10,8 +11,39 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from aws_durable_execution_sdk_python.types import JitterStrategy
 
 Numeric = int | float
+
+# region Jitter
+
+class JitterStrategy(StrEnum):
+    """
+    Jitter strategies are used to introduce noise when attempting to retry
+    an invoke. We introduce noise to prevent a thundering-herd effect where
+    a group of accesses (e.g. invokes) happen at once.
+
+    Jitter is meant to be used to spread operations across time. 
+
+    members:
+        :NONE: No jitter; use the exact calculated delay
+        :FULL: Full jitter; random delay between 0 and calculated delay
+        :HALF: Half jitter; random delay between 0.5x and 1.0x of the calculated delay
+    """
+    NONE = "NONE"
+    FULL = "FULL"
+    HALF = "HALF"
+
+    def compute_jitter(self, delay) -> int:
+        match self:
+            case JitterStrategy.NONE:
+                return 0
+            case JitterStrategy.FULL:
+                return random.random() * delay  # noqa: S311
+            case JitterStrategy.HALF:
+                return (random.random() * 0.5 + 0.5)  # noqa: S311
+
+# endregion Jitter
 
 
 @dataclass
@@ -38,7 +70,7 @@ class RetryStrategyConfig:
     initial_delay_seconds: int = 5
     max_delay_seconds: int = 300  # 5 minutes
     backoff_rate: Numeric = 2.0
-    jitter_seconds: Numeric = 1.0
+    jitter_strategy: JitterStrategy = field(default=JitterStrategy.FULL)
     retryable_errors: list[str | re.Pattern] = field(
         default_factory=lambda: [re.compile(r".*")]
     )
@@ -77,9 +109,7 @@ def create_retry_strategy(
             config.initial_delay_seconds * (config.backoff_rate ** (attempts_made - 1)),
             config.max_delay_seconds,
         )
-
-        # Add jitter (random not for cryptographic purposes, hence noqa)
-        jitter = (random.random() * 2 - 1) * config.jitter_seconds  # noqa: S311
+        jitter = config.jitter_strategy.compute_jitter(delay)        
         final_delay = max(1, delay + jitter)
 
         return RetryDecision.retry(round(final_delay))
@@ -104,7 +134,6 @@ class RetryPresets:
                 initial_delay_seconds=5,
                 max_delay_seconds=60,
                 backoff_rate=2,
-                jitter_seconds=1,
             )
         )
 
@@ -114,7 +143,6 @@ class RetryPresets:
         return create_retry_strategy(
             RetryStrategyConfig(
                 max_attempts=3,
-                initial_delay_seconds=1,
                 backoff_rate=2,
                 jitter_seconds=0.5,
             )
@@ -129,7 +157,6 @@ class RetryPresets:
                 initial_delay_seconds=5,
                 max_delay_seconds=300,
                 backoff_rate=2,
-                jitter_seconds=1,
             )
         )
 
@@ -142,6 +169,5 @@ class RetryPresets:
                 initial_delay_seconds=1,
                 max_delay_seconds=60,
                 backoff_rate=1.5,
-                jitter_seconds=0.3,
             )
         )
