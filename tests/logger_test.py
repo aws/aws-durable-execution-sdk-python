@@ -4,7 +4,14 @@ from collections.abc import Mapping
 from unittest.mock import Mock
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
-from aws_durable_execution_sdk_python.logger import Logger, LoggerInterface, LogInfo
+from aws_durable_execution_sdk_python.lambda_service import Operation, OperationType
+from aws_durable_execution_sdk_python.logger import (
+    Logger,
+    LoggerInterface,
+    LogInfo,
+    ReplayAwareLogger,
+)
+from aws_durable_execution_sdk_python.state import ExecutionState
 
 
 class PowertoolsLoggerStub:
@@ -325,3 +332,203 @@ def test_logger_extra_override():
         "new_field": "value",
     }
     mock_logger.info.assert_called_once_with("test", extra=expected_extra)
+
+
+def test_replay_detection_with_operations():
+    """Test replay detection when operations exist but not visited."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.operations = {
+        "step1": Mock(spec=Operation, operation_type=OperationType.STEP),
+        "step2": Mock(spec=Operation, operation_type=OperationType.STEP),
+    }
+
+    log_info = LogInfo("arn:aws:test")
+    logger = Logger.from_log_info(Mock(), log_info, execution_state=mock_state)
+
+    # Should be in replay mode when operations exist but not visited
+    assert logger.is_replay() is True
+
+
+def test_replay_detection_partial_visited():
+    """Test replay detection when some operations are visited."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.operations = {
+        "step1": Mock(spec=Operation, operation_type=OperationType.STEP),
+        "step2": Mock(spec=Operation, operation_type=OperationType.STEP),
+    }
+
+    log_info = LogInfo("arn:aws:test")
+    logger = Logger.from_log_info(Mock(), log_info, execution_state=mock_state)
+
+    # Mark one operation as visited
+    logger.mark_operation_visited("step1")
+
+    # Should still be in replay mode because step2 not visited
+    assert logger.is_replay() is True
+
+
+def test_replay_detection_all_visited():
+    """Test replay detection when all operations are visited."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.operations = {
+        "step1": Mock(spec=Operation, operation_type=OperationType.STEP),
+        "step2": Mock(spec=Operation, operation_type=OperationType.STEP),
+    }
+
+    log_info = LogInfo("arn:aws:test")
+    logger = Logger.from_log_info(Mock(), log_info, execution_state=mock_state)
+
+    # Mark all operations as visited
+    logger.mark_operation_visited("step1")
+    logger.mark_operation_visited("step2")
+
+    # Should not be in replay mode
+    assert logger.is_replay() is False
+
+
+def test_replay_detection_ignores_execution_operations():
+    """Test that EXECUTION operations don't trigger replay mode."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.operations = {
+        "execution-1": Mock(spec=Operation, operation_type=OperationType.EXECUTION),
+    }
+
+    log_info = LogInfo("arn:aws:test")
+    logger = Logger.from_log_info(Mock(), log_info, execution_state=mock_state)
+
+    # Should NOT be in replay mode because EXECUTION operations are ignored
+    assert logger.is_replay() is False
+
+
+def test_replay_detection_no_execution_state():
+    """Test replay detection when no execution state is provided."""
+    log_info = LogInfo("arn:aws:test")
+    logger = Logger.from_log_info(Mock(), log_info)
+
+    # Should not be in replay mode when no execution state
+    assert logger.is_replay() is False
+
+
+def test_replay_detection_empty_operations():
+    """Test replay detection when execution state has no operations."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.operations = {}
+
+    log_info = LogInfo("arn:aws:test")
+    logger = Logger.from_log_info(Mock(), log_info, execution_state=mock_state)
+
+    # Should not be in replay mode when no operations
+    assert logger.is_replay() is False
+
+
+def test_logging_suppressed_during_replay():
+    """Test that logging is suppressed during replay."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.operations = {
+        "step1": Mock(spec=Operation, operation_type=OperationType.STEP),
+    }
+
+    mock_underlying_logger = Mock()
+    log_info = LogInfo("arn:aws:test")
+    logger = Logger.from_log_info(
+        mock_underlying_logger, log_info, execution_state=mock_state
+    )
+
+    # During replay, logging should be suppressed
+    logger.info("This should not be logged during replay")
+    logger.debug("This should not be logged during replay")
+    logger.warning("This should not be logged during replay")
+    logger.error("This should not be logged during replay")
+    logger.exception("This should not be logged during replay")
+
+    mock_underlying_logger.info.assert_not_called()
+    mock_underlying_logger.debug.assert_not_called()
+    mock_underlying_logger.warning.assert_not_called()
+    mock_underlying_logger.error.assert_not_called()
+    mock_underlying_logger.exception.assert_not_called()
+
+
+def test_logging_works_after_replay():
+    """Test that logging works after replay ends."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.operations = {
+        "step1": Mock(spec=Operation, operation_type=OperationType.STEP),
+    }
+
+    mock_underlying_logger = Mock()
+    log_info = LogInfo("arn:aws:test")
+    logger = Logger.from_log_info(
+        mock_underlying_logger, log_info, execution_state=mock_state
+    )
+
+    # Mark operation as visited (end replay)
+    logger.mark_operation_visited("step1")
+
+    # Now logging should work
+    logger.info("This should be logged after replay")
+    mock_underlying_logger.info.assert_called_once()
+
+
+def test_mark_operation_visited():
+    """Test marking operations as visited."""
+    log_info = LogInfo("arn:aws:test")
+    logger = Logger.from_log_info(Mock(), log_info)
+
+    # Initially no operations visited
+    assert "op1" not in logger.visited_operations
+
+    # Mark operation as visited
+    logger.mark_operation_visited("op1")
+    assert "op1" in logger.visited_operations
+
+    # Mark another operation
+    logger.mark_operation_visited("op2")
+    assert "op2" in logger.visited_operations
+    assert "op1" in logger.visited_operations
+
+
+def test_replay_aware_logger():
+    """Test ReplayAwareLogger custom behavior."""
+
+    class AlwaysLogLogger(ReplayAwareLogger):
+        def _should_log(self) -> bool:
+            return True  # Always log, even during replay
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.operations = {
+        "step1": Mock(spec=Operation, operation_type=OperationType.STEP),
+    }
+
+    mock_underlying_logger = Mock()
+    log_info = LogInfo("arn:aws:test")
+
+    custom_logger = AlwaysLogLogger.from_log_info(
+        mock_underlying_logger, log_info, execution_state=mock_state
+    )
+
+    # Should be in replay mode
+    assert custom_logger.is_replay() is True
+
+    # But should still log because of custom _should_log implementation
+    custom_logger.info("This should log even during replay")
+    mock_underlying_logger.info.assert_called_once()
+
+
+def test_with_log_info_preserves_execution_state():
+    """Test that with_log_info preserves execution state and visited operations."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.operations = {
+        "step1": Mock(spec=Operation, operation_type=OperationType.STEP),
+    }
+
+    original_info = LogInfo("arn:aws:test", "parent1")
+    logger = Logger.from_log_info(Mock(), original_info, execution_state=mock_state)
+    logger.mark_operation_visited("step1")
+
+    new_info = LogInfo("arn:aws:new", "parent2", "new_name")
+    new_logger = logger.with_log_info(new_info)
+
+    # Should preserve execution state and visited operations
+    assert new_logger._execution_state is mock_state  # noqa: SLF001
+    assert "step1" in new_logger.visited_operations
+    assert new_logger.is_replay() is False  # Because step1 is visited

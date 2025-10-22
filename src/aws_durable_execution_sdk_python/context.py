@@ -167,6 +167,7 @@ class DurableContext(DurableContextProtocol):
         self.logger: Logger = logger or Logger.from_log_info(
             logger=logging.getLogger(),
             info=log_info,
+            execution_state=state,
         )
 
     # region factories
@@ -212,6 +213,8 @@ class DurableContext(DurableContextProtocol):
         self.logger = Logger.from_log_info(
             logger=new_logger,
             info=self._log_info,
+            execution_state=self.state,
+            visited_operations=self.logger.visited_operations,
         )
 
     def _create_step_id(self) -> str:
@@ -248,6 +251,9 @@ class DurableContext(DurableContextProtocol):
         if not config:
             config = CallbackConfig()
         operation_id: str = self._create_step_id()
+        # Mark operation as visited before execution
+        self.logger.mark_operation_visited(operation_id)
+
         callback_id: str = create_callback_handler(
             state=self.state,
             operation_identifier=OperationIdentifier(
@@ -281,12 +287,16 @@ class DurableContext(DurableContextProtocol):
         Returns:
             The result of the invoked function
         """
+        operation_id = self._create_step_id()
+        # Mark operation as visited before execution
+        self.logger.mark_operation_visited(operation_id)
+
         return invoke_handler(
             function_name=function_name,
             payload=payload,
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=self._create_step_id(),
+                operation_id=operation_id,
                 parent_id=self._parent_id,
                 name=name,
             ),
@@ -361,6 +371,8 @@ class DurableContext(DurableContextProtocol):
         step_name: str | None = self._resolve_step_name(name, func)
         # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
         operation_id = self._create_step_id()
+        # Mark operation as visited before execution
+        self.logger.mark_operation_visited(operation_id)
 
         def callable_with_child_context():
             return func(self.create_child_context(parent_id=operation_id))
@@ -383,12 +395,16 @@ class DurableContext(DurableContextProtocol):
         step_name = self._resolve_step_name(name, func)
         logger.debug("Step name: %s", step_name)
 
+        operation_id = self._create_step_id()
+        # Mark operation as visited before execution
+        self.logger.mark_operation_visited(operation_id)
+
         return step_handler(
             func=func,
             config=config,
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=self._create_step_id(),
+                operation_id=operation_id,
                 parent_id=self._parent_id,
                 name=step_name,
             ),
@@ -405,11 +421,16 @@ class DurableContext(DurableContextProtocol):
         if seconds < 1:
             msg = "seconds must be an integer greater than 0"
             raise ValidationError(msg)
+
+        operation_id = self._create_step_id()
+        # Mark operation as visited before execution
+        self.logger.mark_operation_visited(operation_id)
+
         wait_handler(
             seconds=seconds,
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=self._create_step_id(),
+                operation_id=operation_id,
                 parent_id=self._parent_id,
                 name=name,
             ),
@@ -455,12 +476,16 @@ class DurableContext(DurableContextProtocol):
             msg = "`config` is required for wait_for_condition"
             raise ValidationError(msg)
 
+        operation_id = self._create_step_id()
+        # Mark operation as visited before execution
+        self.logger.mark_operation_visited(operation_id)
+
         return wait_for_condition_handler(
             check=check,
             config=config,
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=self._create_step_id(),
+                operation_id=operation_id,
                 parent_id=self._parent_id,
                 name=name,
             ),
