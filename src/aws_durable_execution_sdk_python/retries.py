@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
+import math
 import random
 import re
-import sys
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from aws_durable_execution_sdk_python.types import JitterStrategy
 
 Numeric = int | float
 
 # region Jitter
+
 
 class JitterStrategy(StrEnum):
     """
@@ -23,25 +23,27 @@ class JitterStrategy(StrEnum):
     an invoke. We introduce noise to prevent a thundering-herd effect where
     a group of accesses (e.g. invokes) happen at once.
 
-    Jitter is meant to be used to spread operations across time. 
+    Jitter is meant to be used to spread operations across time.
 
     members:
         :NONE: No jitter; use the exact calculated delay
         :FULL: Full jitter; random delay between 0 and calculated delay
         :HALF: Half jitter; random delay between 0.5x and 1.0x of the calculated delay
     """
+
     NONE = "NONE"
     FULL = "FULL"
     HALF = "HALF"
 
-    def compute_jitter(self, delay) -> int:
+    def compute_jitter(self, delay) -> float:
         match self:
             case JitterStrategy.NONE:
                 return 0
-            case JitterStrategy.FULL:
-                return random.random() * delay  # noqa: S311
             case JitterStrategy.HALF:
-                return (random.random() * 0.5 + 0.5)  # noqa: S311
+                return random.random() * 0.5 + 0.5  # noqa: S311
+            case _:  # default is FULL
+                return random.random() * delay  # noqa: S311
+
 
 # endregion Jitter
 
@@ -66,7 +68,7 @@ class RetryDecision:
 
 @dataclass
 class RetryStrategyConfig:
-    max_attempts: int = sys.maxsize  # "infinite", practically
+    max_attempts: int = 3  # "infinite", practically
     initial_delay_seconds: int = 5
     max_delay_seconds: int = 300  # 5 minutes
     backoff_rate: Numeric = 2.0
@@ -109,8 +111,9 @@ def create_retry_strategy(
             config.initial_delay_seconds * (config.backoff_rate ** (attempts_made - 1)),
             config.max_delay_seconds,
         )
-        jitter = config.jitter_strategy.compute_jitter(delay)        
-        final_delay = max(1, delay + jitter)
+        delay_with_jitter = delay + config.jitter_strategy.compute_jitter(delay)
+        delay_with_jitter = math.ceil(delay_with_jitter)
+        final_delay = max(1, delay_with_jitter)
 
         return RetryDecision.retry(round(final_delay))
 
@@ -123,17 +126,18 @@ class RetryPresets:
     @classmethod
     def none(cls) -> Callable[[Exception, int], RetryDecision]:
         """No retries."""
-        return create_retry_strategy(RetryStrategyConfig(max_attempts=0))
+        return create_retry_strategy(RetryStrategyConfig(max_attempts=1))
 
     @classmethod
     def default(cls) -> Callable[[Exception, int], RetryDecision]:
         """Default retries, will be used automatically if retryConfig is missing"""
         return create_retry_strategy(
             RetryStrategyConfig(
-                max_attempts=sys.maxsize,
+                max_attempts=6,
                 initial_delay_seconds=5,
                 max_delay_seconds=60,
                 backoff_rate=2,
+                jitter_strategy=JitterStrategy.FULL,
             )
         )
 
@@ -142,9 +146,7 @@ class RetryPresets:
         """Quick retries for transient errors"""
         return create_retry_strategy(
             RetryStrategyConfig(
-                max_attempts=3,
-                backoff_rate=2,
-                jitter_seconds=0.5,
+                max_attempts=3, backoff_rate=2, jitter_strategy=JitterStrategy.HALF
             )
         )
 
@@ -169,5 +171,6 @@ class RetryPresets:
                 initial_delay_seconds=1,
                 max_delay_seconds=60,
                 backoff_rate=1.5,
+                jitter_strategy=JitterStrategy.NONE,
             )
         )
