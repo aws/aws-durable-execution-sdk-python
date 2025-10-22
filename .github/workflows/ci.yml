@@ -12,7 +12,21 @@ on:
     branches: [ main ]
 
 jobs:
+  lint-commits:
+    # Note: To re-run `lint-commits` after fixing the PR title, close-and-reopen the PR.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Check PR title
+        run: |
+          node "$GITHUB_WORKSPACE/.github/workflows/lintcommit.js"
+
   build:
+    needs: lint-commits
 
     runs-on: ubuntu-latest
     strategy:
