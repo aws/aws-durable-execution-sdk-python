@@ -5,11 +5,11 @@ from __future__ import annotations
 import heapq
 import logging
 import threading
-import time
 from abc import ABC, abstractmethod
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Generic, Self, TypeVar
 
@@ -258,7 +258,7 @@ class ExecutableWithState(Generic[CallableType, ResultType]):
         self.executable = executable
         self._status = BranchStatus.PENDING
         self._future: Future | None = None
-        self._suspend_until: float | None = None
+        self._suspend_until: datetime | None = None
         self._result: ResultType = None  # type: ignore[assignment]
         self._is_result_set: bool = False
         self._error: Exception | None = None
@@ -293,7 +293,7 @@ class ExecutableWithState(Generic[CallableType, ResultType]):
         return self._error
 
     @property
-    def suspend_until(self) -> float | None:
+    def suspend_until(self) -> datetime | None:
         """Get suspend timestamp."""
         return self._suspend_until
 
@@ -308,7 +308,7 @@ class ExecutableWithState(Generic[CallableType, ResultType]):
         return self._status is BranchStatus.SUSPENDED or (
             self._status is BranchStatus.SUSPENDED_WITH_TIMEOUT
             and self._suspend_until is not None
-            and time.time() >= self._suspend_until
+            and datetime.now(UTC) >= self._suspend_until
         )
 
     @property
@@ -333,7 +333,7 @@ class ExecutableWithState(Generic[CallableType, ResultType]):
         self._status = BranchStatus.SUSPENDED
         self._suspend_until = None
 
-    def suspend_with_timeout(self, timestamp: float) -> None:
+    def suspend_with_timeout(self, timestamp: datetime) -> None:
         """Transition to SUSPENDED_WITH_TIMEOUT state."""
         self._status = BranchStatus.SUSPENDED_WITH_TIMEOUT
         self._suspend_until = timestamp
@@ -507,11 +507,11 @@ class TimerScheduler:
         self.shutdown()
 
     def schedule_resume(
-        self, exe_state: ExecutableWithState, resume_time: float
+        self, exe_state: ExecutableWithState, resume_time: datetime
     ) -> None:
         """Schedule a task to resume at the specified time."""
         with self._lock:
-            heapq.heappush(self._pending_resumes, (resume_time, exe_state))
+            heapq.heappush(self._pending_resumes, (resume_time.timestamp(), exe_state))
 
     def shutdown(self) -> None:
         """Shutdown the timer thread and cancel all pending resumes."""
@@ -534,7 +534,7 @@ class TimerScheduler:
                 self._shutdown.wait(timeout=0.1)
                 continue
 
-            current_time = time.time()
+            current_time = datetime.now(UTC).timestamp()
             if current_time >= next_resume_time:
                 # Time to resume
                 with self._lock:
@@ -675,7 +675,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
 
     def should_execution_suspend(self) -> SuspendResult:
         """Check if execution should suspend."""
-        earliest_timestamp: float = float("inf")
+        earliest_timestamp: datetime | None = None
         indefinite_suspend_task: (
             ExecutableWithState[CallableType, ResultType] | None
         ) = None
@@ -685,16 +685,16 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
                 # Exit here! Still have tasks that can make progress, don't suspend.
                 return SuspendResult.do_not_suspend()
             if exe_state.status is BranchStatus.SUSPENDED_WITH_TIMEOUT:
-                if (
-                    exe_state.suspend_until
-                    and exe_state.suspend_until < earliest_timestamp
+                if exe_state.suspend_until and (
+                    earliest_timestamp is None
+                    or exe_state.suspend_until < earliest_timestamp
                 ):
                     earliest_timestamp = exe_state.suspend_until
             elif exe_state.status is BranchStatus.SUSPENDED:
                 indefinite_suspend_task = exe_state
 
         # All tasks are in final states and at least one of them is a suspend.
-        if earliest_timestamp != float("inf"):
+        if earliest_timestamp is not None:
             return SuspendResult.suspend(
                 TimedSuspendExecution(
                     "All concurrent work complete or suspended pending retry.",

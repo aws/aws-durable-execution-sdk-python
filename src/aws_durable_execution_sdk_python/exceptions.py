@@ -5,12 +5,8 @@ Avoid any non-stdlib references in this module, it is at the bottom of the depen
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import datetime
+from datetime import UTC, datetime, timedelta
 
 
 class DurableExecutionsError(Exception):
@@ -75,10 +71,10 @@ class TimedSuspendExecution(SuspendExecution):
     This is a specialized form of SuspendExecution that includes a scheduled resume time.
 
     Attributes:
-        scheduled_timestamp (float): Unix timestamp in seconds at which to resume.
+        scheduled_timestamp (datetime): DateTime at which to resume.
     """
 
-    def __init__(self, message: str, scheduled_timestamp: float):
+    def __init__(self, message: str, scheduled_timestamp: datetime):
         super().__init__(message)
         self.scheduled_timestamp = scheduled_timestamp
 
@@ -97,23 +93,23 @@ class TimedSuspendExecution(SuspendExecution):
             >>> exception = TimedSuspendExecution.from_delay("Waiting for callback", 30)
             >>> # Will suspend for 30 seconds from now
         """
-        resume_time = time.time() + delay_seconds
+        resume_time = datetime.now(UTC) + timedelta(seconds=delay_seconds)
         return cls(message, scheduled_timestamp=resume_time)
 
     @classmethod
     def from_datetime(
-        cls, message: str, datetime_timestamp: datetime.datetime
+        cls, message: str, datetime_timestamp: datetime
     ) -> TimedSuspendExecution:
         """Create a timed suspension with the delay calculated from now.
 
         Args:
             message: Descriptive message for the suspension
-            datetime_timestamp: Unix datetime timestamp in seconds at which to resume
+            datetime_timestamp: DateTime timestamp at which to resume
 
         Returns:
             TimedSuspendExecution: Instance with calculated resume time
         """
-        return cls(message, scheduled_timestamp=datetime_timestamp.timestamp())
+        return cls(message, scheduled_timestamp=datetime_timestamp)
 
 
 class OrderedLockError(DurableExecutionsError):

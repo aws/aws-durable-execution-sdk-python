@@ -1,6 +1,6 @@
 """Unit tests for exceptions module."""
 
-import time
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -130,7 +130,7 @@ def test_callable_runtime_error_serializable_details_frozen():
 
 def test_timed_suspend_execution():
     """Test TimedSuspendExecution exception."""
-    scheduled_time = 1234567890.0
+    scheduled_time = datetime.now(UTC)
     error = TimedSuspendExecution("timed suspend", scheduled_time)
     assert str(error) == "timed suspend"
     assert error.scheduled_timestamp == scheduled_time
@@ -143,12 +143,16 @@ def test_timed_suspend_execution_from_delay():
     message = "Waiting for callback"
     delay_seconds = 30
 
-    # Mock time.time() to get predictable results
-    with patch("time.time", return_value=1000.0):
+    # Mock datetime.now() to get predictable results
+    mock_now = datetime(2023, 1, 1, 12, 0, 0, tzinfo=UTC)
+    with patch("aws_durable_execution_sdk_python.exceptions.datetime") as mock_datetime:
+        mock_datetime.now.return_value = mock_now
+        mock_datetime.side_effect = datetime
         error = TimedSuspendExecution.from_delay(message, delay_seconds)
 
     assert str(error) == message
-    assert error.scheduled_timestamp == 1030.0  # 1000.0 + 30
+    expected_time = mock_now + timedelta(seconds=30)
+    assert error.scheduled_timestamp == expected_time
     assert isinstance(error, TimedSuspendExecution)
     assert isinstance(error, SuspendExecution)
 
@@ -158,11 +162,14 @@ def test_timed_suspend_execution_from_delay_zero_delay():
     message = "Immediate suspension"
     delay_seconds = 0
 
-    with patch("time.time", return_value=500.0):
+    mock_now = datetime(2023, 1, 1, 12, 0, 0, tzinfo=UTC)
+    with patch("aws_durable_execution_sdk_python.exceptions.datetime") as mock_datetime:
+        mock_datetime.now.return_value = mock_now
+        mock_datetime.side_effect = datetime
         error = TimedSuspendExecution.from_delay(message, delay_seconds)
 
     assert str(error) == message
-    assert error.scheduled_timestamp == 500.0  # 500.0 + 0
+    assert error.scheduled_timestamp == mock_now  # no delay added
     assert isinstance(error, TimedSuspendExecution)
 
 
@@ -171,11 +178,15 @@ def test_timed_suspend_execution_from_delay_negative_delay():
     message = "Past suspension"
     delay_seconds = -10
 
-    with patch("time.time", return_value=100.0):
+    mock_now = datetime(2023, 1, 1, 12, 0, 0, tzinfo=UTC)
+    with patch("aws_durable_execution_sdk_python.exceptions.datetime") as mock_datetime:
+        mock_datetime.now.return_value = mock_now
+        mock_datetime.side_effect = datetime
         error = TimedSuspendExecution.from_delay(message, delay_seconds)
 
     assert str(error) == message
-    assert error.scheduled_timestamp == 90.0  # 100.0 + (-10)
+    expected_time = mock_now + timedelta(seconds=-10)
+    assert error.scheduled_timestamp == expected_time
     assert isinstance(error, TimedSuspendExecution)
 
 
@@ -184,11 +195,15 @@ def test_timed_suspend_execution_from_delay_large_delay():
     message = "Long suspension"
     delay_seconds = 3600  # 1 hour
 
-    with patch("time.time", return_value=0.0):
+    mock_now = datetime(2023, 1, 1, 12, 0, 0, tzinfo=UTC)
+    with patch("aws_durable_execution_sdk_python.exceptions.datetime") as mock_datetime:
+        mock_datetime.now.return_value = mock_now
+        mock_datetime.side_effect = datetime
         error = TimedSuspendExecution.from_delay(message, delay_seconds)
 
     assert str(error) == message
-    assert error.scheduled_timestamp == 3600.0  # 0.0 + 3600
+    expected_time = mock_now + timedelta(seconds=3600)
+    assert error.scheduled_timestamp == expected_time
     assert isinstance(error, TimedSuspendExecution)
 
 
@@ -197,15 +212,15 @@ def test_timed_suspend_execution_from_delay_calculation_accuracy():
     message = "Accurate timing test"
     delay_seconds = 42
 
-    # Test with actual time.time() to ensure the calculation works in real scenarios
-    before_time = time.time()
+    # Test with actual datetime.now() to ensure the calculation works in real scenarios
+    before_time = datetime.now(UTC)
     error = TimedSuspendExecution.from_delay(message, delay_seconds)
-    after_time = time.time()
+    after_time = datetime.now(UTC)
 
     # The scheduled timestamp should be within a reasonable range
     # (accounting for the small time difference between calls)
-    expected_min = before_time + delay_seconds
-    expected_max = after_time + delay_seconds
+    expected_min = before_time + timedelta(seconds=delay_seconds)
+    expected_max = after_time + timedelta(seconds=delay_seconds)
 
     assert expected_min <= error.scheduled_timestamp <= expected_max
     assert str(error) == message

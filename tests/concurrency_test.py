@@ -3,6 +3,7 @@
 import threading
 import time
 from concurrent.futures import Future
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
 
 import pytest
@@ -607,12 +608,12 @@ def test_executable_with_state_can_resume():
     assert exe_state.can_resume
 
     # Suspended with timeout in future
-    future_time = time.time() + 10
+    future_time = datetime.now(UTC) + timedelta(seconds=10)
     exe_state.suspend_with_timeout(future_time)
     assert not exe_state.can_resume
 
     # Suspended with timeout in past
-    past_time = time.time() - 10
+    past_time = datetime.now(UTC) - timedelta(seconds=10)
     exe_state.suspend_with_timeout(past_time)
     assert exe_state.can_resume
 
@@ -655,7 +656,7 @@ def test_executable_with_state_suspend_with_timeout():
     """Test ExecutableWithState suspend_with_timeout method."""
     executable = Executable(index=1, func=lambda: "test")
     exe_state = ExecutableWithState(executable)
-    timestamp = time.time() + 5
+    timestamp = datetime.now(UTC) + timedelta(seconds=5)
 
     exe_state.suspend_with_timeout(timestamp)
     assert exe_state.status == BranchStatus.SUSPENDED_WITH_TIMEOUT
@@ -930,8 +931,8 @@ def test_timer_scheduler_double_check_resume_queue():
         exe_state2 = ExecutableWithState(Executable(1, lambda: "test"))
 
         # Schedule two tasks with different times to avoid comparison issues
-        past_time1 = time.time() - 2
-        past_time2 = time.time() - 1
+        past_time1 = datetime.now(UTC) - timedelta(seconds=2)
+        past_time2 = datetime.now(UTC) - timedelta(seconds=1)
         scheduler.schedule_resume(exe_state1, past_time1)
         scheduler.schedule_resume(exe_state2, past_time2)
 
@@ -968,7 +969,9 @@ def test_concurrent_executor_on_task_complete_timed_suspend():
 
     exe_state = ExecutableWithState(executables[0])
     future = Mock()
-    future.result.side_effect = TimedSuspendExecution("test message", time.time() + 1)
+    future.result.side_effect = TimedSuspendExecution(
+        "test message", datetime.now(UTC) + timedelta(seconds=1)
+    )
 
     scheduler = Mock()
     scheduler.schedule_resume = Mock()
@@ -1192,7 +1195,9 @@ def test_single_task_suspend_bubbles_up():
     class TestExecutor(ConcurrentExecutor):
         def execute_item(self, child_context, executable):
             msg = "test"
-            raise TimedSuspendExecution(msg, time.time() + 1)  # Future time
+            raise TimedSuspendExecution(
+                msg, datetime.now(UTC) + timedelta(seconds=1)
+            )  # Future time
 
     executables = [Executable(0, lambda: "test")]
     completion_config = CompletionConfig(
@@ -1235,7 +1240,9 @@ def test_multiple_tasks_one_suspends_execution_continues():
             if executable.index == 0:  # Task A
                 self.task_a_suspended.set()
                 msg = "test"
-                raise TimedSuspendExecution(msg, time.time() + 1)  # Future time
+                raise TimedSuspendExecution(
+                    msg, datetime.now(UTC) + timedelta(seconds=1)
+                )  # Future time
             # Task B
             # Wait for Task A to suspend first
             self.task_a_suspended.wait(timeout=2.0)
@@ -1281,7 +1288,9 @@ def test_concurrent_executor_with_single_task_resubmit():
         def execute_item(self, child_context, executable):
             self.call_count += 1
             msg = "test"
-            raise TimedSuspendExecution(msg, time.time() + 10)  # Future time
+            raise TimedSuspendExecution(
+                msg, datetime.now(UTC) + timedelta(seconds=10)
+            )  # Future time
 
     executables = [Executable(0, lambda: "test")]
     completion_config = CompletionConfig(
@@ -1339,11 +1348,15 @@ def test_concurrent_executor_with_timed_resubmit_while_other_task_running():
                 if call_count == 1:
                     # First call: immediate resubmit (past timestamp)
                     msg = "immediate"
-                    raise TimedSuspendExecution(msg, time.time() - 1)
+                    raise TimedSuspendExecution(
+                        msg, datetime.now(UTC) - timedelta(seconds=1)
+                    )
                 if call_count == 2:
                     # Second call: short delay resubmit
                     msg = "short_delay"
-                    raise TimedSuspendExecution(msg, time.time() + 0.2)
+                    raise TimedSuspendExecution(
+                        msg, datetime.now(UTC) + timedelta(seconds=0.2)
+                    )
                 # Third call: complete successfully
                 result = "result_B"
                 self.task_b_can_complete.set()
@@ -1401,7 +1414,7 @@ def test_timer_scheduler_double_check_condition():
         exe_state.suspend()  # Make it resumable
 
         # Schedule a task with past time
-        past_time = time.time() - 1
+        past_time = datetime.now(UTC) - timedelta(seconds=1)
         scheduler.schedule_resume(exe_state, past_time)
 
         # Give scheduler time to process and hit the double-check condition
@@ -1437,7 +1450,7 @@ def test_concurrent_executor_should_execution_suspend_with_timeout():
 
     # Create executable with state in SUSPENDED_WITH_TIMEOUT
     exe_state = ExecutableWithState(executables[0])
-    future_time = time.time() + 10
+    future_time = datetime.now(UTC) + timedelta(seconds=10)
     exe_state.suspend_with_timeout(future_time)
 
     executor.executables_with_state = [exe_state]
@@ -1539,7 +1552,7 @@ def test_timer_scheduler_can_resume_false():
         exe_state.complete("done")
 
         # Schedule with past time
-        past_time = time.time() - 1
+        past_time = datetime.now(UTC) - timedelta(seconds=1)
         scheduler.schedule_resume(exe_state, past_time)
 
         # Give scheduler time to process
@@ -1577,7 +1590,7 @@ def test_concurrent_executor_mixed_suspend_states():
     exe_state1 = ExecutableWithState(executables[0])
     exe_state2 = ExecutableWithState(executables[1])
 
-    future_time = time.time() + 5
+    future_time = datetime.now(UTC) + timedelta(seconds=5)
     exe_state1.suspend_with_timeout(future_time)
     exe_state2.suspend()  # Indefinite
 
@@ -1618,8 +1631,8 @@ def test_concurrent_executor_multiple_timed_suspends():
     exe_state1 = ExecutableWithState(executables[0])
     exe_state2 = ExecutableWithState(executables[1])
 
-    later_time = time.time() + 10
-    earlier_time = time.time() + 5
+    later_time = datetime.now(UTC) + timedelta(seconds=10)
+    earlier_time = datetime.now(UTC) + timedelta(seconds=5)
 
     exe_state1.suspend_with_timeout(later_time)
     exe_state2.suspend_with_timeout(earlier_time)
@@ -1646,14 +1659,14 @@ def test_timer_scheduler_double_check_condition_race():
         exe_state2.suspend()
 
         # Schedule first task with past time
-        past_time = time.time() - 1
+        past_time = datetime.now(UTC) - timedelta(seconds=1)
         scheduler.schedule_resume(exe_state1, past_time)
 
         # Brief delay to let timer thread see the first task
         time.sleep(0.05)
 
         # Schedule second task with even more past time (will be heap[0])
-        very_past_time = time.time() - 2
+        very_past_time = datetime.now(UTC) - timedelta(seconds=2)
         scheduler.schedule_resume(exe_state2, very_past_time)
 
         # Wait for processing
@@ -1695,9 +1708,9 @@ def test_should_execution_suspend_earliest_timestamp_comparison():
     exe_state2 = ExecutableWithState(executables[1])
     exe_state3 = ExecutableWithState(executables[2])
 
-    time1 = time.time() + 10
-    time2 = time.time() + 5  # Earliest
-    time3 = time.time() + 15
+    time1 = datetime.now(UTC) + timedelta(seconds=10)
+    time2 = datetime.now(UTC) + timedelta(seconds=5)  # Earliest
+    time3 = datetime.now(UTC) + timedelta(seconds=15)
 
     exe_state1.suspend_with_timeout(time1)
     exe_state2.suspend_with_timeout(time2)
@@ -1762,7 +1775,7 @@ def test_timer_scheduler_cannot_resume_branch():
         exe_state.complete("done")
 
         # Schedule with past time
-        past_time = time.time() - 1
+        past_time = datetime.now(UTC) - timedelta(seconds=1)
         scheduler.schedule_resume(exe_state, past_time)
 
         # Wait for processing
@@ -2057,7 +2070,7 @@ def test_create_result_suspended_with_timeout_branch():
 
     # Create executable with SUSPENDED_WITH_TIMEOUT status
     exe_state = ExecutableWithState(executables[0])
-    future_time = time.time() + 10
+    future_time = datetime.now(UTC) + timedelta(seconds=10)
     exe_state.suspend_with_timeout(future_time)
     executor.executables_with_state = [exe_state]
 
@@ -2119,7 +2132,7 @@ def test_create_result_mixed_statuses():
     exe_states[4].suspend()
 
     # SUSPENDED_WITH_TIMEOUT
-    exe_states[5].suspend_with_timeout(time.time() + 10)
+    exe_states[5].suspend_with_timeout(datetime.now(UTC) + timedelta(seconds=10))
 
     executor.executables_with_state = exe_states
 
@@ -2284,7 +2297,7 @@ def test_create_result_multiple_started_states():
     exe_states[2].suspend()
 
     # SUSPENDED_WITH_TIMEOUT
-    exe_states[3].suspend_with_timeout(time.time() + 5)
+    exe_states[3].suspend_with_timeout(datetime.now(UTC) + timedelta(seconds=5))
 
     executor.executables_with_state = exe_states
 
@@ -2336,7 +2349,7 @@ def test_timer_scheduler_future_time_condition_false():
         exe_state.suspend()
 
         # Schedule with future time so condition will be False
-        future_time = time.time() + 10
+        future_time = datetime.now(UTC) + timedelta(seconds=10)
         scheduler.schedule_resume(exe_state, future_time)
 
         # Wait briefly for timer thread to check and find condition False
