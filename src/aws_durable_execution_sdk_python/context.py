@@ -303,7 +303,7 @@ class DurableContext(DurableContextProtocol):
         """Execute a callable for each item in parallel."""
         map_name: str | None = self._resolve_step_name(name, func)
 
-        def map_in_child_context(child_context):
+        def map_in_child_context(child_context) -> BatchResult[R]:
             return map_handler(
                 items=inputs,
                 func=func,
@@ -315,7 +315,10 @@ class DurableContext(DurableContextProtocol):
         return self.run_in_child_context(
             func=map_in_child_context,
             name=map_name,
-            config=ChildConfig(sub_type=OperationSubType.MAP),
+            config=ChildConfig(
+                sub_type=OperationSubType.MAP,
+                serdes=config.serdes if config is not None else None,
+            ),
         )
 
     def parallel(
@@ -337,7 +340,10 @@ class DurableContext(DurableContextProtocol):
         return self.run_in_child_context(
             func=parallel_in_child_context,
             name=name,
-            config=ChildConfig(sub_type=OperationSubType.PARALLEL),
+            config=ChildConfig(
+                sub_type=OperationSubType.PARALLEL,
+                serdes=config.serdes if config is not None else None,
+            ),
         )
 
     def run_in_child_context(

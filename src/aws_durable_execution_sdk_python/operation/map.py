@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.state import ExecutionState
     from aws_durable_execution_sdk_python.types import DurableContext, SummaryGenerator
 
-
 logger = logging.getLogger(__name__)
 
 # Input item type
@@ -42,6 +41,7 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI0
         name_prefix: str,
         serdes: SerDes | None,
         summary_generator: SummaryGenerator | None = None,
+        item_serdes: SerDes | None = None,
     ):
         super().__init__(
             executables=executables,
@@ -52,6 +52,7 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI0
             name_prefix=name_prefix,
             serdes=serdes,
             summary_generator=summary_generator,
+            item_serdes=item_serdes,
         )
         self.items = items
 

@@ -566,6 +566,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         sub_type_iteration: OperationSubType,
         name_prefix: str,
         serdes: SerDes | None,
+        item_serdes: SerDes | None = None,
         summary_generator: SummaryGenerator | None = None,
     ):
         """Initialize ConcurrentExecutor.
@@ -604,6 +605,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         )
         self.executables_with_state: list[ExecutableWithState] = []
         self.serdes = serdes
+        self.item_serdes = item_serdes
 
     @abstractmethod
     def execute_item(
@@ -797,7 +799,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
             execute_in_child_context,
             f"{self.name_prefix}{executable.index}",
             ChildConfig(
-                serdes=self.serdes,
+                serdes=self.item_serdes or self.serdes,
                 sub_type=self.sub_type_iteration,
                 summary_generator=self.summary_generator,
             ),

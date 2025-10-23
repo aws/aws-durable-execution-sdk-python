@@ -125,9 +125,21 @@ class ParallelConfig:
             Default is CompletionConfig.all_successful() which requires all branches
             to succeed. Other options include first_successful() and all_completed().
 
-        serdes: Custom serialization/deserialization configuration for parallel results.
-            If None, uses the default serializer. This allows custom handling of
-            complex result types or optimization for large result sets.
+        serdes: Custom serialization/deserialization configuration for BatchResult.
+            Applied at the handler level to serialize the entire BatchResult object.
+            If None, uses the default JSON serializer for BatchResult.
+
+            Backward Compatibility: If only 'serdes' is provided (no item_serdes),
+            it will be used for both individual functions AND BatchResult serialization
+            to maintain existing behavior.
+
+        item_serdes: Custom serialization/deserialization configuration for individual functions.
+            Applied to each function's result as tasks complete in child contexts.
+            If None, uses the default JSON serializer for individual function results.
+
+            When both 'serdes' and 'item_serdes' are provided:
+            - item_serdes: Used for individual function results in child contexts
+            - serdes: Used for the entire BatchResult at handler level
 
         summary_generator: Function to generate compact summaries for large results (>256KB).
             When the serialized result exceeds CHECKPOINT_SIZE_LIMIT, this generator
@@ -150,6 +162,7 @@ class ParallelConfig:
         default_factory=CompletionConfig.all_successful
     )
     serdes: SerDes | None = None
+    item_serdes: SerDes | None = None
     summary_generator: SummaryGenerator | None = None
 
 
@@ -181,9 +194,21 @@ class ChildConfig(Generic[T]):
     matching the TypeScript ChildConfig interface behavior.
 
     Args:
-        serdes: Custom serialization/deserialization configuration for the child context data.
-            If None, uses the default serializer. This allows different serialization
-            strategies for child operations vs parent operations.
+        serdes: Custom serialization/deserialization configuration for BatchResult.
+            Applied at the handler level to serialize the entire BatchResult object.
+            If None, uses the default JSON serializer for BatchResult.
+
+            Backward Compatibility: If only 'serdes' is provided (no item_serdes),
+            it will be used for both individual items AND BatchResult serialization
+            to maintain existing behavior.
+
+        item_serdes: Custom serialization/deserialization configuration for individual items.
+            Applied to each item's result as tasks complete in child contexts.
+            If None, uses the default JSON serializer for individual items.
+
+            When both 'serdes' and 'item_serdes' are provided:
+            - item_serdes: Used for individual item results in child contexts
+            - serdes: Used for the entire BatchResult at handler level
 
         sub_type: Operation subtype identifier used for tracking and debugging.
             Examples: OperationSubType.MAP_ITERATION, OperationSubType.PARALLEL_BRANCH.
@@ -208,6 +233,7 @@ class ChildConfig(Generic[T]):
 
     # checkpoint_mode: CheckpointMode = CheckpointMode.CHECKPOINT_AT_START_AND_FINISH
     serdes: SerDes | None = None
+    item_serdes: SerDes | None = None
     sub_type: OperationSubType | None = None
     summary_generator: SummaryGenerator | None = None
 
@@ -273,9 +299,21 @@ class MapConfig:
             Default allows any number of failures. Use CompletionConfig.all_successful()
             to require all items to succeed.
 
-        serdes: Custom serialization/deserialization configuration for map results.
-            If None, uses the default serializer. This allows custom handling of
-            complex item types or optimization for large result collections.
+        serdes: Custom serialization/deserialization configuration for BatchResult.
+            Applied at the handler level to serialize the entire BatchResult object.
+            If None, uses the default JSON serializer for BatchResult.
+
+            Backward Compatibility: If only 'serdes' is provided (no item_serdes),
+            it will be used for both individual items AND BatchResult serialization
+            to maintain existing behavior.
+
+        item_serdes: Custom serialization/deserialization configuration for individual items.
+            Applied to each item's result as tasks complete in child contexts.
+            If None, uses the default JSON serializer for individual items.
+
+            When both 'serdes' and 'item_serdes' are provided:
+            - item_serdes: Used for individual item results in child contexts
+            - serdes: Used for the entire BatchResult at handler level
 
         summary_generator: Function to generate compact summaries for large results (>256KB).
             When the serialized result exceeds CHECKPOINT_SIZE_LIMIT, this generator
@@ -298,6 +336,7 @@ class MapConfig:
     item_batcher: ItemBatcher = field(default_factory=ItemBatcher)
     completion_config: CompletionConfig = field(default_factory=CompletionConfig)
     serdes: SerDes | None = None
+    item_serdes: SerDes | None = None
     summary_generator: SummaryGenerator | None = None
 
 

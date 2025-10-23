@@ -1,6 +1,7 @@
 """Unit tests for child handler."""
 
 import json
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -16,6 +17,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.operation.child import child_handler
 from aws_durable_execution_sdk_python.state import ExecutionState
+from aws_durable_execution_sdk_python.types import SummaryGenerator
 from tests.serdes_test import CustomDictSerDes
 
 
@@ -383,7 +385,9 @@ def test_child_handler_large_payload_with_summary_generator() -> None:
     def my_summary(result: str) -> str:
         return "summary"
 
-    child_config: ChildConfig = ChildConfig[str](summary_generator=my_summary)
+    child_config: ChildConfig = ChildConfig[str](
+        summary_generator=cast(SummaryGenerator, my_summary)
+    )
 
     actual_result = child_handler(
         mock_callable,

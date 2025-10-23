@@ -35,6 +35,7 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
         name_prefix: str,
         serdes: SerDes | None,
         summary_generator: SummaryGenerator | None = None,
+        item_serdes: SerDes | None = None,
     ):
         super().__init__(
             executables=executables,
@@ -45,6 +46,7 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
             name_prefix=name_prefix,
             serdes=serdes,
             summary_generator=summary_generator,
+            item_serdes=item_serdes,
         )
 
     @classmethod
@@ -98,7 +100,7 @@ def parallel_handler(
 
 
 class ParallelSummaryGenerator:
-    def __call__(self, result: BatchResult[R]) -> str:
+    def __call__(self, result: BatchResult) -> str:
         fields = {
             "totalCount": result.total_count,
             "successCount": result.success_count,
