@@ -13,7 +13,7 @@ from aws_durable_execution_sdk_python.config import (
 )
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
-    FatalError,
+    ExecutionError,
     StepInterruptedError,
     SuspendExecution,
 )
@@ -261,18 +261,18 @@ def test_step_handler_success_at_most_once():
     assert success_operation.action is OperationAction.SUCCEED
 
 
-def test_step_handler_fatal_error():
-    """Test step_handler with FatalError exception."""
+def test_step_handler_non_retriable_execution_error():
+    """Test step_handler with ExecutionError exception."""
     mock_state = Mock(spec=ExecutionState)
     mock_result = CheckpointedResult.create_not_found()
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_state.durable_execution_arn = "test_arn"
 
-    mock_callable = Mock(side_effect=FatalError("Fatal error"))
+    mock_callable = Mock(side_effect=ExecutionError("Do Not Retry"))
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    with pytest.raises(FatalError, match="Fatal error"):
+    with pytest.raises(ExecutionError, match="Do Not Retry"):
         step_handler(
             mock_callable,
             mock_state,
@@ -487,7 +487,8 @@ def test_step_handler_retry_handler_no_exception(mock_retry_handler):
     mock_logger.with_log_info.return_value = mock_logger
 
     with pytest.raises(
-        FatalError, match="retry handler should have raised an exception, but did not."
+        ExecutionError,
+        match="retry handler should have raised an exception, but did not.",
     ):
         step_handler(
             mock_callable,

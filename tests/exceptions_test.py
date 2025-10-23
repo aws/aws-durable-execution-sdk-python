@@ -10,11 +10,14 @@ from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeErrorSerializableDetails,
     CheckpointError,
     DurableExecutionsError,
-    FatalError,
+    ExecutionError,
+    InvocationError,
     OrderedLockError,
     StepInterruptedError,
     SuspendExecution,
+    TerminationReason,
     TimedSuspendExecution,
+    UnrecoverableError,
     UserlandError,
     ValidationError,
 )
@@ -27,18 +30,22 @@ def test_durable_executions_error():
     assert isinstance(error, Exception)
 
 
-def test_fatal_error():
-    """Test FatalError exception."""
-    error = FatalError("fatal error")
-    assert str(error) == "fatal error"
+def test_invocation_error():
+    """Test InvocationError exception."""
+    error = InvocationError("invocation error")
+    assert str(error) == "invocation error"
+    assert isinstance(error, UnrecoverableError)
     assert isinstance(error, DurableExecutionsError)
+    assert error.termination_reason == TerminationReason.INVOCATION_ERROR
 
 
 def test_checkpoint_error():
     """Test CheckpointError exception."""
     error = CheckpointError("checkpoint failed")
     assert str(error) == "checkpoint failed"
-    assert isinstance(error, FatalError)
+    assert isinstance(error, InvocationError)
+    assert isinstance(error, UnrecoverableError)
+    assert error.termination_reason == TerminationReason.CHECKPOINT_FAILED
 
 
 def test_validation_error():
@@ -64,7 +71,6 @@ def test_callable_runtime_error():
     assert error.message == "runtime error"
     assert error.error_type == "ValueError"
     assert error.data == "error data"
-    assert error.stack_trace == ["line1", "line2"]
     assert isinstance(error, UserlandError)
 
 
@@ -74,14 +80,16 @@ def test_callable_runtime_error_with_none_values():
     assert error.message is None
     assert error.error_type is None
     assert error.data is None
-    assert error.stack_trace is None
 
 
 def test_step_interrupted_error():
     """Test StepInterruptedError exception."""
-    error = StepInterruptedError("step interrupted")
+    error = StepInterruptedError("step interrupted", "step_123")
     assert str(error) == "step interrupted"
-    assert isinstance(error, UserlandError)
+    assert isinstance(error, InvocationError)
+    assert isinstance(error, UnrecoverableError)
+    assert error.termination_reason == TerminationReason.STEP_INTERRUPTED
+    assert error.step_id == "step_123"
 
 
 def test_suspend_execution():
@@ -225,3 +233,27 @@ def test_timed_suspend_execution_from_delay_calculation_accuracy():
     assert expected_min <= error.scheduled_timestamp <= expected_max
     assert str(error) == message
     assert isinstance(error, TimedSuspendExecution)
+
+
+def test_unrecoverable_error():
+    """Test UnrecoverableError base class."""
+    error = UnrecoverableError("unrecoverable error", TerminationReason.EXECUTION_ERROR)
+    assert str(error) == "unrecoverable error"
+    assert error.termination_reason == TerminationReason.EXECUTION_ERROR
+    assert isinstance(error, DurableExecutionsError)
+
+
+def test_execution_error():
+    """Test ExecutionError exception."""
+    error = ExecutionError("execution error")
+    assert str(error) == "execution error"
+    assert isinstance(error, UnrecoverableError)
+    assert isinstance(error, DurableExecutionsError)
+    assert error.termination_reason == TerminationReason.EXECUTION_ERROR
+
+
+def test_execution_error_with_custom_termination_reason():
+    """Test ExecutionError with custom termination reason."""
+    error = ExecutionError("custom error", TerminationReason.SERIALIZATION_ERROR)
+    assert str(error) == "custom error"
+    assert error.termination_reason == TerminationReason.SERIALIZATION_ERROR

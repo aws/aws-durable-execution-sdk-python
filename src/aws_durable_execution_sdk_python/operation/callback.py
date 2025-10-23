@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from aws_durable_execution_sdk_python.config import StepConfig
-from aws_durable_execution_sdk_python.exceptions import FatalError
+from aws_durable_execution_sdk_python.exceptions import CallbackError
 from aws_durable_execution_sdk_python.lambda_service import (
     CallbackOptions,
     OperationUpdate,
@@ -58,8 +58,8 @@ def create_callback_handler(
             not checkpointed_result.operation
             or not checkpointed_result.operation.callback_details
         ):
-            msg = "Missing callback details"
-            raise FatalError(msg)
+            msg = f"Missing callback details for operation: {operation_identifier.operation_id}"
+            raise CallbackError(msg)
 
         return checkpointed_result.operation.callback_details.callback_id
 
@@ -74,8 +74,8 @@ def create_callback_handler(
     )
 
     if not result.operation or not result.operation.callback_details:
-        msg = "Missing callback details"
-        raise FatalError(msg)
+        msg = f"Missing callback details for operation: {operation_identifier.operation_id}"
+        raise CallbackError(msg)
 
     return result.operation.callback_details.callback_id
 

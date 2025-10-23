@@ -92,6 +92,11 @@ class CheckpointedResult:
 
         return op.status is OperationStatus.SUCCEEDED
 
+    def is_cancelled(self) -> bool:
+        if op := self.operation:
+            return op.status is OperationStatus.CANCELLED
+        return False
+
     def is_failed(self) -> bool:
         """Return True if the checkpointed operation is FAILED."""
         op = self.operation

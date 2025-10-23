@@ -983,7 +983,7 @@ class LambdaClient(DurableServiceClient):
             return CheckpointOutput.from_dict(result)
         except Exception as e:
             logger.exception("Failed to checkpoint.")
-            raise CheckpointError(e) from e
+            raise CheckpointError.from_exception(e) from e
 
     def get_execution_state(
         self,

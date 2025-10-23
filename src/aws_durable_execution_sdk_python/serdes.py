@@ -34,7 +34,7 @@ from typing import Any, Generic, Protocol, TypeVar
 
 from aws_durable_execution_sdk_python.exceptions import (
     DurableExecutionsError,
-    FatalError,
+    ExecutionError,
     SerDesError,
 )
 
@@ -440,9 +440,12 @@ def serialize(
     try:
         return active_serdes.serialize(value, serdes_context)
     except Exception as e:
-        logger.exception("⚠️ Serialization failed for id: %s", operation_id)
-        msg = f"Serialization failed for id: {operation_id}, error: {e}"
-        raise FatalError(msg) from e
+        logger.exception(
+            "⚠️ Serialization failed for id: %s",
+            operation_id,
+        )
+        msg = f"Serialization failed for id: {operation_id}, error: {e}."
+        raise ExecutionError(msg) from e
 
 
 def deserialize(
@@ -469,4 +472,4 @@ def deserialize(
     except Exception as e:
         logger.exception("⚠️ Deserialization failed for id: %s", operation_id)
         msg = f"Deserialization failed for id: {operation_id}"
-        raise FatalError(msg) from e
+        raise ExecutionError(msg) from e

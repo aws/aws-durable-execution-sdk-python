@@ -11,7 +11,7 @@ from aws_durable_execution_sdk_python.config import (
     StepSemantics,
 )
 from aws_durable_execution_sdk_python.exceptions import (
-    FatalError,
+    ExecutionError,
     StepInterruptedError,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -151,14 +151,14 @@ def step_handler(
         )
         return raw_result  # noqa: TRY300
     except Exception as e:
-        if isinstance(e, FatalError):
+        if isinstance(e, ExecutionError):
             # no retry on fatal - e.g checkpoint exception
             logger.debug(
                 "💥 Fatal error for id: %s, name: %s",
                 operation_identifier.operation_id,
                 operation_identifier.name,
             )
-            # this bubbles up to execution.durable_handler, where it will exit with PENDING. TODO: confirm if still correct
+            # this bubbles up to execution.durable_handler, where it will exit with FAILED
             raise
 
         logger.exception(
@@ -168,8 +168,10 @@ def step_handler(
         )
 
         retry_handler(e, state, operation_identifier, config, checkpointed_result)
+        # if we've failed to raise an exception from the retry_handler, then we are in a
+        # weird state, and should crash terminate the execution
         msg = "retry handler should have raised an exception, but did not."
-        raise FatalError(msg) from None
+        raise ExecutionError(msg) from None
 
 
 # TODO: I don't much like this func, needs refactor. Messy grab-bag of args, refine.

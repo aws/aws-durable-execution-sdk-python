@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING, TypeVar
 
 from aws_durable_execution_sdk_python.exceptions import (
-    FatalError,
+    ExecutionError,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
@@ -203,4 +203,4 @@ def wait_for_condition_handler(
         raise
 
     msg: str = "wait_for_condition should never reach this point"
-    raise FatalError(msg)
+    raise ExecutionError(msg)

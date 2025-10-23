@@ -10,7 +10,7 @@ from aws_durable_execution_sdk_python.config import (
     StepConfig,
     WaitForCallbackConfig,
 )
-from aws_durable_execution_sdk_python.exceptions import FatalError
+from aws_durable_execution_sdk_python.exceptions import CallbackError
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
@@ -171,7 +171,7 @@ def test_create_callback_handler_existing_started_missing_callback_details():
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
 
-    with pytest.raises(FatalError, match="Missing callback details"):
+    with pytest.raises(CallbackError, match="Missing callback details"):
         create_callback_handler(
             state=mock_state,
             operation_identifier=OperationIdentifier("callback5", None),
@@ -193,7 +193,7 @@ def test_create_callback_handler_new_operation_missing_callback_details_after_ch
         CheckpointedResult.create_from_operation(operation),
     ]
 
-    with pytest.raises(FatalError, match="Missing callback details"):
+    with pytest.raises(CallbackError, match="Missing callback details"):
         create_callback_handler(
             state=mock_state,
             operation_identifier=OperationIdentifier("callback6", None),
@@ -236,7 +236,7 @@ def test_create_callback_handler_existing_timed_out_missing_callback_details():
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
 
-    with pytest.raises(FatalError, match="Missing callback details"):
+    with pytest.raises(CallbackError, match="Missing callback details"):
         create_callback_handler(
             state=mock_state,
             operation_identifier=OperationIdentifier(
@@ -319,7 +319,7 @@ def test_create_callback_handler_with_none_operation_in_result():
     mock_result.operation = None
     mock_state.get_checkpoint_result.return_value = mock_result
 
-    with pytest.raises(FatalError, match="Missing callback details"):
+    with pytest.raises(CallbackError, match="Missing callback details"):
         create_callback_handler(
             state=mock_state,
             operation_identifier=OperationIdentifier("none_operation", None),
@@ -473,7 +473,7 @@ def test_create_callback_handler_existing_succeeded_missing_callback_details():
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
 
-    with pytest.raises(FatalError, match="Missing callback details"):
+    with pytest.raises(CallbackError, match="Missing callback details"):
         create_callback_handler(
             state=mock_state,
             operation_identifier=OperationIdentifier(

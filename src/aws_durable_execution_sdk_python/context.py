@@ -16,7 +16,7 @@ from aws_durable_execution_sdk_python.config import (
     WaitForConditionConfig,
 )
 from aws_durable_execution_sdk_python.exceptions import (
-    FatalError,
+    CallbackError,
     SuspendExecution,
     ValidationError,
 )
@@ -125,11 +125,17 @@ class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
         checkpointed_result: CheckpointedResult = self.state.get_checkpoint_result(
             self.operation_id
         )
-        if checkpointed_result.is_started():
-            msg: str = "Calback result not received yet. Suspending execution while waiting for result."
-            raise SuspendExecution(msg)
 
-        if checkpointed_result.is_failed() or checkpointed_result.is_timed_out():
+        if not checkpointed_result.is_existent():
+            msg = "Callback operation must exist"
+            raise CallbackError(msg)
+
+        if (
+            checkpointed_result.is_failed()
+            or checkpointed_result.is_cancelled()
+            or checkpointed_result.is_timed_out()
+            or checkpointed_result.is_stopped()
+        ):
             checkpointed_result.raise_callable_error()
 
         if checkpointed_result.is_succeeded():
@@ -143,8 +149,10 @@ class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
                 durable_execution_arn=self.state.durable_execution_arn,
             )
 
-        msg = "Callback must be started before you can await the result."
-        raise FatalError(msg)
+        # operation exists; it has not terminated (successfully or otherwise)
+        # therefore we should wait
+        msg = "Callback result not received yet. Suspending execution while waiting for result."
+        raise SuspendExecution(msg)
 
 
 class DurableContext(DurableContextProtocol):

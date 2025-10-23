@@ -10,7 +10,7 @@ import pytest
 from aws_durable_execution_sdk_python.config import InvokeConfig
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
-    FatalError,
+    ExecutionError,
     SuspendExecution,
     TimedSuspendExecution,
 )
@@ -519,7 +519,7 @@ def test_invoke_handler_suspend_does_not_raise(mock_suspend):
     mock_suspend.return_value = None
 
     with pytest.raises(
-        FatalError,
+        ExecutionError,
         match="suspend_with_optional_timeout should have raised an exception, but did not.",
     ):
         invoke_handler(

@@ -6,7 +6,10 @@ import logging
 from typing import TYPE_CHECKING, TypeVar
 
 from aws_durable_execution_sdk_python.config import ChildConfig
-from aws_durable_execution_sdk_python.exceptions import FatalError, SuspendExecution
+from aws_durable_execution_sdk_python.exceptions import (
+    InvocationError,
+    SuspendExecution,
+)
 from aws_durable_execution_sdk_python.lambda_service import (
     ContextOptions,
     ErrorObject,
@@ -138,7 +141,11 @@ def child_handler(
         )
         state.create_checkpoint(operation_update=fail_operation)
 
-        # TODO: rethink FatalError
-        if isinstance(e, FatalError):
+        # InvocationError and its derivatives can be retried
+        # When we encounter an invocation error (in all of its forms), we bubble that
+        # error upwards (with the checkpoint in place) such that we reach the
+        # execution handler at the very top, which will then induce a retry from the
+        # dataplane.
+        if isinstance(e, InvocationError):
             raise
         raise error_object.to_callable_runtime_error() from e

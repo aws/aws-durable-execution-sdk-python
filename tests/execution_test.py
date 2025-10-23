@@ -8,7 +8,11 @@ from unittest.mock import Mock, patch
 import pytest
 
 from aws_durable_execution_sdk_python.context import DurableContext
-from aws_durable_execution_sdk_python.exceptions import CheckpointError, FatalError
+from aws_durable_execution_sdk_python.exceptions import (
+    CheckpointError,
+    ExecutionError,
+    InvocationError,
+)
 from aws_durable_execution_sdk_python.execution import (
     DurableExecutionInvocationInput,
     DurableExecutionInvocationInputWithClient,
@@ -581,8 +585,8 @@ def test_durable_execution_fatal_error_handling():
 
     @durable_execution
     def test_handler(event: Any, context: DurableContext) -> dict:
-        msg = "Fatal error occurred"
-        raise FatalError(msg)
+        msg = "Retriable invocation error occurred"
+        raise InvocationError(msg)
 
     operation = Operation(
         operation_id="exec1",
@@ -609,10 +613,54 @@ def test_durable_execution_fatal_error_handling():
     lambda_context.invoked_function_arn = None
     lambda_context.tenant_id = None
 
-    result = test_handler(invocation_input, lambda_context)
+    # expect raise; backend will retry
+    with pytest.raises(InvocationError, match="Retriable invocation error occurred"):
+        test_handler(invocation_input, lambda_context)
 
-    assert result["Status"] == InvocationStatus.PENDING.value
-    assert "Fatal error occurred" in result["Error"]["ErrorMessage"]
+
+def test_durable_execution_execution_error_handling():
+    """Test durable_execution handles InvocationError correctly."""
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "Retriable invocation error occurred"
+        raise ExecutionError(msg)
+
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+
+    initial_state = InitialExecutionState(operations=[operation], next_marker="")
+
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=initial_state,
+        is_local_runner=False,
+        service_client=mock_client,
+    )
+
+    lambda_context = Mock()
+    lambda_context.aws_request_id = "test-request"
+    lambda_context.client_context = None
+    lambda_context.identity = None
+    lambda_context._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
+    lambda_context.invoked_function_arn = None
+    lambda_context.tenant_id = None
+
+    # ExecutionError should return FAILED status with ErrorObject in result field
+    result = test_handler(invocation_input, lambda_context)
+    assert result["Status"] == InvocationStatus.FAILED.value
+
+    # Parse the ErrorObject from the result field
+    error_data = result["Error"]
+
+    assert error_data["ErrorMessage"] == "Retriable invocation error occurred"
+    assert error_data["ErrorType"] == "ExecutionError"
 
 
 def test_durable_execution_client_selection_local_runner():

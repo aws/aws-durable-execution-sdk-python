@@ -10,7 +10,7 @@ import pytest
 
 from aws_durable_execution_sdk_python.exceptions import (
     DurableExecutionsError,
-    FatalError,
+    ExecutionError,
     SerDesError,
 )
 from aws_durable_execution_sdk_python.serdes import (
@@ -123,13 +123,13 @@ def test_serialize_invalid_json():
     circular_ref = {"a": 1}
     circular_ref["self"] = circular_ref
 
-    with pytest.raises(FatalError) as exc_info:
+    with pytest.raises(ExecutionError) as exc_info:
         serialize(None, circular_ref, "test-op", "test-arn")
     assert "Serialization failed" in str(exc_info.value)
 
 
 def test_deserialize_invalid_json():
-    with pytest.raises(FatalError) as exc_info:
+    with pytest.raises(ExecutionError) as exc_info:
         deserialize(None, "invalid json", "test-op", "test-arn")
     assert "Deserialization failed" in str(exc_info.value)
 
@@ -583,7 +583,7 @@ def test_envelope_handles_json_incompatible_types():
     }
 
     # JsonSerDes should fail
-    with pytest.raises(FatalError):
+    with pytest.raises(ExecutionError):
         serialize(json_serdes, complex_data, "test-op", "test-arn")
 
     # EnvelopeSerDes should succeed
@@ -598,11 +598,11 @@ def test_envelope_error_handling_with_main_api():
     envelope_serdes = ExtendedTypeSerDes()
 
     # Test serialization error
-    with pytest.raises(FatalError, match="Serialization failed"):
+    with pytest.raises(ExecutionError, match="Serialization failed"):
         serialize(envelope_serdes, object(), "test-op", "test-arn")
 
     # Test deserialization error
-    with pytest.raises(FatalError, match="Deserialization failed"):
+    with pytest.raises(ExecutionError, match="Deserialization failed"):
         deserialize(envelope_serdes, "invalid json", "test-op", "test-arn")
 
 

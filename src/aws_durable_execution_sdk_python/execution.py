@@ -12,7 +12,8 @@ from aws_durable_execution_sdk_python.context import DurableContext, ExecutionSt
 from aws_durable_execution_sdk_python.exceptions import (
     CheckpointError,
     DurableExecutionsError,
-    FatalError,
+    ExecutionError,
+    InvocationError,
     SuspendExecution,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -291,10 +292,16 @@ def durable_execution(
             logger.exception("Failed to checkpoint")
             # Throw the error to terminate the lambda
             raise
-        except FatalError as e:
-            logger.exception("Fatal error")
+
+        except InvocationError:
+            logger.exception("Invocation error. Must terminate.")
+            # Throw the error to trigger Lambda retry
+            raise
+        except ExecutionError as e:
+            logger.exception("Execution error. Must terminate without retry.")
             return DurableExecutionInvocationOutput(
-                status=InvocationStatus.PENDING, error=ErrorObject.from_exception(e)
+                status=InvocationStatus.FAILED,
+                error=ErrorObject.from_exception(e),
             ).to_dict()
         except Exception as e:
             # all user-space errors go here

@@ -20,7 +20,7 @@ from aws_durable_execution_sdk_python.config import (
 from aws_durable_execution_sdk_python.context import Callback, DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
-    FatalError,
+    CallbackError,
     SuspendExecution,
     ValidationError,
 )
@@ -108,7 +108,7 @@ def test_callback_result_started_no_timeout():
 
     callback = Callback("callback3", "op3", mock_state)
 
-    with pytest.raises(SuspendExecution, match="Calback result not received yet"):
+    with pytest.raises(SuspendExecution, match="Callback result not received yet"):
         callback.result()
 
 
@@ -126,7 +126,7 @@ def test_callback_result_started_with_timeout():
 
     callback = Callback("callback4", "op4", mock_state)
 
-    with pytest.raises(SuspendExecution, match="Calback result not received yet"):
+    with pytest.raises(SuspendExecution, match="Callback result not received yet"):
         callback.result()
 
 
@@ -159,7 +159,7 @@ def test_callback_result_not_started():
 
     callback = Callback("callback6", "op6", mock_state)
 
-    with pytest.raises(FatalError, match="Callback must be started"):
+    with pytest.raises(CallbackError, match="Callback operation must exist"):
         callback.result()
 
 

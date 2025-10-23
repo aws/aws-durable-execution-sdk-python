@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import pytest
 
 from aws_durable_execution_sdk_python.config import ChildConfig
-from aws_durable_execution_sdk_python.exceptions import CallableRuntimeError, FatalError
+from aws_durable_execution_sdk_python.exceptions import CallableRuntimeError
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
@@ -241,8 +241,8 @@ def test_child_handler_callable_exception(
     assert fail_operation.error == ErrorObject.from_exception(ValueError("Test error"))
 
 
-def test_child_handler_fatal_error_propagated():
-    """Test child_handler propagates FatalError without wrapping."""
+def test_child_handler_error_wrapped():
+    """Test child_handler wraps regular errors as CallableRuntimeError."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
@@ -250,10 +250,10 @@ def test_child_handler_fatal_error_propagated():
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
-    fatal_error = FatalError("Fatal test error")
-    mock_callable = Mock(side_effect=fatal_error)
+    test_error = RuntimeError("Test error")
+    mock_callable = Mock(side_effect=test_error)
 
-    with pytest.raises(FatalError, match="Fatal test error"):
+    with pytest.raises(CallableRuntimeError):
         child_handler(
             mock_callable,
             mock_state,

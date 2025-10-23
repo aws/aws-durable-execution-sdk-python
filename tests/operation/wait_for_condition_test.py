@@ -12,7 +12,7 @@ from aws_durable_execution_sdk_python.config import (
 )
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
-    FatalError,
+    InvocationError,
     SuspendExecution,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -681,7 +681,7 @@ def test_wait_for_condition_pending():
 
     def check_func(state, context):
         msg = "Should not be called"
-        raise FatalError(msg)
+        raise InvocationError(msg)
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -716,7 +716,7 @@ def test_wait_for_condition_pending_without_next_attempt():
 
     def check_func(state, context):
         msg = "Should not be called"
-        raise FatalError(msg)
+        raise InvocationError(msg)
 
     config = WaitForConditionConfig(
         initial_state=5,

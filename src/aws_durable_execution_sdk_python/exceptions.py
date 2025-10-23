@@ -7,18 +7,89 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
+
+
+class TerminationReason(Enum):
+    """Reasons why a durable execution terminated."""
+
+    UNHANDLED_ERROR = "UNHANDLED_ERROR"
+    INVOCATION_ERROR = "INVOCATION_ERROR"
+    EXECUTION_ERROR = "EXECUTION_ERROR"
+    CHECKPOINT_FAILED = "CHECKPOINT_FAILED"
+    NON_DETERMINISTIC_EXECUTION = "NON_DETERMINISTIC_EXECUTION"
+    STEP_INTERRUPTED = "STEP_INTERRUPTED"
+    CALLBACK_ERROR = "CALLBACK_ERROR"
+    SERIALIZATION_ERROR = "SERIALIZATION_ERROR"
 
 
 class DurableExecutionsError(Exception):
     """Base class for Durable Executions exceptions"""
 
 
-class FatalError(DurableExecutionsError):
-    """Unrecoverable error. Will not retry."""
+class UnrecoverableError(DurableExecutionsError):
+    """Base class for errors that terminate execution."""
+
+    def __init__(self, message: str, termination_reason: TerminationReason):
+        super().__init__(message)
+        self.termination_reason = termination_reason
 
 
-class CheckpointError(FatalError):
+class ExecutionError(UnrecoverableError):
+    """Error that returns FAILED status without retry."""
+
+    def __init__(
+        self,
+        message: str,
+        termination_reason: TerminationReason = TerminationReason.EXECUTION_ERROR,
+    ):
+        super().__init__(message, termination_reason)
+
+
+class InvocationError(UnrecoverableError):
+    """Error that should cause Lambda retry by throwing from handler."""
+
+    def __init__(
+        self,
+        message: str,
+        termination_reason: TerminationReason = TerminationReason.INVOCATION_ERROR,
+    ):
+        super().__init__(message, termination_reason)
+
+
+class CallbackError(ExecutionError):
+    """Error in callback handling."""
+
+    def __init__(self, message: str, callback_id: str | None = None):
+        super().__init__(message, TerminationReason.CALLBACK_ERROR)
+        self.callback_id = callback_id
+
+
+class CheckpointFailedError(InvocationError):
+    """Error when checkpoint operation fails."""
+
+    def __init__(self, message: str, step_id: str | None = None):
+        super().__init__(message, TerminationReason.CHECKPOINT_FAILED)
+        self.step_id = step_id
+
+
+class NonDeterministicExecutionError(ExecutionError):
+    """Error when execution is non-deterministic."""
+
+    def __init__(self, message: str, step_id: str | None = None):
+        super().__init__(message, TerminationReason.NON_DETERMINISTIC_EXECUTION)
+        self.step_id = step_id
+
+
+class CheckpointError(CheckpointFailedError):
     """Failure to checkpoint. Will terminate the lambda."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+
+    @classmethod
+    def from_exception(cls, exception: Exception) -> CheckpointError:
+        return cls(message=str(exception))
 
 
 class ValidationError(DurableExecutionsError):
@@ -50,8 +121,12 @@ class CallableRuntimeError(UserlandError):
         self.stack_trace = stack_trace
 
 
-class StepInterruptedError(UserlandError):
+class StepInterruptedError(InvocationError):
     """Raised when a step is interrupted before it checkpointed at the end."""
+
+    def __init__(self, message: str, step_id: str | None = None):
+        super().__init__(message, TerminationReason.STEP_INTERRUPTED)
+        self.step_id = step_id
 
 
 class SuspendExecution(BaseException):

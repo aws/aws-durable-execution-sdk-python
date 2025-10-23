@@ -6,9 +6,7 @@ import logging
 from typing import TYPE_CHECKING, TypeVar
 
 from aws_durable_execution_sdk_python.config import InvokeConfig
-from aws_durable_execution_sdk_python.exceptions import (
-    FatalError,
-)
+from aws_durable_execution_sdk_python.exceptions import ExecutionError
 from aws_durable_execution_sdk_python.lambda_service import (
     ChainedInvokeOptions,
     OperationUpdate,
@@ -107,5 +105,6 @@ def invoke_handler(
     )
     suspend_with_optional_timeout(msg, config.timeout_seconds)
     # This line should never be reached since suspend_with_optional_timeout always raises
+    # if it is ever reached, we will crash in a non-retryable manner via ExecutionError
     msg = "suspend_with_optional_timeout should have raised an exception, but did not."
-    raise FatalError(msg) from None
+    raise ExecutionError(msg) from None
