@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+import time
 from typing import TYPE_CHECKING
 
 from aws_durable_execution_sdk_python.exceptions import TimedSuspendExecution
@@ -48,6 +48,6 @@ def wait_handler(
         state.create_checkpoint(operation_update=operation)
 
     # Calculate when to resume
-    resume_time = datetime.now(UTC) + timedelta(seconds=seconds)
+    resume_time = time.time() + seconds
     msg = f"Wait for {seconds} seconds"
     raise TimedSuspendExecution(msg, scheduled_timestamp=resume_time)
