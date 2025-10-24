@@ -219,7 +219,7 @@ class ExecutionState:
         Note this does not invoke the Durable Functions API. It only checks
         against the checkpoints currently saved in ExecutionState. The current
         saved checkpoints are from InitialExecutionState as retrieved
-        at the start of the current execution/replay (see execution.durable_handler),
+        at the start of the current execution/replay (see execution.durable_execution),
         and from each create_checkpoint response.
 
         Args:

@@ -12,7 +12,7 @@ from aws_durable_execution_sdk_python.context import (
 )
 from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
-    durable_handler,
+    durable_execution,
 )
 
 # LambdaContext no longer needed - using duck typing
@@ -41,7 +41,7 @@ def test_step_different_ways_to_pass_args():
     def step_with_args(step_context: StepContext, a: int, b: str) -> str:
         return f"from step {a} {b}"
 
-    @durable_handler
+    @durable_execution
     def my_handler(event, context: DurableContext) -> list[str]:
         results: list[str] = []
         result: str = context.step(step_with_args(a=123, b="str"))
@@ -138,7 +138,7 @@ def test_step_with_logger():
         step_context.logger.info("from step %s %s", a, b)
         return "result"
 
-    @durable_handler
+    @durable_execution
     def my_handler(event, context: DurableContext):
         context.set_logger(my_logger)
         result: str = context.step(mystep(a=123, b="str"))
@@ -232,7 +232,7 @@ def test_wait_inside_run_in_childcontext():
         mock_inside_child(a, b)
         child_context.wait(1)
 
-    @durable_handler
+    @durable_execution
     def my_handler(event, context):
         context.run_in_child_context(func(10, 20))
 
@@ -325,7 +325,7 @@ class CustomError(Exception):
 def test_wait_not_caught_by_exception():
     """Do not catch Suspend exceptions."""
 
-    @durable_handler
+    @durable_execution
     def my_handler(event: Any, context: DurableContext):
         try:
             context.wait(1)

@@ -4,7 +4,9 @@ import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
+from functools import wraps
 from typing import TYPE_CHECKING, Any
+from warnings import deprecated
 
 from aws_durable_execution_sdk_python.context import DurableContext, ExecutionState
 from aws_durable_execution_sdk_python.exceptions import (
@@ -187,7 +189,7 @@ class DurableExecutionInvocationOutput:
 # endregion Invocation models
 
 
-def durable_handler(
+def durable_execution(
     func: Callable[[Any, DurableContext], Any],
 ) -> Callable[[Any, LambdaContext], Any]:
     logger.debug("Starting durable execution handler...")
@@ -308,3 +310,9 @@ def durable_handler(
             ).to_dict()
 
     return wrapper
+
+
+@deprecated("Use `durable_execution` instead.")
+@wraps(durable_execution)
+def durable_handler(*args, **kwargs):
+    return durable_execution(*args, **kwargs)
