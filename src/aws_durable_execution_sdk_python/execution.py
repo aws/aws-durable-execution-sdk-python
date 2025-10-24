@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import wraps
 from typing import TYPE_CHECKING, Any
-from warnings import deprecated
+from warnings import warn
 
 from aws_durable_execution_sdk_python.context import DurableContext, ExecutionState
 from aws_durable_execution_sdk_python.exceptions import (
@@ -319,7 +319,7 @@ def durable_execution(
     return wrapper
 
 
-@deprecated("Use `durable_execution` instead.")
 @wraps(durable_execution)
 def durable_handler(*args, **kwargs):
+    warn("Deprecated, use `durable_execution`.", DeprecationWarning, stacklevel=2)
     return durable_execution(*args, **kwargs)
