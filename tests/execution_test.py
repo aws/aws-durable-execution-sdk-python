@@ -14,7 +14,7 @@ from aws_durable_execution_sdk_python.execution import (
     DurableExecutionInvocationInputWithClient,
     InitialExecutionState,
     InvocationStatus,
-    durable_handler,
+    durable_execution,
 )
 
 # LambdaContext no longer needed - using duck typing
@@ -266,11 +266,11 @@ def test_operation_to_dict_minimal():
 
 # endregion Models
 
-# region durable_handler
+# region durable_execution
 
 
-def test_durable_handler_client_selection_env_normal_result():
-    """Test durable_handler selects correct client from environment."""
+def test_durable_execution_client_selection_env_normal_result():
+    """Test durable_execution selects correct client from environment."""
     with patch(
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_lambda_client:
@@ -284,7 +284,7 @@ def test_durable_handler_client_selection_env_normal_result():
         )
         mock_client.checkpoint.return_value = mock_output
 
-        @durable_handler
+        @durable_execution
         def test_handler(event: Any, context: DurableContext) -> dict:
             return {"result": "success"}
 
@@ -322,8 +322,8 @@ def test_durable_handler_client_selection_env_normal_result():
         mock_client.checkpoint.assert_not_called()
 
 
-def test_durable_handler_client_selection_env_large_result():
-    """Test durable_handler selects correct client from environment."""
+def test_durable_execution_client_selection_env_large_result():
+    """Test durable_execution selects correct client from environment."""
     with patch(
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_lambda_client:
@@ -337,7 +337,7 @@ def test_durable_handler_client_selection_env_large_result():
         )
         mock_client.checkpoint.return_value = mock_output
 
-        @durable_handler
+        @durable_execution
         def test_handler(event: Any, context: DurableContext) -> dict:
             return {"result": LARGE_RESULT}
 
@@ -375,8 +375,8 @@ def test_durable_handler_client_selection_env_large_result():
         mock_client.checkpoint.assert_called_once()
 
 
-def test_durable_handler_with_injected_client_success_normal_result():
-    """Test durable_handler uses injected DurableServiceClient for successful execution."""
+def test_durable_execution_with_injected_client_success_normal_result():
+    """Test durable_execution uses injected DurableServiceClient for successful execution."""
     mock_client = Mock(spec=DurableServiceClient)
 
     # Mock successful checkpoint
@@ -386,7 +386,7 @@ def test_durable_handler_with_injected_client_success_normal_result():
     )
     mock_client.checkpoint.return_value = mock_output
 
-    @durable_handler
+    @durable_execution
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"result": "success"}
 
@@ -423,8 +423,8 @@ def test_durable_handler_with_injected_client_success_normal_result():
     mock_client.checkpoint.assert_not_called()
 
 
-def test_durable_handler_with_injected_client_success_large_result():
-    """Test durable_handler uses injected DurableServiceClient for successful execution."""
+def test_durable_execution_with_injected_client_success_large_result():
+    """Test durable_execution uses injected DurableServiceClient for successful execution."""
     mock_client = Mock(spec=DurableServiceClient)
 
     # Mock successful checkpoint
@@ -434,7 +434,7 @@ def test_durable_handler_with_injected_client_success_large_result():
     )
     mock_client.checkpoint.return_value = mock_output
 
-    @durable_handler
+    @durable_execution
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"result": LARGE_RESULT}
 
@@ -479,8 +479,8 @@ def test_durable_handler_with_injected_client_success_large_result():
     assert json.loads(updates[0].payload) == {"result": LARGE_RESULT}
 
 
-def test_durable_handler_with_injected_client_failure():
-    """Test durable_handler uses injected DurableServiceClient for failed execution."""
+def test_durable_execution_with_injected_client_failure():
+    """Test durable_execution uses injected DurableServiceClient for failed execution."""
     mock_client = Mock(spec=DurableServiceClient)
 
     # Mock successful checkpoint for failure
@@ -490,7 +490,7 @@ def test_durable_handler_with_injected_client_failure():
     )
     mock_client.checkpoint.return_value = mock_output
 
-    @durable_handler
+    @durable_execution
     def test_handler(event: Any, context: DurableContext) -> dict:
         msg = "Test error"
         raise ValueError(msg)
@@ -535,14 +535,14 @@ def test_durable_handler_with_injected_client_failure():
     assert updates[0].error.type == "ValueError"
 
 
-def test_durable_handler_checkpoint_error_propagation():
-    """Test durable_handler propagates CheckpointError from DurableServiceClient."""
+def test_durable_execution_checkpoint_error_propagation():
+    """Test durable_execution propagates CheckpointError from DurableServiceClient."""
     mock_client = Mock(spec=DurableServiceClient)
 
     # Mock checkpoint to raise CheckpointError
     mock_client.checkpoint.side_effect = CheckpointError("Checkpoint failed")
 
-    @durable_handler
+    @durable_execution
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"result": LARGE_RESULT}
 
@@ -575,11 +575,11 @@ def test_durable_handler_checkpoint_error_propagation():
         test_handler(invocation_input, lambda_context)
 
 
-def test_durable_handler_fatal_error_handling():
-    """Test durable_handler handles FatalError correctly."""
+def test_durable_execution_fatal_error_handling():
+    """Test durable_execution handles FatalError correctly."""
     mock_client = Mock(spec=DurableServiceClient)
 
-    @durable_handler
+    @durable_execution
     def test_handler(event: Any, context: DurableContext) -> dict:
         msg = "Fatal error occurred"
         raise FatalError(msg)
@@ -615,8 +615,8 @@ def test_durable_handler_fatal_error_handling():
     assert "Fatal error occurred" in result["Error"]["ErrorMessage"]
 
 
-def test_durable_handler_client_selection_local_runner():
-    """Test durable_handler selects correct client for local runner."""
+def test_durable_execution_client_selection_local_runner():
+    """Test durable_execution selects correct client for local runner."""
     with patch(
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_lambda_client:
@@ -630,7 +630,7 @@ def test_durable_handler_client_selection_local_runner():
         )
         mock_client.checkpoint.return_value = mock_output
 
-        @durable_handler
+        @durable_execution
         def test_handler(event: Any, context: DurableContext) -> dict:
             return {"result": "success"}
 
@@ -666,4 +666,4 @@ def test_durable_handler_client_selection_local_runner():
         mock_lambda_client.initialize_local_runner_client.assert_called_once()
 
 
-# endregion durable_handler
+# endregion durable_execution
