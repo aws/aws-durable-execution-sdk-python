@@ -23,15 +23,15 @@ from aws_durable_execution_sdk_python.types import WaitForConditionCheckContext
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from aws_durable_execution_sdk_python.config import (
-        WaitForConditionConfig,
-        WaitForConditionDecision,
-    )
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
     from aws_durable_execution_sdk_python.logger import Logger
     from aws_durable_execution_sdk_python.state import (
         CheckpointedResult,
         ExecutionState,
+    )
+    from aws_durable_execution_sdk_python.waits import (
+        WaitForConditionConfig,
+        WaitForConditionDecision,
     )
 
 

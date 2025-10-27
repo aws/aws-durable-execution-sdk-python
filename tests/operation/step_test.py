@@ -7,7 +7,6 @@ from unittest.mock import Mock, patch
 import pytest
 
 from aws_durable_execution_sdk_python.config import (
-    RetryDecision,
     StepConfig,
     StepSemantics,
 )
@@ -29,6 +28,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.logger import Logger
 from aws_durable_execution_sdk_python.operation.step import step_handler
+from aws_durable_execution_sdk_python.retries import RetryDecision
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 from tests.serdes_test import CustomDictSerDes
 

@@ -6,10 +6,6 @@ from unittest.mock import Mock
 
 import pytest
 
-from aws_durable_execution_sdk_python.config import (
-    WaitForConditionConfig,
-    WaitForConditionDecision,
-)
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     InvocationError,
@@ -29,6 +25,10 @@ from aws_durable_execution_sdk_python.operation.wait_for_condition import (
 )
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 from aws_durable_execution_sdk_python.types import WaitForConditionCheckContext
+from aws_durable_execution_sdk_python.waits import (
+    WaitForConditionConfig,
+    WaitForConditionDecision,
+)
 from tests.serdes_test import CustomDictSerDes
 
 

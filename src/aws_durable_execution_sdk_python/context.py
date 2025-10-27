@@ -13,7 +13,6 @@ from aws_durable_execution_sdk_python.config import (
     ParallelConfig,
     StepConfig,
     WaitForCallbackConfig,
-    WaitForConditionConfig,
 )
 from aws_durable_execution_sdk_python.exceptions import (
     CallbackError,
@@ -55,6 +54,7 @@ if TYPE_CHECKING:
 
     from aws_durable_execution_sdk_python.state import CheckpointedResult
     from aws_durable_execution_sdk_python.types import LambdaContext
+    from aws_durable_execution_sdk_python.waits import WaitForConditionConfig
 
 P = TypeVar("P")  # Payload type
 R = TypeVar("R")  # Result type

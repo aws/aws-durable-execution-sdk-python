@@ -3,49 +3,16 @@
 from __future__ import annotations
 
 import math
-import random
 import re
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import TYPE_CHECKING
+
+from aws_durable_execution_sdk_python.config import JitterStrategy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 Numeric = int | float
-
-# region Jitter
-
-
-class JitterStrategy(StrEnum):
-    """
-    Jitter strategies are used to introduce noise when attempting to retry
-    an invoke. We introduce noise to prevent a thundering-herd effect where
-    a group of accesses (e.g. invokes) happen at once.
-
-    Jitter is meant to be used to spread operations across time.
-
-    members:
-        :NONE: No jitter; use the exact calculated delay
-        :FULL: Full jitter; random delay between 0 and calculated delay
-        :HALF: Half jitter; random delay between 0.5x and 1.0x of the calculated delay
-    """
-
-    NONE = "NONE"
-    FULL = "FULL"
-    HALF = "HALF"
-
-    def compute_jitter(self, delay) -> float:
-        match self:
-            case JitterStrategy.NONE:
-                return 0
-            case JitterStrategy.HALF:
-                return random.random() * 0.5 + 0.5  # noqa: S311
-            case _:  # default is FULL
-                return random.random() * delay  # noqa: S311
-
-
-# endregion Jitter
 
 
 @dataclass
@@ -68,7 +35,7 @@ class RetryDecision:
 
 @dataclass
 class RetryStrategyConfig:
-    max_attempts: int = 3  # "infinite", practically
+    max_attempts: int = 3
     initial_delay_seconds: int = 5
     max_delay_seconds: int = 300  # 5 minutes
     backoff_rate: Numeric = 2.0

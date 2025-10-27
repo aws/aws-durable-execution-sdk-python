@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Generic, TypeVar
-
-from aws_durable_execution_sdk_python.retries import RetryDecision  # noqa: TCH001
 
 P = TypeVar("P")  # Payload type
 R = TypeVar("R")  # Result type
@@ -18,6 +17,7 @@ if TYPE_CHECKING:
     from concurrent.futures import Future
 
     from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+    from aws_durable_execution_sdk_python.retries import RetryDecision
     from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.types import SummaryGenerator
 
@@ -364,33 +364,6 @@ class WaitForCallbackConfig(CallbackConfig):
     retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
 
 
-@dataclass(frozen=True)
-class WaitForConditionDecision:
-    """Decision about whether to continue waiting."""
-
-    should_continue: bool
-    delay_seconds: int
-
-    @classmethod
-    def continue_waiting(cls, delay_seconds: int) -> WaitForConditionDecision:
-        """Create a decision to continue waiting for delay_seconds."""
-        return cls(should_continue=True, delay_seconds=delay_seconds)
-
-    @classmethod
-    def stop_polling(cls) -> WaitForConditionDecision:
-        """Create a decision to stop polling."""
-        return cls(should_continue=False, delay_seconds=-1)
-
-
-@dataclass(frozen=True)
-class WaitForConditionConfig(Generic[T]):
-    """Configuration for wait_for_condition."""
-
-    wait_strategy: Callable[[T, int], WaitForConditionDecision]
-    initial_state: T
-    serdes: SerDes | None = None
-
-
 class StepFuture(Generic[T]):
     """A future that will block on result() until the step returns."""
 
@@ -401,3 +374,37 @@ class StepFuture(Generic[T]):
     def result(self, timeout_seconds: int | None = None) -> T:
         """Return the result of the Future."""
         return self.future.result(timeout=timeout_seconds)
+
+
+# region Jitter
+
+
+class JitterStrategy(StrEnum):
+    """
+    Jitter strategies are used to introduce noise when attempting to retry
+    an invoke. We introduce noise to prevent a thundering-herd effect where
+    a group of accesses (e.g. invokes) happen at once.
+
+    Jitter is meant to be used to spread operations across time.
+
+    members:
+        :NONE: No jitter; use the exact calculated delay
+        :FULL: Full jitter; random delay between 0 and calculated delay
+        :HALF: Half jitter; random delay between 0.5x and 1.0x of the calculated delay
+    """
+
+    NONE = "NONE"
+    FULL = "FULL"
+    HALF = "HALF"
+
+    def compute_jitter(self, delay) -> float:
+        match self:
+            case JitterStrategy.NONE:
+                return 0
+            case JitterStrategy.HALF:
+                return delay * (random.random() * 0.5 + 0.5)  # noqa: S311
+            case _:  # default is FULL
+                return random.random() * delay  # noqa: S311
+
+
+# endregion Jitter

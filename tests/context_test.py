@@ -14,8 +14,6 @@ from aws_durable_execution_sdk_python.config import (
     MapConfig,
     ParallelConfig,
     StepConfig,
-    WaitForConditionConfig,
-    WaitForConditionDecision,
 )
 from aws_durable_execution_sdk_python.context import Callback, DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
@@ -33,6 +31,10 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
 )
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
+from aws_durable_execution_sdk_python.waits import (
+    WaitForConditionConfig,
+    WaitForConditionDecision,
+)
 from tests.serdes_test import CustomDictSerDes
 from tests.test_helpers import operation_id_sequence
 

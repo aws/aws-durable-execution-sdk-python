@@ -23,7 +23,7 @@ class TestJitterStrategy:
         assert strategy.compute_jitter(10) == 0
         assert strategy.compute_jitter(100) == 0
 
-    @patch("aws_durable_execution_sdk_python.retries.random.random")
+    @patch("random.random")
     def test_full_jitter_range(self, mock_random):
         """Test FULL jitter returns value between 0 and delay."""
         mock_random.return_value = 0.5
@@ -32,15 +32,15 @@ class TestJitterStrategy:
         result = strategy.compute_jitter(delay)
         assert result == 5.0  # 0.5 * 10
 
-    @patch("aws_durable_execution_sdk_python.retries.random.random")
+    @patch("random.random")
     def test_half_jitter_range(self, mock_random):
         """Test HALF jitter returns value between 0.5 and 1.0 (multiplier)."""
         mock_random.return_value = 0.5
         strategy = JitterStrategy.HALF
         result = strategy.compute_jitter(10)
-        assert result == 0.75  # 0.5 * 0.5 + 0.5
+        assert result == 7.5  # 10 * (0.5 + 0.5*0.5)
 
-    @patch("aws_durable_execution_sdk_python.retries.random.random")
+    @patch("random.random")
     def test_half_jitter_boundary_values(self, mock_random):
         """Test HALF jitter boundary values."""
         strategy = JitterStrategy.HALF
@@ -48,12 +48,12 @@ class TestJitterStrategy:
         # Minimum value (random = 0)
         mock_random.return_value = 0.0
         result = strategy.compute_jitter(100)
-        assert result == 0.5
+        assert result == 50
 
         # Maximum value (random = 1)
         mock_random.return_value = 1.0
         result = strategy.compute_jitter(100)
-        assert result == 1.0
+        assert result == 100
 
     def test_invalid_jitter_strategy(self):
         """Test behavior with invalid jitter strategy."""
@@ -144,7 +144,7 @@ class TestCreateRetryStrategy:
         decision = strategy(error, 1)
         assert decision.should_retry is False
 
-    @patch("aws_durable_execution_sdk_python.retries.random.random")
+    @patch("random.random")
     def test_exponential_backoff_calculation(self, mock_random):
         """Test exponential backoff delay calculation."""
         mock_random.return_value = 0.5
@@ -192,9 +192,7 @@ class TestCreateRetryStrategy:
 
     def test_delay_ceiling_applied(self):
         """Test delay is rounded up using math.ceil."""
-        with patch(
-            "aws_durable_execution_sdk_python.retries.random.random", return_value=0.3
-        ):
+        with patch("random.random", return_value=0.3):
             config = RetryStrategyConfig(
                 initial_delay_seconds=3, jitter_strategy=JitterStrategy.FULL
             )
@@ -269,7 +267,7 @@ class TestRetryPresets:
         decision = strategy(error, 10)
         assert decision.should_retry is False
 
-    @patch("aws_durable_execution_sdk_python.retries.random.random")
+    @patch("random.random")
     def test_critical_preset_no_jitter(self, mock_random):
         """Test critical preset uses no jitter."""
         mock_random.return_value = 0.5  # Should be ignored
@@ -284,7 +282,7 @@ class TestRetryPresets:
 class TestJitterIntegration:
     """Test jitter integration with retry strategies."""
 
-    @patch("aws_durable_execution_sdk_python.retries.random.random")
+    @patch("random.random")
     def test_full_jitter_integration(self, mock_random):
         """Test full jitter integration in retry strategy."""
         mock_random.return_value = 0.8
@@ -298,7 +296,7 @@ class TestJitterIntegration:
         # 10 + (0.8 * 10) = 18
         assert decision.delay_seconds == 18
 
-    @patch("aws_durable_execution_sdk_python.retries.random.random")
+    @patch("random.random")
     def test_half_jitter_integration(self, mock_random):
         """Test half jitter integration in retry strategy."""
         mock_random.return_value = 0.6
@@ -309,10 +307,10 @@ class TestJitterIntegration:
 
         error = Exception("test error")
         decision = strategy(error, 1)
-        # 10 + (0.6 * 0.5 + 0.5) = 10.8, ceil(10.8) = 11
-        assert decision.delay_seconds == 11
+        # 10 + 10*(0.6 * 0.5 + 0.5) = 18
+        assert decision.delay_seconds == 18
 
-    @patch("aws_durable_execution_sdk_python.retries.random.random")
+    @patch("random.random")
     def test_half_jitter_integration_corrected(self, mock_random):
         """Test half jitter with corrected understanding of implementation."""
         mock_random.return_value = 0.0  # Minimum jitter
@@ -323,8 +321,8 @@ class TestJitterIntegration:
 
         error = Exception("test error")
         decision = strategy(error, 1)
-        # 10 + 0.5 = 10.5, ceil(10.5) = 11
-        assert decision.delay_seconds == 11
+        # 10 + 10 * 0.5 = 15
+        assert decision.delay_seconds == 15
 
     def test_none_jitter_integration(self):
         """Test no jitter integration in retry strategy."""

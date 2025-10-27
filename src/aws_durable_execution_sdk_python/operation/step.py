@@ -6,7 +6,6 @@ import logging
 from typing import TYPE_CHECKING, TypeVar
 
 from aws_durable_execution_sdk_python.config import (
-    RetryDecision,
     StepConfig,
     StepSemantics,
 )
@@ -19,7 +18,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationUpdate,
 )
 from aws_durable_execution_sdk_python.logger import Logger, LogInfo
-from aws_durable_execution_sdk_python.retries import RetryPresets
+from aws_durable_execution_sdk_python.retries import RetryDecision, RetryPresets
 from aws_durable_execution_sdk_python.serdes import deserialize, serialize
 from aws_durable_execution_sdk_python.suspend import (
     suspend_with_optional_timeout,
