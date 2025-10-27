@@ -158,7 +158,7 @@ def step_handler(
                 operation_identifier.operation_id,
                 operation_identifier.name,
             )
-            # this bubbles up to execution.durable_handler, where it will exit with FAILED
+            # this bubbles up to execution.durable_execution, where it will exit with FAILED
             raise
 
         logger.exception(

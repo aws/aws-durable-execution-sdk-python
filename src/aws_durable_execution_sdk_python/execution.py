@@ -4,9 +4,7 @@ import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from functools import wraps
 from typing import TYPE_CHECKING, Any
-from warnings import warn
 
 from aws_durable_execution_sdk_python.context import DurableContext, ExecutionState
 from aws_durable_execution_sdk_python.exceptions import (
@@ -317,9 +315,3 @@ def durable_execution(
             ).to_dict()
 
     return wrapper
-
-
-@wraps(durable_execution)
-def durable_handler(*args, **kwargs):
-    warn("Deprecated, use `durable_execution`.", DeprecationWarning, stacklevel=2)
-    return durable_execution(*args, **kwargs)
