@@ -247,7 +247,6 @@ def test_invoke_handler_new_operation():
     assert operation_update.name == "test_invoke"
     assert operation_update.payload == json.dumps("test_input")
     assert operation_update.chained_invoke_options.function_name == "test_function"
-    assert operation_update.chained_invoke_options.timeout_seconds == 60
 
 
 def test_invoke_handler_new_operation_with_timeout():
@@ -309,7 +308,10 @@ def test_invoke_handler_no_config():
 
     # Verify default config was used
     operation_update = mock_state.create_checkpoint.call_args[1]["operation_update"]
-    assert operation_update.chained_invoke_options.timeout_seconds == 0
+    assert (
+        operation_update.to_dict()["ChainedInvokeOptions"]["FunctionName"]
+        == "test_function"
+    )
 
 
 def test_invoke_handler_custom_serdes():

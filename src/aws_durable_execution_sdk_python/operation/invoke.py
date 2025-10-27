@@ -87,9 +87,7 @@ def invoke_handler(
     start_operation: OperationUpdate = OperationUpdate.create_invoke_start(
         identifier=operation_identifier,
         payload=serialized_payload,
-        chained_invoke_options=ChainedInvokeOptions(
-            function_name=function_name, timeout_seconds=config.timeout_seconds
-        ),
+        chained_invoke_options=ChainedInvokeOptions(function_name=function_name),
     )
 
     state.create_checkpoint(operation_update=start_operation)

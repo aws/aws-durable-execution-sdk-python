@@ -402,7 +402,6 @@ def test_invoke_options_from_dict():
     data = {"FunctionName": "test-function", "TimeoutSeconds": 120}
     options = ChainedInvokeOptions.from_dict(data)
     assert options.function_name == "test-function"
-    assert options.timeout_seconds == 120
 
 
 def test_invoke_options_from_dict_required_only():
@@ -410,7 +409,6 @@ def test_invoke_options_from_dict_required_only():
     data = {"FunctionName": "test-function"}
     options = ChainedInvokeOptions.from_dict(data)
     assert options.function_name == "test-function"
-    assert options.timeout_seconds == 0
 
 
 def test_context_options_from_dict():
@@ -444,7 +442,7 @@ def test_callback_options_roundtrip():
 
 def test_invoke_options_roundtrip():
     """Test ChainedInvokeOptions to_dict -> from_dict roundtrip."""
-    original = ChainedInvokeOptions(function_name="test-func", timeout_seconds=120)
+    original = ChainedInvokeOptions(function_name="test-func")
     data = original.to_dict()
     restored = ChainedInvokeOptions.from_dict(data)
     assert restored == original
@@ -498,12 +496,10 @@ def test_invoke_options_to_dict():
     """Test ChainedInvokeOptions.to_dict method."""
     options = ChainedInvokeOptions(
         function_name="test_function",
-        timeout_seconds=30,
     )
     result = options.to_dict()
     expected = {
         "FunctionName": "test_function",
-        "TimeoutSeconds": 30,
     }
     assert result == expected
 
@@ -512,7 +508,7 @@ def test_invoke_options_to_dict_minimal():
     """Test ChainedInvokeOptions.to_dict with minimal fields."""
     options = ChainedInvokeOptions(function_name="test_function")
     result = options.to_dict()
-    assert result == {"FunctionName": "test_function", "TimeoutSeconds": 0}
+    assert result == {"FunctionName": "test_function"}
 
 
 def test_context_options_to_dict():
@@ -546,12 +542,11 @@ def test_invoke_options_from_dict_missing_function_name():
 
 def test_invoke_options_to_dict_complete():
     """Test ChainedInvokeOptions.to_dict with all fields."""
-    options = ChainedInvokeOptions(function_name="test_func", timeout_seconds=120)
+    options = ChainedInvokeOptions(function_name="test_func")
 
     result = options.to_dict()
 
     assert result["FunctionName"] == "test_func"
-    assert result["TimeoutSeconds"] == 120
 
 
 # =============================================================================
@@ -562,7 +557,7 @@ def test_invoke_options_to_dict_complete():
 def test_operation_update_create_invoke_start():
     """Test OperationUpdate.create_invoke_start method to cover line 545."""
     identifier = OperationIdentifier("test-id", "parent-id")
-    invoke_options = ChainedInvokeOptions("test-func", 120)
+    invoke_options = ChainedInvokeOptions("test-func")
     update = OperationUpdate.create_invoke_start(identifier, "payload", invoke_options)
     assert update.operation_id == "test-id"
 
@@ -609,9 +604,7 @@ def test_operation_update_to_dict_complete():
     callback_options = CallbackOptions(
         timeout_seconds=300, heartbeat_timeout_seconds=60
     )
-    chained_invoke_options = ChainedInvokeOptions(
-        function_name="test_func", timeout_seconds=60
-    )
+    chained_invoke_options = ChainedInvokeOptions(function_name="test_func")
 
     update = OperationUpdate(
         operation_id="op1",
@@ -639,7 +632,7 @@ def test_operation_update_to_dict_complete():
         "StepOptions": {"NextAttemptDelaySeconds": 30},
         "WaitOptions": {"WaitSeconds": 60},
         "CallbackOptions": {"TimeoutSeconds": 300, "HeartbeatTimeoutSeconds": 60},
-        "ChainedInvokeOptions": {"FunctionName": "test_func", "TimeoutSeconds": 60},
+        "ChainedInvokeOptions": {"FunctionName": "test_func"},
     }
     assert result == expected
 
@@ -884,9 +877,7 @@ def test_operation_update_complete_with_new_fields():
     callback_options = CallbackOptions(
         timeout_seconds=300, heartbeat_timeout_seconds=60
     )
-    chained_invoke_options = ChainedInvokeOptions(
-        function_name="test_func", timeout_seconds=60
-    )
+    chained_invoke_options = ChainedInvokeOptions(function_name="test_func")
 
     update = OperationUpdate(
         operation_id="op1",
@@ -918,7 +909,7 @@ def test_operation_update_complete_with_new_fields():
         "StepOptions": {"NextAttemptDelaySeconds": 30},
         "WaitOptions": {"WaitSeconds": 60},
         "CallbackOptions": {"TimeoutSeconds": 300, "HeartbeatTimeoutSeconds": 60},
-        "ChainedInvokeOptions": {"FunctionName": "test_func", "TimeoutSeconds": 60},
+        "ChainedInvokeOptions": {"FunctionName": "test_func"},
     }
     assert result == expected
 

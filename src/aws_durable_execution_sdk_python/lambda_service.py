@@ -241,11 +241,21 @@ class StepOptions:
 
 @dataclass(frozen=True)
 class WaitOptions:
-    wait_seconds: int = 0
+    """
+    Wait Options provides details regarding suspension.
+
+    As of 2025/10/27:
+
+    - `wait_seconds` accepts values between 1, and 31622400
+    - When wait_second seconds does not exist,then we default to 1
+
+    """
+
+    wait_seconds: int = 1
 
     @classmethod
     def from_dict(cls, data: MutableMapping[str, Any]) -> WaitOptions:
-        return cls(wait_seconds=data.get("WaitSeconds", 0))
+        return cls(wait_seconds=data.get("WaitSeconds", 1))
 
     def to_dict(self) -> MutableMapping[str, Any]:
         return {"WaitSeconds": self.wait_seconds}
@@ -253,6 +263,19 @@ class WaitOptions:
 
 @dataclass(frozen=True)
 class CallbackOptions:
+    """
+    Callback options provides details about the callback, wrt timeout
+    and heartbeat checks.
+
+    As of 2025/10/27:
+    - When timeout_seconds == 0, then the callback has no timeout
+    - When heartbeat_timeout_seconds == 0, then the callback has no timeout
+
+    - When timeout_seconds is not present, then default is 0
+    - When heartbeat_timeout_seconds, then default is 0
+
+    """
+
     timeout_seconds: TimeoutSeconds = 0
     heartbeat_timeout_seconds: int = 0
 
@@ -272,20 +295,22 @@ class CallbackOptions:
 
 @dataclass(frozen=True)
 class ChainedInvokeOptions:
+    """
+    As of 2025/10/27:
+     - Chained invoke options only contains a function name
+    """
+
     function_name: str
-    timeout_seconds: TimeoutSeconds = 0
 
     @classmethod
     def from_dict(cls, data: MutableMapping[str, Any]) -> ChainedInvokeOptions:
         return cls(
             function_name=data["FunctionName"],
-            timeout_seconds=data.get("TimeoutSeconds", 0),
         )
 
     def to_dict(self) -> MutableMapping[str, Any]:
         result: MutableMapping[str, Any] = {
             "FunctionName": self.function_name,
-            "TimeoutSeconds": self.timeout_seconds,
         }
         return result
 
