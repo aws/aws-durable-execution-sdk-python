@@ -123,8 +123,10 @@ def wait_for_condition_handler(
                 identifier=operation_identifier,
             )
         )
-
-        state.create_checkpoint(operation_update=start_operation)
+        # Checkpoint wait_for_condition START with non-blocking (is_sync=False).
+        # This is purely for observability - we don't need to wait for persistence before
+        # executing the check function. The START checkpoint just records that polling began.
+        state.create_checkpoint(operation_update=start_operation, is_sync=False)
 
     try:
         # Execute the check function with the injected logger
@@ -163,6 +165,9 @@ def wait_for_condition_handler(
                 identifier=operation_identifier,
                 payload=serialized_state,
             )
+            # Checkpoint SUCCEED operation with blocking (is_sync=True, default).
+            # Must ensure the final state is persisted before returning to the caller.
+            # This guarantees the condition result is durable and won't be re-evaluated on replay.
             state.create_checkpoint(operation_update=success_operation)
 
             logger.debug(
@@ -179,6 +184,9 @@ def wait_for_condition_handler(
             next_attempt_delay_seconds=decision.delay_seconds or 0,
         )
 
+        # Checkpoint RETRY operation with blocking (is_sync=True, default).
+        # Must ensure the current state and next attempt timestamp are persisted before suspending.
+        # This guarantees the polling state is durable and will resume correctly on the next invocation.
         state.create_checkpoint(operation_update=retry_operation)
 
         suspend_with_optional_timeout(
@@ -199,8 +207,11 @@ def wait_for_condition_handler(
             identifier=operation_identifier,
             error=ErrorObject.from_exception(e),
         )
+        # Checkpoint FAIL operation with blocking (is_sync=True, default).
+        # Must ensure the failure state is persisted before raising the exception.
+        # This guarantees the error is durable and the condition won't be re-evaluated on replay.
         state.create_checkpoint(operation_update=fail_operation)
         raise
 
-    msg: str = "wait_for_condition should never reach this point"
-    raise ExecutionError(msg)
+    msg: str = "wait_for_condition should never reach this point"  # pragma: no cover
+    raise ExecutionError(msg)  # pragma: no cover

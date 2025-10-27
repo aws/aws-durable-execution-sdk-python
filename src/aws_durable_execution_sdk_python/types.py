@@ -168,7 +168,7 @@ the child context to be re-executed during replay to reconstruct the full result
 
 
 class SummaryGenerator(Protocol[C_contra]):
-    def __call__(self, result: C_contra) -> str: ...
+    def __call__(self, result: C_contra) -> str: ...  # pragma: no cover
 
 
 # endregion Summary

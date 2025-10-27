@@ -133,6 +133,27 @@ class StepInterruptedError(InvocationError):
         self.step_id = step_id
 
 
+class BackgroundThreadError(BaseException):
+    """Critical error from background checkpoint thread.
+
+    Derives from BaseException to bypass normal exception handlers.
+    Similar to KeyboardInterrupt or SystemExit - this is a system-level
+    error that should terminate execution immediately without attempting
+    to checkpoint or process the error.
+
+    This exception is raised in the user thread when the background
+    checkpoint processing thread encounters a fatal error. It propagates
+    through CompletionEvent.wait() to interrupt blocked user code.
+
+    Attributes:
+        source_exception: The original exception from the background thread
+    """
+
+    def __init__(self, message: str, source_exception: Exception):
+        super().__init__(message)
+        self.source_exception = source_exception
+
+
 class SuspendExecution(BaseException):
     """Raise this exception to suspend the current execution by returning PENDING to DAR.
 

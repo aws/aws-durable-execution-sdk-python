@@ -74,7 +74,11 @@ def child_handler(
             identifier=operation_identifier,
             sub_type=sub_type,
         )
-        state.create_checkpoint(operation_update=start_operation)
+        # Checkpoint child context START with non-blocking (is_sync=False).
+        # This is a fire-and-forget operation for performance - we don't need to wait for
+        # persistence before executing the child context. The START checkpoint is purely
+        # for observability and tracking the operation hierarchy.
+        state.create_checkpoint(operation_update=start_operation, is_sync=False)
 
     try:
         raw_result: T = func()
@@ -123,6 +127,10 @@ def child_handler(
             sub_type=sub_type,
             context_options=ContextOptions(replay_children=replay_children),
         )
+        # Checkpoint child context SUCCEED with blocking (is_sync=True, default).
+        # Must ensure the child context result is persisted before returning to the parent.
+        # This guarantees the result is durable and child operations won't be re-executed on replay
+        # (unless replay_children=True for large payloads).
         state.create_checkpoint(operation_update=success_operation)
 
         logger.debug(
@@ -139,6 +147,9 @@ def child_handler(
         fail_operation = OperationUpdate.create_context_fail(
             identifier=operation_identifier, error=error_object, sub_type=sub_type
         )
+        # Checkpoint child context FAIL with blocking (is_sync=True, default).
+        # Must ensure the failure state is persisted before raising the exception.
+        # This guarantees the error is durable and child operations won't be re-executed on replay.
         state.create_checkpoint(operation_update=fail_operation)
 
         # InvocationError and its derivatives can be retried

@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock, patch
 
+import pytest
+
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
     durable_step,
@@ -121,13 +123,16 @@ def test_step_different_ways_to_pass_args():
             == '["from step 123 str", "from step no args", "from step plain"]'
         )
 
-        # 3 START checkpoint, 3 SUCCEED checkpoint
-        assert len(checkpoint_calls) == 6
+        # 3 START checkpoint, 3 SUCCEED checkpoint (batched together)
+        # Flatten all operations from all batches
+        all_operations = [op for batch in checkpoint_calls for op in batch]
+        assert len(all_operations) == 6
 
-        checkpoint = checkpoint_calls[-1][0]
-        assert checkpoint.operation_type is OperationType.STEP
-        assert checkpoint.action is OperationAction.SUCCEED
-        assert checkpoint.payload == '"from step plain"'
+        # Check the last operation
+        last_checkpoint = all_operations[-1]
+        assert last_checkpoint.operation_type is OperationType.STEP
+        assert last_checkpoint.action is OperationAction.SUCCEED
+        assert last_checkpoint.payload == '"from step plain"'
 
 
 def test_step_with_logger():
@@ -207,19 +212,22 @@ def test_step_with_logger():
 
         assert result["Status"] == InvocationStatus.SUCCEEDED.value
 
-        # 1 START checkpoint, 1 SUCCEED checkpoint
-        assert len(checkpoint_calls) == 2
+        # 1 START checkpoint, 1 SUCCEED checkpoint (batched together)
+        # Flatten all operations from all batches
+        all_operations = [op for batch in checkpoint_calls for op in batch]
+        assert len(all_operations) == 2
         operation_id = next(operation_id_sequence())
 
-        checkpoint = checkpoint_calls[0][0]
-        assert checkpoint.operation_type == OperationType.STEP
-        assert checkpoint.action == OperationAction.START
-        assert checkpoint.operation_id == operation_id
-        # Check the wait checkpoint
-        checkpoint = checkpoint_calls[1][0]
-        assert checkpoint.operation_type == OperationType.STEP
-        assert checkpoint.action == OperationAction.SUCCEED
-        assert checkpoint.operation_id == operation_id
+        # Check the START operation
+        start_op = all_operations[0]
+        assert start_op.operation_type == OperationType.STEP
+        assert start_op.action == OperationAction.START
+        assert start_op.operation_id == operation_id
+        # Check the SUCCEED operation
+        succeed_op = all_operations[1]
+        assert succeed_op.operation_type == OperationType.STEP
+        assert succeed_op.action == OperationAction.SUCCEED
+        assert succeed_op.operation_id == operation_id
 
 
 def test_wait_inside_run_in_childcontext():
@@ -294,20 +302,22 @@ def test_wait_inside_run_in_childcontext():
         # Assert the execution returns PENDING status
         assert result["Status"] == InvocationStatus.PENDING.value
 
-        # Assert that checkpoints were created
-        assert len(checkpoint_calls) == 2  # One for child context start, one for wait
+        # Assert that checkpoints were created (may be batched together)
+        # Flatten all operations from all batches
+        all_operations = [op for batch in checkpoint_calls for op in batch]
+        assert len(all_operations) == 2  # One for child context start, one for wait
 
         expected_parent_id = next(operation_id_sequence())
         expected_child_id = next(operation_id_sequence(expected_parent_id))
 
-        # Check first checkpoint (child context start)
-        first_checkpoint = checkpoint_calls[0][0]
+        # Check first operation (child context start)
+        first_checkpoint = all_operations[0]
         assert first_checkpoint.operation_type is OperationType.CONTEXT
         assert first_checkpoint.action is OperationAction.START
         assert first_checkpoint.operation_id == expected_parent_id
 
-        # Check second checkpoint (wait operation)
-        second_checkpoint = checkpoint_calls[1][0]
+        # Check second operation (wait operation)
+        second_checkpoint = all_operations[1]
         assert second_checkpoint.operation_type is OperationType.WAIT
         assert second_checkpoint.action is OperationAction.START
         assert second_checkpoint.operation_id == expected_child_id
@@ -320,6 +330,77 @@ def test_wait_inside_run_in_childcontext():
 
 class CustomError(Exception):
     """Custom exception for testing."""
+
+
+def test_step_checkpoint_failure_propagates_error():
+    """Test that errors during checkpoint invocation propagate correctly from background thread.
+
+    This test demonstrates a bug: when a checkpoint fails in the background thread,
+    the user code thread is blocked waiting on completion_event.wait() with no timeout.
+    The background thread exception is raised, but the user thread never completes,
+    causing the execution to hang indefinitely.
+    """
+
+    @durable_step
+    def failing_step(step_context: StepContext) -> str:
+        return "this should checkpoint but fail"
+
+    @durable_execution
+    def my_handler(event, context: DurableContext):
+        # This step will trigger a checkpoint that fails
+        result: str = context.step(failing_step())
+        return result
+
+    with patch(
+        "aws_durable_execution_sdk_python.execution.LambdaClient"
+    ) as mock_client_class:
+        mock_client = Mock()
+        mock_client_class.initialize_local_runner_client.return_value = mock_client
+
+        # Mock the checkpoint method to raise an error (using RuntimeError as a generic exception)
+        def mock_checkpoint_failure(
+            durable_execution_arn,
+            checkpoint_token,
+            updates,
+            client_token="token",  # noqa: S107
+        ):
+            # Simulate a failure during checkpoint invocation
+            msg = "Checkpoint service unavailable"
+            raise RuntimeError(msg)
+
+        mock_client.checkpoint = mock_checkpoint_failure
+
+        # Create test event
+        event = {
+            "DurableExecutionArn": "test-arn",
+            "CheckpointToken": "test-token",
+            "InitialExecutionState": {
+                "Operations": [
+                    {
+                        "Id": "execution-1",
+                        "Type": "EXECUTION",
+                        "Status": "STARTED",
+                        "ExecutionDetails": {"InputPayload": "{}"},
+                    }
+                ],
+                "NextMarker": "",
+            },
+            "LocalRunner": True,
+        }
+
+        # Create mock lambda context
+        lambda_context = Mock()
+        lambda_context.aws_request_id = "test-request-id"
+        lambda_context.client_context = None
+        lambda_context.identity = None
+        lambda_context._epoch_deadline_time_in_ms = 0  # noqa: SLF001
+        lambda_context.invoked_function_arn = "test-arn"
+        lambda_context.tenant_id = None
+
+        # Execute the handler - should propagate the checkpoint error
+        # The background thread error should propagate and raise
+        with pytest.raises(RuntimeError, match="Checkpoint service unavailable"):
+            my_handler(event, lambda_context)
 
 
 def test_wait_not_caught_by_exception():

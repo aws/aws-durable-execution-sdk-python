@@ -533,6 +533,124 @@ classDiagram
     OrderedLock --> Event : manages queue of
 ```
 
+## Checkpointing System
+
+The SDK invokes the AWS Lambda checkpoint API to persist execution state. Checkpoints are batched for efficiency and can be either 
+synchronous (blocking) or asynchronous (non-blocking). Critical checkpoints are blocking,
+meaning that execution will not proceed until the checkpoint call has successfully completed.
+
+### Checkpoint Types
+
+Checkpoints are categorized by their action (START, SUCCEED, FAIL) and whether they are critical to execution correctness:
+
+| Operation Type | Action | Is Sync? | Rationale |
+|---------------|--------|----------|-----------|
+| Step (AtMostOncePerRetry) | START | Yes | Prevents duplicate execution - must wait for confirmation |
+| Step (AtLeastOncePerRetry) | START | No | Performance optimization - idempotent operations can retry |
+| Step | SUCCEED/FAIL | Yes | Ensures result persisted before returning to caller |
+| Callback | START | Yes | Must wait for API to generate callback ID |
+| Callback | SUCCEED/FAIL | Yes | Ensures callback result persisted |
+| Invoke | START | Yes | Ensures chained invoke recorded before proceeding |
+| Invoke | SUCCEED/FAIL | Yes | Ensures invoke result persisted |
+| Context (Child) | START | No | Fire-and-forget for performance - parent tracks completion |
+| Context (Child) | SUCCEED/FAIL | Yes | Ensures child result available to parent |
+| Wait | START | No | Observability only - no blocking needed |
+| Wait | SUCCEED | Yes | Ensures wait completion recorded |
+| Wait for Condition | START | No | Observability only - condition check is idempotent |
+| Wait for Condition | SUCCEED/FAIL | Yes | Ensures condition result persisted |
+| Empty Checkpoint | N/A | Yes (default) | Refreshes checkpoint token and operations list |
+
+### Synchronous vs Asynchronous Checkpoints
+
+**Synchronous Checkpoints (is_sync=True, default)**:
+- Block the caller until the checkpoint is processed by the background thread
+- Ensure the checkpoint is persisted before continuing execution
+- Safe default for correctness
+- Used for critical operations where confirmation is required
+
+**Asynchronous Checkpoints (is_sync=False, opt-in)**:
+- Return immediately without waiting for the checkpoint to complete
+- Performance optimization for specific use cases
+- Used for observability checkpoints and fire-and-forget operations
+- Only safe when the operation is idempotent or non-critical
+
+### Checkpoint Batching
+
+The SDK uses a background thread to batch multiple checkpoint operations into a single API call for efficiency. This reduces API overhead and
+improves throughput.
+
+```mermaid
+sequenceDiagram
+    participant MT as Main Thread
+    participant Q as Checkpoint Queue
+    participant BT as Background Thread
+    participant API as Durable Functions API
+    
+    Note over MT,API: Synchronous Checkpoint Flow
+    MT->>Q: Enqueue operation + completion event
+    MT->>MT: Block on completion event
+    BT->>Q: Collect batch (up to 1 second or 750KB)
+    BT->>API: POST /checkpoint (batched operations)
+    API-->>BT: New checkpoint token + operations
+    BT->>BT: Update execution state
+    BT->>MT: Signal completion event
+    MT->>MT: Resume execution
+    
+    Note over MT,API: Asynchronous Checkpoint Flow
+    MT->>Q: Enqueue operation (no event)
+    MT->>MT: Continue immediately
+    BT->>Q: Collect batch (up to 1 second or 750KB)
+    BT->>API: POST /checkpoint (batched operations)
+    API-->>BT: New checkpoint token + operations
+    BT->>BT: Update execution state
+```
+
+### Batching Configuration
+
+Checkpoint batching is controlled by `CheckpointBatcherConfig`:
+
+```python
+@dataclass(frozen=True)
+class CheckpointBatcherConfig:
+    max_batch_size_bytes: int = 750 * 1024  # 750KB
+    max_batch_time_seconds: float = 1.0     # 1 second
+    max_batch_operations: int | float = float("inf")  # No limit
+```
+
+The background thread collects operations until one of these limits is reached:
+1. Batch size exceeds 750KB
+2. 1 second has elapsed since the first operation
+3. Maximum operation count is reached (unlimited by default)
+
+### Concurrency Management
+
+The checkpointing system handles concurrent operations (map/parallel) by tracking parent-child relationships:
+
+1. When a CONTEXT operation completes (SUCCEED/FAIL), all descendant operations are marked as orphaned
+2. Orphaned operations are rejected if they attempt to checkpoint
+3. This prevents child operations from checkpointing after their parent has already completed
+4. Uses a single lock (`_parent_done_lock`) to coordinate completion and checkpoint validation
+
+### Error Handling
+
+When a checkpoint fails in the background thread:
+
+1. **Error Signaling**: The background thread creates a `BackgroundThreadError` wrapping the original exception
+2. **Event Notification**: All completion events (both in the current batch and queued operations) are signaled with this error
+3. **Immediate Propagation**: Synchronous callers waiting on `create_checkpoint(is_sync=True)` immediately receive the `BackgroundThreadError` 
+4. **Future Prevention**: A failure event (`_checkpointing_failed`) is set to prevent any future checkpoint attempts
+5. **Clean Termination**: The background thread exits cleanly after signaling all waiting operations
+
+For **synchronous operations** (default `is_sync=True`):
+- The main thread receives `BackgroundThreadError` immediately when calling `create_checkpoint()`
+- This prevents further execution with corrupted state
+
+For **asynchronous operations** (`is_sync=False`):
+- The error is detected on the next synchronous checkpoint attempt
+- The `_checkpointing_failed` event causes immediate failure before queuing
+
+This ensures no code continues executing after a checkpoint failure, maintaining execution state integrity.
+
 ## License
 
 This project is licensed under the [Apache-2.0 License](LICENSE).

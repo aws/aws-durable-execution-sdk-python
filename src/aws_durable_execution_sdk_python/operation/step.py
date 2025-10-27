@@ -111,7 +111,13 @@ def step_handler(
         start_operation: OperationUpdate = OperationUpdate.create_step_start(
             identifier=operation_identifier,
         )
-        state.create_checkpoint(operation_update=start_operation)
+        # Checkpoint START operation with appropriate synchronization:
+        # - AtMostOncePerRetry: Use blocking checkpoint (is_sync=True) to prevent duplicate execution.
+        #   The step must not execute until the START checkpoint is persisted, ensuring exactly-once semantics.
+        # - AtLeastOncePerRetry: Use non-blocking checkpoint (is_sync=False) for performance optimization.
+        #   The step can execute immediately without waiting for checkpoint persistence, allowing at-least-once semantics.
+        is_sync: bool = config.step_semantics is StepSemantics.AT_MOST_ONCE_PER_RETRY
+        state.create_checkpoint(operation_update=start_operation, is_sync=is_sync)
 
     attempt: int = 0
     if checkpointed_result.operation and checkpointed_result.operation.step_details:
@@ -141,6 +147,9 @@ def step_handler(
             payload=serialized_result,
         )
 
+        # Checkpoint SUCCEED operation with blocking (is_sync=True, default).
+        # Must ensure the success state is persisted before returning the result to the caller.
+        # This guarantees the step result is durable and won't be lost if Lambda terminates.
         state.create_checkpoint(operation_update=success_operation)
 
         logger.debug(
@@ -209,6 +218,9 @@ def retry_handler(
             next_attempt_delay_seconds=retry_decision.delay_seconds,
         )
 
+        # Checkpoint RETRY operation with blocking (is_sync=True, default).
+        # Must ensure retry state is persisted before suspending execution.
+        # This guarantees the retry attempt count and next attempt timestamp are durable.
         state.create_checkpoint(operation_update=retry_operation)
 
         suspend_with_optional_timeout(
@@ -221,6 +233,9 @@ def retry_handler(
         identifier=operation_identifier, error=error_object
     )
 
+    # Checkpoint FAIL operation with blocking (is_sync=True, default).
+    # Must ensure the failure state is persisted before raising the exception.
+    # This guarantees the error is durable and the step won't be retried on replay.
     state.create_checkpoint(operation_update=fail_operation)
 
     if isinstance(error, StepInterruptedError):

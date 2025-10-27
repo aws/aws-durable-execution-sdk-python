@@ -92,6 +92,9 @@ def invoke_handler(
         ),
     )
 
+    # Checkpoint invoke START with blocking (is_sync=True, default).
+    # Must ensure the chained invocation is recorded before suspending execution.
+    # This guarantees the invoke operation is durable and will be tracked by the backend.
     state.create_checkpoint(operation_update=start_operation)
 
     logger.debug(

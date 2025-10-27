@@ -45,6 +45,9 @@ def wait_handler(
             identifier=operation_identifier,
             wait_options=WaitOptions(wait_seconds=seconds),
         )
+        # Checkpoint wait START with blocking (is_sync=True, default).
+        # Must ensure the wait operation and scheduled timestamp are persisted before suspending.
+        # This guarantees the wait will resume at the correct time on the next invocation.
         state.create_checkpoint(operation_update=operation)
 
     # Calculate when to resume

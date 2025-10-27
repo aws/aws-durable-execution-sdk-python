@@ -67,6 +67,9 @@ def create_callback_handler(
         identifier=operation_identifier,
         callback_options=callback_options,
     )
+    # Checkpoint callback START with blocking (is_sync=True, default).
+    # Must wait for the API to generate and return the callback ID before proceeding.
+    # The callback ID is needed immediately by the caller to pass to external systems.
     state.create_checkpoint(operation_update=create_callback_operation)
 
     result: CheckpointedResult = state.get_checkpoint_result(

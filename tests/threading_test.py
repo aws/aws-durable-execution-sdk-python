@@ -5,8 +5,15 @@ import time
 
 import pytest
 
-from aws_durable_execution_sdk_python.exceptions import OrderedLockError
-from aws_durable_execution_sdk_python.threading import OrderedCounter, OrderedLock
+from aws_durable_execution_sdk_python.exceptions import (
+    BackgroundThreadError,
+    OrderedLockError,
+)
+from aws_durable_execution_sdk_python.threading import (
+    CompletionEvent,
+    OrderedCounter,
+    OrderedLock,
+)
 
 
 # region OrderedLock
@@ -597,3 +604,351 @@ def test_ordered_counter_exception_handling() -> None:
 
 
 # endregion OrderedCounter tests
+
+
+# region CompletionEvent tests
+def test_completion_event_init():
+    """Test CompletionEvent initialization."""
+    event = CompletionEvent()
+    assert not event.is_set()
+    assert event._error is None  # noqa: SLF001
+
+
+def test_completion_event_set_without_error():
+    """Test setting event without error."""
+    event = CompletionEvent()
+
+    # Initially not set
+    assert not event.is_set()
+
+    # Set without error
+    event.set()
+
+    # Should be set now
+    assert event.is_set()
+
+    # Wait should return True and not raise
+    result = event.wait()
+    assert result is True
+
+
+def test_completion_event_set_with_error():
+    """Test setting event with error."""
+    event = CompletionEvent()
+    test_error = RuntimeError("test error")
+
+    # Set with error
+    event.set(test_error)
+
+    # Should be set
+    assert event.is_set()
+
+    # Wait should raise the error
+    with pytest.raises(RuntimeError, match="test error"):
+        event.wait()
+
+
+def test_completion_event_wait_timeout():
+    """Test wait with timeout when event is not set."""
+    event = CompletionEvent()
+
+    # Wait with short timeout should return False
+    start_time = time.time()
+    result = event.wait(timeout=0.1)
+    elapsed = time.time() - start_time
+
+    assert result is False
+    assert 0 <= elapsed < 1  # Should timeout around 0.1 seconds
+
+
+def test_completion_event_wait_timeout_with_error():
+    """Test wait with timeout when event has error."""
+    event = CompletionEvent()
+    test_error = ValueError("timeout error")
+
+    # Set with error
+    event.set(test_error)
+
+    # Wait with timeout should still raise error immediately
+    with pytest.raises(ValueError, match="timeout error"):
+        event.wait(timeout=1.0)
+
+
+def test_completion_event_multiple_waits():
+    """Test multiple waits on the same event."""
+    event = CompletionEvent()
+
+    # Set the event
+    event.set()
+
+    # Multiple waits should all succeed
+    assert event.wait() is True
+    assert event.wait() is True
+    assert event.wait(timeout=0.1) is True
+
+
+def test_completion_event_multiple_waits_with_error():
+    """Test multiple waits when event has error."""
+    event = CompletionEvent()
+    test_error = RuntimeError("persistent error")
+
+    # Set with error
+    event.set(test_error)
+
+    # Multiple waits should all raise the same error
+    with pytest.raises(RuntimeError, match="persistent error"):
+        event.wait()
+
+    with pytest.raises(RuntimeError, match="persistent error"):
+        event.wait()
+
+    with pytest.raises(RuntimeError, match="persistent error"):
+        event.wait(timeout=0.1)
+
+
+def test_completion_event_concurrent_wait_and_set():
+    """Test concurrent wait and set operations."""
+    event = CompletionEvent()
+    results = []
+
+    def waiter_thread():
+        """Thread that waits for the event."""
+        try:
+            result = event.wait(timeout=1.0)
+            results.append(("wait_success", result))
+        except Exception as e:  # noqa: BLE001
+            results.append(("wait_error", e))
+
+    def setter_thread():
+        """Thread that sets the event after delay."""
+        time.sleep(0.1)
+        event.set()
+        results.append(("set_done", None))
+
+    # Start both threads
+    waiter = threading.Thread(target=waiter_thread)
+    setter = threading.Thread(target=setter_thread)
+
+    waiter.start()
+    setter.start()
+
+    waiter.join()
+    setter.join()
+
+    # Both operations should succeed
+    assert len(results) == 2
+    assert ("wait_success", True) in results
+    assert ("set_done", None) in results
+
+
+def test_completion_event_concurrent_wait_and_set_with_error():
+    """Test concurrent wait and set with error."""
+    event = CompletionEvent()
+    results = []
+    test_error = ValueError("concurrent error")
+
+    def waiter_thread():
+        """Thread that waits for the event."""
+        try:
+            event.wait(timeout=1.0)
+            results.append(("wait_unexpected_success", None))
+        except ValueError as e:
+            results.append(("wait_error", str(e)))
+        except Exception as e:  # noqa: BLE001
+            results.append(("wait_other_error", str(e)))
+
+    def setter_thread():
+        """Thread that sets the event with error after delay."""
+        time.sleep(0.1)
+        event.set(test_error)
+        results.append(("set_done", None))
+
+    # Start both threads
+    waiter = threading.Thread(target=waiter_thread)
+    setter = threading.Thread(target=setter_thread)
+
+    waiter.start()
+    setter.start()
+
+    waiter.join()
+    setter.join()
+
+    # Waiter should get the error, setter should complete
+    assert len(results) == 2
+    assert ("wait_error", "concurrent error") in results
+    assert ("set_done", None) in results
+
+
+def test_completion_event_multiple_concurrent_waiters():
+    """Test multiple threads waiting on the same event."""
+    event = CompletionEvent()
+    results = []
+    num_waiters = 5
+
+    def waiter_thread(waiter_id):
+        """Thread that waits for the event."""
+        try:
+            result = event.wait(timeout=1.0)
+            results.append((f"waiter_{waiter_id}", result))
+        except Exception as e:  # noqa: BLE001
+            results.append((f"waiter_{waiter_id}_error", str(e)))
+
+    # Start multiple waiter threads
+    waiters = []
+    for i in range(num_waiters):
+        waiter = threading.Thread(target=waiter_thread, args=(i,))
+        waiters.append(waiter)
+        waiter.start()
+
+    # Give waiters time to start waiting
+    time.sleep(0.1)
+
+    # Set the event
+    event.set()
+
+    # Wait for all waiters
+    for waiter in waiters:
+        waiter.join()
+
+    # All waiters should succeed
+    assert len(results) == num_waiters
+    for i in range(num_waiters):
+        assert (f"waiter_{i}", True) in results
+
+
+def test_completion_event_multiple_concurrent_waiters_with_error():
+    """Test multiple threads waiting when event is set with error."""
+    event = CompletionEvent()
+    results = []
+    num_waiters = 5
+    test_error = RuntimeError("broadcast error")
+
+    def waiter_thread(waiter_id):
+        """Thread that waits for the event."""
+        try:
+            event.wait(timeout=1.0)
+            results.append((f"waiter_{waiter_id}_unexpected", None))
+        except RuntimeError as e:
+            results.append((f"waiter_{waiter_id}", str(e)))
+        except Exception as e:  # noqa: BLE001
+            results.append((f"waiter_{waiter_id}_other", str(e)))
+
+    # Start multiple waiter threads
+    waiters = []
+    for i in range(num_waiters):
+        waiter = threading.Thread(target=waiter_thread, args=(i,))
+        waiters.append(waiter)
+        waiter.start()
+
+    # Give waiters time to start waiting
+    time.sleep(0.1)
+
+    # Set the event with error
+    event.set(test_error)
+
+    # Wait for all waiters
+    for waiter in waiters:
+        waiter.join()
+
+    # All waiters should get the error
+    assert len(results) == num_waiters
+    for i in range(num_waiters):
+        assert (f"waiter_{i}", "broadcast error") in results
+
+
+def test_completion_event_set_multiple_times():
+    """Test setting event multiple times (should be idempotent)."""
+    event = CompletionEvent()
+
+    # Set multiple times without error
+    event.set()
+    event.set()
+    event.set()
+
+    # Should still work
+    assert event.is_set()
+    assert event.wait() is True
+
+
+def test_completion_event_set_multiple_times_with_different_errors():
+    """Test setting event multiple times with different errors."""
+    event = CompletionEvent()
+    first_error = ValueError("first error")
+    second_error = RuntimeError("second error")
+
+    # Set with first error
+    event.set(first_error)
+
+    # Set with second error (should not change the stored error)
+    event.set(second_error)
+
+    # Should still raise the first error
+    with pytest.raises(ValueError, match="first error"):
+        event.wait()
+
+
+def test_completion_event_background_thread_error_scenario():
+    """Test scenario similar to background thread error propagation."""
+    event = CompletionEvent()
+    user_thread_result = []
+    background_thread_result = []
+
+    def user_thread():
+        """Simulates user thread waiting for checkpoint completion."""
+        try:
+            result = event.wait(timeout=2.0)  # Add timeout to prevent hanging in tests
+            if result:
+                user_thread_result.append("success")
+            else:
+                user_thread_result.append("timeout")
+        except BaseException as e:  # noqa: BLE001
+            user_thread_result.append(f"error: {e}")
+
+    def background_thread():
+        """Simulates background thread that encounters error."""
+        try:
+            background_thread_result.append("started")
+            time.sleep(0.1)  # Simulate some processing
+            background_thread_result.append("about_to_raise")
+            # Simulate checkpoint failure
+            error_msg = "Checkpoint service unavailable"
+            raise RuntimeError(error_msg)
+        except Exception as e:  # noqa: BLE001
+            background_thread_result.append("caught_exception")
+            # Signal error to user thread
+            try:
+                error_msg = "Background processing failed"
+                bg_error = BackgroundThreadError(error_msg, e)
+                background_thread_result.append("created_bg_error")
+            except Exception as create_error:  # noqa: BLE001
+                background_thread_result.append(f"failed_to_create: {create_error}")
+            event.set(bg_error)
+            background_thread_result.append("error_signaled")
+
+    # Start both threads
+    user = threading.Thread(target=user_thread)
+    background = threading.Thread(target=background_thread)
+
+    user.start()
+    background.start()
+
+    # Wait for background thread to complete first
+    background.join()
+    # Then wait for user thread
+    user.join()
+
+    # Background thread should complete all steps and signal error
+    assert background_thread_result == [
+        "started",
+        "about_to_raise",
+        "caught_exception",
+        "created_bg_error",
+        "error_signaled",
+    ]
+
+    # User thread should receive the error
+    assert len(user_thread_result) == 1
+    assert "Background processing failed" in user_thread_result[0]
+
+
+# endregion CompletionEvent tests

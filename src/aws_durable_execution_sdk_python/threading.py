@@ -12,6 +12,69 @@ if TYPE_CHECKING:
     from typing import Self
 
 
+class CompletionEvent:
+    """Threading event that can signal completion or propagate errors.
+
+    This event allows a background thread to wake up a waiting thread either
+    with a successful completion signal or by propagating an exception. When
+    an error is set, the waiting thread will raise that exception.
+
+    This is used for checkpoint operations where the background checkpoint
+    thread needs to signal completion to the user thread, or interrupt it
+    with a critical error.
+
+    Example:
+        >>> event = CompletionEvent()
+        >>> # In background thread:
+        >>> try:
+        ...     process_checkpoint()
+        ...     event.set()  # Success
+        ... except Exception as e:
+        ...     event.set(BackgroundThreadError(..., e))  # Error
+        >>>
+        >>> # In user thread:
+        >>> event.wait()  # Raises BackgroundThreadError if set
+    """
+
+    def __init__(self) -> None:
+        """Initialize completion event."""
+        self._event: Event = Event()
+        self._error: BaseException | None = None
+
+    def set(self, error: BaseException | None = None) -> None:
+        """Signal completion, optionally with an error.
+
+        Args:
+            error: Optional exception to propagate to waiting thread.
+                  If provided, wait() will raise this exception.
+        """
+        # Only set error if none is already set (first error wins)
+        if self._error is None:
+            self._error = error
+        self._event.set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Wait for completion and raise if error occurred.
+
+        Args:
+            timeout: Optional timeout in seconds
+
+        Returns:
+            True if event was set, False if timeout occurred
+
+        Raises:
+            BaseException: If an error was set via set(error=...)
+        """
+        result = self._event.wait(timeout)
+        if self._error is not None:
+            raise self._error
+        return result
+
+    def is_set(self) -> bool:
+        """Return True if the event is set, False otherwise."""
+        return self._event.is_set()
+
+
 class OrderedLock:
     """Lock that guarantees callers acquire in the invocation order.
 
