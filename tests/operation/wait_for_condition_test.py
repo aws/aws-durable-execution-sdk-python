@@ -724,5 +724,8 @@ def test_wait_for_condition_pending_without_next_attempt():
         serdes=CustomDictSerDes(),
     )
 
-    with pytest.raises(SuspendExecution, match="suspending without retry timestamp"):
+    with pytest.raises(
+        SuspendExecution,
+        match="No timestamp provided. Suspending without retry timestamp.",
+    ):
         wait_for_condition_handler(check_func, config, mock_state, op_id, mock_logger)

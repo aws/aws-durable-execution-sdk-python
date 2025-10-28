@@ -15,8 +15,8 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python.logger import LogInfo
 from aws_durable_execution_sdk_python.serdes import deserialize, serialize
 from aws_durable_execution_sdk_python.suspend import (
-    suspend_with_optional_timeout,
-    suspend_with_optional_timestamp,
+    suspend_with_optional_resume_delay,
+    suspend_with_optional_resume_timestamp,
 )
 from aws_durable_execution_sdk_python.types import WaitForConditionCheckContext
 
@@ -82,7 +82,7 @@ def wait_for_condition_handler(
 
     if checkpointed_result.is_pending():
         scheduled_timestamp = checkpointed_result.get_next_attempt_timestamp()
-        suspend_with_optional_timestamp(
+        suspend_with_optional_resume_timestamp(
             msg=f"wait_for_condition {operation_identifier.name or operation_identifier.operation_id} will retry at timestamp {scheduled_timestamp}",
             datetime_timestamp=scheduled_timestamp,
         )
@@ -173,17 +173,35 @@ def wait_for_condition_handler(
             return new_state
 
         # Condition not met - schedule retry
+        # we enforce a minimum delay second of 1, to match model behaviour.
+        # we localize enforcement and keep it outside suspension methods as:
+        # a) those are used throughout the codebase, e.g. in wait(..) <- enforcement is done in context
+        # b) they shouldn't know model specific details <- enforcement is done above
+        # and c) this "issue" arises from retry-decision and shouldn't be chased deeper.
+        delay_seconds = decision.delay_seconds
+        if delay_seconds is not None and delay_seconds < 1:
+            logger.warning(
+                (
+                    "WaitDecision delay_seconds step for id: %s, name: %s,"
+                    "is %d < 1. Setting to minimum of 1 seconds."
+                ),
+                operation_identifier.operation_id,
+                operation_identifier.name,
+                delay_seconds,
+            )
+            delay_seconds = 1
+
         retry_operation = OperationUpdate.create_wait_for_condition_retry(
             identifier=operation_identifier,
             payload=serialized_state,
-            next_attempt_delay_seconds=decision.delay_seconds or 0,
+            next_attempt_delay_seconds=delay_seconds,
         )
 
         state.create_checkpoint(operation_update=retry_operation)
 
-        suspend_with_optional_timeout(
+        suspend_with_optional_resume_delay(
             msg=f"wait_for_condition {operation_identifier.name or operation_identifier.operation_id} will retry in {decision.delay_seconds} seconds",
-            timeout_seconds=decision.delay_seconds,
+            delay_seconds=decision.delay_seconds,
         )
 
     except Exception as e:

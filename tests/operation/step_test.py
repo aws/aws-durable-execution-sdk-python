@@ -458,7 +458,7 @@ def test_step_handler_pending_without_existing_attempts():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    with pytest.raises(SuspendExecution, match="suspending without retry timestamp"):
+    with pytest.raises(SuspendExecution, match="No timestamp provided"):
         step_handler(
             mock_callable,
             mock_state,
