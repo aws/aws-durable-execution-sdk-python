@@ -25,7 +25,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.operation.invoke import (
     invoke_handler,
-    suspend_with_optional_timeout,
+    suspend_with_optional_resume_delay,
 )
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 from tests.serdes_test import CustomDictSerDes
@@ -374,34 +374,34 @@ def test_invoke_handler_custom_serdes_new_operation():
     assert operation_update.payload == expected_serialized
 
 
-def test_suspend_with_optional_timeout_with_timeout():
-    """Test suspend_with_optional_timeout with timeout."""
+def test_suspend_with_optional_resume_delay_with_timeout():
+    """Test suspend_with_optional_resume_delay with timeout."""
     with pytest.raises(TimedSuspendExecution) as exc_info:
-        suspend_with_optional_timeout("test message", 30)
+        suspend_with_optional_resume_delay("test message", 30)
 
     assert "test message" in str(exc_info.value)
 
 
-def test_suspend_with_optional_timeout_no_timeout():
-    """Test suspend_with_optional_timeout without timeout."""
+def test_suspend_with_optional_resume_delay_no_timeout():
+    """Test suspend_with_optional_resume_delay without timeout."""
     with pytest.raises(SuspendExecution) as exc_info:
-        suspend_with_optional_timeout("test message", None)
+        suspend_with_optional_resume_delay("test message", None)
 
     assert "test message" in str(exc_info.value)
 
 
-def test_suspend_with_optional_timeout_zero_timeout():
-    """Test suspend_with_optional_timeout with zero timeout."""
+def test_suspend_with_optional_resume_delay_zero_timeout():
+    """Test suspend_with_optional_resume_delay with zero timeout."""
     with pytest.raises(SuspendExecution) as exc_info:
-        suspend_with_optional_timeout("test message", 0)
+        suspend_with_optional_resume_delay("test message", 0)
 
     assert "test message" in str(exc_info.value)
 
 
-def test_suspend_with_optional_timeout_negative_timeout():
-    """Test suspend_with_optional_timeout with negative timeout."""
+def test_suspend_with_optional_resume_delay_negative_timeout():
+    """Test suspend_with_optional_resume_delay with negative timeout."""
     with pytest.raises(SuspendExecution) as exc_info:
-        suspend_with_optional_timeout("test message", -5)
+        suspend_with_optional_resume_delay("test message", -5)
 
     assert "test message" in str(exc_info.value)
 
@@ -506,10 +506,10 @@ def test_invoke_handler_already_succeeded_with_none_payload():
 
 
 @patch(
-    "aws_durable_execution_sdk_python.operation.invoke.suspend_with_optional_timeout"
+    "aws_durable_execution_sdk_python.operation.invoke.suspend_with_optional_resume_delay"
 )
 def test_invoke_handler_suspend_does_not_raise(mock_suspend):
-    """Test invoke_handler when suspend_with_optional_timeout doesn't raise an exception."""
+    """Test invoke_handler when suspend_with_optional_resume_delay doesn't raise an exception."""
 
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
@@ -517,12 +517,12 @@ def test_invoke_handler_suspend_does_not_raise(mock_suspend):
     mock_result = CheckpointedResult.create_not_found()
     mock_state.get_checkpoint_result.return_value = mock_result
 
-    # Mock suspend_with_optional_timeout to not raise an exception (which it should always do)
+    # Mock suspend_with_optional_resume_delay to not raise an exception (which it should always do)
     mock_suspend.return_value = None
 
     with pytest.raises(
         ExecutionError,
-        match="suspend_with_optional_timeout should have raised an exception, but did not.",
+        match="suspend_with_optional_resume_delay should have raised an exception, but did not.",
     ):
         invoke_handler(
             function_name="test_function",

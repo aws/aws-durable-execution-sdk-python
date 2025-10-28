@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import logging
-import time
 from typing import TYPE_CHECKING
 
-from aws_durable_execution_sdk_python.exceptions import TimedSuspendExecution
 from aws_durable_execution_sdk_python.lambda_service import OperationUpdate, WaitOptions
+from aws_durable_execution_sdk_python.suspend import suspend_with_optional_resume_delay
 
 if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -47,7 +46,5 @@ def wait_handler(
         )
         state.create_checkpoint(operation_update=operation)
 
-    # Calculate when to resume
-    resume_time = time.time() + seconds
     msg = f"Wait for {seconds} seconds"
-    raise TimedSuspendExecution(msg, scheduled_timestamp=resume_time)
+    suspend_with_optional_resume_delay(msg, seconds)  # throws suspend

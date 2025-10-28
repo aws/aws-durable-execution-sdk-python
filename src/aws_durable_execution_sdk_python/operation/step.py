@@ -21,8 +21,8 @@ from aws_durable_execution_sdk_python.logger import Logger, LogInfo
 from aws_durable_execution_sdk_python.retries import RetryDecision, RetryPresets
 from aws_durable_execution_sdk_python.serdes import deserialize, serialize
 from aws_durable_execution_sdk_python.suspend import (
-    suspend_with_optional_timeout,
-    suspend_with_optional_timestamp,
+    suspend_with_optional_resume_delay,
+    suspend_with_optional_resume_timestamp,
 )
 from aws_durable_execution_sdk_python.types import StepContext
 
@@ -81,7 +81,9 @@ def step_handler(
 
     if checkpointed_result.is_pending():
         scheduled_timestamp = checkpointed_result.get_next_attempt_timestamp()
-        suspend_with_optional_timestamp(
+        # normally, we'd ensure that a suspension here would be for > 0 seconds;
+        # however, this is coming from a checkpoint, and we can trust that it is a correct target timestamp.
+        suspend_with_optional_resume_timestamp(
             msg=f"Retry scheduled for {operation_identifier.name or operation_identifier.operation_id} will retry at timestamp {scheduled_timestamp}",
             datetime_timestamp=scheduled_timestamp,
         )
@@ -203,17 +205,40 @@ def retry_handler(
             retry_attempt + 1,
         )
 
+        # because we are issuing a retry and create an OperationUpdate
+        # we enforce a minimum delay second of 1, to match model behaviour.
+        # we localize enforcement and keep it outside suspension methods as:
+        # a) those are used throughout the codebase, e.g. in wait(..) <- enforcement is done in context
+        # b) they shouldn't know model specific details <- enforcement is done above
+        # and c) this "issue" arises from retry-decision and we shouldn't push it down
+        delay_seconds = retry_decision.delay_seconds
+        if delay_seconds < 1:
+            logger.warning(
+                (
+                    "Retry delay_seconds step for id: %s, name: %s,"
+                    "attempt: %s is %d < 1. Setting to minimum of 1 seconds."
+                ),
+                operation_identifier.operation_id,
+                operation_identifier.name,
+                retry_attempt + 1,
+                delay_seconds,
+            )
+            delay_seconds = 1
+
         retry_operation: OperationUpdate = OperationUpdate.create_step_retry(
             identifier=operation_identifier,
             error=error_object,
-            next_attempt_delay_seconds=retry_decision.delay_seconds,
+            next_attempt_delay_seconds=delay_seconds,
         )
 
         state.create_checkpoint(operation_update=retry_operation)
 
-        suspend_with_optional_timeout(
-            msg=f"Retry scheduled for {operation_identifier.operation_id} in {retry_decision.delay_seconds} seconds",
-            timeout_seconds=retry_decision.delay_seconds,
+        suspend_with_optional_resume_delay(
+            msg=(
+                f"Retry scheduled for {operation_identifier.operation_id}"
+                f"in {retry_decision.delay_seconds} seconds"
+            ),
+            delay_seconds=delay_seconds,
         )
 
     # no retry

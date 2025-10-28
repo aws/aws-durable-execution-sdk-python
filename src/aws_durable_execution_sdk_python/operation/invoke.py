@@ -12,7 +12,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationUpdate,
 )
 from aws_durable_execution_sdk_python.serdes import deserialize, serialize
-from aws_durable_execution_sdk_python.suspend import suspend_with_optional_timeout
+from aws_durable_execution_sdk_python.suspend import suspend_with_optional_resume_delay
 
 if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -74,7 +74,7 @@ def invoke_handler(
             operation_identifier.name or function_name,
         )
         msg = f"Invoke {operation_identifier.operation_id} still in progress"
-        suspend_with_optional_timeout(msg, config.timeout_seconds)
+        suspend_with_optional_resume_delay(msg, config.timeout_seconds)
 
     serialized_payload: str = serialize(
         serdes=config.serdes_payload,
@@ -101,8 +101,8 @@ def invoke_handler(
     msg = (
         f"Invoke {operation_identifier.operation_id} started, suspending for completion"
     )
-    suspend_with_optional_timeout(msg, config.timeout_seconds)
-    # This line should never be reached since suspend_with_optional_timeout always raises
+    suspend_with_optional_resume_delay(msg, config.timeout_seconds)
+    # This line should never be reached since suspend_with_optional_resume_delay always raises
     # if it is ever reached, we will crash in a non-retryable manner via ExecutionError
-    msg = "suspend_with_optional_timeout should have raised an exception, but did not."
+    msg = "suspend_with_optional_resume_delay should have raised an exception, but did not."
     raise ExecutionError(msg) from None
