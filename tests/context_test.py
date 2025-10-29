@@ -1086,7 +1086,7 @@ def test_wait_for_callback_passes_child_context(mock_handler):
 
 
 # region map
-@patch("aws_durable_execution_sdk_python.context.map_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_map_basic(mock_handler):
     """Test map with basic parameters."""
     mock_handler.return_value = "map_result"
@@ -1100,22 +1100,19 @@ def test_map_basic(mock_handler):
 
     inputs = [1, 2, 3]
 
-    with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
-        mock_run_in_child.return_value = "map_result"
-        context = DurableContext(state=mock_state)
+    context = DurableContext(state=mock_state)
 
-        result = context.map(inputs, test_function)
+    result = context.map(inputs, test_function)
 
-        assert result == "map_result"
-        mock_run_in_child.assert_called_once()
+    assert result == "map_result"
+    mock_handler.assert_called_once()
 
-        # Verify the child context callable
-        call_args = mock_run_in_child.call_args
-        assert call_args[1]["name"] is None  # name should be None
-        assert call_args[1]["config"].sub_type.value == "Map"
+    # Verify the child handler was called with correct parameters
+    call_args = mock_handler.call_args
+    assert call_args[1]["config"].sub_type.value == "Map"
 
 
-@patch("aws_durable_execution_sdk_python.context.map_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_map_with_name_and_config(mock_handler):
     """Test map with name and config."""
     mock_handler.return_value = "configured_map_result"
@@ -1132,18 +1129,18 @@ def test_map_with_name_and_config(mock_handler):
     inputs = ["a", "b", "c"]
     config = MapConfig()
 
-    with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
-        mock_run_in_child.return_value = "configured_map_result"
-        context = DurableContext(state=mock_state)
+    context = DurableContext(state=mock_state)
 
-        result = context.map(inputs, test_function, name="custom_map", config=config)
+    result = context.map(inputs, test_function, name="custom_map", config=config)
 
-        assert result == "configured_map_result"
-        call_args = mock_run_in_child.call_args
-        assert call_args[1]["name"] == "custom_map"  # name should be custom_map
+    assert result == "configured_map_result"
+    call_args = mock_handler.call_args
+    assert (
+        call_args[1]["operation_identifier"].name == "custom_map"
+    )  # name should be custom_map
 
 
-@patch("aws_durable_execution_sdk_python.context.map_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_map_calls_handler_correctly(mock_handler):
     """Test map calls map_handler with correct parameters."""
     mock_handler.return_value = "handler_result"
@@ -1157,14 +1154,12 @@ def test_map_calls_handler_correctly(mock_handler):
 
     inputs = ["hello", "world"]
 
-    with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
-        mock_run_in_child.return_value = "handler_result"
-        context = DurableContext(state=mock_state)
+    context = DurableContext(state=mock_state)
 
-        result = context.map(inputs, test_function)
+    result = context.map(inputs, test_function)
 
-        assert result == "handler_result"
-        mock_run_in_child.assert_called_once()
+    assert result == "handler_result"
+    mock_handler.assert_called_once()
 
 
 @patch("aws_durable_execution_sdk_python.context.map_handler")
@@ -1217,7 +1212,7 @@ def test_map_with_different_input_types(mock_handler):
 
 
 # region parallel
-@patch("aws_durable_execution_sdk_python.context.parallel_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_parallel_basic(mock_handler):
     """Test parallel with basic parameters."""
     mock_handler.return_value = "parallel_result"
@@ -1234,22 +1229,19 @@ def test_parallel_basic(mock_handler):
 
     callables = [task1, task2]
 
-    with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
-        mock_run_in_child.return_value = "parallel_result"
-        context = DurableContext(state=mock_state)
+    context = DurableContext(state=mock_state)
 
-        result = context.parallel(callables)
+    result = context.parallel(callables)
 
-        assert result == "parallel_result"
-        mock_run_in_child.assert_called_once()
+    assert result == "parallel_result"
+    mock_handler.assert_called_once()
 
-        # Verify the child context callable
-        call_args = mock_run_in_child.call_args
-        assert call_args[1]["name"] is None  # name should be None
-        assert call_args[1]["config"].sub_type.value == "Parallel"
+    # Verify the child handler was called with correct parameters
+    call_args = mock_handler.call_args
+    assert call_args[1]["config"].sub_type.value == "Parallel"
 
 
-@patch("aws_durable_execution_sdk_python.context.parallel_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_parallel_with_name_and_config(mock_handler):
     """Test parallel with name and config."""
     mock_handler.return_value = "configured_parallel_result"
@@ -1267,20 +1259,18 @@ def test_parallel_with_name_and_config(mock_handler):
     callables = [task1, task2]
     config = ParallelConfig()
 
-    with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
-        mock_run_in_child.return_value = "configured_parallel_result"
-        context = DurableContext(state=mock_state)
+    context = DurableContext(state=mock_state)
 
-        result = context.parallel(callables, name="custom_parallel", config=config)
+    result = context.parallel(callables, name="custom_parallel", config=config)
 
-        assert result == "configured_parallel_result"
-        call_args = mock_run_in_child.call_args
-        assert (
-            call_args[1]["name"] == "custom_parallel"
-        )  # name should be custom_parallel
+    assert result == "configured_parallel_result"
+    call_args = mock_handler.call_args
+    assert (
+        call_args[1]["operation_identifier"].name == "custom_parallel"
+    )  # name should be custom_parallel
 
 
-@patch("aws_durable_execution_sdk_python.context.parallel_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_parallel_resolves_name_from_callable(mock_handler):
     """Test parallel resolves name from callable._original_name."""
     mock_handler.return_value = "named_parallel_result"
@@ -1301,23 +1291,21 @@ def test_parallel_resolves_name_from_callable(mock_handler):
 
     callables = [task1, task2]
 
-    with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
-        mock_run_in_child.return_value = "named_parallel_result"
-        context = DurableContext(state=mock_state)
+    context = DurableContext(state=mock_state)
 
-        # Use _resolve_step_name to test name resolution
-        resolved_name = context._resolve_step_name(None, mock_callable)  # noqa: SLF001
-        assert resolved_name == "parallel_tasks"
+    # Use _resolve_step_name to test name resolution
+    resolved_name = context._resolve_step_name(None, mock_callable)  # noqa: SLF001
+    assert resolved_name == "parallel_tasks"
 
-        context.parallel(callables)
+    context.parallel(callables)
 
-        call_args = mock_run_in_child.call_args
-        assert (
-            call_args[1]["name"] is None
-        )  # name should be None since callables don't have _original_name
+    call_args = mock_handler.call_args
+    assert (
+        call_args[1]["operation_identifier"].name is None
+    )  # name should be None since callables don't have _original_name
 
 
-@patch("aws_durable_execution_sdk_python.context.parallel_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_parallel_calls_handler_correctly(mock_handler):
     """Test parallel calls parallel_handler with correct parameters."""
     mock_handler.return_value = "handler_result"
@@ -1334,14 +1322,12 @@ def test_parallel_calls_handler_correctly(mock_handler):
 
     callables = [task1, task2]
 
-    with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
-        mock_run_in_child.return_value = "handler_result"
-        context = DurableContext(state=mock_state)
+    context = DurableContext(state=mock_state)
 
-        result = context.parallel(callables)
+    result = context.parallel(callables)
 
-        assert result == "handler_result"
-        mock_run_in_child.assert_called_once()
+    assert result == "handler_result"
+    mock_handler.assert_called_once()
 
 
 @patch("aws_durable_execution_sdk_python.context.parallel_handler")
@@ -1417,7 +1403,7 @@ def test_parallel_with_many_callables(mock_handler):
 
 
 # region map
-@patch("aws_durable_execution_sdk_python.context.map_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_map_calls_handler(mock_handler):
     """Test map calls map_handler through run_in_child_context."""
     mock_handler.return_value = "map_result"
@@ -1432,17 +1418,15 @@ def test_map_calls_handler(mock_handler):
     inputs = ["a", "b", "c"]
     config = MapConfig()
 
-    with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
-        mock_run_in_child.return_value = "map_result"
-        context = DurableContext(state=mock_state)
+    context = DurableContext(state=mock_state)
 
-        result = context.map(inputs, test_function, config=config)
+    result = context.map(inputs, test_function, config=config)
 
-        assert result == "map_result"
-        mock_run_in_child.assert_called_once()
+    assert result == "map_result"
+    mock_handler.assert_called_once()
 
 
-@patch("aws_durable_execution_sdk_python.context.parallel_handler")
+@patch("aws_durable_execution_sdk_python.context.child_handler")
 def test_parallel_calls_handler(mock_handler):
     """Test parallel calls parallel_handler through run_in_child_context."""
     mock_handler.return_value = "parallel_result"
@@ -1460,14 +1444,12 @@ def test_parallel_calls_handler(mock_handler):
     callables = [task1, task2]
     config = ParallelConfig()
 
-    with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
-        mock_run_in_child.return_value = "parallel_result"
-        context = DurableContext(state=mock_state)
+    context = DurableContext(state=mock_state)
 
-        result = context.parallel(callables, config=config)
+    result = context.parallel(callables, config=config)
 
-        assert result == "parallel_result"
-        mock_run_in_child.assert_called_once()
+    assert result == "parallel_result"
+    mock_handler.assert_called_once()
 
 
 # region wait_for_condition

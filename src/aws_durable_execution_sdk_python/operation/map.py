@@ -17,8 +17,12 @@ from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 
 if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.context import DurableContext
+    from aws_durable_execution_sdk_python.identifier import OperationIdentifier
     from aws_durable_execution_sdk_python.serdes import SerDes
-    from aws_durable_execution_sdk_python.state import ExecutionState
+    from aws_durable_execution_sdk_python.state import (
+        CheckpointedResult,
+        ExecutionState,
+    )
     from aws_durable_execution_sdk_python.types import SummaryGenerator
 
 logger = logging.getLogger(__name__)
@@ -94,6 +98,7 @@ def map_handler(
     config: MapConfig | None,
     execution_state: ExecutionState,
     map_context: DurableContext,
+    operation_identifier: OperationIdentifier,
 ) -> BatchResult[R]:
     """Execute a callable for each item in parallel."""
     # Summary Generator Construction (matches TypeScript implementation):
@@ -107,6 +112,13 @@ def map_handler(
         func=func,
         config=config or MapConfig(summary_generator=MapSummaryGenerator()),
     )
+
+    checkpoint: CheckpointedResult = execution_state.get_checkpoint_result(
+        operation_identifier.operation_id
+    )
+    if checkpoint.is_succeeded():
+        # if we've reached this point, then not only is the step succeeded, but it is also `replay_children`.
+        return executor.replay(execution_state, map_context)
     # we are making it explicit that we are now executing within the map_context
     return executor.execute(execution_state, executor_context=map_context)
 

@@ -317,7 +317,13 @@ class DurableContext(DurableContextProtocol):
         """Execute a callable for each item in parallel."""
         map_name: str | None = self._resolve_step_name(name, func)
 
-        def map_in_child_context(map_context) -> BatchResult[R]:
+        operation_id = self._create_step_id()
+        operation_identifier = OperationIdentifier(
+            operation_id=operation_id, parent_id=self._parent_id, name=map_name
+        )
+        map_context = self.create_child_context(parent_id=operation_id)
+
+        def map_in_child_context() -> BatchResult[R]:
             # map_context is a child_context of the context upon which `.map`
             # was called. We are calling it `map_context` to make it explicit
             # that any operations happening from hereon are done on the context
@@ -328,11 +334,13 @@ class DurableContext(DurableContextProtocol):
                 config=config,
                 execution_state=self.state,
                 map_context=map_context,
+                operation_identifier=operation_identifier,
             )
 
-        return self.run_in_child_context(
+        return child_handler(
             func=map_in_child_context,
-            name=map_name,
+            state=self.state,
+            operation_identifier=operation_identifier,
             config=ChildConfig(
                 sub_type=OperationSubType.MAP,
                 serdes=config.serdes if config is not None else None,
@@ -346,8 +354,14 @@ class DurableContext(DurableContextProtocol):
         config: ParallelConfig | None = None,
     ) -> BatchResult[T]:
         """Execute multiple callables in parallel."""
+        # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
+        operation_id = self._create_step_id()
+        parallel_context = self.create_child_context(parent_id=operation_id)
+        operation_identifier = OperationIdentifier(
+            operation_id=operation_id, parent_id=self._parent_id, name=name
+        )
 
-        def parallel_in_child_context(parallel_context) -> BatchResult[T]:
+        def parallel_in_child_context() -> BatchResult[T]:
             # parallel_context is a child_context of the context upon which `.map`
             # was called. We are calling it `parallel_context` to make it explicit
             # that any operations happening from hereon are done on the context
@@ -357,11 +371,13 @@ class DurableContext(DurableContextProtocol):
                 config=config,
                 execution_state=self.state,
                 parallel_context=parallel_context,
+                operation_identifier=operation_identifier,
             )
 
-        return self.run_in_child_context(
+        return child_handler(
             func=parallel_in_child_context,
-            name=name,
+            state=self.state,
+            operation_identifier=operation_identifier,
             config=ChildConfig(
                 sub_type=OperationSubType.PARALLEL,
                 serdes=config.serdes if config is not None else None,

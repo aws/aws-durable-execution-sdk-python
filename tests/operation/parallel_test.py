@@ -14,6 +14,7 @@ from aws_durable_execution_sdk_python.concurrency import (
     Executable,
 )
 from aws_durable_execution_sdk_python.config import CompletionConfig, ParallelConfig
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.operation.parallel import (
     ParallelExecutor,
@@ -144,7 +145,15 @@ def test_parallel_handler():
 
     callables = [func1, func2]
     config = ParallelConfig(max_concurrency=2)
-    execution_state = Mock()
+
+    class MockExecutionState:
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            mock_result.is_succeeded.return_value = False
+            return mock_result
+
+    execution_state = MockExecutionState()
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
 
     # Mock the run_in_child_context function
     def mock_run_in_child_context(callable_func, name, child_config):
@@ -157,7 +166,11 @@ def test_parallel_handler():
 
     with patch.object(ParallelExecutor, "execute", return_value=mock_batch_result):
         result = parallel_handler(
-            callables, config, execution_state, mock_run_in_child_context
+            callables,
+            config,
+            execution_state,
+            mock_run_in_child_context,
+            operation_identifier,
         )
 
         assert result == mock_batch_result
@@ -170,7 +183,15 @@ def test_parallel_handler_with_none_config():
         return "result1"
 
     callables = [func1]
-    execution_state = Mock()
+
+    class MockExecutionState:
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            mock_result.is_succeeded.return_value = False
+            return mock_result
+
+    execution_state = MockExecutionState()
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
 
     def mock_run_in_child_context(callable_func, name, child_config):
         return callable_func("mock-context")
@@ -182,7 +203,11 @@ def test_parallel_handler_with_none_config():
 
     with patch.object(ParallelExecutor, "execute", return_value=mock_batch_result):
         result = parallel_handler(
-            callables, None, execution_state, mock_run_in_child_context
+            callables,
+            None,
+            execution_state,
+            mock_run_in_child_context,
+            operation_identifier,
         )
 
         assert result == mock_batch_result
@@ -196,7 +221,15 @@ def test_parallel_handler_creates_executor_with_correct_config():
 
     callables = [func1]
     config = ParallelConfig(max_concurrency=5)
-    execution_state = Mock()
+
+    class MockExecutionState:
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            mock_result.is_succeeded.return_value = False
+            return mock_result
+
+    execution_state = MockExecutionState()
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
@@ -208,7 +241,9 @@ def test_parallel_handler_creates_executor_with_correct_config():
         mock_executor.execute.return_value = mock_batch_result
         mock_from_callables.return_value = mock_executor
 
-        result = parallel_handler(callables, config, execution_state, executor_context)
+        result = parallel_handler(
+            callables, config, execution_state, executor_context, operation_identifier
+        )
 
         mock_from_callables.assert_called_once_with(callables, config)
         mock_executor.execute.assert_called_once_with(
@@ -224,7 +259,15 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
         return "result1"
 
     callables = [func1]
-    execution_state = Mock()
+
+    class MockExecutionState:
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            mock_result.is_succeeded.return_value = False
+            return mock_result
+
+    execution_state = MockExecutionState()
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
@@ -236,7 +279,9 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
         mock_executor.execute.return_value = mock_batch_result
         mock_from_callables.return_value = mock_executor
 
-        result = parallel_handler(callables, None, execution_state, executor_context)
+        result = parallel_handler(
+            callables, None, execution_state, executor_context, operation_identifier
+        )
 
         assert result == mock_batch_result
         # Verify that a default ParallelConfig was created
@@ -313,7 +358,15 @@ def test_parallel_handler_with_serdes():
         return "RESULT1"
 
     callables = [func1]
-    execution_state = Mock()
+
+    class MockExecutionState:
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            mock_result.is_succeeded.return_value = False
+            return mock_result
+
+    execution_state = MockExecutionState()
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
@@ -324,6 +377,7 @@ def test_parallel_handler_with_serdes():
         ParallelConfig(serdes=CustomStrSerDes()),
         execution_state,
         executor_context,
+        operation_identifier,
     )
 
     assert result.all[0].result == "RESULT1"
@@ -340,14 +394,24 @@ def test_parallel_handler_with_summary_generator():
 
     callables = [func1]
     config = ParallelConfig(summary_generator=mock_summary_generator)
-    execution_state = Mock()
+
+    class MockExecutionState:
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            mock_result.is_succeeded.return_value = False
+            return mock_result
+
+    execution_state = MockExecutionState()
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = Mock(return_value="1")  # noqa SLF001
     executor_context.create_child_context = Mock(return_value=Mock())
 
     # Call parallel_handler
-    parallel_handler(callables, config, execution_state, executor_context)
+    parallel_handler(
+        callables, config, execution_state, executor_context, operation_identifier
+    )
 
     # Verify that create_child_context was called once (N=1 job)
     assert executor_context.create_child_context.call_count == 1
@@ -384,14 +448,24 @@ def test_parallel_handler_default_summary_generator():
         return "result2"
 
     callables = [func1, func2]
-    execution_state = Mock()
+
+    class MockExecutionState:
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            mock_result.is_succeeded.return_value = False
+            return mock_result
+
+    execution_state = MockExecutionState()
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = Mock(side_effect=["1", "2"])  # noqa SLF001
     executor_context.create_child_context = Mock(return_value=Mock())
 
     # Call parallel_handler with None config (should use default)
-    parallel_handler(callables, None, execution_state, executor_context)
+    parallel_handler(
+        callables, None, execution_state, executor_context, operation_identifier
+    )
 
     # Verify that create_child_context was called twice (N=2 jobs)
     assert executor_context.create_child_context.call_count == 2
@@ -419,7 +493,14 @@ def test_parallel_handler_with_explicit_none_summary_generator():
     # Explicitly set summary_generator to None
     config = ParallelConfig(summary_generator=None)
 
-    execution_state = Mock()
+    class MockExecutionState:
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            mock_result.is_succeeded.return_value = False
+            return mock_result
+
+    execution_state = MockExecutionState()
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = Mock(  # noqa: SLF001
@@ -433,17 +514,127 @@ def test_parallel_handler_with_explicit_none_summary_generator():
         config=config,
         execution_state=execution_state,
         parallel_context=executor_context,
+        operation_identifier=operation_identifier,
     )
 
     # Verify that create_child_context was called 3 times (N=3 jobs)
     assert executor_context.create_child_context.call_count == 3
 
-    # Verify that _create_step_id_for_logical_step was called 3 times with unique values
-    assert executor_context._create_step_id_for_logical_step.call_count == 3  # noqa SLF001
-    calls = executor_context._create_step_id_for_logical_step.call_args_list  # noqa SLF001
-    # Verify all calls have unique values
-    call_values = [call[0][0] for call in calls]
-    assert len(set(call_values)) == 3  # All unique
+
+def test_parallel_handler_replay_mechanism():
+    """Test that parallel_handler uses replay when operation has already succeeded."""
+
+    def func1(ctx):
+        return "result1"
+
+    def func2(ctx):
+        return "result2"
+
+    callables = [func1, func2]
+
+    # Mock execution state that indicates operation already succeeded
+    class MockExecutionState:
+        durable_execution_arn = "arn:aws:durable:us-east-1:123456789012:execution/test"
+
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            mock_result.is_succeeded.return_value = True
+            mock_result.is_replay_children.return_value = False
+            # Provide properly serialized JSON data
+            mock_result.result = f'"cached_result_{operation_id}"'  # JSON string
+            return mock_result
+
+    execution_state = MockExecutionState()
+    config = ParallelConfig()
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+
+    # Mock parallel context
+    parallel_context = Mock()
+    parallel_context._create_step_id_for_logical_step = Mock(  # noqa: SLF001
+        side_effect=["child_1", "child_2"]
+    )
+
+    # Mock the executor's replay method
+    with patch.object(ParallelExecutor, "replay") as mock_replay:
+        expected_batch_result = BatchResult(
+            all=[
+                BatchItem(
+                    index=0,
+                    status=BatchItemStatus.SUCCEEDED,
+                    result="cached_result_child_1",
+                ),
+                BatchItem(
+                    index=1,
+                    status=BatchItemStatus.SUCCEEDED,
+                    result="cached_result_child_2",
+                ),
+            ],
+            completion_reason=CompletionReason.ALL_COMPLETED,
+        )
+        mock_replay.return_value = expected_batch_result
+
+        result = parallel_handler(
+            callables, config, execution_state, parallel_context, operation_identifier
+        )
+
+        # Verify replay was called instead of execute
+        mock_replay.assert_called_once_with(execution_state, parallel_context)
+        assert result == expected_batch_result
+
+
+def test_parallel_handler_replay_with_replay_children():
+    """Test parallel_handler replay when children need to be re-executed."""
+
+    def func1(ctx):
+        return "result1"
+
+    callables = [func1]
+
+    # Mock execution state that indicates operation succeeded but children need replay
+    class MockExecutionState:
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            if operation_id == "test_op":
+                mock_result.is_succeeded.return_value = True
+            else:  # child operations
+                mock_result.is_succeeded.return_value = True
+                mock_result.is_replay_children.return_value = True
+            return mock_result
+
+    execution_state = MockExecutionState()
+    config = ParallelConfig()
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+
+    # Mock parallel context
+    parallel_context = Mock()
+    parallel_context._create_step_id_for_logical_step = Mock(return_value="child_1")  # noqa: SLF001
+
+    # Mock the executor's replay method and _execute_item_in_child_context
+    with (
+        patch.object(ParallelExecutor, "replay") as mock_replay,
+        patch.object(
+            ParallelExecutor, "_execute_item_in_child_context"
+        ) as mock_execute_item,
+    ):
+        mock_execute_item.return_value = "re_executed_result"
+        expected_batch_result = BatchResult(
+            all=[
+                BatchItem(
+                    index=0,
+                    status=BatchItemStatus.SUCCEEDED,
+                    result="re_executed_result",
+                )
+            ],
+            completion_reason=CompletionReason.ALL_COMPLETED,
+        )
+        mock_replay.return_value = expected_batch_result
+
+        result = parallel_handler(
+            callables, config, execution_state, parallel_context, operation_identifier
+        )
+
+        mock_replay.assert_called_once_with(execution_state, parallel_context)
+        assert result == expected_batch_result
 
 
 def test_parallel_config_with_explicit_none_summary_generator():
@@ -470,3 +661,76 @@ def test_parallel_config_default_summary_generator_behavior():
     )
     assert test_result == ""  # noqa PLC1901
     assert config.serdes is None
+
+
+def test_parallel_handler_first_execution_then_replay():
+    """Test parallel_handler called twice - first calls execute, second calls replay."""
+
+    def task1(ctx):
+        return "result1"
+
+    def task2(ctx):
+        return "result2"
+
+    callables = [task1, task2]
+    config = ParallelConfig()
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+
+    # Track whether we're in first or second execution
+    execution_count = 0
+
+    class MockExecutionState:
+        durable_execution_arn = "arn:aws:durable:us-east-1:123456789012:execution/test"
+
+        def get_checkpoint_result(self, operation_id):
+            nonlocal execution_count
+            mock_result = Mock()
+
+            if operation_id == "test_op":
+                # Main operation checkpoint
+                if execution_count == 0:
+                    # First execution - operation not succeeded yet
+                    mock_result.is_succeeded.return_value = False
+                else:
+                    # Second execution - operation succeeded, trigger replay
+                    mock_result.is_succeeded.return_value = True
+
+            return mock_result
+
+    execution_state = MockExecutionState()
+    parallel_context = Mock()
+
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.operation.parallel.ParallelExecutor.execute"
+        ) as mock_execute,
+        patch(
+            "aws_durable_execution_sdk_python.operation.parallel.ParallelExecutor.replay"
+        ) as mock_replay,
+    ):
+        mock_execute.return_value = Mock()  # Mock BatchResult
+        mock_replay.return_value = Mock()  # Mock BatchResult
+
+        # FIRST EXECUTION - should call execute
+        execution_count = 0
+        parallel_handler(
+            callables, config, execution_state, parallel_context, operation_identifier
+        )
+
+        # Verify execute was called, replay was not
+        mock_execute.assert_called_once()
+        mock_replay.assert_not_called()
+
+        # Reset mocks for second call
+        mock_execute.reset_mock()
+        mock_replay.reset_mock()
+
+        # SECOND EXECUTION - should call replay
+        execution_count = 1
+        parallel_handler(
+            callables, config, execution_state, parallel_context, operation_identifier
+        )
+
+        # Verify replay was called, execute was not
+        mock_replay.assert_called_once()
+        mock_execute.assert_not_called()

@@ -824,5 +824,39 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
             ),
         )
 
+    def replay(self, execution_state: ExecutionState, executor_context: DurableContext):
+        """
+        Replay rather than re-run children.
+
+        if we are here, then we are in replay_children.
+        This will pre-generate all the operation ids for the children and collect the checkpointed
+        results.
+        """
+        items: list[BatchItem[ResultType]] = []
+        for executable in self.executables:
+            operation_id = executor_context._create_step_id_for_logical_step(  # noqa: SLF001
+                executable.index
+            )
+            checkpoint = execution_state.get_checkpoint_result(operation_id)
+
+            result: ResultType | None = None
+            error = None
+            status: BatchItemStatus
+            if checkpoint.is_succeeded():
+                status = BatchItemStatus.SUCCEEDED
+                result = self._execute_item_in_child_context(
+                    executor_context, executable
+                )
+
+            elif checkpoint.is_failed():
+                error = checkpoint.error
+                status = BatchItemStatus.FAILED
+            else:
+                status = BatchItemStatus.STARTED
+
+            batch_item = BatchItem(executable.index, status, result=result, error=error)
+            items.append(batch_item)
+        return BatchResult.from_items(items, self.completion_config)
+
 
 # endregion concurrency logic

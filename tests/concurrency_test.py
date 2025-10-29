@@ -22,7 +22,7 @@ from aws_durable_execution_sdk_python.concurrency import (
     ExecutionCounters,
     TimerScheduler,
 )
-from aws_durable_execution_sdk_python.config import CompletionConfig
+from aws_durable_execution_sdk_python.config import CompletionConfig, MapConfig
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     InvalidStateError,
@@ -30,6 +30,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     TimedSuspendExecution,
 )
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
+from aws_durable_execution_sdk_python.operation.map import MapExecutor
 
 
 def test_batch_item_status_enum():
@@ -2535,3 +2536,143 @@ def test_operation_id_determinism_across_shuffles():
     assert all(
         assoc1 == assoc2 for assoc1, assoc2 in combinations(associations_per_run, 2)
     )
+
+
+def test_concurrent_executor_replay_with_succeeded_operations():
+    """Test ConcurrentExecutor replay method with succeeded operations."""
+
+    def func1(ctx, item, idx, items):
+        return f"result_{item}"
+
+    items = ["a", "b"]
+    config = MapConfig()
+
+    executor = MapExecutor.from_items(
+        items=items,
+        func=func1,
+        config=config,
+    )
+
+    # Mock execution state with succeeded operations
+    mock_execution_state = Mock()
+    mock_execution_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    def mock_get_checkpoint_result(operation_id):
+        mock_result = Mock()
+        mock_result.is_succeeded.return_value = True
+        mock_result.is_failed.return_value = False
+        mock_result.is_replay_children.return_value = False
+        mock_result.is_existent.return_value = True
+        # Provide properly serialized JSON data
+        mock_result.result = f'"cached_result_{operation_id}"'  # JSON string
+        return mock_result
+
+    mock_execution_state.get_checkpoint_result = mock_get_checkpoint_result
+
+    def mock_create_step_id_for_logical_step(step):
+        return f"op_{step}"
+
+    # Mock executor context
+    mock_executor_context = Mock()
+    mock_executor_context._create_step_id_for_logical_step = (  # noqa
+        mock_create_step_id_for_logical_step
+    )
+
+    # Mock child context that has the same execution state
+    mock_child_context = Mock()
+    mock_child_context.state = mock_execution_state
+    mock_executor_context.create_child_context = Mock(return_value=mock_child_context)
+    mock_executor_context._parent_id = "parent_id"  # noqa
+
+    result = executor.replay(mock_execution_state, mock_executor_context)
+
+    assert isinstance(result, BatchResult)
+    assert len(result.all) == 2
+    assert result.all[0].status == BatchItemStatus.SUCCEEDED
+    assert result.all[0].result == "cached_result_op_0"
+    assert result.all[1].status == BatchItemStatus.SUCCEEDED
+    assert result.all[1].result == "cached_result_op_1"
+
+
+def test_concurrent_executor_replay_with_failed_operations():
+    """Test ConcurrentExecutor replay method with failed operations."""
+
+    def func1(ctx, item, idx, items):
+        return f"result_{item}"
+
+    items = ["a"]
+    config = MapConfig()
+
+    executor = MapExecutor.from_items(
+        items=items,
+        func=func1,
+        config=config,
+    )
+
+    # Mock execution state with failed operation
+    mock_execution_state = Mock()
+
+    def mock_get_checkpoint_result(operation_id):
+        mock_result = Mock()
+        mock_result.is_succeeded.return_value = False
+        mock_result.is_failed.return_value = True
+        mock_result.error = Exception("Test error")
+        return mock_result
+
+    mock_execution_state.get_checkpoint_result = mock_get_checkpoint_result
+
+    # Mock executor context
+    mock_executor_context = Mock()
+    mock_executor_context._create_step_id_for_logical_step = Mock(return_value="op_1")  # noqa: SLF001
+
+    result = executor.replay(mock_execution_state, mock_executor_context)
+
+    assert isinstance(result, BatchResult)
+    assert len(result.all) == 1
+    assert result.all[0].status == BatchItemStatus.FAILED
+    assert result.all[0].error is not None
+
+
+def test_concurrent_executor_replay_with_replay_children():
+    """Test ConcurrentExecutor replay method when children need re-execution."""
+
+    def func1(ctx, item, idx, items):
+        return f"result_{item}"
+
+    items = ["a"]
+    config = MapConfig()
+
+    executor = MapExecutor.from_items(
+        items=items,
+        func=func1,
+        config=config,
+    )
+
+    # Mock execution state with succeeded operation that needs replay
+    mock_execution_state = Mock()
+
+    def mock_get_checkpoint_result(operation_id):
+        mock_result = Mock()
+        mock_result.is_succeeded.return_value = True
+        mock_result.is_failed.return_value = False
+        mock_result.is_replay_children.return_value = True
+        return mock_result
+
+    mock_execution_state.get_checkpoint_result = mock_get_checkpoint_result
+
+    # Mock executor context
+    mock_executor_context = Mock()
+    mock_executor_context._create_step_id_for_logical_step = Mock(return_value="op_1")  # noqa: SLF001
+
+    # Mock _execute_item_in_child_context to return a result
+    with patch.object(
+        executor, "_execute_item_in_child_context", return_value="re_executed_result"
+    ):
+        result = executor.replay(mock_execution_state, mock_executor_context)
+
+        assert isinstance(result, BatchResult)
+        assert len(result.all) == 1
+        assert result.all[0].status == BatchItemStatus.SUCCEEDED
+        assert result.all[0].result == "re_executed_result"
