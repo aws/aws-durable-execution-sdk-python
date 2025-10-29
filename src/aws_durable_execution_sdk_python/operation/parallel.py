@@ -13,10 +13,10 @@ from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 
 if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.concurrency import BatchResult
-    from aws_durable_execution_sdk_python.config import ChildConfig
+    from aws_durable_execution_sdk_python.context import DurableContext
     from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.state import ExecutionState
-    from aws_durable_execution_sdk_python.types import DurableContext, SummaryGenerator
+    from aws_durable_execution_sdk_python.types import SummaryGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +81,7 @@ def parallel_handler(
     callables: Sequence[Callable],
     config: ParallelConfig | None,
     execution_state: ExecutionState,
-    run_in_child_context: Callable[
-        [Callable[[DurableContext], R], str | None, ChildConfig | None], R
-    ],
+    parallel_context: DurableContext,
 ) -> BatchResult[R]:
     """Execute multiple operations in parallel."""
     # Summary Generator Construction (matches TypeScript implementation):
@@ -96,7 +94,7 @@ def parallel_handler(
         callables,
         config or ParallelConfig(summary_generator=ParallelSummaryGenerator()),
     )
-    return executor.execute(execution_state, run_in_child_context)
+    return executor.execute(execution_state, executor_context=parallel_context)
 
 
 class ParallelSummaryGenerator:

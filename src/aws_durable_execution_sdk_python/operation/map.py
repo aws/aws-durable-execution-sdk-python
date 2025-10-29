@@ -16,10 +16,10 @@ from aws_durable_execution_sdk_python.config import MapConfig
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 
 if TYPE_CHECKING:
-    from aws_durable_execution_sdk_python.config import ChildConfig
+    from aws_durable_execution_sdk_python.context import DurableContext
     from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.state import ExecutionState
-    from aws_durable_execution_sdk_python.types import DurableContext, SummaryGenerator
+    from aws_durable_execution_sdk_python.types import SummaryGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +93,7 @@ def map_handler(
     func: Callable,
     config: MapConfig | None,
     execution_state: ExecutionState,
-    run_in_child_context: Callable[
-        [Callable[[DurableContext], R], str | None, ChildConfig | None], R
-    ],
+    map_context: DurableContext,
 ) -> BatchResult[R]:
     """Execute a callable for each item in parallel."""
     # Summary Generator Construction (matches TypeScript implementation):
@@ -109,7 +107,8 @@ def map_handler(
         func=func,
         config=config or MapConfig(summary_generator=MapSummaryGenerator()),
     )
-    return executor.execute(execution_state, run_in_child_context)
+    # we are making it explicit that we are now executing within the map_context
+    return executor.execute(execution_state, executor_context=map_context)
 
 
 class MapSummaryGenerator:

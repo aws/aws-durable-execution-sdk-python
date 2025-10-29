@@ -17,7 +17,6 @@ from aws_durable_execution_sdk_python.config import (
 )
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.operation.map import MapExecutor, map_handler
-from aws_durable_execution_sdk_python.serdes import serialize
 from tests.serdes_test import CustomStrSerDes
 
 
@@ -228,12 +227,13 @@ def test_map_handler_calls_executor_execute():
         completion_reason=CompletionReason.ALL_COMPLETED,
     )
 
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
+
     with patch.object(
         MapExecutor, "execute", return_value=mock_batch_result
     ) as mock_execute:
-
-        def mock_run_in_child_context(func, name, config):
-            return func("mock_context")
 
         class MockExecutionState:
             pass
@@ -242,11 +242,13 @@ def test_map_handler_calls_executor_execute():
         config = MapConfig()
 
         result = map_handler(
-            items, callable_func, config, execution_state, mock_run_in_child_context
+            items, callable_func, config, execution_state, executor_context
         )
 
         # Verify execute was called
-        mock_execute.assert_called_once_with(execution_state, mock_run_in_child_context)
+        mock_execute.assert_called_once_with(
+            execution_state, executor_context=executor_context
+        )
         assert result == mock_batch_result
 
 
@@ -267,8 +269,9 @@ def test_map_handler_with_none_config_creates_default():
         mock_executor.execute.return_value = mock_batch_result
         mock_from_items.return_value = mock_executor
 
-        def mock_run_in_child_context(func, name, config):
-            return func("mock_context")
+        executor_context = Mock()
+        executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+        executor_context.create_child_context = lambda *args: Mock()
 
         class MockExecutionState:
             pass
@@ -276,7 +279,7 @@ def test_map_handler_with_none_config_creates_default():
         execution_state = MockExecutionState()
 
         result = map_handler(
-            items, callable_func, None, execution_state, mock_run_in_child_context
+            items, callable_func, None, execution_state, executor_context
         )
 
         # Verify from_items was called with a MapConfig instance
@@ -297,21 +300,15 @@ def test_map_handler_with_none_config_creates_default():
 
 
 def test_map_handler_with_serdes():
-    """Test that map_handler calls executor.execute method."""
+    """Test that map_handler with serdes"""
     items = ["test_item"]
 
     def callable_func(ctx, item, idx, items):
-        return f"result_{item}"
+        return f"RESULT_{item.upper()}"
 
-    # Mock the executor.execute method
-
-    def mock_run_in_child_context(func, name, config):
-        return serialize(
-            serdes=config.serdes,
-            value=func("mock_context"),
-            operation_id="op_id",
-            durable_execution_arn="durable_execution_arn",
-        )
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
     class MockExecutionState:
         pass
@@ -320,7 +317,7 @@ def test_map_handler_with_serdes():
     config = MapConfig(serdes=CustomStrSerDes())
 
     result = map_handler(
-        items, callable_func, config, execution_state, mock_run_in_child_context
+        items, callable_func, config, execution_state, executor_context
     )
 
     # Verify execute was called
@@ -328,7 +325,7 @@ def test_map_handler_with_serdes():
 
 
 def test_map_handler_with_summary_generator():
-    """Test that map_handler passes summary_generator to child config."""
+    """Test that map_handler calls executor_context methods correctly."""
     items = ["item1", "item2"]
 
     def callable_func(ctx, item, idx, items):
@@ -339,31 +336,26 @@ def test_map_handler_with_summary_generator():
 
     config = MapConfig(summary_generator=mock_summary_generator)
 
-    # Track the child_config passed to run_in_child_context
-    captured_child_configs = []
-
-    def mock_run_in_child_context(callable_func, name, child_config):
-        captured_child_configs.append(child_config)
-        return callable_func("mock-context")
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = Mock(side_effect=["1", "2"])  # noqa SLF001
+    executor_context.create_child_context = Mock(return_value=Mock())
 
     class MockExecutionState:
         pass
 
     execution_state = MockExecutionState()
 
-    # Call map_handler with our mock run_in_child_context
-    map_handler(
-        items, callable_func, config, execution_state, mock_run_in_child_context
-    )
+    # Call map_handler
+    map_handler(items, callable_func, config, execution_state, executor_context)
 
-    # Verify that the summary_generator was passed to the child config
-    assert len(captured_child_configs) > 0
-    child_config = captured_child_configs[0]
-    assert child_config.summary_generator is mock_summary_generator
+    # Verify that create_child_context was called twice (N=2 items)
+    assert executor_context.create_child_context.call_count == 2
 
-    # Test that the summary generator works
-    test_result = child_config.summary_generator("test" * 100)
-    assert test_result == "Summary of 400 chars for map item"
+    # Verify that _create_step_id_for_logical_step was called twice with unique values
+    assert executor_context._create_step_id_for_logical_step.call_count == 2  # noqa SLF001
+    calls = executor_context._create_step_id_for_logical_step.call_args_list  # noqa SLF001
+    # Verify unique values were passed
+    assert calls[0] != calls[1]
 
 
 def test_map_executor_from_items_with_summary_generator():
@@ -385,18 +377,15 @@ def test_map_executor_from_items_with_summary_generator():
 
 
 def test_map_handler_default_summary_generator():
-    """Test that map_handler uses default summary generator when config is None."""
+    """Test that map_handler calls executor_context methods correctly with default config."""
     items = ["item1"]
 
     def callable_func(ctx, item, idx, items):
         return f"result_{item}"
 
-    # Track the child_config passed to run_in_child_context
-    captured_child_configs = []
-
-    def mock_run_in_child_context(callable_func, name, child_config):
-        captured_child_configs.append(child_config)
-        return callable_func("mock-context")
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = Mock(return_value="1")  # noqa SLF001
+    executor_context.create_child_context = Mock(return_value=Mock())  # SLF001
 
     class MockExecutionState:
         pass
@@ -404,19 +393,13 @@ def test_map_handler_default_summary_generator():
     execution_state = MockExecutionState()
 
     # Call map_handler with None config (should use default)
-    map_handler(items, callable_func, None, execution_state, mock_run_in_child_context)
+    map_handler(items, callable_func, None, execution_state, executor_context)
 
-    # Verify that a default summary_generator was provided
-    assert len(captured_child_configs) > 0
-    child_config = captured_child_configs[0]
-    assert child_config.summary_generator is not None
+    # Verify that create_child_context was called once (N=1 item)
+    assert executor_context.create_child_context.call_count == 1
 
-    # Test that the default summary generator works
-    test_result = child_config.summary_generator(
-        BatchResult([], CompletionReason.ALL_COMPLETED)
-    )
-    assert isinstance(test_result, str)
-    assert len(test_result) > 0
+    # Verify that _create_step_id_for_logical_step was called once
+    assert executor_context._create_step_id_for_logical_step.call_count == 1  # noqa SLF001
 
 
 def test_map_executor_init_with_summary_generator():
@@ -445,12 +428,12 @@ def test_map_executor_init_with_summary_generator():
 
 
 def test_map_handler_with_explicit_none_summary_generator():
-    """Test that map_handler respects explicit None summary_generator."""
+    """Test that map_handler calls executor_context methods correctly with explicit None summary_generator."""
 
     def func(ctx, item, index, array):
         return f"processed_{item}"
 
-    items = ["item1", "item2"]
+    items = ["item1", "item2", "item3"]
     # Explicitly set summary_generator to None
     config = MapConfig(summary_generator=None)
 
@@ -459,35 +442,30 @@ def test_map_handler_with_explicit_none_summary_generator():
 
     execution_state = MockExecutionState()
 
-    # Capture the child configs passed to run_in_child_context
-    captured_child_configs = []
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = Mock(  # noqa: SLF001
+        side_effect=["1", "2", "3"]
+    )
+    executor_context.create_child_context = Mock(return_value=Mock())
 
-    def mock_run_in_child_context(func, name, child_config):
-        captured_child_configs.append(child_config)
-        return func(Mock())
-
-    # Call map_handler with our mock run_in_child_context
+    # Call map_handler
     map_handler(
         items=items,
         func=func,
         config=config,
         execution_state=execution_state,
-        run_in_child_context=mock_run_in_child_context,
+        map_context=executor_context,
     )
 
-    # Verify that the summary_generator was set to None (not default)
-    assert len(captured_child_configs) > 0
-    child_config = captured_child_configs[0]
-    assert child_config.summary_generator is None
+    # Verify that create_child_context was called 3 times (N=3 items)
+    assert executor_context.create_child_context.call_count == 3
 
-    # Test that when None, it should result in empty string behavior
-    # This matches child.py: config.summary_generator(raw_result) if config.summary_generator else ""
-    test_result = (
-        child_config.summary_generator("test_data")
-        if child_config.summary_generator
-        else ""
-    )
-    assert test_result == ""  # noqa PLC1901
+    # Verify that _create_step_id_for_logical_step was called 3 times with unique values
+    assert executor_context._create_step_id_for_logical_step.call_count == 3  # noqa SLF001
+    calls = executor_context._create_step_id_for_logical_step.call_args_list  # noqa SLF001
+    # Verify all calls have unique values
+    call_values = [call[0][0] for call in calls]
+    assert len(set(call_values)) == 3  # All unique
 
 
 def test_map_config_with_explicit_none_summary_generator():

@@ -19,17 +19,20 @@ from aws_durable_execution_sdk_python.exceptions import (
     SuspendExecution,
     TimedSuspendExecution,
 )
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
+from aws_durable_execution_sdk_python.operation.child import child_handler
 from aws_durable_execution_sdk_python.types import BatchResult as BatchResultProtocol
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from aws_durable_execution_sdk_python.config import CompletionConfig
+    from aws_durable_execution_sdk_python.context import DurableContext
     from aws_durable_execution_sdk_python.lambda_service import OperationSubType
     from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.state import ExecutionState
-    from aws_durable_execution_sdk_python.types import DurableContext, SummaryGenerator
+    from aws_durable_execution_sdk_python.types import SummaryGenerator
 
 
 logger = logging.getLogger(__name__)
@@ -615,12 +618,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         raise NotImplementedError
 
     def execute(
-        self,
-        execution_state: ExecutionState,
-        run_in_child_context: Callable[
-            [Callable[[DurableContext], ResultType], str | None, ChildConfig | None],
-            ResultType,
-        ],
+        self, execution_state: ExecutionState, executor_context: DurableContext
     ) -> BatchResult[ResultType]:
         """Execute items concurrently with event-driven state management."""
         logger.debug(
@@ -649,7 +647,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
                 """Submit task to the thread executor and mark its state as started."""
                 future = thread_executor.submit(
                     self._execute_item_in_child_context,
-                    run_in_child_context,
+                    executor_context,
                     executable_with_state.executable,
                 )
                 executable_with_state.run(future)
@@ -784,21 +782,42 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
 
     def _execute_item_in_child_context(
         self,
-        run_in_child_context: Callable[
-            [Callable[[DurableContext], ResultType], str | None, ChildConfig | None],
-            ResultType,
-        ],
+        executor_context: DurableContext,
         executable: Executable[CallableType],
     ) -> ResultType:
-        """Execute a single item in a child context."""
+        """
+        Execute a single item in a derived child context.
 
-        def execute_in_child_context(child_context: DurableContext) -> ResultType:
+        instead of relying on `executor_context.run_in_child_context`
+        we generate an operation_id for the child, and then call `child_handler`
+        directly. This avoids the hidden mutation of the context's internal counter.
+        we can do this because we explicitly control the generation of step_id and do it
+        using executable.index.
+
+
+        invariant: `operation_id` for a given executable is deterministic,
+            and execution order invariant.
+        """
+
+        operation_id = executor_context._create_step_id_for_logical_step(  # noqa: SLF001
+            executable.index
+        )
+        name = f"{self.name_prefix}{executable.index}"
+        child_context = executor_context.create_child_context(operation_id)
+        operation_identifier = OperationIdentifier(
+            operation_id,
+            executor_context._parent_id,  # noqa: SLF001
+            name,
+        )
+
+        def run_in_child_handler():
             return self.execute_item(child_context, executable)
 
-        return run_in_child_context(
-            execute_in_child_context,
-            f"{self.name_prefix}{executable.index}",
-            ChildConfig(
+        return child_handler(
+            run_in_child_handler,
+            child_context.state,
+            operation_identifier=operation_identifier,
+            config=ChildConfig(
                 serdes=self.item_serdes or self.serdes,
                 sub_type=self.sub_type_iteration,
                 summary_generator=self.summary_generator,

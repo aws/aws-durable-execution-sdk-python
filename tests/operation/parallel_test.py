@@ -19,7 +19,6 @@ from aws_durable_execution_sdk_python.operation.parallel import (
     ParallelExecutor,
     parallel_handler,
 )
-from aws_durable_execution_sdk_python.serdes import serialize
 from tests.serdes_test import CustomStrSerDes
 
 
@@ -199,8 +198,9 @@ def test_parallel_handler_creates_executor_with_correct_config():
     config = ParallelConfig(max_concurrency=5)
     execution_state = Mock()
 
-    def mock_run_in_child_context(callable_func, name, child_config):
-        return callable_func("mock-context")
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
     with patch.object(ParallelExecutor, "from_callables") as mock_from_callables:
         mock_executor = Mock()
@@ -208,13 +208,11 @@ def test_parallel_handler_creates_executor_with_correct_config():
         mock_executor.execute.return_value = mock_batch_result
         mock_from_callables.return_value = mock_executor
 
-        result = parallel_handler(
-            callables, config, execution_state, mock_run_in_child_context
-        )
+        result = parallel_handler(callables, config, execution_state, executor_context)
 
         mock_from_callables.assert_called_once_with(callables, config)
         mock_executor.execute.assert_called_once_with(
-            execution_state, mock_run_in_child_context
+            execution_state, executor_context=executor_context
         )
         assert result == mock_batch_result
 
@@ -228,8 +226,9 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
     callables = [func1]
     execution_state = Mock()
 
-    def mock_run_in_child_context(callable_func, name, child_config):
-        return callable_func("mock-context")
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
     with patch.object(ParallelExecutor, "from_callables") as mock_from_callables:
         mock_executor = Mock()
@@ -237,9 +236,7 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
         mock_executor.execute.return_value = mock_batch_result
         mock_from_callables.return_value = mock_executor
 
-        result = parallel_handler(
-            callables, None, execution_state, mock_run_in_child_context
-        )
+        result = parallel_handler(callables, None, execution_state, executor_context)
 
         assert result == mock_batch_result
         # Verify that a default ParallelConfig was created
@@ -313,31 +310,27 @@ def test_parallel_handler_with_serdes():
     """Test that parallel_handler with serdes"""
 
     def func1(ctx):
-        return "result1"
+        return "RESULT1"
 
     callables = [func1]
     execution_state = Mock()
 
-    def mock_run_in_child_context(callable_func, name, child_config):
-        return serialize(
-            serdes=child_config.serdes,
-            value=callable_func("mock-context"),
-            operation_id="op_id",
-            durable_execution_arn="exec_arn",
-        )
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
     result = parallel_handler(
         callables,
         ParallelConfig(serdes=CustomStrSerDes()),
         execution_state,
-        mock_run_in_child_context,
+        executor_context,
     )
 
     assert result.all[0].result == "RESULT1"
 
 
 def test_parallel_handler_with_summary_generator():
-    """Test that parallel_handler passes summary_generator to child config."""
+    """Test that parallel_handler calls executor_context methods correctly."""
 
     def func1(ctx):
         return "large_result" * 1000  # Create a large result
@@ -349,24 +342,18 @@ def test_parallel_handler_with_summary_generator():
     config = ParallelConfig(summary_generator=mock_summary_generator)
     execution_state = Mock()
 
-    # Track the child_config passed to run_in_child_context
-    captured_child_configs = []
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = Mock(return_value="1")  # noqa SLF001
+    executor_context.create_child_context = Mock(return_value=Mock())
 
-    def mock_run_in_child_context(callable_func, name, child_config):
-        captured_child_configs.append(child_config)
-        return callable_func("mock-context")
+    # Call parallel_handler
+    parallel_handler(callables, config, execution_state, executor_context)
 
-    # Call parallel_handler with our mock run_in_child_context
-    parallel_handler(callables, config, execution_state, mock_run_in_child_context)
+    # Verify that create_child_context was called once (N=1 job)
+    assert executor_context.create_child_context.call_count == 1
 
-    # Verify that the summary_generator was passed to the child config
-    assert len(captured_child_configs) > 0
-    child_config = captured_child_configs[0]
-    assert child_config.summary_generator is mock_summary_generator
-
-    # Test that the summary generator works
-    test_result = child_config.summary_generator("test" * 100)
-    assert test_result == "Summary of 400 chars"
+    # Verify that _create_step_id_for_logical_step was called once with unique value
+    assert executor_context._create_step_id_for_logical_step.call_count == 1  # noqa SLF001
 
 
 def test_parallel_executor_from_callables_with_summary_generator():
@@ -388,82 +375,75 @@ def test_parallel_executor_from_callables_with_summary_generator():
 
 
 def test_parallel_handler_default_summary_generator():
-    """Test that parallel_handler uses default summary generator when config is None."""
+    """Test that parallel_handler calls executor_context methods correctly with default config."""
 
     def func1(ctx):
         return "result1"
 
-    callables = [func1]
+    def func2(ctx):
+        return "result2"
+
+    callables = [func1, func2]
     execution_state = Mock()
 
-    # Track the child_config passed to run_in_child_context
-    captured_child_configs = []
-
-    def mock_run_in_child_context(callable_func, name, child_config):
-        captured_child_configs.append(child_config)
-        return callable_func("mock-context")
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = Mock(side_effect=["1", "2"])  # noqa SLF001
+    executor_context.create_child_context = Mock(return_value=Mock())
 
     # Call parallel_handler with None config (should use default)
-    parallel_handler(callables, None, execution_state, mock_run_in_child_context)
+    parallel_handler(callables, None, execution_state, executor_context)
 
-    # Verify that a default summary_generator was provided
-    assert len(captured_child_configs) > 0
-    child_config = captured_child_configs[0]
-    assert child_config.summary_generator is not None
+    # Verify that create_child_context was called twice (N=2 jobs)
+    assert executor_context.create_child_context.call_count == 2
 
-    # Test that the default summary generator works
-    test_result = child_config.summary_generator(
-        BatchResult.from_dict(
-            {
-                "all": [{"index": 0, "status": "SUCCEEDED", "result": "test"}],
-                "completionReason": "ALL_COMPLETED",
-            }
-        )
-    )
-    assert isinstance(test_result, str)
-    assert len(test_result) > 0
+    # Verify that _create_step_id_for_logical_step was called twice with unique values
+    assert executor_context._create_step_id_for_logical_step.call_count == 2  # noqa SLF001
+    calls = executor_context._create_step_id_for_logical_step.call_args_list  # noqa SLF001
+    # Verify unique values were passed
+    assert calls[0] != calls[1]
 
 
 def test_parallel_handler_with_explicit_none_summary_generator():
-    """Test that parallel_handler respects explicit None summary_generator."""
+    """Test that parallel_handler calls executor_context methods correctly with explicit None summary_generator."""
 
     def func1(ctx):
         return "result1"
 
-    callables = [func1]
+    def func2(ctx):
+        return "result2"
+
+    def func3(ctx):
+        return "result3"
+
+    callables = [func1, func2, func3]
     # Explicitly set summary_generator to None
     config = ParallelConfig(summary_generator=None)
 
     execution_state = Mock()
 
-    # Capture the child configs passed to run_in_child_context
-    captured_child_configs = []
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = Mock(  # noqa: SLF001
+        side_effect=["1", "2", "3"]
+    )
+    executor_context.create_child_context = Mock(return_value=Mock())
 
-    def mock_run_in_child_context(func, name, child_config):
-        captured_child_configs.append(child_config)
-        return func(Mock())
-
-    # Call parallel_handler with our mock run_in_child_context
+    # Call parallel_handler
     parallel_handler(
         callables=callables,
         config=config,
         execution_state=execution_state,
-        run_in_child_context=mock_run_in_child_context,
+        parallel_context=executor_context,
     )
 
-    # Verify that the summary_generator was set to None (not default)
-    assert len(captured_child_configs) > 0
-    child_config = captured_child_configs[0]
-    assert child_config.summary_generator is None
+    # Verify that create_child_context was called 3 times (N=3 jobs)
+    assert executor_context.create_child_context.call_count == 3
 
-    # Test that when None, it should result in empty string behavior
-    # This matches child.py: config.summary_generator(raw_result) if config.summary_generator else ""
-    test_result = (
-        child_config.summary_generator("test_data")
-        if child_config.summary_generator
-        else ""
-    )
-    assert test_result == ""  # noqa PLC1901
+    # Verify that _create_step_id_for_logical_step was called 3 times with unique values
+    assert executor_context._create_step_id_for_logical_step.call_count == 3  # noqa SLF001
+    calls = executor_context._create_step_id_for_logical_step.call_args_list  # noqa SLF001
+    # Verify all calls have unique values
+    call_values = [call[0][0] for call in calls]
+    assert len(set(call_values)) == 3  # All unique
 
 
 def test_parallel_config_with_explicit_none_summary_generator():

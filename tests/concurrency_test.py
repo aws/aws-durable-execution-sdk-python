@@ -1,8 +1,11 @@
 """Tests for the concurrency module."""
 
+import random
 import threading
 import time
 from concurrent.futures import Future
+from functools import partial
+from itertools import combinations
 from unittest.mock import Mock, patch
 
 import pytest
@@ -1086,10 +1089,11 @@ def test_concurrent_executor_create_result_with_failed_branches():
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
-    def mock_run_in_child_context(func, name, config):
-        return func(Mock())
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
-    result = executor.execute(execution_state, mock_run_in_child_context)
+    result = executor.execute(execution_state, executor_context)
 
     assert len(result.all) == 2
     assert result.all[0].status == BatchItemStatus.SUCCEEDED
@@ -1124,11 +1128,12 @@ def test_concurrent_executor_execute_item_in_child_context():
         serdes=None,
     )
 
-    def mock_run_in_child_context(func, name, config):
-        return func(Mock())
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
     result = executor._execute_item_in_child_context(  # noqa: SLF001
-        mock_run_in_child_context, executables[0]
+        executor_context, executables[0]
     )
     assert result == "result_0"
 
@@ -1214,12 +1219,13 @@ def test_single_task_suspend_bubbles_up():
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
-    def mock_run_in_child_context(func, name, config):
-        return func(Mock())
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
     # Should raise TimedSuspendExecution since no other tasks running
     with pytest.raises(TimedSuspendExecution):
-        executor.execute(execution_state, mock_run_in_child_context)
+        executor.execute(execution_state, executor_context)
 
 
 def test_multiple_tasks_one_suspends_execution_continues():
@@ -1259,12 +1265,13 @@ def test_multiple_tasks_one_suspends_execution_continues():
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
-    def mock_run_in_child_context(func, name, config):
-        return func(Mock())
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
     # Should raise TimedSuspendExecution after Task B completes
     with pytest.raises(TimedSuspendExecution):
-        executor.execute(execution_state, mock_run_in_child_context)
+        executor.execute(execution_state, executor_context)
 
     # Assert that Task B did complete before suspension
     assert executor.task_b_completed
@@ -1303,12 +1310,13 @@ def test_concurrent_executor_with_single_task_resubmit():
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
-    def mock_run_in_child_context(func, name, config):
-        return func(Mock())
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
     # Should raise TimedSuspendExecution since single task suspends
     with pytest.raises(TimedSuspendExecution):
-        executor.execute(execution_state, mock_run_in_child_context)
+        executor.execute(execution_state, executor_context)
 
 
 def test_concurrent_executor_with_timed_resubmit_while_other_task_running():
@@ -1375,11 +1383,12 @@ def test_concurrent_executor_with_timed_resubmit_while_other_task_running():
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
-    def mock_run_in_child_context(func, name, config):
-        return func(Mock())
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
     # Should complete successfully after B resubmits and both tasks finish
-    result = executor.execute(execution_state, mock_run_in_child_context)
+    result = executor.execute(execution_state, executor_context)
 
     # Verify results
     assert len(result.all) == 2
@@ -1517,10 +1526,11 @@ def test_concurrent_executor_create_result_with_failed_status():
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
-    def mock_run_in_child_context(func, name, config):
-        return func(Mock())
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
-    result = executor.execute(execution_state, mock_run_in_child_context)
+    result = executor.execute(execution_state, executor_context)
 
     assert len(result.all) == 1
     assert result.all[0].status == BatchItemStatus.FAILED
@@ -1741,10 +1751,11 @@ def test_concurrent_executor_execute_with_failing_task():
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
-    def mock_run_in_child_context(func, name, config):
-        return func(Mock())
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
-    result = executor.execute(execution_state, mock_run_in_child_context)
+    result = executor.execute(execution_state, executor_context)
 
     assert len(result.all) == 1
     assert result.all[0].status == BatchItemStatus.FAILED
@@ -1802,10 +1813,11 @@ def test_create_result_no_failed_executables():
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
-    def mock_run_in_child_context(func, name, config):
-        return func(Mock())
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
-    result = executor.execute(execution_state, mock_run_in_child_context)
+    result = executor.execute(execution_state, executor_context)
 
     assert len(result.all) == 1
     assert result.all[0].status == BatchItemStatus.SUCCEEDED
@@ -1843,12 +1855,13 @@ def test_create_result_with_suspended_executable():
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
-    def mock_run_in_child_context(func, name, config):
-        return func(Mock())
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
 
     # Should raise SuspendExecution since single task suspends
     with pytest.raises(SuspendExecution):
-        executor.execute(execution_state, mock_run_in_child_context)
+        executor.execute(execution_state, executor_context)
 
 
 # Tests for _create_result method match statement branches
@@ -2435,3 +2448,90 @@ def test_batch_result_infer_completion_reason_basic_cases():
     # Test empty items - should be ALL_COMPLETED
     batch = BatchResult.from_dict({"all": []}, CompletionConfig(1))
     assert batch.completion_reason == CompletionReason.ALL_COMPLETED
+
+
+def test_operation_id_determinism_across_shuffles():
+    """Test that operation_id depends on Executable.index, not execution order."""
+
+    def index_based_function(index, ctx):
+        """Function that returns a result based on the executable index."""
+        return f"result_for_index_{index}"
+
+    class TestExecutor(ConcurrentExecutor):
+        """Custom executor for testing operation_id determinism."""
+
+        def execute_item(self, child_context, executable):
+            return executable.func(child_context)
+
+    # Create executables with specific indices using partial
+    num_executables = 50
+    funcs = [partial(index_based_function, i) for i in range(num_executables)]
+
+    # Track operation_id -> result associations
+    captured_associations = []
+
+    def patched_child_handler(func, execution_state, operation_identifier, config):
+        """Patched child handler that captures operation_id -> result mapping."""
+        result = func()  # Execute the function
+        captured_associations.append((operation_identifier.operation_id, result))
+        return result
+
+    execution_state = Mock()
+    execution_state.create_checkpoint = Mock()
+
+    completion_config = CompletionConfig(min_successful=num_executables)
+
+    # Run multiple times with different shuffle orders
+    associations_per_run = []
+
+    for run in range(10):  # Test 10 different shuffle orders
+        captured_associations.clear()
+
+        # Create executables from shuffled functions
+        executables = [Executable(index=i, func=func) for i, func in enumerate(funcs)]
+        random.seed(run)  # Different seed for each run
+        random.shuffle(executables)
+
+        executor = TestExecutor(
+            executables=executables,
+            max_concurrency=2,
+            completion_config=completion_config,
+            sub_type_top="TEST",
+            sub_type_iteration="TEST_ITER",
+            name_prefix="test_",
+            serdes=None,
+        )
+
+        # Create executor context mock
+        executor_context = Mock()
+        executor_context._parent_id = "parent_123"  # noqa SLF001
+
+        def create_step_id(index):
+            return f"step_{index}"
+
+        executor_context._create_step_id_for_logical_step = create_step_id  # noqa SLF001
+
+        def create_child_context(operation_id):
+            child_ctx = Mock()
+            child_ctx.state = execution_state
+            return child_ctx
+
+        executor_context.create_child_context = create_child_context
+
+        with patch(
+            "aws_durable_execution_sdk_python.concurrency.child_handler",
+            patched_child_handler,
+        ):
+            executor.execute(execution_state, executor_context)
+
+        associations_per_run.append(captured_associations.copy())
+
+    # first we will verify the validity of the test by ensuring that there exist at least 2 runs with different ordering
+    assert any(
+        assoc1 != assoc2 for assoc1, assoc2 in combinations(associations_per_run, 2)
+    )
+    # then we will verify the invariant of association between step_id and result
+    associations_per_run = [dict(assoc) for assoc in associations_per_run]
+    assert all(
+        assoc1 == assoc2 for assoc1, assoc2 in combinations(associations_per_run, 2)
+    )
