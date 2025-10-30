@@ -245,6 +245,62 @@ To send us a pull request, please:
 5. Send us a pull request, answering any default questions in the pull request interface.
 6. Pay attention to any automated CI failures reported in the pull request, and stay involved in the conversation.
 
+### Pull Request Title and Commit Message Format
+
+We follow the [Conventional Commits](https://www.conventionalcommits.org/) specification for PR titles and commit messages. This helps us maintain a clear project history and enables automated tooling.
+
+**Format:** `type: subject`
+
+- **type**: The type of change (required)  
+- **subject**: Brief description of the change (required, max 50 characters)
+
+**Valid types:**
+- `feat`: New features
+- `fix`: Bug fixes
+- `docs`: Documentation changes
+- `test`: Adding or updating tests
+- `refactor`: Code refactoring without functional changes
+- `perf`: Performance improvements
+- `style`: Code style/formatting changes
+- `chore`: Maintenance tasks
+- `ci`: CI/CD changes
+- `build`: Build system changes
+- `deps`: Dependency updates
+
+**Examples:**
+```
+feat: add retry mechanism for operations
+fix: resolve memory leak in execution state
+docs: update API documentation for context
+test: add integration tests for parallel exec
+feat(sdk): implement new callback functionality
+fix(examples): correct timeout handling
+```
+
+**Requirements:**
+- Subject line must be 50 characters or less
+- Body text should wrap at 72 characters for good terminal display
+- Use lowercase for type and scope
+- Use imperative mood in subject ("add" not "added" or "adds")
+- No period at the end of the subject line
+- Use conventional commit message format with clear, concise descriptions
+- Body should provide detailed explanation of changes with bullet points when helpful
+
+**Full commit message example:**
+```
+feat: add retry mechanism for operations
+
+- Implement exponential backoff strategy for transient failures
+- Add configurable retry limits and timeout settings
+- Include comprehensive error logging for debugging
+- Update documentation with retry configuration examples
+
+Resolves issue with intermittent network failures causing
+execution interruptions in production environments.
+```
+
+The PR title will be used as the commit message when your PR is merged, so please ensure it follows this format.
+
 GitHub provides additional document on [forking a repository](https://help.github.com/articles/fork-a-repo/) and
 [creating a pull request](https://help.github.com/articles/creating-a-pull-request/).
 
