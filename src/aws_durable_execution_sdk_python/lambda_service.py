@@ -188,11 +188,11 @@ class StepDetails:
 
 @dataclass(frozen=True)
 class WaitDetails:
-    scheduled_timestamp: datetime.datetime | None = None
+    scheduled_end_timestamp: datetime.datetime | None = None
 
     @classmethod
     def from_dict(cls, data: MutableMapping[str, Any]) -> WaitDetails:
-        return cls(scheduled_timestamp=data.get("ScheduledTimestamp"))
+        return cls(scheduled_end_timestamp=data.get("ScheduledEndTimestamp"))
 
 
 @dataclass(frozen=True)
@@ -801,7 +801,7 @@ class Operation:
             result["StepDetails"] = step_dict
         if self.wait_details:
             result["WaitDetails"] = {
-                "ScheduledTimestamp": self.wait_details.scheduled_timestamp
+                "ScheduledEndTimestamp": self.wait_details.scheduled_end_timestamp
             }
         if self.callback_details:
             callback_dict: MutableMapping[str, Any] = {

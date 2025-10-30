@@ -279,16 +279,16 @@ def test_step_details_minimal():
 def test_wait_details_from_dict():
     """Test WaitDetails.from_dict method."""
     timestamp = datetime.datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
-    data = {"ScheduledTimestamp": timestamp}
+    data = {"ScheduledEndTimestamp": timestamp}
     details = WaitDetails.from_dict(data)
-    assert details.scheduled_timestamp == timestamp
+    assert details.scheduled_end_timestamp == timestamp
 
 
 def test_wait_details_from_dict_empty():
     """Test WaitDetails.from_dict with empty data."""
     data = {}
     details = WaitDetails.from_dict(data)
-    assert details.scheduled_timestamp is None
+    assert details.scheduled_end_timestamp is None
 
 
 def test_callback_details_from_dict():
@@ -1202,7 +1202,7 @@ def test_operation_to_dict_with_all_details():
         attempt=2, next_attempt_timestamp="2023-01-01", result="step_result", error=None
     )
     wait_details = WaitDetails(
-        scheduled_timestamp=datetime.datetime(2023, 1, 1, tzinfo=datetime.UTC)
+        scheduled_end_timestamp=datetime.datetime(2023, 1, 1, tzinfo=datetime.UTC)
     )
     callback_details = CallbackDetails(
         callback_id="cb123", result="callback_result", error=None
@@ -1231,7 +1231,7 @@ def test_operation_to_dict_with_all_details():
     assert result["ExecutionDetails"]["InputPayload"] == "exec_payload"
     assert result["ContextDetails"]["Result"] == "context_result"
     assert result["StepDetails"]["Attempt"] == 2
-    assert result["WaitDetails"]["ScheduledTimestamp"] == datetime.datetime(
+    assert result["WaitDetails"]["ScheduledEndTimestamp"] == datetime.datetime(
         2023, 1, 1, tzinfo=datetime.UTC
     )
     assert result["CallbackDetails"]["CallbackId"] == "cb123"
@@ -1446,7 +1446,7 @@ def test_operation_from_dict_complete():
         "ExecutionDetails": {"InputPayload": "exec_payload"},
         "ContextDetails": {"Result": "context_result"},
         "StepDetails": {"Result": "step_result", "Attempt": 1},
-        "WaitDetails": {"ScheduledTimestamp": start_time},
+        "WaitDetails": {"ScheduledEndTimestamp": start_time},
         "CallbackDetails": {"CallbackId": "cb1", "Result": "callback_result"},
         "ChainedInvokeDetails": {
             "DurableExecutionArn": "arn:test",
@@ -1465,7 +1465,7 @@ def test_operation_from_dict_complete():
     assert operation.execution_details.input_payload == "exec_payload"
     assert operation.context_details.result == "context_result"
     assert operation.step_details.result == "step_result"
-    assert operation.wait_details.scheduled_timestamp == start_time
+    assert operation.wait_details.scheduled_end_timestamp == start_time
     assert operation.callback_details.callback_id == "cb1"
 
 
