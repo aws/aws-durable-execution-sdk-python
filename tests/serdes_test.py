@@ -8,11 +8,18 @@ from typing import Any
 
 import pytest
 
+from aws_durable_execution_sdk_python.concurrency import (
+    BatchItem,
+    BatchItemStatus,
+    BatchResult,
+    CompletionReason,
+)
 from aws_durable_execution_sdk_python.exceptions import (
     DurableExecutionsError,
     ExecutionError,
     SerDesError,
 )
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from aws_durable_execution_sdk_python.serdes import (
     BytesCodec,
     ContainerCodec,
@@ -894,3 +901,82 @@ def test_all_t_v_nested_dicts():
 
 
 # endregion
+
+
+# to_dict() support tests
+def test_default_serdes_supports_to_dict_objects():
+    """Test that default serdes automatically handles BatchResult serialization/deserialization."""
+
+    result = BatchResult(
+        all=[BatchItem(0, BatchItemStatus.SUCCEEDED, result="test")],
+        completion_reason=CompletionReason.ALL_COMPLETED,
+    )
+
+    # Default serdes should automatically handle BatchResult
+    serialized = serialize(
+        serdes=None,
+        value=result,
+        operation_id="test_op",
+        durable_execution_arn="arn:test",
+    )
+
+    # Deserialize returns BatchResult (not dict)
+    deserialized = deserialize(
+        serdes=None,
+        data=serialized,
+        operation_id="test_op",
+        durable_execution_arn="arn:test",
+    )
+
+    assert isinstance(deserialized, BatchResult)
+    assert deserialized.completion_reason == CompletionReason.ALL_COMPLETED
+    assert len(deserialized.all) == 1
+    assert deserialized.all[0].result == "test"
+
+
+def test_to_dict_output_is_serializable():
+    """Test that to_dict() output is serializable by default serdes."""
+
+    result = BatchResult(
+        all=[
+            BatchItem(0, BatchItemStatus.SUCCEEDED, result={"key": "value"}),
+            BatchItem(
+                1,
+                BatchItemStatus.FAILED,
+                error=ErrorObject(
+                    message="error", type="TestError", data=None, stack_trace=[]
+                ),
+            ),
+        ],
+        completion_reason=CompletionReason.ALL_COMPLETED,
+    )
+
+    # Convert to dict
+    result_dict = result.to_dict()
+
+    # Dict should be serializable
+    serialized = serialize(
+        serdes=None,
+        value=result_dict,
+        operation_id="test_op",
+        durable_execution_arn="arn:test",
+    )
+
+    # Deserialize
+    deserialized_dict = deserialize(
+        serdes=None,
+        data=serialized,
+        operation_id="test_op",
+        durable_execution_arn="arn:test",
+    )
+
+    # Verify structure preserved
+    assert deserialized_dict["completionReason"] == "ALL_COMPLETED"
+    assert len(deserialized_dict["all"]) == 2
+    assert deserialized_dict["all"][0]["result"] == {"key": "value"}
+    assert deserialized_dict["all"][1]["error"]["ErrorType"] == "TestError"
+
+    # Can reconstruct BatchResult
+    reconstructed = BatchResult.from_dict(deserialized_dict)
+    assert len(reconstructed.all) == 2
+    assert reconstructed.completion_reason == CompletionReason.ALL_COMPLETED

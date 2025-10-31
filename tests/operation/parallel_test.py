@@ -1,5 +1,6 @@
 """Tests for the parallel operation module."""
 
+import json
 from unittest.mock import Mock, patch
 
 import pytest
@@ -858,3 +859,57 @@ def test_parallel_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
     assert mock_deserialize.call_args_list[0][1]["operation_id"] == "child-0"
     assert mock_deserialize.call_args_list[1][1]["serdes"] is expected
     assert mock_deserialize.call_args_list[1][1]["operation_id"] == "child-1"
+
+
+def test_parallel_result_serialization_roundtrip():
+    """Test that parallel operation BatchResult can be serialized and deserialized."""
+
+    def func1(ctx):
+        return [1, 2, 3]
+
+    def func2(ctx):
+        return {"status": "complete", "count": 42}
+
+    def func3(ctx):
+        return "simple string"
+
+    callables = [func1, func2, func3]
+
+    class MockExecutionState:
+        durable_execution_arn = "arn:test"
+
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            mock_result.is_succeeded.return_value = False
+            return mock_result
+
+    execution_state = MockExecutionState()
+    parallel_context = Mock()
+    parallel_context._create_step_id_for_logical_step = Mock(  # noqa SLF001
+        side_effect=["1", "2", "3"]
+    )
+    parallel_context.create_child_context = Mock(return_value=Mock())
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+
+    # Execute parallel
+    result = parallel_handler(
+        callables,
+        ParallelConfig(),
+        execution_state,
+        parallel_context,
+        operation_identifier,
+    )
+
+    # Serialize the BatchResult
+    serialized = json.dumps(result.to_dict())
+
+    # Deserialize
+    deserialized = BatchResult.from_dict(json.loads(serialized))
+
+    # Verify all data preserved
+    assert len(deserialized.all) == 3
+    assert deserialized.all[0].result == [1, 2, 3]
+    assert deserialized.all[1].result == {"status": "complete", "count": 42}
+    assert deserialized.all[2].result == "simple string"
+    assert deserialized.completion_reason == result.completion_reason
+    assert all(item.status == BatchItemStatus.SUCCEEDED for item in deserialized.all)
