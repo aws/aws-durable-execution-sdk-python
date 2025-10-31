@@ -1,5 +1,6 @@
 """Tests for map operation."""
 
+import json
 from unittest.mock import Mock, patch
 
 import pytest
@@ -878,3 +879,45 @@ def test_map_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
     assert mock_deserialize.call_args_list[0][1]["operation_id"] == "child-0"
     assert mock_deserialize.call_args_list[1][1]["serdes"] is expected
     assert mock_deserialize.call_args_list[1][1]["operation_id"] == "child-1"
+
+
+def test_map_result_serialization_roundtrip():
+    """Test that map operation BatchResult can be serialized and deserialized."""
+
+    items = ["a", "b", "c"]
+
+    def func(ctx, item, idx, items):
+        return {"item": item.upper(), "index": idx}
+
+    class MockExecutionState:
+        durable_execution_arn = "arn:test"
+
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            mock_result.is_succeeded.return_value = False
+            return mock_result
+
+    execution_state = MockExecutionState()
+    map_context = Mock()
+    map_context._create_step_id_for_logical_step = Mock(side_effect=["1", "2", "3"])  # noqa SLF001
+    map_context.create_child_context = Mock(return_value=Mock())
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_map")
+
+    # Execute map
+    result = map_handler(
+        items, func, MapConfig(), execution_state, map_context, operation_identifier
+    )
+
+    # Serialize the BatchResult
+    serialized = json.dumps(result.to_dict())
+
+    # Deserialize
+    deserialized = BatchResult.from_dict(json.loads(serialized))
+
+    # Verify all data preserved
+    assert len(deserialized.all) == 3
+    assert deserialized.all[0].result == {"item": "A", "index": 0}
+    assert deserialized.all[1].result == {"item": "B", "index": 1}
+    assert deserialized.all[2].result == {"item": "C", "index": 2}
+    assert deserialized.completion_reason == result.completion_reason
+    assert all(item.status == BatchItemStatus.SUCCEEDED for item in deserialized.all)

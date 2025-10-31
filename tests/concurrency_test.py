@@ -1,5 +1,6 @@
 """Tests for the concurrency module."""
 
+import json
 import random
 import threading
 import time
@@ -100,28 +101,6 @@ def test_batch_item_from_dict():
     assert item.status == BatchItemStatus.SUCCEEDED
     assert item.result == "success_result"
     assert item.error is None
-
-
-def test_batch_item_from_dict_with_error():
-    """Test BatchItem from_dict with error object."""
-    error_data = {
-        "message": "Test error",
-        "type": "TestError",
-        "data": None,
-        "stackTrace": None,
-    }
-    data = {
-        "index": 1,
-        "status": "FAILED",
-        "result": None,
-        "error": error_data,
-    }
-
-    item = BatchItem.from_dict(data)
-    assert item.index == 1
-    assert item.status == BatchItemStatus.FAILED
-    assert item.result is None
-    assert item.error is not None
 
 
 def test_batch_result_creation():
@@ -2676,3 +2655,79 @@ def test_concurrent_executor_replay_with_replay_children():
         assert len(result.all) == 1
         assert result.all[0].status == BatchItemStatus.SUCCEEDED
         assert result.all[0].result == "re_executed_result"
+
+
+def test_batch_item_from_dict_with_error():
+    """Test BatchItem.from_dict() with error."""
+    data = {
+        "index": 3,
+        "status": "FAILED",
+        "result": None,
+        "error": {
+            "ErrorType": "ValueError",
+            "ErrorMessage": "bad value",
+            "StackTrace": [],
+        },
+    }
+
+    item = BatchItem.from_dict(data)
+
+    assert item.index == 3
+    assert item.status == BatchItemStatus.FAILED
+    assert item.error.type == "ValueError"
+    assert item.error.message == "bad value"
+
+
+def test_batch_result_with_mixed_statuses():
+    """Test BatchResult serialization with mixed item statuses."""
+    result = BatchResult(
+        all=[
+            BatchItem(0, BatchItemStatus.SUCCEEDED, result="success"),
+            BatchItem(
+                1,
+                BatchItemStatus.FAILED,
+                error=ErrorObject(message="msg", type="E", data=None, stack_trace=[]),
+            ),
+            BatchItem(2, BatchItemStatus.STARTED),
+        ],
+        completion_reason=CompletionReason.FAILURE_TOLERANCE_EXCEEDED,
+    )
+
+    serialized = json.dumps(result.to_dict())
+    deserialized = BatchResult.from_dict(json.loads(serialized))
+
+    assert len(deserialized.all) == 3
+    assert deserialized.all[0].status == BatchItemStatus.SUCCEEDED
+    assert deserialized.all[1].status == BatchItemStatus.FAILED
+    assert deserialized.all[2].status == BatchItemStatus.STARTED
+    assert deserialized.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+
+def test_batch_result_empty_list():
+    """Test BatchResult serialization with empty items list."""
+    result = BatchResult(all=[], completion_reason=CompletionReason.ALL_COMPLETED)
+
+    serialized = json.dumps(result.to_dict())
+    deserialized = BatchResult.from_dict(json.loads(serialized))
+
+    assert len(deserialized.all) == 0
+    assert deserialized.completion_reason == CompletionReason.ALL_COMPLETED
+
+
+def test_batch_result_complex_nested_data():
+    """Test BatchResult with complex nested data structures."""
+    complex_result = {
+        "users": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}],
+        "metadata": {"count": 2, "timestamp": "2025-10-31"},
+    }
+
+    result = BatchResult(
+        all=[BatchItem(0, BatchItemStatus.SUCCEEDED, result=complex_result)],
+        completion_reason=CompletionReason.ALL_COMPLETED,
+    )
+
+    serialized = json.dumps(result.to_dict())
+    deserialized = BatchResult.from_dict(json.loads(serialized))
+
+    assert deserialized.all[0].result == complex_result
+    assert deserialized.all[0].result["users"][0]["name"] == "Alice"

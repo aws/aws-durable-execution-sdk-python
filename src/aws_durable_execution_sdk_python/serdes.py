@@ -62,6 +62,7 @@ class TypeTag(StrEnum):
     TUPLE = "t"
     LIST = "l"
     DICT = "m"
+    BATCH_RESULT = "br"
 
 
 @dataclass(frozen=True)
@@ -206,7 +207,17 @@ class ContainerCodec(Codec):
 
     def encode(self, obj: Any) -> EncodedValue:
         """Encode container using dispatcher for recursive elements."""
+        # Import here to avoid circular dependency
+        # concurrency -> child_handler -> serdes -> concurrency
+        from aws_durable_execution_sdk_python.concurrency import BatchResult  # noqa PLC0415
+
         match obj:
+            case BatchResult():
+                # Encode BatchResult as dict with special tag
+                return EncodedValue(
+                    TypeTag.BATCH_RESULT,
+                    self._wrap(obj.to_dict(), self.dispatcher).value,
+                )
             case list():
                 return EncodedValue(
                     TypeTag.LIST, [self._wrap(v, self.dispatcher) for v in obj]
@@ -230,7 +241,15 @@ class ContainerCodec(Codec):
 
     def decode(self, tag: TypeTag, value: Any) -> Any:
         """Decode container using dispatcher for recursive elements."""
+        # Import here to avoid circular dependency
+        from aws_durable_execution_sdk_python.concurrency import BatchResult  # noqa PLC0415
+
         match tag:
+            case TypeTag.BATCH_RESULT:
+                # Decode BatchResult from dict - value is already the dict structure
+                # First decode it as a dict to unwrap all nested EncodedValues
+                decoded_dict = self.decode(TypeTag.DICT, value)
+                return BatchResult.from_dict(decoded_dict)
             case TypeTag.LIST:
                 if not isinstance(value, list):
                     msg = f"Expected list, got {type(value)}"
@@ -295,6 +314,11 @@ class TypeCodec(Codec):
             case list() | tuple() | dict():
                 return self.container_codec.encode(obj)
             case _:
+                # Check if it's a BatchResult (handled by container_codec)
+                from aws_durable_execution_sdk_python.concurrency import BatchResult  # noqa PLC0415
+
+                if isinstance(obj, BatchResult):
+                    return self.container_codec.encode(obj)
                 msg = f"Unsupported type: {type(obj)}"
                 raise SerDesError(msg)
 
@@ -316,7 +340,7 @@ class TypeCodec(Codec):
                 return self.decimal_codec.decode(tag, value)
             case TypeTag.DATETIME | TypeTag.DATE:
                 return self.datetime_codec.decode(tag, value)
-            case TypeTag.LIST | TypeTag.TUPLE | TypeTag.DICT:
+            case TypeTag.LIST | TypeTag.TUPLE | TypeTag.DICT | TypeTag.BATCH_RESULT:
                 return self.container_codec.decode(tag, value)
             case _:
                 msg = f"Unknown type tag: {tag}"
