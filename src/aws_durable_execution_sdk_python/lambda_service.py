@@ -13,6 +13,7 @@ import boto3  # type: ignore
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     CheckpointError,
+    GetExecutionStateError,
 )
 
 if TYPE_CHECKING:
@@ -1007,8 +1008,11 @@ class LambdaClient(DurableServiceClient):
 
             return CheckpointOutput.from_dict(result)
         except Exception as e:
-            logger.exception("Failed to checkpoint.")
-            raise CheckpointError.from_exception(e) from e
+            checkpoint_error = CheckpointError.from_exception(e)
+            logger.exception(
+                "Failed to checkpoint.", extra=checkpoint_error.build_logger_extras()
+            )
+            raise checkpoint_error from None
 
     def get_execution_state(
         self,
@@ -1017,13 +1021,20 @@ class LambdaClient(DurableServiceClient):
         next_marker: str,
         max_items: int = 1000,
     ) -> StateOutput:
-        result: MutableMapping[str, Any] = self.client.get_durable_execution_state(
-            DurableExecutionArn=durable_execution_arn,
-            CheckpointToken=checkpoint_token,
-            Marker=next_marker,
-            MaxItems=max_items,
-        )
-        return StateOutput.from_dict(result)
+        try:
+            result: MutableMapping[str, Any] = self.client.get_durable_execution_state(
+                DurableExecutionArn=durable_execution_arn,
+                CheckpointToken=checkpoint_token,
+                Marker=next_marker,
+                MaxItems=max_items,
+            )
+            return StateOutput.from_dict(result)
+        except Exception as e:
+            error = GetExecutionStateError.from_exception(e)
+            logger.exception(
+                "Failed to get execution state.", extra=error.build_logger_extras()
+            )
+            raise error from None
 
 
 # endregion client

@@ -8,6 +8,7 @@ import pytest
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     CheckpointError,
+    GetExecutionStateError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -1786,6 +1787,80 @@ def test_lambda_client_checkpoint_with_exception():
 
     with pytest.raises(CheckpointError):
         lambda_client.checkpoint("arn123", "token123", [update], None)
+
+
+@patch("aws_durable_execution_sdk_python.lambda_service.logger")
+def test_lambda_client_checkpoint_logs_response_metadata(mock_logger):
+    """Test LambdaClient.checkpoint logs ResponseMetadata from boto3 exception."""
+    mock_client = Mock()
+    boto_error = Exception("API Error")
+    boto_error.response = {
+        "ResponseMetadata": {
+            "RequestId": "test-request-id-123",
+            "HTTPStatusCode": 500,
+            "RetryAttempts": 2,
+        }
+    }
+    mock_client.checkpoint_durable_execution.side_effect = boto_error
+
+    lambda_client = LambdaClient(mock_client)
+    update = OperationUpdate(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        action=OperationAction.START,
+    )
+
+    with pytest.raises(CheckpointError):
+        lambda_client.checkpoint("arn123", "token123", [update], None)
+
+    mock_logger.exception.assert_called_once_with(
+        "Failed to checkpoint.",
+        extra={
+            "ResponseMetadata": {
+                "RequestId": "test-request-id-123",
+                "HTTPStatusCode": 500,
+                "RetryAttempts": 2,
+            },
+        },
+    )
+
+
+@patch("aws_durable_execution_sdk_python.lambda_service.logger")
+def test_lambda_client_get_execution_state_logs_response_metadata(mock_logger):
+    """Test LambdaClient.get_execution_state logs ResponseMetadata from boto3 exception."""
+    mock_client = Mock()
+    boto_error = Exception("API Error")
+    boto_error.response = {
+        "ResponseMetadata": {
+            "RequestId": "test-request-id-456",
+            "HTTPStatusCode": 503,
+            "RetryAttempts": 1,
+        }
+    }
+    mock_client.get_durable_execution_state.side_effect = boto_error
+
+    lambda_client = LambdaClient(mock_client)
+
+    with pytest.raises(GetExecutionStateError) as exc_info:
+        lambda_client.get_execution_state("arn123", "token123", "", 1000)
+
+    assert exc_info.value.error is None
+    assert exc_info.value.response_metadata == {
+        "RequestId": "test-request-id-456",
+        "HTTPStatusCode": 503,
+        "RetryAttempts": 1,
+    }
+
+    mock_logger.exception.assert_called_once_with(
+        "Failed to get execution state.",
+        extra={
+            "ResponseMetadata": {
+                "RequestId": "test-request-id-456",
+                "HTTPStatusCode": 503,
+                "RetryAttempts": 1,
+            },
+        },
+    )
 
 
 def test_durable_service_client_protocol_checkpoint():
