@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,24 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, MutableMapping
 
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+
+
+class RequestInfo:
+    request_id: str | None = None
+
+    @classmethod
+    def set(cls, *, request_id: str | None = None):
+        cls.request_id = request_id
+
+    @classmethod
+    def to_dict(cls):
+        request_id = getattr(cls, "request_id", None) or "unavailable"
+        return {"request_id": request_id}
+
+
+def getLogger(name: str):  # noqa: N802
+    logger = logging.getLogger(name)
+    return Logger(logger, {})
 
 
 @dataclass(frozen=True)
@@ -75,29 +94,29 @@ class Logger(LoggerInterface):
     def debug(
         self, msg: object, *args: object, extra: Mapping[str, object] | None = None
     ) -> None:
-        merged_extra = {**self._default_extra, **(extra or {})}
+        merged_extra = {**self._default_extra, **RequestInfo.to_dict(), **(extra or {})}
         self._logger.debug(msg, *args, extra=merged_extra)
 
     def info(
         self, msg: object, *args: object, extra: Mapping[str, object] | None = None
     ) -> None:
-        merged_extra = {**self._default_extra, **(extra or {})}
+        merged_extra = {**self._default_extra, **RequestInfo.to_dict(), **(extra or {})}
         self._logger.info(msg, *args, extra=merged_extra)
 
     def warning(
         self, msg: object, *args: object, extra: Mapping[str, object] | None = None
     ) -> None:
-        merged_extra = {**self._default_extra, **(extra or {})}
+        merged_extra = {**self._default_extra, **RequestInfo.to_dict(), **(extra or {})}
         self._logger.warning(msg, *args, extra=merged_extra)
 
     def error(
         self, msg: object, *args: object, extra: Mapping[str, object] | None = None
     ) -> None:
-        merged_extra = {**self._default_extra, **(extra or {})}
+        merged_extra = {**self._default_extra, **RequestInfo.to_dict(), **(extra or {})}
         self._logger.error(msg, *args, extra=merged_extra)
 
     def exception(
         self, msg: object, *args: object, extra: Mapping[str, object] | None = None
     ) -> None:
-        merged_extra = {**self._default_extra, **(extra or {})}
+        merged_extra = {**self._default_extra, **RequestInfo.to_dict(), **(extra or {})}
         self._logger.exception(msg, *args, extra=merged_extra)

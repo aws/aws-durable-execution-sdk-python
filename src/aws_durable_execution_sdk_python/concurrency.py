@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import heapq
-import logging
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -13,6 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Generic, Self, TypeVar
 
+import aws_durable_execution_sdk_python.logger as logging
 from aws_durable_execution_sdk_python.config import ChildConfig
 from aws_durable_execution_sdk_python.exceptions import (
     InvalidStateError,

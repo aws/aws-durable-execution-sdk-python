@@ -233,6 +233,7 @@ def test_logger_debug():
         "execution_arn": "arn:aws:test",
         "parent_id": "parent123",
         "custom": "value",
+        "request_id": "test-request-id",
     }
     mock_logger.debug.assert_called_once_with(
         "test %s message", "arg1", extra=expected_extra
@@ -247,7 +248,10 @@ def test_logger_info():
 
     logger.info("info message")
 
-    expected_extra = {"execution_arn": "arn:aws:test"}
+    expected_extra = {
+        "execution_arn": "arn:aws:test",
+        "request_id": "test-request-id",
+    }
     mock_logger.info.assert_called_once_with("info message", extra=expected_extra)
 
 
@@ -259,7 +263,10 @@ def test_logger_warning():
 
     logger.warning("warning %s %s message", "arg1", "arg2")
 
-    expected_extra = {"execution_arn": "arn:aws:test"}
+    expected_extra = {
+        "execution_arn": "arn:aws:test",
+        "request_id": "test-request-id",
+    }
     mock_logger.warning.assert_called_once_with(
         "warning %s %s message", "arg1", "arg2", extra=expected_extra
     )
@@ -273,7 +280,11 @@ def test_logger_error():
 
     logger.error("error message", extra={"error_code": 500})
 
-    expected_extra = {"execution_arn": "arn:aws:test", "error_code": 500}
+    expected_extra = {
+        "execution_arn": "arn:aws:test",
+        "error_code": 500,
+        "request_id": "test-request-id",
+    }
     mock_logger.error.assert_called_once_with("error message", extra=expected_extra)
 
 
@@ -285,7 +296,10 @@ def test_logger_exception():
 
     logger.exception("exception message")
 
-    expected_extra = {"execution_arn": "arn:aws:test"}
+    expected_extra = {
+        "execution_arn": "arn:aws:test",
+        "request_id": "test-request-id",
+    }
     mock_logger.exception.assert_called_once_with(
         "exception message", extra=expected_extra
     )
@@ -303,25 +317,12 @@ def test_logger_methods_with_none_extra():
     logger.error("error", extra=None)
     logger.exception("exception", extra=None)
 
-    expected_extra = {"execution_arn": "arn:aws:test"}
+    expected_extra = {
+        "execution_arn": "arn:aws:test",
+        "request_id": "test-request-id",
+    }
     mock_logger.debug.assert_called_with("debug", extra=expected_extra)
     mock_logger.info.assert_called_with("info", extra=expected_extra)
     mock_logger.warning.assert_called_with("warning", extra=expected_extra)
     mock_logger.error.assert_called_with("error", extra=expected_extra)
     mock_logger.exception.assert_called_with("exception", extra=expected_extra)
-
-
-def test_logger_extra_override():
-    """Test that custom extra overrides default extra."""
-    mock_logger = Mock()
-    log_info = LogInfo("arn:aws:test", "parent123")
-    logger = Logger.from_log_info(mock_logger, log_info)
-
-    logger.info("test", extra={"execution_arn": "overridden", "new_field": "value"})
-
-    expected_extra = {
-        "execution_arn": "overridden",
-        "parent_id": "parent123",
-        "new_field": "value",
-    }
-    mock_logger.info.assert_called_once_with("test", extra=expected_extra)

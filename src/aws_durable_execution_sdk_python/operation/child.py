@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, TypeVar
 
+import aws_durable_execution_sdk_python.logger as logging
 from aws_durable_execution_sdk_python.config import ChildConfig
 from aws_durable_execution_sdk_python.exceptions import (
     InvocationError,

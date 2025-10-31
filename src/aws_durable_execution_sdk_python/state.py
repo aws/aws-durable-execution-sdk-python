@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import queue
 import threading
 import time
@@ -11,6 +10,7 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING
 
+import aws_durable_execution_sdk_python.logger as logging
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     CallableRuntimeError,

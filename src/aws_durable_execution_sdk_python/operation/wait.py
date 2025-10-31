@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
+import aws_durable_execution_sdk_python.logger as logging
 from aws_durable_execution_sdk_python.lambda_service import OperationUpdate, WaitOptions
 from aws_durable_execution_sdk_python.suspend import suspend_with_optional_resume_delay
 

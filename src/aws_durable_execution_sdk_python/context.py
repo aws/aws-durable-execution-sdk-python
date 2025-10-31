@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 from typing import TYPE_CHECKING, Any, Concatenate, Generic, ParamSpec, TypeVar
 
+import aws_durable_execution_sdk_python.logger as logging
 from aws_durable_execution_sdk_python.config import (
     BatchedInput,
     CallbackConfig,
@@ -173,7 +173,7 @@ class DurableContext(DurableContextProtocol):
         )
         self._log_info = log_info
         self.logger: Logger = logger or Logger.from_log_info(
-            logger=logging.getLogger(),
+            logger=logging.getLogger(__file__),
             info=log_info,
         )
 

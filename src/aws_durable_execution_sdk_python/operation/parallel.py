@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-import logging
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, TypeVar
 
+import aws_durable_execution_sdk_python.logger as logging
 from aws_durable_execution_sdk_python.concurrency import ConcurrentExecutor, Executable
 from aws_durable_execution_sdk_python.config import ParallelConfig
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType

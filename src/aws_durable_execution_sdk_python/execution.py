@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+import aws_durable_execution_sdk_python.logger as logging
 from aws_durable_execution_sdk_python.context import DurableContext, ExecutionState
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
@@ -198,6 +198,8 @@ def durable_execution(
     def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
         invocation_input: DurableExecutionInvocationInput
         service_client: DurableServiceClient
+
+        logging.RequestInfo.set(request_id=context.aws_request_id)
 
         # event likely only to be DurableExecutionInvocationInputWithClient when directly injected by test framework
         if isinstance(event, DurableExecutionInvocationInputWithClient):

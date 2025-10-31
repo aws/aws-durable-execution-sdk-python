@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -32,6 +31,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Generic, Protocol, TypeVar
 
+import aws_durable_execution_sdk_python.logger as logging
 from aws_durable_execution_sdk_python.exceptions import (
     DurableExecutionsError,
     ExecutionError,

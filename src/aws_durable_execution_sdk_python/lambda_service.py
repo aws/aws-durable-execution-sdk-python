@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime
-import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
@@ -10,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 import boto3  # type: ignore
 
+import aws_durable_execution_sdk_python.logger as logging
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     CheckpointError,
