@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Self, TypedDict
 
 if TYPE_CHECKING:
     import datetime
@@ -82,12 +82,35 @@ class CallbackError(ExecutionError):
         self.callback_id = callback_id
 
 
-class CheckpointFailedError(InvocationError):
-    """Error when checkpoint operation fails."""
+class BotoClientError(InvocationError):
+    def __init__(
+        self,
+        message: str,
+        error: AwsErrorObj | None = None,
+        response_metadata: AwsErrorMetadata | None = None,
+        termination_reason=TerminationReason.INVOCATION_ERROR,
+    ):
+        super().__init__(message=message, termination_reason=termination_reason)
+        self.error: AwsErrorObj | None = error
+        self.response_metadata: AwsErrorMetadata | None = response_metadata
 
-    def __init__(self, message: str, step_id: str | None = None):
-        super().__init__(message, TerminationReason.CHECKPOINT_FAILED)
-        self.step_id = step_id
+    @classmethod
+    def from_exception(cls, exception: Exception) -> Self:
+        response = getattr(exception, "response", {})
+        response_metadata = response.get("ResponseMetadata")
+        error = response.get("Error")
+        return cls(
+            message=str(exception), error=error, response_metadata=response_metadata
+        )
+
+    def build_logger_extras(self) -> dict:
+        extras: dict = {}
+        # preserve PascalCase to be consistent with other langauges
+        if error := self.error:
+            extras["Error"] = error
+        if response_metadata := self.response_metadata:
+            extras["ResponseMetadata"] = response_metadata
+        return extras
 
 
 class NonDeterministicExecutionError(ExecutionError):
@@ -98,7 +121,7 @@ class NonDeterministicExecutionError(ExecutionError):
         self.step_id = step_id
 
 
-class CheckpointError(CheckpointFailedError):
+class CheckpointError(BotoClientError):
     """Failure to checkpoint. Will terminate the lambda."""
 
     def __init__(
@@ -107,34 +130,19 @@ class CheckpointError(CheckpointFailedError):
         error: AwsErrorObj | None = None,
         response_metadata: AwsErrorMetadata | None = None,
     ):
-        super().__init__(message)
-        self.error: AwsErrorObj | None = error
-        self.response_metadata: AwsErrorMetadata | None = response_metadata or None
-
-    @classmethod
-    def from_exception(cls, exception: Exception) -> CheckpointError:
-        response = getattr(exception, "response", {})
-        response_metadata = response.get("ResponseMetadata")
-        error = response.get("Error")
-        return cls(
-            message=str(exception), error=error, response_metadata=response_metadata
+        super().__init__(
+            message,
+            error,
+            response_metadata,
+            termination_reason=TerminationReason.CHECKPOINT_FAILED,
         )
-
-    def build_logger_extras(self) -> dict:
-        extras: dict = {}
-        # preserve PascalCase to be consistent with other langauges
-        if error := self.error:
-            extras["Error"] = error
-        if response_metadata := self.response_metadata:
-            extras["ResponseMetadata"] = response_metadata
-        return extras
 
 
 class ValidationError(DurableExecutionsError):
     """Incorrect arguments to a Durable Function operation."""
 
 
-class GetExecutionStateError(InvocationError):
+class GetExecutionStateError(BotoClientError):
     """Raised when failing to retrieve execution state"""
 
     def __init__(
@@ -143,27 +151,12 @@ class GetExecutionStateError(InvocationError):
         error: AwsErrorObj | None = None,
         response_metadata: AwsErrorMetadata | None = None,
     ):
-        super().__init__(message, termination_reason=TerminationReason.INVOCATION_ERROR)
-        self.error: AwsErrorObj | None = error
-        self.response_metadata: AwsErrorMetadata | None = response_metadata or None
-
-    @classmethod
-    def from_exception(cls, exception: Exception) -> GetExecutionStateError:
-        response = getattr(exception, "response", {})
-        response_metadata = response.get("ResponseMetadata")
-        error = response.get("Error")
-        return cls(
-            message=str(exception), error=error, response_metadata=response_metadata
+        super().__init__(
+            message,
+            error,
+            response_metadata,
+            termination_reason=TerminationReason.INVOCATION_ERROR,
         )
-
-    def build_logger_extras(self) -> dict:
-        extras: dict = {}
-        # preserve PascalCase to be consistent with other langauges
-        if error := self.error:
-            extras["Error"] = error
-        if response_metadata := self.response_metadata:
-            extras["ResponseMetadata"] = response_metadata
-        return extras
 
 
 class InvalidStateError(DurableExecutionsError):
