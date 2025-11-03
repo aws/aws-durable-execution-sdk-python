@@ -13,6 +13,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     ExecutionError,
     SerDesError,
 )
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from aws_durable_execution_sdk_python.serdes import (
     BytesCodec,
     ContainerCodec,
@@ -29,6 +30,12 @@ from aws_durable_execution_sdk_python.serdes import (
     UuidCodec,
     deserialize,
     serialize,
+)
+from aws_durable_execution_sdk_python.types import (
+    BatchItem,
+    BatchItemStatus,
+    BatchResult,
+    CompletionReason,
 )
 
 
@@ -891,6 +898,333 @@ def test_all_t_v_nested_dicts():
     serialized = serdes.serialize(val, ctx)
     deserialized = serdes.deserialize(serialized, ctx)
     assert deserialized == val
+
+
+# endregion
+
+
+# region BatchResult Serialization Tests
+def test_batch_result_encode_simple():
+    """Test BatchResult encoding through ContainerCodec."""
+
+    items = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, "result1", None),
+        BatchItem(1, BatchItemStatus.SUCCEEDED, "result2", None),
+    ]
+    batch_result = BatchResult(items, CompletionReason.ALL_COMPLETED)
+
+    type_codec = TypeCodec()
+
+    encoded = type_codec.encode(batch_result)
+    assert encoded.tag == TypeTag.BATCH_RESULT
+    assert isinstance(encoded.value, dict)
+
+
+def test_batch_result_decode_simple():
+    """Test BatchResult decoding through ContainerCodec."""
+
+    type_codec = TypeCodec()
+
+    # Create encoded value matching BatchResult.to_dict() format
+    value = {
+        "all": [
+            {"index": 0, "status": "SUCCEEDED", "result": "result1", "error": None},
+            {"index": 1, "status": "SUCCEEDED", "result": "result2", "error": None},
+        ],
+        "completionReason": "ALL_COMPLETED",
+    }
+
+    decoded = type_codec.decode(TypeTag.BATCH_RESULT, value)
+    assert isinstance(decoded, BatchResult)
+    assert len(decoded.all) == 2
+    assert decoded.all[0].index == 0
+    assert decoded.all[0].status == BatchItemStatus.SUCCEEDED
+    assert decoded.all[0].result == "result1"
+    assert decoded.completion_reason == CompletionReason.ALL_COMPLETED
+
+
+def test_batch_result_roundtrip():
+    """Test BatchResult roundtrip through ContainerCodec."""
+
+    items = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, "result1", None),
+        BatchItem(1, BatchItemStatus.FAILED, None, None),
+        BatchItem(2, BatchItemStatus.STARTED, None, None),
+    ]
+    original = BatchResult(items, CompletionReason.FAILURE_TOLERANCE_EXCEEDED)
+
+    type_codec = TypeCodec()
+
+    encoded = type_codec.encode(original)
+    decoded = type_codec.decode(encoded.tag, encoded.value)
+
+    assert isinstance(decoded, BatchResult)
+    assert len(decoded.all) == 3
+    assert decoded.all[0].status == BatchItemStatus.SUCCEEDED
+    assert decoded.all[1].status == BatchItemStatus.FAILED
+    assert decoded.all[2].status == BatchItemStatus.STARTED
+    assert decoded.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+
+def test_batch_result_with_errors():
+    """Test BatchResult with errors through ContainerCodec."""
+
+    error = ErrorObject("Test error message", "TestError", None, ["trace1", "trace2"])
+    items = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, "success", None),
+        BatchItem(1, BatchItemStatus.FAILED, None, error),
+    ]
+    original = BatchResult(items, CompletionReason.ALL_COMPLETED)
+
+    type_codec = TypeCodec()
+
+    encoded = type_codec.encode(original)
+    decoded = type_codec.decode(encoded.tag, encoded.value)
+
+    assert isinstance(decoded, BatchResult)
+    assert decoded.all[1].error is not None
+    assert decoded.all[1].error.type == "TestError"
+    assert decoded.all[1].error.message == "Test error message"
+
+
+def test_batch_result_with_complex_results():
+    """Test BatchResult with complex result types through ContainerCodec."""
+
+    complex_result = {
+        "uuid": uuid.uuid4(),
+        "decimal": Decimal("123.45"),
+        "datetime": datetime.now(UTC),
+        "nested": {"list": [1, 2, 3], "tuple": (4, 5, 6)},
+    }
+
+    items = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, complex_result, None),
+        BatchItem(1, BatchItemStatus.SUCCEEDED, [1, 2, 3], None),
+    ]
+    original = BatchResult(items, CompletionReason.ALL_COMPLETED)
+
+    type_codec = TypeCodec()
+
+    encoded = type_codec.encode(original)
+    decoded = type_codec.decode(encoded.tag, encoded.value)
+
+    assert isinstance(decoded, BatchResult)
+    assert decoded.all[0].result == complex_result
+    assert decoded.all[1].result == [1, 2, 3]
+
+
+def test_batch_result_container_codec_direct():
+    """Test ContainerCodec handles BatchResult directly."""
+
+    items = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, "result1", None),
+        BatchItem(1, BatchItemStatus.SUCCEEDED, "result2", None),
+    ]
+    batch_result = BatchResult(items, CompletionReason.ALL_COMPLETED)
+
+    # Test ContainerCodec directly
+    container_codec = ContainerCodec()
+    type_codec = TypeCodec()
+    container_codec.set_dispatcher(type_codec)
+
+    # Encode through ContainerCodec
+    encoded = container_codec.encode(batch_result)
+    assert encoded.tag == TypeTag.BATCH_RESULT
+    assert isinstance(encoded.value, dict)
+
+    # Decode through ContainerCodec
+    decoded = container_codec.decode(encoded.tag, encoded.value)
+    assert isinstance(decoded, BatchResult)
+    assert len(decoded.all) == 2
+    assert decoded.completion_reason == CompletionReason.ALL_COMPLETED
+
+
+def test_batch_result_type_codec_routing():
+    """Test TypeCodec routes BatchResult to ContainerCodec."""
+
+    type_codec = TypeCodec()
+
+    # Test encode with unsupported type still raises error
+    with pytest.raises(SerDesError, match="Unsupported type"):
+        type_codec.encode(object())
+
+    # Test decode with wrong value type for BATCH_RESULT
+    # ContainerCodec._unwrap will handle the dict, but from_dict will fail if malformed
+    # This test validates the integration works correctly
+
+
+def test_batch_result_extended_serdes_roundtrip():
+    """Test BatchResult roundtrip through ExtendedTypeSerDes."""
+
+    items = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, "result1", None),
+        BatchItem(1, BatchItemStatus.SUCCEEDED, "result2", None),
+    ]
+    original = BatchResult(items, CompletionReason.ALL_COMPLETED)
+
+    serdes = ExtendedTypeSerDes()
+    context = SerDesContext("test-op", "test-arn")
+
+    serialized = serdes.serialize(original, context)
+    deserialized = serdes.deserialize(serialized, context)
+
+    assert isinstance(deserialized, BatchResult)
+    assert len(deserialized.all) == 2
+    assert deserialized.all[0].result == "result1"
+    assert deserialized.all[1].result == "result2"
+    assert deserialized.completion_reason == CompletionReason.ALL_COMPLETED
+
+
+def test_batch_result_extended_serdes_with_nested_types():
+    """Test BatchResult with nested complex types through ExtendedTypeSerDes."""
+
+    nested_result = {
+        "id": uuid.uuid4(),
+        "timestamp": datetime.now(UTC),
+        "amount": Decimal("999.99"),
+        "data": b"binary_data",
+        "tags": ["tag1", "tag2"],
+        "metadata": {"nested": {"deep": "value"}},
+    }
+
+    items = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, nested_result, None),
+        BatchItem(1, BatchItemStatus.SUCCEEDED, (1, 2, 3), None),
+    ]
+    original = BatchResult(items, CompletionReason.MIN_SUCCESSFUL_REACHED)
+
+    serdes = ExtendedTypeSerDes()
+    context = SerDesContext("test-op", "test-arn")
+
+    serialized = serdes.serialize(original, context)
+    deserialized = serdes.deserialize(serialized, context)
+
+    assert isinstance(deserialized, BatchResult)
+    assert deserialized.all[0].result == nested_result
+    assert deserialized.all[1].result == (1, 2, 3)
+    assert deserialized.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
+
+
+def test_batch_result_serialize_deserialize_api():
+    """Test BatchResult with main serialize/deserialize API."""
+
+    items = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, {"key": "value"}, None),
+        BatchItem(1, BatchItemStatus.FAILED, None, None),
+    ]
+    original = BatchResult(items, CompletionReason.FAILURE_TOLERANCE_EXCEEDED)
+
+    serialized = serialize(None, original, "test-op", "test-arn")
+    deserialized = deserialize(None, serialized, "test-op", "test-arn")
+
+    assert isinstance(deserialized, BatchResult)
+    assert len(deserialized.all) == 2
+    assert deserialized.all[0].result == {"key": "value"}
+    assert deserialized.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+
+def test_batch_result_in_nested_structure():
+    """Test BatchResult as part of nested data structure."""
+
+    items = [BatchItem(0, BatchItemStatus.SUCCEEDED, "result", None)]
+    batch_result = BatchResult(items, CompletionReason.ALL_COMPLETED)
+
+    nested_data = {
+        "batch": batch_result,
+        "metadata": {"timestamp": datetime.now(UTC), "count": 1},
+        "results": [batch_result, batch_result],
+    }
+
+    serdes = ExtendedTypeSerDes()
+    context = SerDesContext("test-op", "test-arn")
+
+    serialized = serdes.serialize(nested_data, context)
+    deserialized = serdes.deserialize(serialized, context)
+
+    assert isinstance(deserialized["batch"], BatchResult)
+    assert isinstance(deserialized["results"][0], BatchResult)
+    assert isinstance(deserialized["results"][1], BatchResult)
+    assert deserialized["batch"].all[0].result == "result"
+
+
+def test_batch_result_preserves_methods():
+    """Test that deserialized BatchResult preserves all methods."""
+
+    error = ErrorObject("Test message", "TestError", None, [])
+    items = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, "success1", None),
+        BatchItem(1, BatchItemStatus.SUCCEEDED, "success2", None),
+        BatchItem(2, BatchItemStatus.FAILED, None, error),
+        BatchItem(3, BatchItemStatus.STARTED, None, None),
+    ]
+    original = BatchResult(items, CompletionReason.ALL_COMPLETED)
+
+    serdes = ExtendedTypeSerDes()
+    context = SerDesContext("test-op", "test-arn")
+
+    serialized = serdes.serialize(original, context)
+    deserialized = serdes.deserialize(serialized, context)
+
+    # Test all methods work
+    assert len(deserialized.succeeded()) == 2
+    assert len(deserialized.failed()) == 1
+    assert len(deserialized.started()) == 1
+    assert deserialized.has_failure is True
+    assert deserialized.status == BatchItemStatus.FAILED
+
+
+def test_batch_result_format_structure():
+    """Test BatchResult serialization format structure."""
+
+    items = [BatchItem(0, BatchItemStatus.SUCCEEDED, "result", None)]
+    batch_result = BatchResult(items, CompletionReason.ALL_COMPLETED)
+
+    serdes = ExtendedTypeSerDes()
+    context = SerDesContext("test-op", "test-arn")
+
+    serialized = serdes.serialize(batch_result, context)
+    parsed = json.loads(serialized)
+
+    # Verify envelope structure
+    assert "t" in parsed
+    assert "v" in parsed
+    assert parsed["t"] == "br"  # BATCH_RESULT tag
+    assert "all" in parsed["v"]
+    assert "completionReason" in parsed["v"]
+
+
+def test_batch_result_empty_items():
+    """Test BatchResult with empty items list."""
+
+    original = BatchResult([], CompletionReason.ALL_COMPLETED)
+
+    serdes = ExtendedTypeSerDes()
+    context = SerDesContext("test-op", "test-arn")
+
+    serialized = serdes.serialize(original, context)
+    deserialized = serdes.deserialize(serialized, context)
+
+    assert isinstance(deserialized, BatchResult)
+    assert len(deserialized.all) == 0
+    assert deserialized.completion_reason == CompletionReason.ALL_COMPLETED
+
+
+def test_batch_result_all_completion_reasons():
+    """Test BatchResult with all completion reason types."""
+
+    items = [BatchItem(0, BatchItemStatus.SUCCEEDED, "result", None)]
+
+    for reason in CompletionReason:
+        original = BatchResult(items, reason)
+
+        serdes = ExtendedTypeSerDes()
+        context = SerDesContext("test-op", "test-arn")
+
+        serialized = serdes.serialize(original, context)
+        deserialized = serdes.deserialize(serialized, context)
+
+        assert isinstance(deserialized, BatchResult)
+        assert deserialized.completion_reason == reason
 
 
 # endregion

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from abc import abstractmethod
+from collections import Counter
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
+
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -13,10 +18,13 @@ if TYPE_CHECKING:
         BatchedInput,
         CallbackConfig,
         ChildConfig,
+        CompletionConfig,
         MapConfig,
         ParallelConfig,
         StepConfig,
     )
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 U = TypeVar("U")
@@ -72,7 +80,7 @@ class Callback(Protocol, Generic[C_co]):
         ...  # pragma: no cover
 
 
-class BatchResult(Protocol, Generic[T]):
+class BatchResultProtocol(Protocol, Generic[T]):
     """Protocol for batch operation results."""
 
     @abstractmethod
@@ -172,3 +180,211 @@ class SummaryGenerator(Protocol[C_contra]):
 
 
 # endregion Summary
+
+
+# region Batch Types
+
+
+class BatchItemStatus(Enum):
+    """Status of a batch item."""
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    STARTED = "STARTED"
+
+
+class CompletionReason(Enum):
+    """Reason for batch operation completion."""
+
+    ALL_COMPLETED = "ALL_COMPLETED"
+    MIN_SUCCESSFUL_REACHED = "MIN_SUCCESSFUL_REACHED"
+    FAILURE_TOLERANCE_EXCEEDED = "FAILURE_TOLERANCE_EXCEEDED"
+
+
+R = TypeVar("R")
+
+
+@dataclass(frozen=True)
+class BatchItem(Generic[R]):
+    """Represents a single item in a batch operation."""
+
+    index: int
+    status: BatchItemStatus
+    result: R | None = None
+    error: ErrorObject | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary representation."""
+        return {
+            "index": self.index,
+            "status": self.status.value,
+            "result": self.result,
+            "error": self.error.to_dict() if self.error else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> BatchItem[R]:
+        """Create from dictionary representation."""
+        return cls(
+            index=data["index"],
+            status=BatchItemStatus(data["status"]),
+            result=data.get("result"),
+            error=ErrorObject.from_dict(data["error"]) if data.get("error") else None,
+        )
+
+
+@dataclass(frozen=True)
+class BatchResult(Generic[R]):
+    """Result of a batch operation containing multiple items."""
+
+    all: list[BatchItem[R]]
+    completion_reason: CompletionReason
+
+    @classmethod
+    def from_dict(
+        cls, data: dict, completion_config: CompletionConfig | None = None
+    ) -> BatchResult[R]:
+        """Create from dictionary representation."""
+        batch_items: list[BatchItem[R]] = [
+            BatchItem.from_dict(item) for item in data["all"]
+        ]
+
+        completion_reason_value = data.get("completionReason")
+        if completion_reason_value is None:
+            # Infer completion reason from batch item statuses and completion config
+            # This aligns with the TypeScript implementation that uses completion config
+            # to accurately reconstruct the completion reason during replay
+            result = cls.from_items(batch_items, completion_config)
+            logger.warning(
+                "Missing completionReason in BatchResult deserialization, "
+                "inferred '%s' from batch item statuses. "
+                "This may indicate incomplete serialization data.",
+                result.completion_reason.value,
+            )
+            return result
+
+        completion_reason = CompletionReason(completion_reason_value)
+        return cls(batch_items, completion_reason)
+
+    @classmethod
+    def from_items(
+        cls,
+        items: list[BatchItem[R]],
+        completion_config: CompletionConfig | None = None,
+    ):
+        """
+        Infer completion reason based on batch item statuses and completion config.
+
+        This follows the same logic as the TypeScript implementation:
+        - If all items completed: ALL_COMPLETED
+        - If minSuccessful threshold met and not all completed: MIN_SUCCESSFUL_REACHED
+        - Otherwise: FAILURE_TOLERANCE_EXCEEDED
+        """
+        statuses = (item.status for item in items)
+        counts = Counter(statuses)
+        succeeded_count = counts.get(BatchItemStatus.SUCCEEDED, 0)
+        failed_count = counts.get(BatchItemStatus.FAILED, 0)
+        started_count = counts.get(BatchItemStatus.STARTED, 0)
+
+        completed_count = succeeded_count + failed_count
+        total_count = started_count + completed_count
+
+        # If all items completed (no started items), it's ALL_COMPLETED
+        if completed_count == total_count:
+            completion_reason = CompletionReason.ALL_COMPLETED
+        elif (  # If we have completion config and minSuccessful threshold is met
+            completion_config
+            and (min_successful := completion_config.min_successful) is not None
+            and succeeded_count >= min_successful
+        ):
+            completion_reason = CompletionReason.MIN_SUCCESSFUL_REACHED
+        else:
+            # Otherwise, assume failure tolerance was exceeded
+            completion_reason = CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+        return cls(items, completion_reason)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary representation."""
+        return {
+            "all": [item.to_dict() for item in self.all],
+            "completionReason": self.completion_reason.value,
+        }
+
+    def succeeded(self) -> list[BatchItem[R]]:
+        """Get list of succeeded items."""
+        return [
+            item
+            for item in self.all
+            if item.status is BatchItemStatus.SUCCEEDED and item.result is not None
+        ]
+
+    def failed(self) -> list[BatchItem[R]]:
+        """Get list of failed items."""
+        return [
+            item
+            for item in self.all
+            if item.status is BatchItemStatus.FAILED and item.error is not None
+        ]
+
+    def started(self) -> list[BatchItem[R]]:
+        """Get list of started items."""
+        return [item for item in self.all if item.status is BatchItemStatus.STARTED]
+
+    @property
+    def status(self) -> BatchItemStatus:
+        """Overall status of the batch."""
+        return BatchItemStatus.FAILED if self.has_failure else BatchItemStatus.SUCCEEDED
+
+    @property
+    def has_failure(self) -> bool:
+        """True if any item failed."""
+        return any(item.status is BatchItemStatus.FAILED for item in self.all)
+
+    def throw_if_error(self) -> None:
+        """Throw first error if any item failed."""
+        first_error = next(
+            (item.error for item in self.all if item.status is BatchItemStatus.FAILED),
+            None,
+        )
+        if first_error:
+            raise first_error.to_callable_runtime_error()
+
+    def get_results(self) -> list[R]:
+        """Get results from succeeded items."""
+        return [
+            item.result
+            for item in self.all
+            if item.status is BatchItemStatus.SUCCEEDED and item.result is not None
+        ]
+
+    def get_errors(self) -> list[ErrorObject]:
+        """Get errors from failed items."""
+        return [
+            item.error
+            for item in self.all
+            if item.status is BatchItemStatus.FAILED and item.error is not None
+        ]
+
+    @property
+    def success_count(self) -> int:
+        """Count of succeeded items."""
+        return sum(1 for item in self.all if item.status is BatchItemStatus.SUCCEEDED)
+
+    @property
+    def failure_count(self) -> int:
+        """Count of failed items."""
+        return sum(1 for item in self.all if item.status is BatchItemStatus.FAILED)
+
+    @property
+    def started_count(self) -> int:
+        """Count of started items."""
+        return sum(1 for item in self.all if item.status is BatchItemStatus.STARTED)
+
+    @property
+    def total_count(self) -> int:
+        """Total count of items."""
+        return len(self.all)
+
+
+# endregion Batch Types

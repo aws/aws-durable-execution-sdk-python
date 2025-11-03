@@ -37,6 +37,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     ExecutionError,
     SerDesError,
 )
+from aws_durable_execution_sdk_python.types import BatchResult
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ class TypeTag(StrEnum):
     TUPLE = "t"
     LIST = "l"
     DICT = "m"
+    BATCH_RESULT = "br"
 
 
 @dataclass(frozen=True)
@@ -207,6 +209,12 @@ class ContainerCodec(Codec):
     def encode(self, obj: Any) -> EncodedValue:
         """Encode container using dispatcher for recursive elements."""
         match obj:
+            case BatchResult():
+                # Encode BatchResult as dict with special tag
+                return EncodedValue(
+                    TypeTag.BATCH_RESULT,
+                    self._wrap(obj.to_dict(), self.dispatcher).value,
+                )
             case list():
                 return EncodedValue(
                     TypeTag.LIST, [self._wrap(v, self.dispatcher) for v in obj]
@@ -231,6 +239,10 @@ class ContainerCodec(Codec):
     def decode(self, tag: TypeTag, value: Any) -> Any:
         """Decode container using dispatcher for recursive elements."""
         match tag:
+            case TypeTag.BATCH_RESULT:
+                # Decode as dict (handles all recursive unwrapping) then reconstruct
+                decoded_dict = self.decode(TypeTag.DICT, value)
+                return BatchResult.from_dict(decoded_dict)
             case TypeTag.LIST:
                 if not isinstance(value, list):
                     msg = f"Expected list, got {type(value)}"
@@ -292,7 +304,7 @@ class TypeCodec(Codec):
                 return self.decimal_codec.encode(obj)
             case datetime() | date():
                 return self.datetime_codec.encode(obj)
-            case list() | tuple() | dict():
+            case BatchResult() | list() | tuple() | dict():
                 return self.container_codec.encode(obj)
             case _:
                 msg = f"Unsupported type: {type(obj)}"
@@ -316,7 +328,7 @@ class TypeCodec(Codec):
                 return self.decimal_codec.decode(tag, value)
             case TypeTag.DATETIME | TypeTag.DATE:
                 return self.datetime_codec.decode(tag, value)
-            case TypeTag.LIST | TypeTag.TUPLE | TypeTag.DICT:
+            case TypeTag.BATCH_RESULT | TypeTag.LIST | TypeTag.TUPLE | TypeTag.DICT:
                 return self.container_codec.decode(tag, value)
             case _:
                 msg = f"Unknown type tag: {tag}"

@@ -7,7 +7,6 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
@@ -22,7 +21,12 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from aws_durable_execution_sdk_python.operation.child import child_handler
-from aws_durable_execution_sdk_python.types import BatchResult as BatchResultProtocol
+from aws_durable_execution_sdk_python.types import (
+    BatchItem,
+    BatchItemStatus,
+    BatchResult,
+    CompletionReason,  # noqa: F401
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -45,18 +49,6 @@ ResultType = TypeVar("ResultType")
 
 
 # region Result models
-class BatchItemStatus(Enum):
-    SUCCEEDED = "SUCCEEDED"
-    FAILED = "FAILED"
-    STARTED = "STARTED"
-
-
-class CompletionReason(Enum):
-    ALL_COMPLETED = "ALL_COMPLETED"
-    MIN_SUCCESSFUL_REACHED = "MIN_SUCCESSFUL_REACHED"
-    FAILURE_TOLERANCE_EXCEEDED = "FAILURE_TOLERANCE_EXCEEDED"
-
-
 @dataclass(frozen=True)
 class SuspendResult:
     should_suspend: bool
@@ -69,173 +61,6 @@ class SuspendResult:
     @staticmethod
     def suspend(exception: SuspendExecution) -> SuspendResult:
         return SuspendResult(should_suspend=True, exception=exception)
-
-
-@dataclass(frozen=True)
-class BatchItem(Generic[R]):
-    index: int
-    status: BatchItemStatus
-    result: R | None = None
-    error: ErrorObject | None = None
-
-    def to_dict(self) -> dict:
-        return {
-            "index": self.index,
-            "status": self.status.value,
-            "result": self.result,
-            "error": self.error.to_dict() if self.error else None,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> BatchItem[R]:
-        return cls(
-            index=data["index"],
-            status=BatchItemStatus(data["status"]),
-            result=data.get("result"),
-            error=ErrorObject.from_dict(data["error"]) if data.get("error") else None,
-        )
-
-
-@dataclass(frozen=True)
-class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
-    all: list[BatchItem[R]]
-    completion_reason: CompletionReason
-
-    @classmethod
-    def from_dict(
-        cls, data: dict, completion_config: CompletionConfig | None = None
-    ) -> BatchResult[R]:
-        batch_items: list[BatchItem[R]] = [
-            BatchItem.from_dict(item) for item in data["all"]
-        ]
-
-        completion_reason_value = data.get("completionReason")
-        if completion_reason_value is None:
-            # Infer completion reason from batch item statuses and completion config
-            # This aligns with the TypeScript implementation that uses completion config
-            # to accurately reconstruct the completion reason during replay
-            result = cls.from_items(batch_items, completion_config)
-            logger.warning(
-                "Missing completionReason in BatchResult deserialization, "
-                "inferred '%s' from batch item statuses. "
-                "This may indicate incomplete serialization data.",
-                result.completion_reason.value,
-            )
-            return result
-
-        completion_reason = CompletionReason(completion_reason_value)
-        return cls(batch_items, completion_reason)
-
-    @classmethod
-    def from_items(
-        cls,
-        items: list[BatchItem[R]],
-        completion_config: CompletionConfig | None = None,
-    ):
-        """
-        Infer completion reason based on batch item statuses and completion config.
-
-        This follows the same logic as the TypeScript implementation:
-        - If all items completed: ALL_COMPLETED
-        - If minSuccessful threshold met and not all completed: MIN_SUCCESSFUL_REACHED
-        - Otherwise: FAILURE_TOLERANCE_EXCEEDED
-        """
-
-        statuses = (item.status for item in items)
-        counts = Counter(statuses)
-        succeeded_count = counts.get(BatchItemStatus.SUCCEEDED, 0)
-        failed_count = counts.get(BatchItemStatus.FAILED, 0)
-        started_count = counts.get(BatchItemStatus.STARTED, 0)
-
-        completed_count = succeeded_count + failed_count
-        total_count = started_count + completed_count
-
-        # If all items completed (no started items), it's ALL_COMPLETED
-        if completed_count == total_count:
-            completion_reason = CompletionReason.ALL_COMPLETED
-        elif (  # If we have completion config and minSuccessful threshold is met
-            completion_config
-            and (min_successful := completion_config.min_successful) is not None
-            and succeeded_count >= min_successful
-        ):
-            completion_reason = CompletionReason.MIN_SUCCESSFUL_REACHED
-        else:
-            # Otherwise, assume failure tolerance was exceeded
-            completion_reason = CompletionReason.FAILURE_TOLERANCE_EXCEEDED
-
-        return cls(items, completion_reason)
-
-    def to_dict(self) -> dict:
-        return {
-            "all": [item.to_dict() for item in self.all],
-            "completionReason": self.completion_reason.value,
-        }
-
-    def succeeded(self) -> list[BatchItem[R]]:
-        return [
-            item
-            for item in self.all
-            if item.status is BatchItemStatus.SUCCEEDED and item.result is not None
-        ]
-
-    def failed(self) -> list[BatchItem[R]]:
-        return [
-            item
-            for item in self.all
-            if item.status is BatchItemStatus.FAILED and item.error is not None
-        ]
-
-    def started(self) -> list[BatchItem[R]]:
-        return [item for item in self.all if item.status is BatchItemStatus.STARTED]
-
-    @property
-    def status(self) -> BatchItemStatus:
-        return BatchItemStatus.FAILED if self.has_failure else BatchItemStatus.SUCCEEDED
-
-    @property
-    def has_failure(self) -> bool:
-        return any(item.status is BatchItemStatus.FAILED for item in self.all)
-
-    def throw_if_error(self) -> None:
-        first_error = next(
-            (item.error for item in self.all if item.status is BatchItemStatus.FAILED),
-            None,
-        )
-        if first_error:
-            raise first_error.to_callable_runtime_error()
-
-    def get_results(self) -> list[R]:
-        return [
-            item.result
-            for item in self.all
-            if item.status is BatchItemStatus.SUCCEEDED and item.result is not None
-        ]
-
-    def get_errors(self) -> list[ErrorObject]:
-        return [
-            item.error
-            for item in self.all
-            if item.status is BatchItemStatus.FAILED and item.error is not None
-        ]
-
-    @property
-    def success_count(self) -> int:
-        return sum(1 for item in self.all if item.status is BatchItemStatus.SUCCEEDED)
-
-    @property
-    def failure_count(self) -> int:
-        return sum(1 for item in self.all if item.status is BatchItemStatus.FAILED)
-
-    @property
-    def started_count(self) -> int:
-        return sum(1 for item in self.all if item.status is BatchItemStatus.STARTED)
-
-    @property
-    def total_count(self) -> int:
-        return len(self.all)
-
-
-# endregion Result models
 
 
 # region concurrency models
@@ -367,12 +192,12 @@ class ExecutionCounters:
     def __init__(
         self,
         total_tasks: int,
-        min_successful: int,
+        min_successful: int | None,
         tolerated_failure_count: int | None,
         tolerated_failure_percentage: float | None,
     ):
         self.total_tasks: int = total_tasks
-        self.min_successful: int = min_successful
+        self.min_successful: int | None = min_successful
         self.tolerated_failure_count: int | None = tolerated_failure_count
         self.tolerated_failure_percentage: float | None = tolerated_failure_percentage
         self.success_count: int = 0
@@ -421,24 +246,26 @@ class ExecutionCounters:
         """
         Check if execution should complete (based on completion criteria).
         Matches TypeScript isComplete() logic.
+
+        Note: This method only checks completion criteria (all done, or min_successful met).
+        Failure tolerance is enforced separately by should_continue() and combined in should_complete().
         """
         with self._lock:
             completed_count = self.success_count + self.failure_count
 
             # All tasks completed
             if completed_count == self.total_tasks:
-                # Complete if no failure tolerance OR no failures OR min successful reached
-                return (
-                    (
-                        self.tolerated_failure_count is None
-                        and self.tolerated_failure_percentage is None
-                    )
-                    or self.failure_count == 0
-                    or self.success_count >= self.min_successful
-                )
+                # If min_successful is explicitly set, check if we met it
+                # Otherwise, complete when all tasks are done
+                if self.min_successful is not None:
+                    return self.success_count >= self.min_successful
+                return True
 
-            # when we breach min successful, we've completed
-            return self.success_count >= self.min_successful
+            # Early completion: when we breach min_successful (only if explicitly set)
+            return (
+                self.min_successful is not None
+                and self.success_count >= self.min_successful
+            )
 
     def should_complete(self) -> bool:
         """
@@ -453,9 +280,12 @@ class ExecutionCounters:
             return self.success_count == self.total_tasks
 
     def is_min_successful_reached(self) -> bool:
-        """True if minimum successful tasks reached."""
+        """True if minimum successful task is both set and reached."""
         with self._lock:
-            return self.success_count >= self.min_successful
+            return (
+                self.min_successful is not None
+                and self.success_count >= self.min_successful
+            )
 
     def is_failure_tolerance_exceeded(self) -> bool:
         """True if failure tolerance was exceeded."""
@@ -594,7 +424,9 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         self._suspend_exception: SuspendExecution | None = None
 
         # ExecutionCounters will keep track of completion criteria and on-going counters
-        min_successful = self.completion_config.min_successful or len(self.executables)
+        # Note: min_successful should remain None if not explicitly set
+        # When None, the operation completes when all tasks finish (respecting failure tolerance)
+        min_successful = self.completion_config.min_successful
         tolerated_failure_count = self.completion_config.tolerated_failure_count
         tolerated_failure_percentage = (
             self.completion_config.tolerated_failure_percentage

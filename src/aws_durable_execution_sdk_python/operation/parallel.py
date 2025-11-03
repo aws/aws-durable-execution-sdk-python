@@ -12,12 +12,11 @@ from aws_durable_execution_sdk_python.config import ParallelConfig
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 
 if TYPE_CHECKING:
-    from aws_durable_execution_sdk_python.concurrency import BatchResult
     from aws_durable_execution_sdk_python.context import DurableContext
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
     from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.state import ExecutionState
-    from aws_durable_execution_sdk_python.types import SummaryGenerator
+    from aws_durable_execution_sdk_python.types import BatchResult, SummaryGenerator
 
 logger = logging.getLogger(__name__)
 

@@ -1,15 +1,12 @@
 """Tests for the parallel operation module."""
 
+import json
 from unittest.mock import Mock, patch
 
 import pytest
 
 # Mock the executor.execute method to return a BatchResult
 from aws_durable_execution_sdk_python.concurrency import (
-    BatchItem,
-    BatchItemStatus,
-    BatchResult,
-    CompletionReason,
     ConcurrentExecutor,
     Executable,
 )
@@ -20,6 +17,12 @@ from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.operation.parallel import (
     ParallelExecutor,
     parallel_handler,
+)
+from aws_durable_execution_sdk_python.types import (
+    BatchItem,
+    BatchItemStatus,
+    BatchResult,
+    CompletionReason,
 )
 from tests.serdes_test import CustomStrSerDes
 
@@ -735,6 +738,60 @@ def test_parallel_handler_first_execution_then_replay():
         # Verify replay was called, execute was not
         mock_replay.assert_called_once()
         mock_execute.assert_not_called()
+
+
+def test_parallel_result_serialization_roundtrip():
+    """Test that parallel operation BatchResult can be serialized and deserialized."""
+
+    def func1(ctx):
+        return [1, 2, 3]
+
+    def func2(ctx):
+        return {"status": "complete", "count": 42}
+
+    def func3(ctx):
+        return "simple string"
+
+    callables = [func1, func2, func3]
+
+    class MockExecutionState:
+        durable_execution_arn = "arn:test"
+
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            mock_result.is_succeeded.return_value = False
+            return mock_result
+
+    execution_state = MockExecutionState()
+    parallel_context = Mock()
+    parallel_context._create_step_id_for_logical_step = Mock(  # noqa SLF001
+        side_effect=["1", "2", "3"]
+    )
+    parallel_context.create_child_context = Mock(return_value=Mock())
+    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+
+    # Execute parallel
+    result = parallel_handler(
+        callables,
+        ParallelConfig(),
+        execution_state,
+        parallel_context,
+        operation_identifier,
+    )
+
+    # Serialize the BatchResult
+    serialized = json.dumps(result.to_dict())
+
+    # Deserialize
+    deserialized = BatchResult.from_dict(json.loads(serialized))
+
+    # Verify all data preserved
+    assert len(deserialized.all) == 3
+    assert deserialized.all[0].result == [1, 2, 3]
+    assert deserialized.all[1].result == {"status": "complete", "count": 42}
+    assert deserialized.all[2].result == "simple string"
+    assert deserialized.completion_reason == result.completion_reason
+    assert all(item.status == BatchItemStatus.SUCCEEDED for item in deserialized.all)
 
 
 @pytest.mark.parametrize(
