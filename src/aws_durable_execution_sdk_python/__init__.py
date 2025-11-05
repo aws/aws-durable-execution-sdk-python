@@ -8,7 +8,7 @@ from aws_durable_execution_sdk_python.context import (
     durable_with_child_context,
 )
 
-# Most common exceptions - users need to handle these
+# Most common exceptions - users need to handle these exceptions
 from aws_durable_execution_sdk_python.exceptions import (
     DurableExecutionsError,
     DurableOperationError,
