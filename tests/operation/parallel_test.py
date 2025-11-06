@@ -6,13 +6,14 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from aws_durable_execution_sdk_python.concurrency.impl import ConcurrentExecutor
+
 # Mock the executor.execute method to return a BatchResult
-from aws_durable_execution_sdk_python.concurrency import (
+from aws_durable_execution_sdk_python.concurrency.models import (
     BatchItem,
     BatchItemStatus,
     BatchResult,
     CompletionReason,
-    ConcurrentExecutor,
     Executable,
 )
 from aws_durable_execution_sdk_python.config import CompletionConfig, ParallelConfig

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from aws_durable_execution_sdk_python.concurrency import (
+from aws_durable_execution_sdk_python.concurrency.models import (
     BatchItem,
     BatchItemStatus,
     BatchResult,

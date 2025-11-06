@@ -32,6 +32,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Generic, Protocol, TypeVar
 
+from aws_durable_execution_sdk_python.concurrency.models import BatchResult
 from aws_durable_execution_sdk_python.exceptions import (
     DurableExecutionsError,
     ExecutionError,
@@ -207,9 +208,6 @@ class ContainerCodec(Codec):
 
     def encode(self, obj: Any) -> EncodedValue:
         """Encode container using dispatcher for recursive elements."""
-        # Import here to avoid circular dependency
-        # concurrency -> child_handler -> serdes -> concurrency
-        from aws_durable_execution_sdk_python.concurrency import BatchResult  # noqa PLC0415
 
         match obj:
             case BatchResult():
@@ -241,8 +239,6 @@ class ContainerCodec(Codec):
 
     def decode(self, tag: TypeTag, value: Any) -> Any:
         """Decode container using dispatcher for recursive elements."""
-        # Import here to avoid circular dependency
-        from aws_durable_execution_sdk_python.concurrency import BatchResult  # noqa PLC0415
 
         match tag:
             case TypeTag.BATCH_RESULT:
@@ -314,9 +310,6 @@ class TypeCodec(Codec):
             case list() | tuple() | dict():
                 return self.container_codec.encode(obj)
             case _:
-                # Check if it's a BatchResult (handled by container_codec)
-                from aws_durable_execution_sdk_python.concurrency import BatchResult  # noqa PLC0415
-
                 if isinstance(obj, BatchResult):
                     return self.container_codec.encode(obj)
                 msg = f"Unsupported type: {type(obj)}"

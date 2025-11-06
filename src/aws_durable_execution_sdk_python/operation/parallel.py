@@ -7,12 +7,13 @@ import logging
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, TypeVar
 
-from aws_durable_execution_sdk_python.concurrency import ConcurrentExecutor, Executable
+from aws_durable_execution_sdk_python.concurrency.impl import ConcurrentExecutor
+from aws_durable_execution_sdk_python.concurrency.models import Executable
 from aws_durable_execution_sdk_python.config import ParallelConfig
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 
 if TYPE_CHECKING:
-    from aws_durable_execution_sdk_python.concurrency import BatchResult
+    from aws_durable_execution_sdk_python.concurrency.models import BatchResult
     from aws_durable_execution_sdk_python.context import DurableContext
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
     from aws_durable_execution_sdk_python.serdes import SerDes

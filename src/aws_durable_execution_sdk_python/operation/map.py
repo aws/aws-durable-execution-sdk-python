@@ -7,9 +7,9 @@ import logging
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from aws_durable_execution_sdk_python.concurrency import (
+from aws_durable_execution_sdk_python.concurrency.impl import ConcurrentExecutor
+from aws_durable_execution_sdk_python.concurrency.models import (
     BatchResult,
-    ConcurrentExecutor,
     Executable,
 )
 from aws_durable_execution_sdk_python.config import MapConfig

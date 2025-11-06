@@ -11,17 +11,19 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from aws_durable_execution_sdk_python.concurrency import (
+from aws_durable_execution_sdk_python.concurrency.impl import (
+    ConcurrentExecutor,
+    TimerScheduler,
+)
+from aws_durable_execution_sdk_python.concurrency.models import (
     BatchItem,
     BatchItemStatus,
     BatchResult,
     BranchStatus,
     CompletionReason,
-    ConcurrentExecutor,
     Executable,
     ExecutableWithState,
     ExecutionCounters,
-    TimerScheduler,
 )
 from aws_durable_execution_sdk_python.config import CompletionConfig, MapConfig
 from aws_durable_execution_sdk_python.exceptions import (
@@ -302,7 +304,9 @@ def test_batch_result_from_dict_default_completion_reason():
         # No completionReason provided
     }
 
-    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+    with patch(
+        "aws_durable_execution_sdk_python.concurrency.models.logger"
+    ) as mock_logger:
         result = BatchResult.from_dict(data)
         assert result.completion_reason == CompletionReason.ALL_COMPLETED
         # Verify warning was logged
@@ -320,7 +324,9 @@ def test_batch_result_from_dict_infer_all_completed_all_succeeded():
         # No completionReason provided
     }
 
-    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+    with patch(
+        "aws_durable_execution_sdk_python.concurrency.models.logger"
+    ) as mock_logger:
         result = BatchResult.from_dict(data)
         assert result.completion_reason == CompletionReason.ALL_COMPLETED
         mock_logger.warning.assert_called_once()
@@ -344,7 +350,9 @@ def test_batch_result_from_dict_infer_failure_tolerance_exceeded_all_failed():
 
     # even if everything has failed, if we've completed all items, then we've finished as ALL_COMPLETED
     # https://github.com/aws/aws-durable-execution-sdk-js/blob/f20396f24afa9d6539d8e5056ee851ac7ef62301/packages/aws-durable-execution-sdk-js/src/handlers/concurrent-execution-handler/concurrent-execution-handler.ts#L324-L335
-    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+    with patch(
+        "aws_durable_execution_sdk_python.concurrency.models.logger"
+    ) as mock_logger:
         result = BatchResult.from_dict(data)
         assert result.completion_reason == CompletionReason.ALL_COMPLETED
         mock_logger.warning.assert_called_once()
@@ -368,7 +376,9 @@ def test_batch_result_from_dict_infer_all_completed_mixed_success_failure():
     }
 
     # the logic is that when \every item i: hasCompleted(i) then terminate due to all_completed
-    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+    with patch(
+        "aws_durable_execution_sdk_python.concurrency.models.logger"
+    ) as mock_logger:
         result = BatchResult.from_dict(data)
         assert result.completion_reason == CompletionReason.ALL_COMPLETED
         mock_logger.warning.assert_called_once()
@@ -385,7 +395,9 @@ def test_batch_result_from_dict_infer_min_successful_reached_has_started():
         # No completionReason provided
     }
 
-    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+    with patch(
+        "aws_durable_execution_sdk_python.concurrency.models.logger"
+    ) as mock_logger:
         result = BatchResult.from_dict(data, CompletionConfig(1))
         assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
         mock_logger.warning.assert_called_once()
@@ -398,7 +410,9 @@ def test_batch_result_from_dict_infer_empty_items():
         # No completionReason provided
     }
 
-    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+    with patch(
+        "aws_durable_execution_sdk_python.concurrency.models.logger"
+    ) as mock_logger:
         result = BatchResult.from_dict(data)
         assert result.completion_reason == CompletionReason.ALL_COMPLETED
         mock_logger.warning.assert_called_once()
@@ -413,7 +427,9 @@ def test_batch_result_from_dict_with_explicit_completion_reason():
         "completionReason": "MIN_SUCCESSFUL_REACHED",
     }
 
-    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+    with patch(
+        "aws_durable_execution_sdk_python.concurrency.models.logger"
+    ) as mock_logger:
         result = BatchResult.from_dict(data)
         assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
         # No warning should be logged when completionReason is provided
@@ -2352,7 +2368,9 @@ def test_batch_result_from_dict_with_completion_config():
     # With started items, should infer MIN_SUCCESSFUL_REACHED
     completion_config = CompletionConfig(min_successful=1)
 
-    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+    with patch(
+        "aws_durable_execution_sdk_python.concurrency.models.logger"
+    ) as mock_logger:
         result = BatchResult.from_dict(data, completion_config)
         assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
         mock_logger.warning.assert_called_once()
@@ -2378,7 +2396,9 @@ def test_batch_result_from_dict_all_completed():
         # No completionReason provided
     }
 
-    with patch("aws_durable_execution_sdk_python.concurrency.logger") as mock_logger:
+    with patch(
+        "aws_durable_execution_sdk_python.concurrency.models.logger"
+    ) as mock_logger:
         result = BatchResult.from_dict(data)
         assert result.completion_reason == CompletionReason.ALL_COMPLETED
         mock_logger.warning.assert_called_once()
@@ -2499,7 +2519,7 @@ def test_operation_id_determinism_across_shuffles():
         executor_context.create_child_context = create_child_context
 
         with patch(
-            "aws_durable_execution_sdk_python.concurrency.child_handler",
+            "aws_durable_execution_sdk_python.concurrency.impl.child_handler",
             patched_child_handler,
         ):
             executor.execute(execution_state, executor_context)

@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 # Mock the executor.execute method
-from aws_durable_execution_sdk_python.concurrency import (
+from aws_durable_execution_sdk_python.concurrency.models import (
     BatchItem,
     BatchItemStatus,
     BatchResult,
@@ -22,6 +22,7 @@ from aws_durable_execution_sdk_python.config import (
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+from aws_durable_execution_sdk_python.operation import child  # PLC0415
 from aws_durable_execution_sdk_python.operation.map import MapExecutor, map_handler
 from aws_durable_execution_sdk_python.serdes import serialize
 from tests.serdes_test import CustomStrSerDes
@@ -927,15 +928,11 @@ def test_map_result_serialization_roundtrip():
 
 def test_map_handler_serializes_batch_result():
     """Verify map_handler serializes BatchResult at parent level."""
-    # we are using importlib to reload the child module so that we can actually
-    # patch serdes.serialize
-    from aws_durable_execution_sdk_python.operation import child as child_module  # noqa PLC0415
-
     with patch(
         "aws_durable_execution_sdk_python.serdes.serialize"
     ) as mock_serdes_serialize:
         mock_serdes_serialize.return_value = '"serialized"'
-        importlib.reload(child_module)
+        importlib.reload(child)
 
         parent_checkpoint = Mock()
         parent_checkpoint.is_succeeded.return_value = False
@@ -984,14 +981,10 @@ def test_map_handler_serializes_batch_result():
 def test_map_default_serdes_serializes_batch_result():
     """Verify default serdes automatically serializes BatchResult."""
 
-    # we are using importlib to reload the child module so that we can actually
-    # patch serdes.serialize
-    from aws_durable_execution_sdk_python.operation import child as child_module  # noqa PLC0415
-
     with patch(
         "aws_durable_execution_sdk_python.serdes.serialize", wraps=serialize
     ) as mock_serialize:
-        importlib.reload(child_module)
+        importlib.reload(child)
 
         parent_checkpoint = Mock()
         parent_checkpoint.is_succeeded.return_value = False
@@ -1043,15 +1036,11 @@ def test_map_default_serdes_serializes_batch_result():
 def test_map_custom_serdes_serializes_batch_result():
     """Verify custom serdes is used for BatchResult serialization."""
 
-    # we are using importlib to reload the child module so that we can actually
-    # patch serdes.serialize
-    from aws_durable_execution_sdk_python.operation import child as child_module  # noqa PLC0415
-
     custom_serdes = CustomStrSerDes()
 
     with patch("aws_durable_execution_sdk_python.serdes.serialize") as mock_serialize:
         mock_serialize.return_value = '"serialized"'
-        importlib.reload(child_module)
+        importlib.reload(child)
 
         parent_checkpoint = Mock()
         parent_checkpoint.is_succeeded.return_value = False
