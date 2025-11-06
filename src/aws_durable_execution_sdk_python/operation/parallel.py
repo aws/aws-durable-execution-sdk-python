@@ -69,6 +69,7 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
             name_prefix="parallel-branch-",
             serdes=config.serdes,
             summary_generator=config.summary_generator,
+            item_serdes=config.item_serdes,
         )
 
     def execute_item(self, child_context, executable: Executable[Callable]) -> R:  # noqa: PLR6301

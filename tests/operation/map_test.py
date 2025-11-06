@@ -2,6 +2,8 @@
 
 from unittest.mock import Mock, patch
 
+import pytest
+
 # Mock the executor.execute method
 from aws_durable_execution_sdk_python.concurrency import (
     BatchItem,
@@ -15,6 +17,7 @@ from aws_durable_execution_sdk_python.config import (
     ItemBatcher,
     MapConfig,
 )
+from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.operation.map import MapExecutor, map_handler
@@ -750,3 +753,128 @@ def test_map_handler_first_execution_then_replay_integration():
         # Verify replay was called, execute was not
         mock_replay.assert_called_once()
         mock_execute.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("item_serdes", "batch_serdes"),
+    [
+        (Mock(), Mock()),
+        (None, Mock()),
+        (Mock(), None),
+    ],
+)
+@patch("aws_durable_execution_sdk_python.operation.child.serialize")
+def test_map_item_serialize(mock_serialize, item_serdes, batch_serdes):
+    """Test map serializes items with item_serdes or fallback."""
+    mock_serialize.return_value = '"serialized"'
+
+    parent_checkpoint = Mock()
+    parent_checkpoint.is_succeeded.return_value = False
+    parent_checkpoint.is_failed.return_value = False
+    parent_checkpoint.is_started.return_value = False
+    parent_checkpoint.is_existent.return_value = True
+    parent_checkpoint.is_replay_children.return_value = False
+
+    child_checkpoint = Mock()
+    child_checkpoint.is_succeeded.return_value = False
+    child_checkpoint.is_failed.return_value = False
+    child_checkpoint.is_started.return_value = False
+    child_checkpoint.is_existent.return_value = True
+    child_checkpoint.is_replay_children.return_value = False
+
+    def get_checkpoint(op_id):
+        return child_checkpoint if op_id.startswith("child-") else parent_checkpoint
+
+    mock_state = Mock()
+    mock_state.durable_execution_arn = "arn:test"
+    mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
+    mock_state.create_checkpoint = Mock()
+
+    context_map = {}
+
+    def create_id(self, i):
+        ctx_id = id(self)
+        if ctx_id not in context_map:
+            context_map[ctx_id] = []
+        context_map[ctx_id].append(i)
+        return (
+            "parent"
+            if len(context_map) == 1 and len(context_map[ctx_id]) == 1
+            else f"child-{i}"
+        )
+
+    with patch.object(DurableContext, "_create_step_id_for_logical_step", create_id):
+        context = DurableContext(state=mock_state)
+        context.map(
+            ["a", "b"],
+            lambda ctx, item, idx, items: item,
+            config=MapConfig(serdes=batch_serdes, item_serdes=item_serdes),
+        )
+
+    expected = item_serdes or batch_serdes
+    assert mock_serialize.call_args_list[0][1]["serdes"] is expected
+    assert mock_serialize.call_args_list[0][1]["operation_id"] == "child-0"
+    assert mock_serialize.call_args_list[1][1]["serdes"] is expected
+    assert mock_serialize.call_args_list[1][1]["operation_id"] == "child-1"
+    assert mock_serialize.call_args_list[2][1]["serdes"] is batch_serdes
+    assert mock_serialize.call_args_list[2][1]["operation_id"] == "parent"
+
+
+@pytest.mark.parametrize(
+    ("item_serdes", "batch_serdes"),
+    [
+        (Mock(), Mock()),
+        (None, Mock()),
+        (Mock(), None),
+    ],
+)
+@patch("aws_durable_execution_sdk_python.operation.child.deserialize")
+def test_map_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
+    """Test map deserializes items with item_serdes or fallback."""
+    mock_deserialize.return_value = "deserialized"
+
+    parent_checkpoint = Mock()
+    parent_checkpoint.is_succeeded.return_value = False
+    parent_checkpoint.is_failed.return_value = False
+    parent_checkpoint.is_existent.return_value = False
+
+    child_checkpoint = Mock()
+    child_checkpoint.is_succeeded.return_value = True
+    child_checkpoint.is_failed.return_value = False
+    child_checkpoint.is_replay_children.return_value = False
+    child_checkpoint.result = '"cached"'
+
+    def get_checkpoint(op_id):
+        return child_checkpoint if op_id.startswith("child-") else parent_checkpoint
+
+    mock_state = Mock()
+    mock_state.durable_execution_arn = "arn:test"
+    mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
+    mock_state.create_checkpoint = Mock()
+
+    context_map = {}
+
+    def create_id(self, i):
+        ctx_id = id(self)
+        if ctx_id not in context_map:
+            context_map[ctx_id] = []
+        context_map[ctx_id].append(i)
+        return (
+            "parent"
+            if len(context_map) == 1 and len(context_map[ctx_id]) == 1
+            else f"child-{i}"
+        )
+
+    with patch.object(DurableContext, "_create_step_id_for_logical_step", create_id):
+        context = DurableContext(state=mock_state)
+        context.map(
+            ["a", "b"],
+            lambda ctx, item, idx, items: item,
+            config=MapConfig(serdes=batch_serdes, item_serdes=item_serdes),
+        )
+
+    expected = item_serdes or batch_serdes
+    assert mock_deserialize.call_args_list[0][1]["serdes"] is expected
+    assert mock_deserialize.call_args_list[0][1]["operation_id"] == "child-0"
+    assert mock_deserialize.call_args_list[1][1]["serdes"] is expected
+    assert mock_deserialize.call_args_list[1][1]["operation_id"] == "child-1"

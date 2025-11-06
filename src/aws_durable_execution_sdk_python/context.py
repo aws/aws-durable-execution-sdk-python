@@ -343,7 +343,11 @@ class DurableContext(DurableContextProtocol):
             operation_identifier=operation_identifier,
             config=ChildConfig(
                 sub_type=OperationSubType.MAP,
-                serdes=config.serdes if config is not None else None,
+                serdes=getattr(config, "serdes", None),
+                # child_handler should only know the serdes of the parent serdes,
+                # the item serdes will be passed when we are actually executing
+                # the branch within its own child_handler.
+                item_serdes=None,
             ),
         )
 
@@ -380,7 +384,11 @@ class DurableContext(DurableContextProtocol):
             operation_identifier=operation_identifier,
             config=ChildConfig(
                 sub_type=OperationSubType.PARALLEL,
-                serdes=config.serdes if config is not None else None,
+                serdes=getattr(config, "serdes", None),
+                # child_handler should only know the serdes of the parent serdes,
+                # the item serdes will be passed when we are actually executing
+                # the branch within its own child_handler.
+                item_serdes=None,
             ),
         )
 
