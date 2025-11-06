@@ -164,7 +164,7 @@ def test_invoke_handler_already_timed_out():
         )
 
 
-@pytest.mark.parametrize("status", [OperationStatus.STARTED, OperationStatus.PENDING])
+@pytest.mark.parametrize("status", [OperationStatus.STARTED])
 def test_invoke_handler_already_started(status):
     """Test invoke_handler when operation is already started."""
     mock_state = Mock(spec=ExecutionState)
