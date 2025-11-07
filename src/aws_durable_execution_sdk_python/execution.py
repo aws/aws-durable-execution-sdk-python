@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -250,9 +251,12 @@ def durable_execution(
         )
 
         # Use ThreadPoolExecutor for concurrent execution of user code and background checkpoint processing
-        with ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="dex-handler"
-        ) as executor:
+        with (
+            ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="dex-handler"
+            ) as executor,
+            contextlib.closing(execution_state) as execution_state,
+        ):
             # Thread 1: Run background checkpoint processing
             executor.submit(execution_state.checkpoint_batches_forever)
 
@@ -296,17 +300,11 @@ def durable_execution(
                     # Must ensure the result is persisted before returning to Lambda.
                     # Large results exceed Lambda response limits and must be stored durably
                     # before the execution completes.
-                    execution_state.create_checkpoint_sync(success_operation)
-
-                    # Stop background checkpointing thread
-                    execution_state.stop_checkpointing()
+                    execution_state.create_checkpoint(success_operation, is_sync=True)
 
                     return DurableExecutionInvocationOutput.create_succeeded(
                         result=""
                     ).to_dict()
-
-                # Stop background checkpointing thread
-                execution_state.stop_checkpointing()
 
                 return DurableExecutionInvocationOutput.create_succeeded(
                     result=serialized_result
@@ -322,33 +320,28 @@ def durable_execution(
                     )
                 else:
                     logger.exception("Checkpoint processing failed")
-                execution_state.stop_checkpointing()
                 # Raise the original exception
                 raise bg_error.source_exception from bg_error
 
             except SuspendExecution:
                 # User code suspended - stop background checkpointing thread
                 logger.debug("Suspending execution...")
-                execution_state.stop_checkpointing()
                 return DurableExecutionInvocationOutput(
                     status=InvocationStatus.PENDING
                 ).to_dict()
 
             except CheckpointError as e:
                 # Checkpoint system is broken - stop background thread and exit immediately
-                execution_state.stop_checkpointing()
                 logger.exception(
                     "Checkpoint system failed",
                     extra=e.build_logger_extras(),
                 )
                 raise  # Terminate Lambda immediately
             except InvocationError:
-                execution_state.stop_checkpointing()
                 logger.exception("Invocation error. Must terminate.")
                 # Throw the error to trigger Lambda retry
                 raise
             except ExecutionError as e:
-                execution_state.stop_checkpointing()
                 logger.exception("Execution error. Must terminate without retry.")
                 return DurableExecutionInvocationOutput(
                     status=InvocationStatus.FAILED,
@@ -357,15 +350,36 @@ def durable_execution(
             except Exception as e:
                 # all user-space errors go here
                 logger.exception("Execution failed")
-                failed_operation = OperationUpdate.create_execution_fail(
-                    error=ErrorObject.from_exception(e)
-                )
-                # TODO: can optimize, if not too large can just return response rather than checkpoint
-                execution_state.create_checkpoint_sync(failed_operation)
 
-                execution_state.stop_checkpointing()
-                return DurableExecutionInvocationOutput(
-                    status=InvocationStatus.FAILED
+                result = DurableExecutionInvocationOutput(
+                    status=InvocationStatus.FAILED, error=ErrorObject.from_exception(e)
                 ).to_dict()
+
+                serialized_result = json.dumps(result)
+
+                if (
+                    serialized_result
+                    and len(serialized_result) > LAMBDA_RESPONSE_SIZE_LIMIT
+                ):
+                    logger.debug(
+                        "Response size (%s bytes) exceeds Lambda limit (%s) bytes). Checkpointing result.",
+                        len(serialized_result),
+                        LAMBDA_RESPONSE_SIZE_LIMIT,
+                    )
+                    failed_operation = OperationUpdate.create_execution_fail(
+                        error=ErrorObject.from_exception(e)
+                    )
+
+                    # Checkpoint large result with blocking (is_sync=True, default).
+                    # Must ensure the result is persisted before returning to Lambda.
+                    # Large results exceed Lambda response limits and must be stored durably
+                    # before the execution completes.
+                    execution_state.create_checkpoint_sync(failed_operation)
+
+                    return DurableExecutionInvocationOutput(
+                        status=InvocationStatus.FAILED
+                    ).to_dict()
+
+                return result
 
     return wrapper
