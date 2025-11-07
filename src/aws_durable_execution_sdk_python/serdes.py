@@ -307,11 +307,9 @@ class TypeCodec(Codec):
                 return self.decimal_codec.encode(obj)
             case datetime() | date():
                 return self.datetime_codec.encode(obj)
-            case list() | tuple() | dict():
+            case list() | tuple() | dict() | BatchResult():
                 return self.container_codec.encode(obj)
             case _:
-                if isinstance(obj, BatchResult):
-                    return self.container_codec.encode(obj)
                 msg = f"Unsupported type: {type(obj)}"
                 raise SerDesError(msg)
 
