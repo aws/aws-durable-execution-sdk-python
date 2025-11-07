@@ -86,7 +86,7 @@ class OperationSubType(Enum):
     PARALLEL_BRANCH = "ParallelBranch"
     WAIT_FOR_CALLBACK = "WaitForCallback"
     WAIT_FOR_CONDITION = "WaitForCondition"
-    INVOKE = "Invoke"
+    CHAINED_INVOKE = "ChainedInvoke"
 
 
 @dataclass(frozen=True)
@@ -592,7 +592,7 @@ class OperationUpdate:
             operation_id=identifier.operation_id,
             parent_id=identifier.parent_id,
             operation_type=OperationType.CHAINED_INVOKE,
-            sub_type=OperationSubType.INVOKE,
+            sub_type=OperationSubType.CHAINED_INVOKE,
             action=OperationAction.START,
             name=identifier.name,
             payload=payload,
