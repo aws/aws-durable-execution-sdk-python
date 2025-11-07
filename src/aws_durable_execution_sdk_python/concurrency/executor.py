@@ -154,7 +154,8 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         self._suspend_exception: SuspendExecution | None = None
 
         # ExecutionCounters will keep track of completion criteria and on-going counters
-        min_successful = self.completion_config.min_successful or len(self.executables)
+        # Pass None if min_successful not explicitly set to distinguish from "require all"
+        min_successful = self.completion_config.min_successful
         tolerated_failure_count = self.completion_config.tolerated_failure_count
         tolerated_failure_percentage = (
             self.completion_config.tolerated_failure_percentage

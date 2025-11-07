@@ -355,12 +355,12 @@ class ExecutionCounters:
     def __init__(
         self,
         total_tasks: int,
-        min_successful: int,
+        min_successful: int | None,
         tolerated_failure_count: int | None,
         tolerated_failure_percentage: float | None,
     ):
         self.total_tasks: int = total_tasks
-        self.min_successful: int = min_successful
+        self.min_successful: int | None = min_successful
         self.tolerated_failure_count: int | None = tolerated_failure_count
         self.tolerated_failure_percentage: float | None = tolerated_failure_percentage
         self.success_count: int = 0
@@ -408,25 +408,26 @@ class ExecutionCounters:
     def is_complete(self) -> bool:
         """
         Check if execution should complete (based on completion criteria).
-        Matches TypeScript isComplete() logic.
+
+        Note: This method only checks completion criteria (all done, or min_successful met).
+        Failure tolerance is enforced separately by should_continue() and combined in should_complete().
         """
         with self._lock:
             completed_count = self.success_count + self.failure_count
 
             # All tasks completed
             if completed_count == self.total_tasks:
-                # Complete if no failure tolerance OR no failures OR min successful reached
-                return (
-                    (
-                        self.tolerated_failure_count is None
-                        and self.tolerated_failure_percentage is None
-                    )
-                    or self.failure_count == 0
-                    or self.success_count >= self.min_successful
-                )
+                # If min_successful is explicitly set, check if we met it
+                # Otherwise, complete when all tasks are done
+                if self.min_successful is not None:
+                    return self.success_count >= self.min_successful
+                return True
 
-            # when we breach min successful, we've completed
-            return self.success_count >= self.min_successful
+            # Early completion: when we breach min_successful (only if explicitly set)
+            return (
+                self.min_successful is not None
+                and self.success_count >= self.min_successful
+            )
 
     def should_complete(self) -> bool:
         """
@@ -441,9 +442,12 @@ class ExecutionCounters:
             return self.success_count == self.total_tasks
 
     def is_min_successful_reached(self) -> bool:
-        """True if minimum successful tasks reached."""
+        """True if minimum successful task is both set and reached."""
         with self._lock:
-            return self.success_count >= self.min_successful
+            return (
+                self.min_successful is not None
+                and self.success_count >= self.min_successful
+            )
 
     def is_failure_tolerance_exceeded(self) -> bool:
         """True if failure tolerance was exceeded."""
