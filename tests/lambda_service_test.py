@@ -686,9 +686,12 @@ def test_operation_update_create_wait_start():
 @patch("aws_durable_execution_sdk_python.lambda_service.datetime")
 def test_operation_update_create_execution_succeed(mock_datetime):
     """Test OperationUpdate.create_execution_succeed factory method."""
-    mock_datetime.datetime.now.return_value = "2023-01-01"
+
+    mock_datetime.datetime.now.return_value = datetime.datetime.fromtimestamp(
+        1672531200.0, tz=datetime.UTC
+    )
     update = OperationUpdate.create_execution_succeed("success_payload")
-    assert update.operation_id == "execution-result-2023-01-01"
+    assert update.operation_id == "execution-result-1672531200000"
     assert update.operation_type == OperationType.EXECUTION
     assert update.action == OperationAction.SUCCEED
     assert update.payload == "success_payload"
