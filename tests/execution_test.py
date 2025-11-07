@@ -11,6 +11,7 @@ import pytest
 from aws_durable_execution_sdk_python.config import StepConfig, StepSemantics
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
+    BotoClientError,
     CheckpointError,
     ExecutionError,
     InvocationError,
@@ -1408,3 +1409,175 @@ def test_durable_handler_background_thread_failure_on_error_checkpoint():
         RuntimeError, match="Background checkpoint failed on error handling"
     ):
         test_handler(invocation_input, lambda_context)
+
+
+def test_durable_execution_logs_checkpoint_error_extras_from_background_thread():
+    """Test that CheckpointError extras are logged when raised from background thread."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_logger = Mock()
+
+    error_obj = {"Code": "TestError", "Message": "Test checkpoint error"}
+    metadata_obj = {"RequestId": "test-request-id"}
+
+    def failing_checkpoint(*args, **kwargs):
+        raise CheckpointError(  # noqa TRY003
+            "Checkpoint failed",  # noqa EM101
+            error=error_obj,
+            response_metadata=metadata_obj,  # EM101
+        )
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        context.step(lambda ctx: "step_result")
+        return {"result": "success"}
+
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+
+    initial_state = InitialExecutionState(operations=[operation], next_marker="")
+
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=initial_state,
+        is_local_runner=False,
+        service_client=mock_client,
+    )
+
+    lambda_context = Mock()
+    lambda_context.aws_request_id = "test-request"
+    lambda_context.client_context = None
+    lambda_context.identity = None
+    lambda_context._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
+    lambda_context.invoked_function_arn = None
+    lambda_context.tenant_id = None
+
+    mock_client.checkpoint.side_effect = failing_checkpoint
+
+    with patch("aws_durable_execution_sdk_python.execution.logger", mock_logger):
+        with pytest.raises(CheckpointError):
+            test_handler(invocation_input, lambda_context)
+
+    mock_logger.exception.assert_called_once()
+    call_args = mock_logger.exception.call_args
+    assert "Checkpoint processing failed" in call_args[0][0]
+    assert call_args[1]["extra"]["Error"] == error_obj
+    assert call_args[1]["extra"]["ResponseMetadata"] == metadata_obj
+
+
+def test_durable_execution_logs_boto_client_error_extras_from_background_thread():
+    """Test that BotoClientError extras are logged when raised from background thread."""
+
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_logger = Mock()
+
+    error_obj = {"Code": "ServiceError", "Message": "Boto3 service error"}
+    metadata_obj = {"RequestId": "boto-request-id"}
+
+    def failing_checkpoint(*args, **kwargs):
+        raise BotoClientError(  # noqa TRY003
+            "Boto3 error",  # noqa EM101
+            error=error_obj,
+            response_metadata=metadata_obj,  # EM101
+        )
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        context.step(lambda ctx: "step_result")
+        return {"result": "success"}
+
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+
+    initial_state = InitialExecutionState(operations=[operation], next_marker="")
+
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=initial_state,
+        is_local_runner=False,
+        service_client=mock_client,
+    )
+
+    lambda_context = Mock()
+    lambda_context.aws_request_id = "test-request"
+    lambda_context.client_context = None
+    lambda_context.identity = None
+    lambda_context._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
+    lambda_context.invoked_function_arn = None
+    lambda_context.tenant_id = None
+
+    mock_client.checkpoint.side_effect = failing_checkpoint
+
+    with patch("aws_durable_execution_sdk_python.execution.logger", mock_logger):
+        with pytest.raises(BotoClientError):
+            test_handler(invocation_input, lambda_context)
+
+    mock_logger.exception.assert_called_once()
+    call_args = mock_logger.exception.call_args
+    assert "Checkpoint processing failed" in call_args[0][0]
+    assert call_args[1]["extra"]["Error"] == error_obj
+    assert call_args[1]["extra"]["ResponseMetadata"] == metadata_obj
+
+
+def test_durable_execution_logs_checkpoint_error_extras_from_user_code():
+    """Test that CheckpointError extras are logged when raised directly from user code."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_logger = Mock()
+
+    error_obj = {
+        "Code": "UserCheckpointError",
+        "Message": "User raised checkpoint error",
+    }
+    metadata_obj = {"RequestId": "user-request-id"}
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        raise CheckpointError(  # noqa TRY003
+            "User checkpoint error",  # noqa EM101
+            error=error_obj,
+            response_metadata=metadata_obj,  # EM101
+        )
+
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+
+    initial_state = InitialExecutionState(operations=[operation], next_marker="")
+
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=initial_state,
+        is_local_runner=False,
+        service_client=mock_client,
+    )
+
+    lambda_context = Mock()
+    lambda_context.aws_request_id = "test-request"
+    lambda_context.client_context = None
+    lambda_context.identity = None
+    lambda_context._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
+    lambda_context.invoked_function_arn = None
+    lambda_context.tenant_id = None
+
+    with patch("aws_durable_execution_sdk_python.execution.logger", mock_logger):
+        with pytest.raises(CheckpointError):
+            test_handler(invocation_input, lambda_context)
+
+    mock_logger.exception.assert_called_once()
+    call_args = mock_logger.exception.call_args
+    assert call_args[0][0] == "Checkpoint system failed"
+    assert call_args[1]["extra"]["Error"] == error_obj
+    assert call_args[1]["extra"]["ResponseMetadata"] == metadata_obj

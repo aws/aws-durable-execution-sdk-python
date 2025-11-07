@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from aws_durable_execution_sdk_python.context import DurableContext, ExecutionState
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
+    BotoClientError,
     CheckpointError,
     DurableExecutionsError,
     ExecutionError,
@@ -314,7 +315,13 @@ def durable_execution(
             except BackgroundThreadError as bg_error:
                 # Background checkpoint system failed - propagated through CompletionEvent
                 # Do not attempt to checkpoint anything, just terminate immediately
-                logger.exception("Checkpoint processing failed")
+                if isinstance(bg_error.source_exception, BotoClientError):
+                    logger.exception(
+                        "Checkpoint processing failed",
+                        extra=bg_error.source_exception.build_logger_extras(),
+                    )
+                else:
+                    logger.exception("Checkpoint processing failed")
                 execution_state.stop_checkpointing()
                 # Raise the original exception
                 raise bg_error.source_exception from bg_error
@@ -327,10 +334,13 @@ def durable_execution(
                     status=InvocationStatus.PENDING
                 ).to_dict()
 
-            except CheckpointError:
+            except CheckpointError as e:
                 # Checkpoint system is broken - stop background thread and exit immediately
                 execution_state.stop_checkpointing()
-                logger.exception("Checkpoint system failed")
+                logger.exception(
+                    "Checkpoint system failed",
+                    extra=e.build_logger_extras(),
+                )
                 raise  # Terminate Lambda immediately
             except InvocationError:
                 execution_state.stop_checkpointing()
