@@ -415,15 +415,7 @@ class ExecutionCounters:
 
             # All tasks completed
             if completed_count == self.total_tasks:
-                # Complete if no failure tolerance OR no failures OR min successful reached
-                return (
-                    (
-                        self.tolerated_failure_count is None
-                        and self.tolerated_failure_percentage is None
-                    )
-                    or self.failure_count == 0
-                    or self.success_count >= self.min_successful
-                )
+                return True
 
             # when we breach min successful, we've completed
             return self.success_count >= self.min_successful

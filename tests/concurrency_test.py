@@ -968,6 +968,7 @@ def test_concurrent_executor_on_task_complete_timed_suspend():
     exe_state = ExecutableWithState(executables[0])
     future = Mock()
     future.result.side_effect = TimedSuspendExecution("test message", time.time() + 1)
+    future.cancelled.return_value = False
 
     scheduler = Mock()
     scheduler.schedule_resume = Mock()
@@ -1040,6 +1041,7 @@ def test_concurrent_executor_on_task_complete_exception():
     exe_state = ExecutableWithState(executables[0])
     future = Mock()
     future.result.side_effect = ValueError("Test error")
+    future.cancelled.return_value = False
 
     scheduler = Mock()
 
@@ -1049,7 +1051,7 @@ def test_concurrent_executor_on_task_complete_exception():
     assert isinstance(exe_state.error, ValueError)
 
 
-def test_concurrent_executor_create_result_with_failed_branches():
+def test_concurrent_executor_create_result_with_early_exit():
     """Test ConcurrentExecutor with failed branches using public execute method."""
 
     class TestExecutor(ConcurrentExecutor):
@@ -1057,6 +1059,8 @@ def test_concurrent_executor_create_result_with_failed_branches():
             if executable.index == 0:
                 return f"result_{executable.index}"
             msg = "Test error"
+            # giving space to terminate early with
+            time.sleep(0.5)
             raise ValueError(msg)
 
     def success_callable():
@@ -1067,7 +1071,8 @@ def test_concurrent_executor_create_result_with_failed_branches():
 
     executables = [Executable(0, success_callable), Executable(1, failure_callable)]
     completion_config = CompletionConfig(
-        min_successful=1,
+        # setting min successful to None to execute all children and avoid early stopping
+        min_successful=None,
         tolerated_failure_count=None,
         tolerated_failure_percentage=None,
     )
@@ -2751,3 +2756,85 @@ def test_batch_result_complex_nested_data():
 
     assert deserialized.all[0].result == complex_result
     assert deserialized.all[0].result["users"][0]["name"] == "Alice"
+
+
+def test_executor_does_not_deadlock_when_all_tasks_terminal_but_completion_config_allows_failures():
+    """Ensure executor returns when all tasks are terminal even if completion rules are confusing."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            if executable.index == 0:
+                # fail one task
+                raise Exception("boom")  # noqa EM101 TRY002
+            return f"ok_{executable.index}"
+
+    # Two tasks, min_successful=2 but tolerated failure_count set to 1.
+    # After one fail + one success, counters.is_complete() should return true,
+    # should_continue() should return false. counters.is_complete was failing to
+    # stop early, which caused map to hang.
+    executables = [Executable(0, lambda: "a"), Executable(1, lambda: "b")]
+    completion_config = CompletionConfig(
+        min_successful=2,
+        tolerated_failure_count=1,
+        tolerated_failure_percentage=None,
+    )
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=2,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    execution_state = Mock()
+    execution_state.create_checkpoint = Mock()
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
+
+    # Should return (not hang) and batch should reflect one FAILED and one SUCCEEDED
+    result = executor.execute(execution_state, executor_context)
+    statuses = {item.index: item.status for item in result.all}
+    assert statuses[0] == BatchItemStatus.FAILED
+    assert statuses[1] == BatchItemStatus.SUCCEEDED
+
+
+def test_executor_terminates_quickly_when_impossible_to_succeed():
+    """Test that executor terminates when min_successful becomes impossible."""
+    executed_count = {"value": 0}
+
+    def task_func(ctx, item, idx, items):
+        executed_count["value"] += 1
+        if idx < 2:
+            raise Exception(f"fail_{idx}")  # noqa EM102 TRY002
+        time.sleep(0.05)
+        return f"ok_{idx}"
+
+    items = list(range(100))
+    config = MapConfig(
+        max_concurrency=10, completion_config=CompletionConfig(min_successful=99)
+    )
+
+    executor = MapExecutor.from_items(items=items, func=task_func, config=config)
+
+    execution_state = Mock()
+    execution_state.create_checkpoint = Mock()
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
+
+    result = executor.execute(execution_state, executor_context)
+
+    # With concurrency=1, only 2 tasks should execute before terminating
+    # min_successful(99) + failure_count(2) = 101 > total_tasks(100)
+    assert executed_count["value"] < 100
+    assert (
+        result.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+    ), executed_count
+    assert sum(1 for item in result.all if item.status == BatchItemStatus.FAILED) == 2
+    assert (
+        sum(1 for item in result.all if item.status == BatchItemStatus.SUCCEEDED) < 98
+    )

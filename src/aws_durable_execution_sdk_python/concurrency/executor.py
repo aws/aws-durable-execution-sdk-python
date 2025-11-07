@@ -203,7 +203,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
             ThreadPoolExecutor(max_workers=max_workers) as thread_executor,
         ):
 
-            def submit_task(executable_with_state: ExecutableWithState) -> None:
+            def submit_task(executable_with_state: ExecutableWithState) -> Future:
                 """Submit task to the thread executor and mark its state as started."""
                 future = thread_executor.submit(
                     self._execute_item_in_child_context,
@@ -216,13 +216,20 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
                     self._on_task_complete(executable_with_state, future, scheduler)
 
                 future.add_done_callback(on_done)
+                return future
 
             # Submit initial tasks
-            for exe_state in self.executables_with_state:
-                submit_task(exe_state)
+            futures = [
+                submit_task(exe_state) for exe_state in self.executables_with_state
+            ]
 
             # Wait for completion
             self._completion_event.wait()
+
+            # Cancel remaining futures so
+            # that we don't wait for them to join.
+            for future in futures:
+                future.cancel()
 
             # Suspend execution if everything done and at least one of the tasks raised a suspend exception.
             if self._suspend_exception:
@@ -275,6 +282,11 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         scheduler: TimerScheduler,
     ) -> None:
         """Handle task completion, suspension, or failure."""
+
+        if future.cancelled():
+            exe_state.suspend()
+            return
+
         try:
             result = future.result()
             exe_state.complete(result)
