@@ -2751,3 +2751,47 @@ def test_batch_result_complex_nested_data():
 
     assert deserialized.all[0].result == complex_result
     assert deserialized.all[0].result["users"][0]["name"] == "Alice"
+
+
+def test_executor_does_not_deadlock_when_all_tasks_terminal_but_completion_config_allows_failures():
+    """Ensure executor returns when all tasks are terminal even if completion rules are confusing."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            if executable.index == 0:
+                # fail one task
+                raise Exception("boom")  # noqa EM101 TRY002
+            return f"ok_{executable.index}"
+
+    # Two tasks, min_successful=2 but tolerated failure_count set to 1.
+    # After one fail + one success, counters.is_complete() should return true,
+    # should_continue() should return false. counters.is_complete was failing to
+    # stop early, which caused map to hang.
+    executables = [Executable(0, lambda: "a"), Executable(1, lambda: "b")]
+    completion_config = CompletionConfig(
+        min_successful=2,
+        tolerated_failure_count=1,
+        tolerated_failure_percentage=None,
+    )
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=2,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    execution_state = Mock()
+    execution_state.create_checkpoint = Mock()
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context.create_child_context = lambda *args: Mock()
+
+    # Should return (not hang) and batch should reflect one FAILED and one SUCCEEDED
+    result = executor.execute(execution_state, executor_context)
+    statuses = {item.index: item.status for item in result.all}
+    assert statuses[0] == BatchItemStatus.FAILED
+    assert statuses[1] == BatchItemStatus.SUCCEEDED
