@@ -731,3 +731,6 @@ class ExecutionState:
         # Use JSON serialization to estimate size
         serialized = json.dumps(queued_op.operation_update.to_dict()).encode("utf-8")
         return len(serialized)
+
+    def close(self):
+        self.stop_checkpointing()

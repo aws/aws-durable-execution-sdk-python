@@ -592,17 +592,63 @@ def test_durable_execution_with_injected_client_failure():
 
     result = test_handler(invocation_input, lambda_context)
 
+    # small error, should not call checkpoint
     assert result["Status"] == InvocationStatus.FAILED.value
+    assert result["Error"] == {"ErrorMessage": "Test error", "ErrorType": "ValueError"}
+
+    assert not mock_client.checkpoint.called
+
+
+def test_durable_execution_with_large_error_payload():
+    """Test that large error payloads trigger checkpoint."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        raise ValueError(LARGE_RESULT)
+
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+
+    initial_state = InitialExecutionState(operations=[operation], next_marker="")
+
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=initial_state,
+        is_local_runner=False,
+        service_client=mock_client,
+    )
+
+    lambda_context = Mock()
+    lambda_context.aws_request_id = "test-request"
+    lambda_context.client_context = None
+    lambda_context.identity = None
+    lambda_context._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
+    lambda_context.invoked_function_arn = None
+    lambda_context.tenant_id = None
+
+    result = test_handler(invocation_input, lambda_context)
+
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert "Error" not in result
     mock_client.checkpoint.assert_called_once()
 
-    # Verify the checkpoint call was for execution failure
     call_args = mock_client.checkpoint.call_args
     updates = call_args[1]["updates"]
     assert len(updates) == 1
     assert updates[0].operation_type == OperationType.EXECUTION
     assert updates[0].action.value == "FAIL"
-    assert updates[0].error.message == "Test error"
-    assert updates[0].error.type == "ValueError"
+    assert updates[0].error.message == LARGE_RESULT
 
 
 def test_durable_execution_fatal_error_handling():
@@ -1404,11 +1450,11 @@ def test_durable_handler_background_thread_failure_on_error_checkpoint():
     # Make the service client checkpoint call fail on error handling
     mock_client.checkpoint.side_effect = failing_checkpoint
 
-    # Verify that the checkpoint error is raised (not the original ValueError)
-    with pytest.raises(
-        RuntimeError, match="Background checkpoint failed on error handling"
-    ):
-        test_handler(invocation_input, lambda_context)
+    # Verify that errors are not raised, but returned because response is small
+    resp = test_handler(invocation_input, lambda_context)
+    assert resp["Error"]["ErrorMessage"] == "User function error"
+    assert resp["Error"]["ErrorType"] == "ValueError"
+    assert resp["Status"] == InvocationStatus.FAILED.value
 
 
 def test_durable_execution_logs_checkpoint_error_extras_from_background_thread():
