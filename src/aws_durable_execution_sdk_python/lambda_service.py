@@ -495,7 +495,7 @@ class OperationUpdate:
     def create_execution_succeed(cls, payload: str) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: EXECUTION, action: SUCCEED."""
         return cls(
-            operation_id=f"execution-result-{datetime.datetime.now(tz=datetime.UTC)}",
+            operation_id=f"execution-result-{int(datetime.datetime.now(tz=datetime.UTC).timestamp() * 1000)}",
             operation_type=OperationType.EXECUTION,
             action=OperationAction.SUCCEED,
             payload=payload,
@@ -505,7 +505,7 @@ class OperationUpdate:
     def create_execution_fail(cls, error: ErrorObject) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: EXECUTION, action: FAIL."""
         return cls(
-            operation_id=f"execution-result-{datetime.datetime.now(tz=datetime.UTC)}",
+            operation_id=f"execution-result-{int(datetime.datetime.now(tz=datetime.UTC).timestamp() * 1000)}",
             operation_type=OperationType.EXECUTION,
             action=OperationAction.FAIL,
             error=error,
