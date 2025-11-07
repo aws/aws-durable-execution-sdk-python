@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from aws_durable_execution_sdk_python.concurrency.impl import (
+from aws_durable_execution_sdk_python.concurrency.executor import (
     ConcurrentExecutor,
     TimerScheduler,
 )
@@ -2519,7 +2519,7 @@ def test_operation_id_determinism_across_shuffles():
         executor_context.create_child_context = create_child_context
 
         with patch(
-            "aws_durable_execution_sdk_python.concurrency.impl.child_handler",
+            "aws_durable_execution_sdk_python.concurrency.executor.child_handler",
             patched_child_handler,
         ):
             executor.execute(execution_state, executor_context)
