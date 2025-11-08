@@ -11,7 +11,7 @@ from aws_durable_execution_sdk_python.config import (
     StepConfig,
     WaitForCallbackConfig,
 )
-from aws_durable_execution_sdk_python.exceptions import CallbackError
+from aws_durable_execution_sdk_python.exceptions import CallbackError, ValidationError
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
@@ -333,7 +333,7 @@ def test_create_callback_handler_with_none_operation_in_result():
 def test_create_callback_handler_with_negative_timeouts():
     """Test create_callback_handler with negative timeout values in config."""
     # Duration now validates that all values must be positive
-    with pytest.raises(ValueError, match="All duration values must be positive"):
+    with pytest.raises(ValidationError, match="Duration seconds must be positive"):
         CallbackConfig(
             timeout=Duration(seconds=-100), heartbeat_timeout=Duration(seconds=-50)
         )

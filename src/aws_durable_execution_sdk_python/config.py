@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from datetime import timedelta
 from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Generic, TypeVar
+
+from aws_durable_execution_sdk_python.exceptions import ValidationError
 
 P = TypeVar("P")  # Payload type
 R = TypeVar("R")  # Result type
@@ -26,49 +27,40 @@ if TYPE_CHECKING:
 Numeric = int | float  # deliberately leaving off complex
 
 
-@dataclass
+@dataclass(frozen=True)
 class Duration:
-    """Represents a duration with multiple time units."""
+    """Represents a duration stored as total seconds."""
 
-    days: int = 0
-    hours: int = 0
-    minutes: int = 0
     seconds: int = 0
 
     def __post_init__(self):
-        if any(v < 0 for v in [self.days, self.hours, self.minutes, self.seconds]):
-            msg = "All duration values must be positive"
-            raise ValueError(msg)
+        if self.seconds < 0:
+            msg = "Duration seconds must be positive"
+            raise ValidationError(msg)
 
     def to_seconds(self) -> int:
         """Convert the duration to total seconds."""
-        td = timedelta(
-            days=self.days,
-            hours=self.hours,
-            minutes=self.minutes,
-            seconds=self.seconds,
-        )
-        return int(td.total_seconds())
+        return self.seconds
 
     @classmethod
-    def from_seconds(cls, value: int) -> Duration:
+    def from_seconds(cls, value: float) -> Duration:
         """Create a Duration from total seconds."""
-        return cls(seconds=value)
+        return cls(seconds=int(value))
 
     @classmethod
-    def from_minutes(cls, value: int) -> Duration:
+    def from_minutes(cls, value: float) -> Duration:
         """Create a Duration from minutes."""
-        return cls(minutes=value)
+        return cls(seconds=int(value * 60))
 
     @classmethod
-    def from_hours(cls, value: int) -> Duration:
+    def from_hours(cls, value: float) -> Duration:
         """Create a Duration from hours."""
-        return cls(hours=value)
+        return cls(seconds=int(value * 3600))
 
     @classmethod
-    def from_days(cls, value: int) -> Duration:
+    def from_days(cls, value: float) -> Duration:
         """Create a Duration from days."""
-        return cls(days=value)
+        return cls(seconds=int(value * 86400))
 
 
 @dataclass(frozen=True)
