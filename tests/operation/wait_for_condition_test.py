@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     InvocationError,
@@ -78,7 +79,7 @@ def test_wait_for_condition_first_execution_condition_not_met():
         return state + 1
 
     def wait_strategy(state, attempt):
-        return WaitForConditionDecision.continue_waiting(30)
+        return WaitForConditionDecision.continue_waiting(Duration.from_seconds(30))
 
     config = WaitForConditionConfig(initial_state=5, wait_strategy=wait_strategy)
 
@@ -357,11 +358,11 @@ def test_wait_for_condition_delay_seconds_none():
         return state + 1
 
     def wait_strategy(state, attempt):
-        return WaitForConditionDecision(should_continue=True, delay_seconds=None)
+        return WaitForConditionDecision(should_continue=True, delay=Duration())
 
     config = WaitForConditionConfig(initial_state=5, wait_strategy=wait_strategy)
 
-    with pytest.raises(SuspendExecution, match="will retry in None seconds"):
+    with pytest.raises(SuspendExecution, match="will retry in 0 seconds"):
         wait_for_condition_handler(check_func, config, mock_state, op_id, mock_logger)
 
 
@@ -464,7 +465,9 @@ def test_wait_for_condition_custom_delay_seconds():
         return state + 1
 
     def wait_strategy(state, attempt):
-        return WaitForConditionDecision(should_continue=True, delay_seconds=60)
+        return WaitForConditionDecision(
+            should_continue=True, delay=Duration.from_minutes(1)
+        )
 
     config = WaitForConditionConfig(initial_state=5, wait_strategy=wait_strategy)
 
@@ -583,7 +586,9 @@ def test_wait_for_condition_zero_delay_seconds():
         return state + 1
 
     def wait_strategy(state, attempt):
-        return WaitForConditionDecision(should_continue=True, delay_seconds=0)
+        return WaitForConditionDecision(
+            should_continue=True, delay=Duration.from_seconds(0)
+        )
 
     config = WaitForConditionConfig(initial_state=5, wait_strategy=wait_strategy)
 

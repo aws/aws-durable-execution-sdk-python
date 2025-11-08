@@ -7,6 +7,7 @@ import pytest
 
 from aws_durable_execution_sdk_python.config import (
     CallbackConfig,
+    Duration,
     StepConfig,
     WaitForCallbackConfig,
 )
@@ -50,7 +51,9 @@ def test_create_callback_handler_new_operation_with_config():
         CheckpointedResult.create_from_operation(operation),
     ]
 
-    config = CallbackConfig(timeout_seconds=300, heartbeat_timeout_seconds=60)
+    config = CallbackConfig(
+        timeout=Duration.from_minutes(5), heartbeat_timeout=Duration.from_minutes(1)
+    )
 
     result = create_callback_handler(
         state=mock_state,
@@ -329,29 +332,11 @@ def test_create_callback_handler_with_none_operation_in_result():
 
 def test_create_callback_handler_with_negative_timeouts():
     """Test create_callback_handler with negative timeout values in config."""
-    mock_state = Mock(spec=ExecutionState)
-    callback_details = CallbackDetails(callback_id="negative_timeout_cb")
-    operation = Operation(
-        operation_id="negative_timeout",
-        operation_type=OperationType.CALLBACK,
-        status=OperationStatus.STARTED,
-        callback_details=callback_details,
-    )
-    mock_state.get_checkpoint_result.side_effect = [
-        CheckpointedResult.create_not_found(),
-        CheckpointedResult.create_from_operation(operation),
-    ]
-
-    config = CallbackConfig(timeout_seconds=-100, heartbeat_timeout_seconds=-50)
-
-    result = create_callback_handler(
-        state=mock_state,
-        operation_identifier=OperationIdentifier("negative_timeout", None),
-        config=config,
-    )
-
-    assert result == "negative_timeout_cb"
-    mock_state.create_checkpoint.assert_called_once()
+    # Duration now validates that all values must be positive
+    with pytest.raises(ValueError, match="All duration values must be positive"):
+        CallbackConfig(
+            timeout=Duration(seconds=-100), heartbeat_timeout=Duration(seconds=-50)
+        )
 
 
 def test_wait_for_callback_handler_with_none_callback_id():
@@ -498,7 +483,9 @@ def test_create_callback_handler_config_with_zero_timeouts():
         CheckpointedResult.create_from_operation(operation),
     ]
 
-    config = CallbackConfig(timeout_seconds=0, heartbeat_timeout_seconds=0)
+    config = CallbackConfig(
+        timeout=Duration.from_seconds(0), heartbeat_timeout=Duration.from_seconds(0)
+    )
 
     result = create_callback_handler(
         state=mock_state,
@@ -538,7 +525,10 @@ def test_create_callback_handler_config_with_large_timeouts():
         CheckpointedResult.create_from_operation(operation),
     ]
 
-    config = CallbackConfig(timeout_seconds=86400, heartbeat_timeout_seconds=3600)
+    config = CallbackConfig(
+        timeout=Duration.from_days(1),
+        heartbeat_timeout=Duration.from_hours(1),
+    )
 
     result = create_callback_handler(
         state=mock_state,
@@ -683,7 +673,9 @@ def test_wait_for_callback_handler_config_propagation():
     mock_context.create_callback.return_value = mock_callback
     mock_submitter = Mock()
 
-    config = WaitForCallbackConfig(timeout_seconds=120, heartbeat_timeout_seconds=30)
+    config = WaitForCallbackConfig(
+        timeout=Duration.from_minutes(2), heartbeat_timeout=Duration.from_seconds(30)
+    )
 
     result = wait_for_callback_handler(
         mock_context, mock_submitter, "config_test", config
@@ -772,7 +764,9 @@ def test_callback_lifecycle_complete_flow():
     mock_callback.result.return_value = {"status": "completed", "data": "test_data"}
     mock_context.create_callback.return_value = mock_callback
 
-    config = WaitForCallbackConfig(timeout_seconds=300, heartbeat_timeout_seconds=60)
+    config = WaitForCallbackConfig(
+        timeout=Duration.from_minutes(5), heartbeat_timeout=Duration.from_minutes(1)
+    )
     callback_id = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier("lifecycle_callback", None),
@@ -847,8 +841,8 @@ def test_callback_timeout_configuration():
         ]
 
         config = CallbackConfig(
-            timeout_seconds=timeout_seconds,
-            heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            timeout=Duration.from_seconds(timeout_seconds),
+            heartbeat_timeout=Duration.from_seconds(heartbeat_timeout_seconds),
         )
 
         callback_id = create_callback_handler(
@@ -1008,7 +1002,9 @@ def test_callback_operation_update_creation(mock_operation_update):
         CheckpointedResult.create_from_operation(operation),
     ]
 
-    config = CallbackConfig(timeout_seconds=600, heartbeat_timeout_seconds=120)
+    config = CallbackConfig(
+        timeout=Duration.from_minutes(10), heartbeat_timeout=Duration.from_minutes(2)
+    )
 
     create_callback_handler(
         state=mock_state,

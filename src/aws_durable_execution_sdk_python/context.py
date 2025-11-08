@@ -8,6 +8,7 @@ from aws_durable_execution_sdk_python.config import (
     BatchedInput,
     CallbackConfig,
     ChildConfig,
+    Duration,
     InvokeConfig,
     MapConfig,
     ParallelConfig,
@@ -447,15 +448,16 @@ class DurableContext(DurableContextProtocol):
             context_logger=self.logger,
         )
 
-    def wait(self, seconds: int, name: str | None = None) -> None:
+    def wait(self, duration: Duration, name: str | None = None) -> None:
         """Wait for a specified amount of time.
 
         Args:
-            seconds: Time to wait in seconds
+            duration: Duration to wait
             name: Optional name for the wait step
         """
+        seconds = duration.to_seconds()
         if seconds < 1:
-            msg = "seconds must be an integer greater than 0"
+            msg = "duration must be at least 1 second"
             raise ValidationError(msg)
         wait_handler(
             seconds=seconds,

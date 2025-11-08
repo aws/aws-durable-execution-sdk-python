@@ -9,6 +9,7 @@ from aws_durable_execution_sdk_python.config import (
     CheckpointMode,
     ChildConfig,
     CompletionConfig,
+    Duration,
     ItemBatcher,
     ItemsPerBatchUnit,
     MapConfig,
@@ -85,7 +86,7 @@ def test_parallel_config_defaults():
 
 def test_wait_for_condition_decision_continue():
     """Test WaitForConditionDecision.continue_waiting factory method."""
-    decision = WaitForConditionDecision.continue_waiting(30)
+    decision = WaitForConditionDecision.continue_waiting(Duration.from_seconds(30))
     assert decision.should_continue is True
     assert decision.delay_seconds == 30
 
@@ -94,14 +95,14 @@ def test_wait_for_condition_decision_stop():
     """Test WaitForConditionDecision.stop_polling factory method."""
     decision = WaitForConditionDecision.stop_polling()
     assert decision.should_continue is False
-    assert decision.delay_seconds == -1
+    assert decision.delay_seconds == 0
 
 
 def test_wait_for_condition_config():
     """Test WaitForConditionConfig with custom values."""
 
     def wait_strategy(state, attempt):
-        return WaitForConditionDecision.continue_waiting(10)
+        return WaitForConditionDecision.continue_waiting(Duration.from_seconds(10))
 
     serdes = Mock()
     config = WaitForConditionConfig(
@@ -237,7 +238,9 @@ def test_callback_config_with_values():
     """Test CallbackConfig with custom values."""
     serdes = Mock()
     config = CallbackConfig(
-        timeout_seconds=30, heartbeat_timeout_seconds=10, serdes=serdes
+        timeout=Duration.from_seconds(30),
+        heartbeat_timeout=Duration.from_seconds(10),
+        serdes=serdes,
     )
     assert config.timeout_seconds == 30
     assert config.heartbeat_timeout_seconds == 10

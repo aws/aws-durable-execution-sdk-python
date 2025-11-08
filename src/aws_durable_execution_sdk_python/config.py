@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from datetime import timedelta
 from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -23,6 +24,51 @@ if TYPE_CHECKING:
 
 
 Numeric = int | float  # deliberately leaving off complex
+
+
+@dataclass
+class Duration:
+    """Represents a duration with multiple time units."""
+
+    days: int = 0
+    hours: int = 0
+    minutes: int = 0
+    seconds: int = 0
+
+    def __post_init__(self):
+        if any(v < 0 for v in [self.days, self.hours, self.minutes, self.seconds]):
+            msg = "All duration values must be positive"
+            raise ValueError(msg)
+
+    def to_seconds(self) -> int:
+        """Convert the duration to total seconds."""
+        td = timedelta(
+            days=self.days,
+            hours=self.hours,
+            minutes=self.minutes,
+            seconds=self.seconds,
+        )
+        return int(td.total_seconds())
+
+    @classmethod
+    def from_seconds(cls, value: int) -> Duration:
+        """Create a Duration from total seconds."""
+        return cls(seconds=value)
+
+    @classmethod
+    def from_minutes(cls, value: int) -> Duration:
+        """Create a Duration from minutes."""
+        return cls(minutes=value)
+
+    @classmethod
+    def from_hours(cls, value: int) -> Duration:
+        """Create a Duration from hours."""
+        return cls(hours=value)
+
+    @classmethod
+    def from_days(cls, value: int) -> Duration:
+        """Create a Duration from days."""
+        return cls(days=value)
 
 
 @dataclass(frozen=True)
@@ -343,18 +389,33 @@ class MapConfig:
 @dataclass
 class InvokeConfig(Generic[P, R]):
     # retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
-    timeout_seconds: int = 0
+    timeout: Duration = field(default_factory=Duration)
     serdes_payload: SerDes[P] | None = None
     serdes_result: SerDes[R] | None = None
+
+    @property
+    def timeout_seconds(self) -> int:
+        """Get timeout in seconds."""
+        return self.timeout.to_seconds()
 
 
 @dataclass(frozen=True)
 class CallbackConfig:
     """Configuration for callbacks."""
 
-    timeout_seconds: int = 0
-    heartbeat_timeout_seconds: int = 0
+    timeout: Duration = field(default_factory=Duration)
+    heartbeat_timeout: Duration = field(default_factory=Duration)
     serdes: SerDes | None = None
+
+    @property
+    def timeout_seconds(self) -> int:
+        """Get timeout in seconds."""
+        return self.timeout.to_seconds()
+
+    @property
+    def heartbeat_timeout_seconds(self) -> int:
+        """Get heartbeat timeout in seconds."""
+        return self.heartbeat_timeout.to_seconds()
 
 
 @dataclass(frozen=True)

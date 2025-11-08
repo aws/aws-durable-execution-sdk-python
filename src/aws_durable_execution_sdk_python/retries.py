@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from aws_durable_execution_sdk_python.config import JitterStrategy
+from aws_durable_execution_sdk_python.config import Duration, JitterStrategy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -20,30 +20,47 @@ class RetryDecision:
     """Decision about whether to retry a step and with what delay."""
 
     should_retry: bool
-    delay_seconds: int
+    delay: Duration
+
+    @property
+    def delay_seconds(self) -> int:
+        """Get delay in seconds."""
+        return self.delay.to_seconds()
 
     @classmethod
-    def retry(cls, delay_seconds: int) -> RetryDecision:
+    def retry(cls, delay: Duration) -> RetryDecision:
         """Create a retry decision."""
-        return cls(should_retry=True, delay_seconds=delay_seconds)
+        return cls(should_retry=True, delay=delay)
 
     @classmethod
     def no_retry(cls) -> RetryDecision:
         """Create a no-retry decision."""
-        return cls(should_retry=False, delay_seconds=0)
+        return cls(should_retry=False, delay=Duration())
 
 
 @dataclass
 class RetryStrategyConfig:
     max_attempts: int = 3
-    initial_delay_seconds: int = 5
-    max_delay_seconds: int = 300  # 5 minutes
+    initial_delay: Duration = field(default_factory=lambda: Duration.from_seconds(5))
+    max_delay: Duration = field(
+        default_factory=lambda: Duration.from_minutes(5)
+    )  # 5 minutes
     backoff_rate: Numeric = 2.0
     jitter_strategy: JitterStrategy = field(default=JitterStrategy.FULL)
     retryable_errors: list[str | re.Pattern] = field(
         default_factory=lambda: [re.compile(r".*")]
     )
     retryable_error_types: list[type[Exception]] = field(default_factory=list)
+
+    @property
+    def initial_delay_seconds(self) -> int:
+        """Get initial delay in seconds."""
+        return self.initial_delay.to_seconds()
+
+    @property
+    def max_delay_seconds(self) -> int:
+        """Get max delay in seconds."""
+        return self.max_delay.to_seconds()
 
 
 def create_retry_strategy(
@@ -82,7 +99,7 @@ def create_retry_strategy(
         delay_with_jitter = math.ceil(delay_with_jitter)
         final_delay = max(1, delay_with_jitter)
 
-        return RetryDecision.retry(round(final_delay))
+        return RetryDecision.retry(Duration(seconds=round(final_delay)))
 
     return retry_strategy
 
@@ -101,8 +118,8 @@ class RetryPresets:
         return create_retry_strategy(
             RetryStrategyConfig(
                 max_attempts=6,
-                initial_delay_seconds=5,
-                max_delay_seconds=60,
+                initial_delay=Duration.from_seconds(5),
+                max_delay=Duration.from_minutes(1),
                 backoff_rate=2,
                 jitter_strategy=JitterStrategy.FULL,
             )
@@ -123,8 +140,8 @@ class RetryPresets:
         return create_retry_strategy(
             RetryStrategyConfig(
                 max_attempts=5,
-                initial_delay_seconds=5,
-                max_delay_seconds=300,
+                initial_delay=Duration.from_seconds(5),
+                max_delay=Duration.from_minutes(5),
                 backoff_rate=2,
             )
         )
@@ -135,8 +152,8 @@ class RetryPresets:
         return create_retry_strategy(
             RetryStrategyConfig(
                 max_attempts=10,
-                initial_delay_seconds=1,
-                max_delay_seconds=60,
+                initial_delay=Duration.from_seconds(1),
+                max_delay=Duration.from_minutes(1),
                 backoff_rate=1.5,
                 jitter_strategy=JitterStrategy.NONE,
             )

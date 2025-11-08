@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.retries import (
     JitterStrategy,
     RetryDecision,
@@ -70,7 +71,7 @@ class TestRetryDecision:
 
     def test_retry_factory(self):
         """Test retry factory method."""
-        decision = RetryDecision.retry(30)
+        decision = RetryDecision.retry(Duration.from_seconds(30))
         assert decision.should_retry is True
         assert decision.delay_seconds == 30
 
@@ -149,7 +150,7 @@ class TestCreateRetryStrategy:
         """Test exponential backoff delay calculation."""
         mock_random.return_value = 0.5
         config = RetryStrategyConfig(
-            initial_delay_seconds=2,
+            initial_delay=Duration.from_seconds(2),
             backoff_rate=2.0,
             jitter_strategy=JitterStrategy.FULL,
         )
@@ -168,8 +169,8 @@ class TestCreateRetryStrategy:
     def test_max_delay_cap(self):
         """Test delay is capped at max_delay_seconds."""
         config = RetryStrategyConfig(
-            initial_delay_seconds=100,
-            max_delay_seconds=50,
+            initial_delay=Duration.from_seconds(100),
+            max_delay=Duration.from_seconds(50),
             backoff_rate=2.0,
             jitter_strategy=JitterStrategy.NONE,
         )
@@ -182,7 +183,7 @@ class TestCreateRetryStrategy:
     def test_minimum_delay_one_second(self):
         """Test delay is at least 1 second."""
         config = RetryStrategyConfig(
-            initial_delay_seconds=0, jitter_strategy=JitterStrategy.NONE
+            initial_delay=Duration.from_seconds(0), jitter_strategy=JitterStrategy.NONE
         )
         strategy = create_retry_strategy(config)
 
@@ -194,7 +195,8 @@ class TestCreateRetryStrategy:
         """Test delay is rounded up using math.ceil."""
         with patch("random.random", return_value=0.3):
             config = RetryStrategyConfig(
-                initial_delay_seconds=3, jitter_strategy=JitterStrategy.FULL
+                initial_delay=Duration.from_seconds(3),
+                jitter_strategy=JitterStrategy.FULL,
             )
             strategy = create_retry_strategy(config)
 
@@ -287,7 +289,7 @@ class TestJitterIntegration:
         """Test full jitter integration in retry strategy."""
         mock_random.return_value = 0.8
         config = RetryStrategyConfig(
-            initial_delay_seconds=10, jitter_strategy=JitterStrategy.FULL
+            initial_delay=Duration.from_seconds(10), jitter_strategy=JitterStrategy.FULL
         )
         strategy = create_retry_strategy(config)
 
@@ -301,7 +303,7 @@ class TestJitterIntegration:
         """Test half jitter integration in retry strategy."""
         mock_random.return_value = 0.6
         config = RetryStrategyConfig(
-            initial_delay_seconds=10, jitter_strategy=JitterStrategy.HALF
+            initial_delay=Duration.from_seconds(10), jitter_strategy=JitterStrategy.HALF
         )
         strategy = create_retry_strategy(config)
 
@@ -315,7 +317,7 @@ class TestJitterIntegration:
         """Test half jitter with corrected understanding of implementation."""
         mock_random.return_value = 0.0  # Minimum jitter
         config = RetryStrategyConfig(
-            initial_delay_seconds=10, jitter_strategy=JitterStrategy.HALF
+            initial_delay=Duration.from_seconds(10), jitter_strategy=JitterStrategy.HALF
         )
         strategy = create_retry_strategy(config)
 
@@ -327,7 +329,7 @@ class TestJitterIntegration:
     def test_none_jitter_integration(self):
         """Test no jitter integration in retry strategy."""
         config = RetryStrategyConfig(
-            initial_delay_seconds=10, jitter_strategy=JitterStrategy.NONE
+            initial_delay=Duration.from_seconds(10), jitter_strategy=JitterStrategy.NONE
         )
         strategy = create_retry_strategy(config)
 
@@ -350,7 +352,9 @@ class TestEdgeCases:
     def test_zero_backoff_rate(self):
         """Test behavior with zero backoff rate."""
         config = RetryStrategyConfig(
-            initial_delay_seconds=5, backoff_rate=0, jitter_strategy=JitterStrategy.NONE
+            initial_delay=Duration.from_seconds(5),
+            backoff_rate=0,
+            jitter_strategy=JitterStrategy.NONE,
         )
         strategy = create_retry_strategy(config)
 
@@ -362,7 +366,7 @@ class TestEdgeCases:
     def test_fractional_backoff_rate(self):
         """Test behavior with fractional backoff rate."""
         config = RetryStrategyConfig(
-            initial_delay_seconds=8,
+            initial_delay=Duration.from_seconds(8),
             backoff_rate=0.5,
             jitter_strategy=JitterStrategy.NONE,
         )

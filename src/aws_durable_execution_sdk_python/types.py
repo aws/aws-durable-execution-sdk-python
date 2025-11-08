@@ -13,6 +13,7 @@ if TYPE_CHECKING:
         BatchedInput,
         CallbackConfig,
         ChildConfig,
+        Duration,
         MapConfig,
         ParallelConfig,
         StepConfig,
@@ -126,7 +127,7 @@ class DurableContext(Protocol):
         ...  # pragma: no cover
 
     @abstractmethod
-    def wait(self, seconds: int, name: str | None = None) -> None:
+    def wait(self, duration: Duration, name: str | None = None) -> None:
         """Wait for a specified amount of time."""
         ...  # pragma: no cover
 

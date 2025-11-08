@@ -10,6 +10,7 @@ import pytest
 from aws_durable_execution_sdk_python.config import (
     CallbackConfig,
     ChildConfig,
+    Duration,
     InvokeConfig,
     MapConfig,
     ParallelConfig,
@@ -523,7 +524,7 @@ def test_invoke_with_name_and_config(mock_handler):
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
-    config = InvokeConfig[str, str](timeout_seconds=30)
+    config = InvokeConfig[str, str](timeout=Duration.from_seconds(30))
 
     context = DurableContext(state=mock_state)
     [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
@@ -642,7 +643,7 @@ def test_invoke_with_custom_serdes(mock_handler):
     config = InvokeConfig[dict, dict](
         serdes_payload=CustomDictSerDes(),
         serdes_result=CustomDictSerDes(),
-        timeout_seconds=60,
+        timeout=Duration.from_minutes(1),
     )
 
     context = DurableContext(state=mock_state)
@@ -685,7 +686,7 @@ def test_wait_basic(mock_handler):
     operation_ids = operation_id_sequence()
     expected_operation_id = next(operation_ids)
 
-    context.wait(30)
+    context.wait(Duration.from_seconds(30))
 
     mock_handler.assert_called_once_with(
         seconds=30,
@@ -705,7 +706,7 @@ def test_wait_with_name(mock_handler):
     context = DurableContext(state=mock_state)
     [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
 
-    context.wait(60, name="test_wait")
+    context.wait(Duration.from_minutes(1), name="test_wait")
 
     seq = operation_id_sequence()
     [next(seq) for _ in range(5)]
@@ -729,7 +730,7 @@ def test_wait_with_parent_id(mock_handler):
     context = DurableContext(state=mock_state, parent_id="parent123")
     [context._create_step_id() for _ in range(2)]  # Set counter to 2 # noqa: SLF001
 
-    context.wait(45)
+    context.wait(Duration.from_seconds(45))
 
     seq = operation_id_sequence("parent123")
     [next(seq) for _ in range(2)]
@@ -753,8 +754,8 @@ def test_wait_increments_counter(mock_handler):
     context = DurableContext(state=mock_state)
     [context._create_step_id() for _ in range(10)]  # Set counter to 10 # noqa: SLF001
 
-    context.wait(15)
-    context.wait(25)
+    context.wait(Duration.from_seconds(15))
+    context.wait(Duration.from_seconds(25))
 
     seq = operation_id_sequence()
     [next(seq) for _ in range(10)]
@@ -780,7 +781,7 @@ def test_wait_returns_none(mock_handler):
 
     context = DurableContext(state=mock_state)
 
-    result = context.wait(10)
+    result = context.wait(Duration.from_seconds(10))
 
     assert result is None
 
@@ -796,7 +797,7 @@ def test_wait_with_time_less_than_one(mock_handler):
     context = DurableContext(state=mock_state)
 
     with pytest.raises(ValidationError):
-        context.wait(0)
+        context.wait(Duration.from_seconds(0))
 
 
 # endregion wait

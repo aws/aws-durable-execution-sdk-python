@@ -2,7 +2,7 @@
 
 from unittest.mock import patch
 
-from aws_durable_execution_sdk_python.config import JitterStrategy
+from aws_durable_execution_sdk_python.config import Duration, JitterStrategy
 from aws_durable_execution_sdk_python.serdes import JsonSerDes
 from aws_durable_execution_sdk_python.waits import (
     WaitDecision,
@@ -18,7 +18,7 @@ class TestWaitDecision:
 
     def test_wait_factory(self):
         """Test wait factory method."""
-        decision = WaitDecision.wait(30)
+        decision = WaitDecision.wait(Duration.from_seconds(30))
         assert decision.should_wait is True
         assert decision.delay_seconds == 30
 
@@ -34,7 +34,7 @@ class TestWaitForConditionDecision:
 
     def test_continue_waiting_factory(self):
         """Test continue_waiting factory method."""
-        decision = WaitForConditionDecision.continue_waiting(45)
+        decision = WaitForConditionDecision.continue_waiting(Duration.from_seconds(45))
         assert decision.should_continue is True
         assert decision.delay_seconds == 45
 
@@ -42,7 +42,7 @@ class TestWaitForConditionDecision:
         """Test stop_polling factory method."""
         decision = WaitForConditionDecision.stop_polling()
         assert decision.should_continue is False
-        assert decision.delay_seconds == -1
+        assert decision.delay_seconds == 0
 
 
 class TestWaitStrategyConfig:
@@ -97,7 +97,7 @@ class TestCreateWaitStrategy:
         mock_random.return_value = 0.5
         config = WaitStrategyConfig(
             should_continue_polling=lambda x: True,
-            initial_delay_seconds=2,
+            initial_delay=Duration.from_seconds(2),
             backoff_rate=2.0,
             jitter_strategy=JitterStrategy.FULL,
         )
@@ -117,8 +117,8 @@ class TestCreateWaitStrategy:
         """Test delay is capped at max_delay_seconds."""
         config = WaitStrategyConfig(
             should_continue_polling=lambda x: True,
-            initial_delay_seconds=100,
-            max_delay_seconds=50,
+            initial_delay=Duration.from_seconds(100),
+            max_delay=Duration.from_seconds(50),
             backoff_rate=2.0,
             jitter_strategy=JitterStrategy.NONE,
         )
@@ -132,7 +132,7 @@ class TestCreateWaitStrategy:
         """Test delay is at least 1 second."""
         config = WaitStrategyConfig(
             should_continue_polling=lambda x: True,
-            initial_delay_seconds=0,
+            initial_delay=Duration.from_seconds(0),
             jitter_strategy=JitterStrategy.NONE,
         )
         strategy = create_wait_strategy(config)
@@ -147,7 +147,7 @@ class TestCreateWaitStrategy:
         mock_random.return_value = 0.8
         config = WaitStrategyConfig(
             should_continue_polling=lambda x: True,
-            initial_delay_seconds=10,
+            initial_delay=Duration.from_seconds(10),
             jitter_strategy=JitterStrategy.FULL,
         )
         strategy = create_wait_strategy(config)
@@ -163,7 +163,7 @@ class TestCreateWaitStrategy:
         mock_random.return_value = 0.0  # Minimum jitter
         config = WaitStrategyConfig(
             should_continue_polling=lambda x: True,
-            initial_delay_seconds=10,
+            initial_delay=Duration.from_seconds(10),
             jitter_strategy=JitterStrategy.HALF,
         )
         strategy = create_wait_strategy(config)
@@ -177,7 +177,7 @@ class TestCreateWaitStrategy:
         """Test no jitter integration in wait strategy."""
         config = WaitStrategyConfig(
             should_continue_polling=lambda x: True,
-            initial_delay_seconds=10,
+            initial_delay=Duration.from_seconds(10),
             jitter_strategy=JitterStrategy.NONE,
         )
         strategy = create_wait_strategy(config)
@@ -244,7 +244,7 @@ class TestEdgeCases:
         """Test behavior with zero backoff rate."""
         config = WaitStrategyConfig(
             should_continue_polling=lambda x: True,
-            initial_delay_seconds=5,
+            initial_delay=Duration.from_seconds(5),
             backoff_rate=0,
             jitter_strategy=JitterStrategy.NONE,
         )
@@ -259,7 +259,7 @@ class TestEdgeCases:
         """Test behavior with fractional backoff rate."""
         config = WaitStrategyConfig(
             should_continue_polling=lambda x: True,
-            initial_delay_seconds=8,
+            initial_delay=Duration.from_seconds(8),
             backoff_rate=0.5,
             jitter_strategy=JitterStrategy.NONE,
         )
@@ -274,8 +274,8 @@ class TestEdgeCases:
         """Test behavior with large backoff rate hits max delay."""
         config = WaitStrategyConfig(
             should_continue_polling=lambda x: True,
-            initial_delay_seconds=10,
-            max_delay_seconds=100,
+            initial_delay=Duration.from_seconds(10),
+            max_delay=Duration.from_seconds(100),
             backoff_rate=10.0,
             jitter_strategy=JitterStrategy.NONE,
         )
@@ -307,7 +307,7 @@ class TestEdgeCases:
         """Test negative delay is clamped to 1."""
         config = WaitStrategyConfig(
             should_continue_polling=lambda x: True,
-            initial_delay_seconds=0,
+            initial_delay=Duration.from_seconds(0),
             backoff_rate=0,
             jitter_strategy=JitterStrategy.NONE,
         )
@@ -323,7 +323,7 @@ class TestEdgeCases:
         mock_random.return_value = 0.3
         config = WaitStrategyConfig(
             should_continue_polling=lambda x: True,
-            initial_delay_seconds=3,
+            initial_delay=Duration.from_seconds(3),
             jitter_strategy=JitterStrategy.FULL,
         )
         strategy = create_wait_strategy(config)
@@ -341,7 +341,7 @@ class TestWaitForConditionConfig:
         """Test creating WaitForConditionConfig."""
 
         def wait_strategy(state, attempt):
-            return WaitForConditionDecision.continue_waiting(10)
+            return WaitForConditionDecision.continue_waiting(Duration.from_seconds(10))
 
         config = WaitForConditionConfig(
             wait_strategy=wait_strategy, initial_state={"count": 0}

@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from aws_durable_execution_sdk_python.config import (
+    Duration,
     StepConfig,
     StepSemantics,
 )
@@ -290,7 +291,7 @@ def test_step_handler_retry_success():
     mock_state.durable_execution_arn = "test_arn"
 
     mock_retry_strategy = Mock(
-        return_value=RetryDecision(should_retry=True, delay_seconds=5)
+        return_value=RetryDecision(should_retry=True, delay=Duration.from_seconds(5))
     )
     config = StepConfig(retry_strategy=mock_retry_strategy)
     mock_callable = Mock(side_effect=RuntimeError("Test error"))
@@ -333,7 +334,7 @@ def test_step_handler_retry_exhausted():
     mock_state.durable_execution_arn = "test_arn"
 
     mock_retry_strategy = Mock(
-        return_value=RetryDecision(should_retry=False, delay_seconds=0)
+        return_value=RetryDecision(should_retry=False, delay=Duration.from_seconds(0))
     )
     config = StepConfig(retry_strategy=mock_retry_strategy)
     mock_callable = Mock(side_effect=RuntimeError("Test error"))
@@ -376,7 +377,7 @@ def test_step_handler_retry_interrupted_error():
     mock_state.durable_execution_arn = "test_arn"
 
     mock_retry_strategy = Mock(
-        return_value=RetryDecision(should_retry=False, delay_seconds=0)
+        return_value=RetryDecision(should_retry=False, delay=Duration.from_seconds(0))
     )
     config = StepConfig(retry_strategy=mock_retry_strategy)
     interrupted_error = StepInterruptedError("Step interrupted")
@@ -415,7 +416,7 @@ def test_step_handler_retry_with_existing_attempts():
     mock_state.durable_execution_arn = "test_arn"
 
     mock_retry_strategy = Mock(
-        return_value=RetryDecision(should_retry=True, delay_seconds=10)
+        return_value=RetryDecision(should_retry=True, delay=Duration.from_seconds(10))
     )
     config = StepConfig(retry_strategy=mock_retry_strategy)
     mock_callable = Mock(side_effect=RuntimeError("Test error"))
@@ -451,7 +452,7 @@ def test_step_handler_pending_without_existing_attempts():
     mock_state.durable_execution_arn = "test_arn"
 
     mock_retry_strategy = Mock(
-        return_value=RetryDecision(should_retry=True, delay_seconds=10)
+        return_value=RetryDecision(should_retry=True, delay=Duration.from_seconds(10))
     )
     config = StepConfig(retry_strategy=mock_retry_strategy)
     mock_callable = Mock(side_effect=RuntimeError("Test error"))

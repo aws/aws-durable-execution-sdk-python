@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from aws_durable_execution_sdk_python.config import InvokeConfig
+from aws_durable_execution_sdk_python.config import Duration, InvokeConfig
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     ExecutionError,
@@ -204,7 +204,7 @@ def test_invoke_handler_already_started_with_timeout(status):
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
 
-    config = InvokeConfig[str, str](timeout_seconds=30)
+    config = InvokeConfig[str, str](timeout=Duration.from_seconds(30))
 
     with pytest.raises(TimedSuspendExecution):
         invoke_handler(
@@ -224,7 +224,7 @@ def test_invoke_handler_new_operation():
     mock_result = CheckpointedResult.create_not_found()
     mock_state.get_checkpoint_result.return_value = mock_result
 
-    config = InvokeConfig[str, str](timeout_seconds=60)
+    config = InvokeConfig[str, str](timeout=Duration.from_minutes(1))
 
     with pytest.raises(
         SuspendExecution, match="Invoke invoke8 started, suspending for completion"
@@ -257,7 +257,7 @@ def test_invoke_handler_new_operation_with_timeout():
     mock_result = CheckpointedResult.create_not_found()
     mock_state.get_checkpoint_result.return_value = mock_result
 
-    config = InvokeConfig[str, str](timeout_seconds=30)
+    config = InvokeConfig[str, str](timeout=Duration.from_seconds(30))
 
     with pytest.raises(TimedSuspendExecution):
         invoke_handler(
@@ -277,7 +277,7 @@ def test_invoke_handler_new_operation_no_timeout():
     mock_result = CheckpointedResult.create_not_found()
     mock_state.get_checkpoint_result.return_value = mock_result
 
-    config = InvokeConfig[str, str](timeout_seconds=0)
+    config = InvokeConfig[str, str](timeout=Duration.from_seconds(0))
 
     with pytest.raises(SuspendExecution):
         invoke_handler(

@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
     durable_step,
@@ -238,7 +239,7 @@ def test_wait_inside_run_in_childcontext():
     @durable_with_child_context
     def func(child_context: DurableContext, a: int, b: int):
         mock_inside_child(a, b)
-        child_context.wait(1)
+        child_context.wait(Duration.from_seconds(1))
 
     @durable_execution
     def my_handler(event, context):
@@ -409,7 +410,7 @@ def test_wait_not_caught_by_exception():
     @durable_execution
     def my_handler(event: Any, context: DurableContext):
         try:
-            context.wait(1)
+            context.wait(Duration.from_seconds(1))
         except Exception as err:
             msg = "This should not be caught"
             raise CustomError(msg) from err
