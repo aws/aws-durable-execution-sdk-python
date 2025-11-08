@@ -708,6 +708,7 @@
         {"shape":"RequestTooLargeException"},
         {"shape":"KMSDisabledException"},
         {"shape":"UnsupportedMediaTypeException"},
+        {"shape":"SerializedRequestEntityTooLargeException"},
         {"shape":"InvalidRuntimeException"},
         {"shape":"EC2UnexpectedException"},
         {"shape":"InvalidSubnetIDException"},
@@ -771,6 +772,7 @@
         {"shape":"RequestTooLargeException"},
         {"shape":"KMSDisabledException"},
         {"shape":"UnsupportedMediaTypeException"},
+        {"shape":"SerializedRequestEntityTooLargeException"},
         {"shape":"InvalidRuntimeException"},
         {"shape":"EC2UnexpectedException"},
         {"shape":"InvalidSubnetIDException"},
@@ -839,7 +841,8 @@
       "errors":[
         {"shape":"InvalidParameterValueException"},
         {"shape":"TooManyRequestsException"},
-        {"shape":"ServiceException"}
+        {"shape":"ServiceException"},
+        {"shape":"ResourceNotFoundException"}
       ],
       "readonly":true
     },
@@ -1596,7 +1599,8 @@
         "FunctionUrlAuthType":{
           "shape":"FunctionUrlAuthType",
           "documentation":"<p>The type of authentication that your function URL uses. Set to <code>AWS_IAM</code> if you want to restrict access to authenticated users only. Set to <code>NONE</code> if you want to bypass IAM authentication to create a public endpoint. For more information, see <a href=\"https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html\">Security and auth model for Lambda function URLs</a>.</p>"
-        }
+        },
+        "InvokedViaFunctionUrl":{"shape":"InvokedViaFunctionUrl"}
       }
     },
     "AddPermissionResponse":{
@@ -1846,24 +1850,20 @@
     },
     "ChainedInvokeOptions":{
       "type":"structure",
+      "required":["FunctionName"],
       "members":{
-        "FunctionName":{"shape":"FunctionName"}
-      }
-    },
-    "ChainedInvokePendingDetails":{
-      "type":"structure",
-      "required":[
-        "Input",
-        "FunctionName"
-      ],
-      "members":{
-        "Input":{"shape":"EventInput"},
-        "FunctionName":{"shape":"FunctionName"}
+        "FunctionName":{"shape":"FunctionName"},
+        "TenantId":{"shape":"TenantId"}
       }
     },
     "ChainedInvokeStartedDetails":{
       "type":"structure",
+      "required":["FunctionName"],
       "members":{
+        "FunctionName":{"shape":"FunctionName"},
+        "TenantId":{"shape":"TenantId"},
+        "Input":{"shape":"EventInput"},
+        "ExecutedVersion":{"shape":"Version"},
         "DurableExecutionArn":{"shape":"DurableExecutionArn"}
       }
     },
@@ -1902,7 +1902,10 @@
         },
         "CheckpointToken":{"shape":"CheckpointToken"},
         "Updates":{"shape":"OperationUpdates"},
-        "ClientToken":{"shape":"ClientToken"}
+        "ClientToken":{
+          "shape":"ClientToken",
+          "idempotencyToken":true
+        }
       }
     },
     "CheckpointDurableExecutionResponse":{
@@ -2992,7 +2995,6 @@
         "StepStartedDetails":{"shape":"StepStartedDetails"},
         "StepSucceededDetails":{"shape":"StepSucceededDetails"},
         "StepFailedDetails":{"shape":"StepFailedDetails"},
-        "ChainedInvokePendingDetails":{"shape":"ChainedInvokePendingDetails"},
         "ChainedInvokeStartedDetails":{"shape":"ChainedInvokeStartedDetails"},
         "ChainedInvokeSucceededDetails":{"shape":"ChainedInvokeSucceededDetails"},
         "ChainedInvokeFailedDetails":{"shape":"ChainedInvokeFailedDetails"},
@@ -3226,12 +3228,11 @@
         "StepStarted",
         "StepSucceeded",
         "StepFailed",
-        "ChainedInvokePending",
         "ChainedInvokeStarted",
         "ChainedInvokeSucceeded",
         "ChainedInvokeFailed",
         "ChainedInvokeTimedOut",
-        "ChainedInvokeCancelled",
+        "ChainedInvokeStopped",
         "CallbackStarted",
         "CallbackSucceeded",
         "CallbackFailed",
@@ -4667,21 +4668,7 @@
         }
       },
       "documentation":"<p>A success response (<code>202 Accepted</code>) indicates that the request is queued for invocation.</p>",
-      "deprecated":true,
-      "payload":"Body"
-    },
-    "InvokeCancelledDetails":{
-      "type":"structure",
-      "members":{
-        "Error":{"shape":"EventError"}
-      }
-    },
-    "InvokeFailedDetails":{
-      "type":"structure",
-      "members":{
-        "Error":{"shape":"EventError"},
-        "RetryDetails":{"shape":"RetryDetails"}
-      }
+      "deprecated":true
     },
     "InvokeMode":{
       "type":"string",
@@ -4803,6 +4790,10 @@
       },
       "documentation":"<p>An object that includes a chunk of the response payload. When the stream has ended, Lambda includes a <code>InvokeComplete</code> object.</p>",
       "eventstream":true
+    },
+    "InvokedViaFunctionUrl":{
+      "type":"boolean",
+      "box":true
     },
     "ItemCount":{
       "type":"integer",
@@ -5886,7 +5877,7 @@
       "type":"string",
       "max":256,
       "min":1,
-      "pattern":"[a-zA-Z0-9-_]+"
+      "pattern":"[\\x20-\\x7E]+"
     },
     "OperationPayload":{
       "type":"string",
@@ -5911,7 +5902,7 @@
       "type":"string",
       "max":32,
       "min":1,
-      "pattern":"[a-zA-Z-_]+"
+      "pattern":"[a-zA-Z0-9-_]+"
     },
     "OperationType":{
       "type":"string",
@@ -6860,6 +6851,18 @@
       "type":"string",
       "sensitive":true
     },
+    "SerializedRequestEntityTooLargeException":{
+      "type":"structure",
+      "members":{
+        "Type":{"shape":"String"},
+        "message":{"shape":"String"}
+      },
+      "error":{
+        "httpStatusCode":413,
+        "senderFault":true
+      },
+      "exception":true
+    },
     "ServiceException":{
       "type":"structure",
       "members":{
@@ -7212,6 +7215,12 @@
       "max":1000,
       "min":84,
       "pattern":".*"
+    },
+    "TenantId":{
+      "type":"string",
+      "max":256,
+      "min":1,
+      "pattern":"[a-zA-Z0-9\\._:\\/=+\\-@ ]+"
     },
     "ThrottleReason":{
       "type":"string",
