@@ -4,6 +4,7 @@ import time
 from unittest.mock import patch
 
 import pytest
+from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
@@ -41,11 +42,83 @@ def test_invocation_error():
 
 def test_checkpoint_error():
     """Test CheckpointError exception."""
-    error = CheckpointError("checkpoint failed")
+    error = CheckpointError("checkpoint failed", error_kind="Execution")
     assert str(error) == "checkpoint failed"
     assert isinstance(error, InvocationError)
     assert isinstance(error, UnrecoverableError)
     assert error.termination_reason == TerminationReason.CHECKPOINT_FAILED
+
+
+def test_checkpoint_error_classification_invalid_token_invocation():
+    """Test 4xx InvalidParameterValueException with Invalid Checkpoint Token is invocation error."""
+    error_response = {
+        "Error": {
+            "Code": "InvalidParameterValueException",
+            "Message": "Invalid Checkpoint Token: token expired",
+        },
+        "ResponseMetadata": {"HTTPStatusCode": 400},
+    }
+    client_error = ClientError(error_response, "Checkpoint")
+
+    result = CheckpointError.from_exception(client_error)
+
+    assert result.error_kind == "Invocation"
+    assert not result.should_be_retried()
+
+
+def test_checkpoint_error_classification_other_4xx_execution():
+    """Test other 4xx errors are execution errors."""
+    error_response = {
+        "Error": {"Code": "ValidationException", "Message": "Invalid parameter value"},
+        "ResponseMetadata": {"HTTPStatusCode": 400},
+    }
+    client_error = ClientError(error_response, "Checkpoint")
+
+    result = CheckpointError.from_exception(client_error)
+
+    assert result.error_kind == "Execution"
+    assert result.should_be_retried()
+
+
+def test_checkpoint_error_classification_invalid_param_without_token_execution():
+    """Test 4xx InvalidParameterValueException without Invalid Checkpoint Token is execution error."""
+    error_response = {
+        "Error": {
+            "Code": "InvalidParameterValueException",
+            "Message": "Some other invalid parameter",
+        },
+        "ResponseMetadata": {"HTTPStatusCode": 400},
+    }
+    client_error = ClientError(error_response, "Checkpoint")
+
+    result = CheckpointError.from_exception(client_error)
+
+    assert result.error_kind == "Execution"
+    assert result.should_be_retried()
+
+
+def test_checkpoint_error_classification_5xx_invocation():
+    """Test 5xx errors are invocation errors."""
+    error_response = {
+        "Error": {"Code": "InternalServerError", "Message": "Service unavailable"},
+        "ResponseMetadata": {"HTTPStatusCode": 500},
+    }
+    client_error = ClientError(error_response, "Checkpoint")
+
+    result = CheckpointError.from_exception(client_error)
+
+    assert result.error_kind == "Invocation"
+    assert not result.should_be_retried()
+
+
+def test_checkpoint_error_classification_unknown_invocation():
+    """Test unknown errors are invocation errors."""
+    unknown_error = Exception("Network timeout")
+
+    result = CheckpointError.from_exception(unknown_error)
+
+    assert result.error_kind == "Invocation"
+    assert not result.should_be_retried()
 
 
 def test_validation_error():

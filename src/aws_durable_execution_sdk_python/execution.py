@@ -321,6 +321,16 @@ def durable_execution(
                 else:
                     logger.exception("Checkpoint processing failed")
                 # Raise the original exception
+                if (
+                    isinstance(bg_error.source_exception, CheckpointError)
+                    and bg_error.source_exception.should_be_retried()
+                ):
+                    raise bg_error.source_exception from None  # Terminate Lambda immediately and have it be retried
+                if isinstance(bg_error.source_exception, CheckpointError):
+                    return DurableExecutionInvocationOutput(
+                        status=InvocationStatus.FAILED,
+                        error=ErrorObject.from_exception(bg_error.source_exception),
+                    ).to_dict()
                 raise bg_error.source_exception from bg_error
 
             except SuspendExecution:
@@ -336,7 +346,11 @@ def durable_execution(
                     "Checkpoint system failed",
                     extra=e.build_logger_extras(),
                 )
-                raise  # Terminate Lambda immediately
+                if e.should_be_retried():
+                    raise  # Terminate Lambda immediately and have it be retried
+                return DurableExecutionInvocationOutput(
+                    status=InvocationStatus.FAILED, error=ErrorObject.from_exception(e)
+                ).to_dict()
             except InvocationError:
                 logger.exception("Invocation error. Must terminate.")
                 # Throw the error to trigger Lambda retry

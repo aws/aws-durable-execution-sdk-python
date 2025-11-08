@@ -8,7 +8,10 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Self, TypedDict
+from typing import TYPE_CHECKING, Literal, Self, TypedDict
+
+BAD_REQUEST_ERROR: int = 400
+SERVICE_ERROR: int = 500
 
 if TYPE_CHECKING:
     import datetime
@@ -22,7 +25,7 @@ class AwsErrorObj(TypedDict):
 class AwsErrorMetadata(TypedDict):
     RequestId: str | None
     HostId: str | None
-    HTTPStatusCode: str | None
+    HTTPStatusCode: int | None
     HTTPHeaders: str | None
     RetryAttempts: str | None
 
@@ -121,12 +124,16 @@ class NonDeterministicExecutionError(ExecutionError):
         self.step_id = step_id
 
 
+CheckpointErrorKind = Literal["Execution", "Invocation"]
+
+
 class CheckpointError(BotoClientError):
     """Failure to checkpoint. Will terminate the lambda."""
 
     def __init__(
         self,
         message: str,
+        error_kind: CheckpointErrorKind,
         error: AwsErrorObj | None = None,
         response_metadata: AwsErrorMetadata | None = None,
     ):
@@ -136,6 +143,40 @@ class CheckpointError(BotoClientError):
             response_metadata,
             termination_reason=TerminationReason.CHECKPOINT_FAILED,
         )
+        self.error_kind: CheckpointErrorKind = error_kind
+
+    @classmethod
+    def from_exception(cls, exception: Exception) -> CheckpointError:
+        base = BotoClientError.from_exception(exception)
+        metadata: AwsErrorMetadata | None = base.response_metadata
+        error: AwsErrorObj | None = base.error
+        error_kind: CheckpointErrorKind = "Invocation"
+
+        # InvalidParameterValueException and error message starts with "Invalid Checkpoint Token" is an InvocationError
+        # all other 4xx errors are Execution Errors and should be retried
+        # all 5xx errors are Invocation Errors
+        status_code: int | None = (metadata and metadata.get("HTTPStatusCode")) or None
+        if (
+            status_code
+            # if we are in 4xx range and is not an InvalidParameterValueException with Invalid Checkpoint Token
+            # then it's an execution error
+            and status_code < SERVICE_ERROR
+            and status_code >= BAD_REQUEST_ERROR
+            and error
+            and (
+                # is not InvalidParam => Execution
+                (error.get("Code", "") or "") != "InvalidParameterValueException"
+                # is not Invalid Token => Execution
+                or not (error.get("Message") or "").startswith(
+                    "Invalid Checkpoint Token"
+                )
+            )
+        ):
+            error_kind = "Execution"
+        return CheckpointError(str(exception), error_kind, error, metadata)
+
+    def should_be_retried(self):
+        return self.error_kind == "Execution"
 
 
 class ValidationError(DurableExecutionsError):
