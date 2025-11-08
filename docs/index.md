@@ -1,6 +1,6 @@
 # AWS Durable Execution SDK for Python
 
-> **Using JavaScript or TypeScript?** Check out the [AWS Durable Execution SDK for JavaScript](https://github.com/awslabs/aws-durable-execution-sdk-js) instead.
+> **Using JavaScript or TypeScript?** Check out the [AWS Durable Execution SDK for JavaScript](https://github.com/aws/aws-durable-execution-sdk-js) instead.
 
 ## Table of Contents
 
