@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, Self, TypedDict
+from typing import TYPE_CHECKING, Self, TypedDict
 
 BAD_REQUEST_ERROR: int = 400
 SERVICE_ERROR: int = 500
@@ -124,7 +124,9 @@ class NonDeterministicExecutionError(ExecutionError):
         self.step_id = step_id
 
 
-CheckpointErrorKind = Literal["Execution", "Invocation"]
+class CheckpointErrorCategory(Enum):
+    INVOCATION = "INVOCATION"
+    EXECUTION = "EXECUTION"
 
 
 class CheckpointError(BotoClientError):
@@ -133,7 +135,7 @@ class CheckpointError(BotoClientError):
     def __init__(
         self,
         message: str,
-        error_kind: CheckpointErrorKind,
+        error_category: CheckpointErrorCategory,
         error: AwsErrorObj | None = None,
         response_metadata: AwsErrorMetadata | None = None,
     ):
@@ -143,14 +145,14 @@ class CheckpointError(BotoClientError):
             response_metadata,
             termination_reason=TerminationReason.CHECKPOINT_FAILED,
         )
-        self.error_kind: CheckpointErrorKind = error_kind
+        self.error_category: CheckpointErrorCategory = error_category
 
     @classmethod
     def from_exception(cls, exception: Exception) -> CheckpointError:
         base = BotoClientError.from_exception(exception)
         metadata: AwsErrorMetadata | None = base.response_metadata
         error: AwsErrorObj | None = base.error
-        error_kind: CheckpointErrorKind = "Invocation"
+        error_category: CheckpointErrorCategory = CheckpointErrorCategory.INVOCATION
 
         # InvalidParameterValueException and error message starts with "Invalid Checkpoint Token" is an InvocationError
         # all other 4xx errors are Execution Errors and should be retried
@@ -172,11 +174,11 @@ class CheckpointError(BotoClientError):
                 )
             )
         ):
-            error_kind = "Execution"
-        return CheckpointError(str(exception), error_kind, error, metadata)
+            error_category = CheckpointErrorCategory.EXECUTION
+        return CheckpointError(str(exception), error_category, error, metadata)
 
-    def should_be_retried(self):
-        return self.error_kind == "Execution"
+    def is_retriable(self):
+        return self.error_category == CheckpointErrorCategory.EXECUTION
 
 
 class ValidationError(DurableExecutionsError):

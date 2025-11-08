@@ -10,6 +10,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     CallableRuntimeErrorSerializableDetails,
     CheckpointError,
+    CheckpointErrorCategory,
     DurableExecutionsError,
     ExecutionError,
     InvocationError,
@@ -42,7 +43,9 @@ def test_invocation_error():
 
 def test_checkpoint_error():
     """Test CheckpointError exception."""
-    error = CheckpointError("checkpoint failed", error_kind="Execution")
+    error = CheckpointError(
+        "checkpoint failed", error_category=CheckpointErrorCategory.EXECUTION
+    )
     assert str(error) == "checkpoint failed"
     assert isinstance(error, InvocationError)
     assert isinstance(error, UnrecoverableError)
@@ -62,8 +65,8 @@ def test_checkpoint_error_classification_invalid_token_invocation():
 
     result = CheckpointError.from_exception(client_error)
 
-    assert result.error_kind == "Invocation"
-    assert not result.should_be_retried()
+    assert result.error_category == CheckpointErrorCategory.INVOCATION
+    assert not result.is_retriable()
 
 
 def test_checkpoint_error_classification_other_4xx_execution():
@@ -76,8 +79,8 @@ def test_checkpoint_error_classification_other_4xx_execution():
 
     result = CheckpointError.from_exception(client_error)
 
-    assert result.error_kind == "Execution"
-    assert result.should_be_retried()
+    assert result.error_category == CheckpointErrorCategory.EXECUTION
+    assert result.is_retriable()
 
 
 def test_checkpoint_error_classification_invalid_param_without_token_execution():
@@ -93,8 +96,8 @@ def test_checkpoint_error_classification_invalid_param_without_token_execution()
 
     result = CheckpointError.from_exception(client_error)
 
-    assert result.error_kind == "Execution"
-    assert result.should_be_retried()
+    assert result.error_category == CheckpointErrorCategory.EXECUTION
+    assert result.is_retriable()
 
 
 def test_checkpoint_error_classification_5xx_invocation():
@@ -107,8 +110,8 @@ def test_checkpoint_error_classification_5xx_invocation():
 
     result = CheckpointError.from_exception(client_error)
 
-    assert result.error_kind == "Invocation"
-    assert not result.should_be_retried()
+    assert result.error_category == CheckpointErrorCategory.INVOCATION
+    assert not result.is_retriable()
 
 
 def test_checkpoint_error_classification_unknown_invocation():
@@ -117,8 +120,8 @@ def test_checkpoint_error_classification_unknown_invocation():
 
     result = CheckpointError.from_exception(unknown_error)
 
-    assert result.error_kind == "Invocation"
-    assert not result.should_be_retried()
+    assert result.error_category == CheckpointErrorCategory.INVOCATION
+    assert not result.is_retriable()
 
 
 def test_validation_error():

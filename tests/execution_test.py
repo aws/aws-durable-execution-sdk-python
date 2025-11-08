@@ -13,6 +13,7 @@ from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     BotoClientError,
     CheckpointError,
+    CheckpointErrorCategory,
     ExecutionError,
     InvocationError,
     SuspendExecution,
@@ -1045,7 +1046,7 @@ def test_durable_execution_checkpoint_error_in_background_thread():
     # Make the background checkpoint thread fail immediately
     def failing_checkpoint(*args, **kwargs):
         msg = "Background checkpoint failed"
-        raise CheckpointError(msg, error_kind="Execution")
+        raise CheckpointError(msg, error_category=CheckpointErrorCategory.EXECUTION)
 
     @durable_execution
     def test_handler(event: Any, context: DurableContext) -> dict:
@@ -1100,7 +1101,7 @@ def test_durable_execution_checkpoint_execution_error_stops_background():
     def test_handler(event: Any, context: DurableContext) -> dict:
         # Directly raise CheckpointError to simulate checkpoint failure
         msg = "Checkpoint system failed"
-        raise CheckpointError(msg, "Execution")
+        raise CheckpointError(msg, CheckpointErrorCategory.EXECUTION)
 
     operation = Operation(
         operation_id="exec1",
@@ -1152,7 +1153,7 @@ def test_durable_execution_checkpoint_invocation_error_stops_background():
     def test_handler(event: Any, context: DurableContext) -> dict:
         # Directly raise CheckpointError to simulate checkpoint failure
         msg = "Checkpoint system failed"
-        raise CheckpointError(msg, "Invocation")
+        raise CheckpointError(msg, CheckpointErrorCategory.INVOCATION)
 
     operation = Operation(
         operation_id="exec1",
@@ -1199,7 +1200,7 @@ def test_durable_execution_background_thread_execution_error_retries():
 
     def failing_checkpoint(*args, **kwargs):
         msg = "Background checkpoint failed"
-        raise CheckpointError(msg, error_kind="Execution")
+        raise CheckpointError(msg, error_category=CheckpointErrorCategory.EXECUTION)
 
     @durable_execution
     def test_handler(event: Any, context: DurableContext) -> dict:
@@ -1243,7 +1244,7 @@ def test_durable_execution_background_thread_invocation_error_returns_failed():
 
     def failing_checkpoint(*args, **kwargs):
         msg = "Background checkpoint failed"
-        raise CheckpointError(msg, error_kind="Invocation")
+        raise CheckpointError(msg, error_category=CheckpointErrorCategory.INVOCATION)
 
     @durable_execution
     def test_handler(event: Any, context: DurableContext) -> dict:
@@ -1280,6 +1281,195 @@ def test_durable_execution_background_thread_invocation_error_returns_failed():
     response = test_handler(invocation_input, lambda_context)
     assert response["Status"] == InvocationStatus.FAILED.value
     assert response["Error"]["ErrorType"] == "CheckpointError"
+
+
+def test_durable_execution_final_success_checkpoint_execution_error_retries():
+    """Test that execution errors on final success checkpoint trigger retry."""
+    mock_client = Mock(spec=DurableServiceClient)
+
+    def failing_final_checkpoint(*args, **kwargs):
+        raise CheckpointError(  # noqa TRY003
+            "Final checkpoint failed",  # noqa EM101
+            error_category=CheckpointErrorCategory.EXECUTION,
+        )
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        # Return large result to trigger final checkpoint (>6MB)
+        return {"result": "x" * (7 * 1024 * 1024)}
+
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+    initial_state = InitialExecutionState(operations=[operation], next_marker="")
+
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=initial_state,
+        is_local_runner=False,
+        service_client=mock_client,
+    )
+
+    lambda_context = Mock()
+    lambda_context.aws_request_id = "test-request"
+    lambda_context.client_context = None
+    lambda_context.identity = None
+    lambda_context._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
+    lambda_context.invoked_function_arn = None
+    lambda_context.tenant_id = None
+
+    mock_client.checkpoint.side_effect = failing_final_checkpoint
+
+    with pytest.raises(CheckpointError, match="Final checkpoint failed"):
+        test_handler(invocation_input, lambda_context)
+
+
+def test_durable_execution_final_success_checkpoint_invocation_error_returns_failed():
+    """Test that invocation errors on final success checkpoint return FAILED."""
+    mock_client = Mock(spec=DurableServiceClient)
+
+    def failing_final_checkpoint(*args, **kwargs):
+        raise CheckpointError(  # noqa TRY003
+            "Final checkpoint failed",  # noqa EM101
+            error_category=CheckpointErrorCategory.INVOCATION,
+        )
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        # Return large result to trigger final checkpoint (>6MB)
+        return {"result": "x" * (7 * 1024 * 1024)}
+
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+
+    initial_state = InitialExecutionState(operations=[operation], next_marker="")
+
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=initial_state,
+        is_local_runner=False,
+        service_client=mock_client,
+    )
+
+    lambda_context = Mock()
+    lambda_context.aws_request_id = "test-request"
+    lambda_context.client_context = None
+    lambda_context.identity = None
+    lambda_context._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
+    lambda_context.invoked_function_arn = None
+    lambda_context.tenant_id = None
+
+    mock_client.checkpoint.side_effect = failing_final_checkpoint
+
+    response = test_handler(invocation_input, lambda_context)
+    assert response["Status"] == InvocationStatus.FAILED.value
+    assert response["Error"]["ErrorType"] == "CheckpointError"
+    assert response["Error"]["ErrorMessage"] == "Final checkpoint failed"
+
+
+def test_durable_execution_final_failure_checkpoint_execution_error_retries():
+    """Test that execution errors on final failure checkpoint trigger retry."""
+    mock_client = Mock(spec=DurableServiceClient)
+
+    def failing_final_checkpoint(*args, **kwargs):
+        raise CheckpointError(  # noqa TRY003
+            "Final checkpoint failed",  # noqa EM101
+            error_category=CheckpointErrorCategory.EXECUTION,
+        )
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        # Raise error with large message to trigger final checkpoint (>6MB)
+        msg = "x" * (7 * 1024 * 1024)
+        raise ValueError(msg)
+
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+
+    initial_state = InitialExecutionState(operations=[operation], next_marker="")
+
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=initial_state,
+        is_local_runner=False,
+        service_client=mock_client,
+    )
+
+    lambda_context = Mock()
+    lambda_context.aws_request_id = "test-request"
+    lambda_context.client_context = None
+    lambda_context.identity = None
+    lambda_context._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
+    lambda_context.invoked_function_arn = None
+    lambda_context.tenant_id = None
+
+    mock_client.checkpoint.side_effect = failing_final_checkpoint
+
+    with pytest.raises(CheckpointError, match="Final checkpoint failed"):
+        test_handler(invocation_input, lambda_context)
+
+
+def test_durable_execution_final_failure_checkpoint_invocation_error_returns_failed():
+    """Test that invocation errors on final failure checkpoint return FAILED."""
+    mock_client = Mock(spec=DurableServiceClient)
+
+    def failing_final_checkpoint(*args, **kwargs):
+        raise CheckpointError(  # noqa TRY003
+            "Final checkpoint failed",  # noqa EM101
+            error_category=CheckpointErrorCategory.INVOCATION,
+        )
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        # Raise error with large message to trigger final checkpoint (>6MB)
+        msg = "x" * (7 * 1024 * 1024)
+        raise ValueError(msg)
+
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+
+    initial_state = InitialExecutionState(operations=[operation], next_marker="")
+
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=initial_state,
+        is_local_runner=False,
+        service_client=mock_client,
+    )
+
+    lambda_context = Mock()
+    lambda_context.aws_request_id = "test-request"
+    lambda_context.client_context = None
+    lambda_context.identity = None
+    lambda_context._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
+    lambda_context.invoked_function_arn = None
+    lambda_context.tenant_id = None
+
+    mock_client.checkpoint.side_effect = failing_final_checkpoint
+
+    response = test_handler(invocation_input, lambda_context)
+    assert response["Status"] == InvocationStatus.FAILED.value
+    assert response["Error"]["ErrorType"] == "CheckpointError"
+    assert response["Error"]["ErrorMessage"] == "Final checkpoint failed"
 
 
 def test_durable_handler_background_thread_failure_on_succeed_checkpoint():
@@ -1610,7 +1800,7 @@ def test_durable_execution_logs_checkpoint_error_extras_from_background_thread()
     def failing_checkpoint(*args, **kwargs):
         raise CheckpointError(  # noqa TRY003
             "Checkpoint failed",  # noqa EM101
-            error_kind="Execution",
+            error_category=CheckpointErrorCategory.EXECUTION,
             error=error_obj,
             response_metadata=metadata_obj,  # EM101
         )
@@ -1732,7 +1922,7 @@ def test_durable_execution_logs_checkpoint_error_extras_from_user_code():
     def test_handler(event: Any, context: DurableContext) -> dict:
         raise CheckpointError(  # noqa TRY003
             "User checkpoint error",  # noqa EM101
-            error_kind="Execution",
+            error_category=CheckpointErrorCategory.EXECUTION,
             error=error_obj,
             response_metadata=metadata_obj,  # EM101
         )

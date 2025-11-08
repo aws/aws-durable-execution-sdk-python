@@ -281,7 +281,6 @@ def durable_execution(
                     invocation_input.durable_execution_arn,
                 )
                 serialized_result = json.dumps(result)
-
                 # large response handling here. Remember if checkpointing to complete, NOT to include
                 # payload in response
                 if (
@@ -300,8 +299,12 @@ def durable_execution(
                     # Must ensure the result is persisted before returning to Lambda.
                     # Large results exceed Lambda response limits and must be stored durably
                     # before the execution completes.
-                    execution_state.create_checkpoint(success_operation, is_sync=True)
-
+                    try:
+                        execution_state.create_checkpoint(
+                            success_operation, is_sync=True
+                        )
+                    except CheckpointError as e:
+                        return handle_checkpoint_error(e).to_dict()
                     return DurableExecutionInvocationOutput.create_succeeded(
                         result=""
                     ).to_dict()
@@ -320,17 +323,9 @@ def durable_execution(
                     )
                 else:
                     logger.exception("Checkpoint processing failed")
-                # Raise the original exception
-                if (
-                    isinstance(bg_error.source_exception, CheckpointError)
-                    and bg_error.source_exception.should_be_retried()
-                ):
-                    raise bg_error.source_exception from None  # Terminate Lambda immediately and have it be retried
+                # handle the original exception
                 if isinstance(bg_error.source_exception, CheckpointError):
-                    return DurableExecutionInvocationOutput(
-                        status=InvocationStatus.FAILED,
-                        error=ErrorObject.from_exception(bg_error.source_exception),
-                    ).to_dict()
+                    return handle_checkpoint_error(bg_error.source_exception).to_dict()
                 raise bg_error.source_exception from bg_error
 
             except SuspendExecution:
@@ -346,11 +341,7 @@ def durable_execution(
                     "Checkpoint system failed",
                     extra=e.build_logger_extras(),
                 )
-                if e.should_be_retried():
-                    raise  # Terminate Lambda immediately and have it be retried
-                return DurableExecutionInvocationOutput(
-                    status=InvocationStatus.FAILED, error=ErrorObject.from_exception(e)
-                ).to_dict()
+                return handle_checkpoint_error(e).to_dict()
             except InvocationError:
                 logger.exception("Invocation error. Must terminate.")
                 # Throw the error to trigger Lambda retry
@@ -388,8 +379,10 @@ def durable_execution(
                     # Must ensure the result is persisted before returning to Lambda.
                     # Large results exceed Lambda response limits and must be stored durably
                     # before the execution completes.
-                    execution_state.create_checkpoint_sync(failed_operation)
-
+                    try:
+                        execution_state.create_checkpoint_sync(failed_operation)
+                    except CheckpointError as e:
+                        return handle_checkpoint_error(e).to_dict()
                     return DurableExecutionInvocationOutput(
                         status=InvocationStatus.FAILED
                     ).to_dict()
@@ -397,3 +390,11 @@ def durable_execution(
                 return result
 
     return wrapper
+
+
+def handle_checkpoint_error(error: CheckpointError) -> DurableExecutionInvocationOutput:
+    if error.is_retriable():
+        raise error from None  # Terminate Lambda immediately and have it be retried
+    return DurableExecutionInvocationOutput(
+        status=InvocationStatus.FAILED, error=ErrorObject.from_exception(error)
+    )
