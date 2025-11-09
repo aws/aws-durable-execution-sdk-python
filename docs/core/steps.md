@@ -20,7 +20,7 @@
 
 ## What are steps?
 
-Steps are the fundamental building blocks of durable functions. A step is a unit of work that executes your code and automatically checkpoints the result. If your function is interrupted or fails, completed steps don't re-execute, they return their saved results instantly.
+Steps are the fundamental building blocks of durable functions. A step is a unit of work that executes your code and automatically checkpoints the result. A completed step won't execute again, it returns its saved result instantly. If a step fails to complete, it automatically retries and saves the error after all retry attempts are exhausted.
 
 Use steps to:
 - Execute business logic with automatic checkpointing
@@ -49,7 +49,7 @@ Use steps to:
 ## Key features
 
 - **Automatic checkpointing** - Results are saved automatically after execution
-- **Configurable retry** - Define retry strategies with exponential backoff
+- **Configurable retry** - Define retry strategies with custom backoff
 - **Execution semantics** - Choose at-most-once or at-least-once per retry
 - **Named operations** - Identify steps by name for debugging and testing
 - **Custom serialization** - Control how inputs and results are serialized
@@ -84,7 +84,7 @@ def handler(event: dict, context: DurableContext) -> int:
 When this function runs:
 1. `add_numbers(5, 3)` executes and returns 8
 2. The result is checkpointed automatically
-3. If Lambda recycles the environment and resumes, `add_numbers` returns 8 instantly without re-executing
+3. If the durable function replays, the step returns 8 instantly without re-executing the `add_numbers` function
 
 [↑ Back to top](#table-of-contents)
 
@@ -103,7 +103,7 @@ def step(
 **Parameters:**
 
 - `func` - A callable that receives a `StepContext` and returns a result. Use the `@durable_step` decorator to create step functions.
-- `name` (optional) - A name for the step. If not provided, uses the function's name if available.
+- `name` (optional) - A name for the step, useful for debugging. If you decorate `func` with `@durable_step`, the SDK uses the function's name automatically.
 - `config` (optional) - A `StepConfig` object to configure retry behavior, execution semantics, and serialization.
 
 **Returns:** The result of executing the step function.
@@ -134,19 +134,19 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 **Why use @durable_step?**
 
-The decorator wraps your function so it can be called with arguments and passed to `context.step()`. Without it, you'd need to use lambda functions:
+The decorator wraps your function so it can be called with arguments and passed to `context.step()`. It also automatically uses the wrapped function's name as the step's name. You can optionally use lambda functions instead:
 
 ```python
-# Without @durable_step (verbose)
-result = context.step(lambda _: validate_order_logic(order_id))
-
-# With @durable_step (clean)
+# With @durable_step (recommended)
 result = context.step(validate_order(order_id))
+
+# Optionally, use a lambda function
+result = context.step(lambda _: validate_order_logic(order_id))
 ```
 
 **StepContext parameter:**
 
-The `StepContext` provides metadata about the current execution. While you must include it in your function signature, you typically don't need to use it unless you need execution metadata.
+The `StepContext` provides metadata about the current execution. While you must include it in your function signature, you typically don't need to use it unless you need execution metadata or custom logging.
 
 [↑ Back to top](#table-of-contents)
 
@@ -185,6 +185,8 @@ def handler(event: dict, context: DurableContext) -> dict:
 - Keep names consistent across your codebase
 - Use names when you need to inspect specific steps in tests
 - Let the SDK auto-name steps when using `@durable_step`
+
+**Note:** Names don't need to be unique, but using distinct names improves observability when debugging or monitoring your workflows.
 
 [↑ Back to top](#table-of-contents)
 
@@ -410,7 +412,7 @@ Each step is checkpointed independently. If the function is interrupted after st
 
 ## Best practices
 
-**Use @durable_step for reusable functions** - Decorate functions you'll use as steps to get automatic naming and cleaner syntax.
+**Use @durable_step for reusable functions** - Decorate functions you'll use as steps to get automatic naming and convenient, succinct syntax.
 
 **Name steps for debugging** - Use explicit names for steps you'll need to inspect in logs or tests.
 
@@ -422,7 +424,7 @@ Each step is checkpointed independently. If the function is interrupted after st
 
 **Don't share state between steps** - Pass data between steps through return values, not global variables.
 
-**Make steps deterministic** - Steps should return the same result given the same input. Avoid random values or timestamps inside steps.
+**Wrap non-deterministic code in steps** - All non-deterministic code, such as random values or timestamps, must be wrapped in a step. Once the step completes, the result won't change on replay.
 
 **Handle errors explicitly** - Catch and handle exceptions in your step functions. Let retries handle transient failures.
 
@@ -432,7 +434,7 @@ Each step is checkpointed independently. If the function is interrupted after st
 
 **Q: What's the difference between a step and a regular function call?**
 
-A: A step is checkpointed automatically. If your function is interrupted, completed steps return their saved results without re-executing. Regular function calls execute every time your function runs.
+A: A step is checkpointed automatically. Completed steps return their saved results without re-executing. Regular function calls execute every time your function runs.
 
 **Q: When should I use at-most-once vs at-least-once semantics?**
 
@@ -460,7 +462,7 @@ A: No, you can't call `context.step()` inside a step function. Steps are leaf op
 
 **Q: What happens if a step raises an exception?**
 
-A: If no retry strategy is configured, the exception propagates and fails the execution. If retry is configured, the SDK retries according to your strategy. After exhausting retries, the exception propagates.
+A: If no retry strategy is configured, the exception propagates and fails the execution. If retry is configured, the SDK retries according to your strategy. After exhausting retries, the step checkpoints the error and the exception propagates.
 
 **Q: How do I access the StepContext?**
 
