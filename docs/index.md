@@ -21,7 +21,7 @@ The AWS Durable Execution SDK for Python lets you build reliable, long-running w
 
 The SDK provides a `DurableContext` that gives you operations like steps, waits, callbacks, and parallel execution. Each operation is checkpointed automatically, so your workflow state is preserved across interruptions.
 
-[↑ Back to index](#table-of-contents)
+[↑ Back to top](#table-of-contents)
 
 ## Key features
 
@@ -34,7 +34,7 @@ The SDK provides a `DurableContext` that gives you operations like steps, waits,
 - **Child contexts** - Isolate nested workflows for better organization and error handling
 - **Structured logging** - Integrate with your logger to track execution flow and debug issues
 
-[↑ Back to index](#table-of-contents)
+[↑ Back to top](#table-of-contents)
 
 ## Quick navigation
 
@@ -63,7 +63,7 @@ The SDK provides a `DurableContext` that gives you operations like steps, waits,
 - [Types and protocols](api-reference/types.md) - Type definitions and interfaces
 - [Exceptions](api-reference/exceptions.md) - DurableExecutionsError, InvocationError, and more
 
-[↑ Back to index](#table-of-contents)
+[↑ Back to top](#table-of-contents)
 
 ## Installation
 
@@ -73,7 +73,7 @@ Install the SDK using pip:
 pip install aws-durable-execution-sdk-python
 ```
 
-[↑ Back to index](#table-of-contents)
+[↑ Back to top](#table-of-contents)
 
 ## Quick example
 
@@ -131,7 +131,7 @@ def process_order(event: dict, context: DurableContext) -> dict:
 
 Each `context.step()` call is checkpointed automatically. If Lambda recycles your execution environment, the function resumes from the last completed step.
 
-[↑ Back to index](#table-of-contents)
+[↑ Back to top](#table-of-contents)
 
 ## Core concepts
 
@@ -166,7 +166,7 @@ The SDK provides decorators to mark functions as durable:
 - `@durable_step` - Marks a function that can be used with `context.step()`
 - `@durable_with_child_context` - Marks a function that receives a child context
 
-[↑ Back to index](#table-of-contents)
+[↑ Back to top](#table-of-contents)
 
 ## Architecture
 
@@ -192,7 +192,7 @@ The SDK integrates with AWS Lambda's durable execution service to provide reliab
 
 The SDK uses a background thread to batch checkpoints for efficiency. Critical operations (like step starts with at-most-once semantics) block until the checkpoint is confirmed. Non-critical operations (like observability checkpoints) are asynchronous for better performance
 
-[↑ Back to index](#table-of-contents)
+[↑ Back to top](#table-of-contents)
 
 ## Use cases
 
@@ -210,7 +210,7 @@ The SDK helps you build:
 
 **Saga patterns** - Implement distributed transactions with compensation logic for failures.
 
-[↑ Back to index](#table-of-contents)
+[↑ Back to top](#table-of-contents)
 
 ## Getting help
 
@@ -222,10 +222,10 @@ The SDK helps you build:
 
 **Contributing** - See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines on contributing to the project.
 
-[↑ Back to index](#table-of-contents)
+[↑ Back to top](#table-of-contents)
 
 ## License
 
 See the LICENSE file for our project's licensing.
 
-[↑ Back to index](#table-of-contents)
+[↑ Back to top](#table-of-contents)

@@ -9,6 +9,8 @@
 - [Quick start](#quick-start)
 - [Next steps](#next-steps)
 
+[← Back to main index](index.md)
+
 ## Overview
 
 This guide explains the fundamental concepts behind durable execution and how the SDK works. You'll understand:
@@ -18,7 +20,7 @@ This guide explains the fundamental concepts behind durable execution and how th
 - Why your function code runs multiple times but side effects happen once
 - The development workflow from writing to testing to deployment
 
-[↑ Back to index](index.md)
+[↑ Back to top](#table-of-contents)
 
 ## The two SDKs
 
@@ -57,7 +59,7 @@ pip install aws-durable-execution-sdk-python-testing
 
 **Key distinction:** The execution SDK runs in production Lambda. The testing SDK runs on your laptop or CI/CD. They're separate concerns.
 
-[↑ Back to index](index.md)
+[↑ Back to top](#table-of-contents)
 
 ## How durable execution works
 
@@ -103,7 +105,7 @@ def handler(event: dict, context: DurableContext) -> dict:
 - You write linear code that looks synchronous
 - The SDK handles all the complexity of state management
 
-[↑ Back to index](index.md)
+[↑ Back to top](#table-of-contents)
 
 ## Your development workflow
 
@@ -197,7 +199,7 @@ export LAMBDA_FUNCTION_TEST_NAME="my_function"
 pytest --runner-mode=cloud test_my_function.py
 ```
 
-[↑ Back to index](index.md)
+[↑ Back to top](#table-of-contents)
 
 ## Quick start
 
@@ -226,7 +228,7 @@ def handler(event: dict, context: DurableContext) -> str:
 
 Deploy this to Lambda and you have a durable function. The `greet_user` step is checkpointed automatically.
 
-[↑ Back to index](index.md)
+[↑ Back to top](#table-of-contents)
 
 ## Next steps
 
@@ -245,7 +247,7 @@ Now that you've built your first durable function, explore the core features:
 - [Testing patterns](testing-patterns/basic-tests.md) - Write effective tests for your workflows
 - [Best practices](testing-patterns/best-practices.md) - Avoid common pitfalls
 
-[↑ Back to index](index.md)
+[↑ Back to top](#table-of-contents)
 
 ## See also
 
@@ -253,4 +255,10 @@ Now that you've built your first durable function, explore the core features:
 - [Decorators](api-reference/decorators.md) - All available decorators
 - [Examples directory](https://github.com/awslabs/aws-durable-execution-sdk-python/tree/main/examples) - More working examples
 
-[↑ Back to index](index.md)
+[↑ Back to top](#table-of-contents)
+
+## License
+
+See the LICENSE file for our project's licensing.
+
+[↑ Back to top](#table-of-contents)
