@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
+import random
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
@@ -239,6 +241,9 @@ def durable_execution(
             operations={},
             service_client=service_client,
         )
+
+        # Seed random with execution_arn for deterministic behavior
+        random.seed(hashlib.sha256(invocation_input.durable_execution_arn.encode()).hexdigest())
 
         execution_state.fetch_paginated_operations(
             invocation_input.initial_execution_state.operations,
