@@ -400,4 +400,10 @@ def test_named_wait(durable_runner):
 - [Wait for Condition](../advanced/wait-for-condition.md) - Poll until a condition is met
 - [Getting Started](../getting-started.md) - Learn the basics of durable functions
 
+[↑ Back to top](#table-of-contents)
+
+## License
+
+See the [LICENSE](../../LICENSE) file for our project's licensing.
+
 [↑ Back to main index](../index.md)
