@@ -2,18 +2,18 @@
 
 ## Table of Contents
 
-- [What you'll learn](#what-youll-learn)
+- [Overview](#overview)
 - [The two SDKs](#the-two-sdks)
 - [How durable execution works](#how-durable-execution-works)
 - [Your development workflow](#your-development-workflow)
 - [Quick start](#quick-start)
 - [Next steps](#next-steps)
 
-## What you'll learn
+## Overview
 
 This guide explains the fundamental concepts behind durable execution and how the SDK works. You'll understand:
 
-- The difference between the execution SDK and testing SDK
+- The difference between `aws-durable-execution-sdk-python` and `aws-durable-execution-sdk-python-testing`
 - How checkpoints and replay enable reliable workflows
 - Why your function code runs multiple times but side effects happen once
 - The development workflow from writing to testing to deployment
@@ -106,6 +106,27 @@ def handler(event: dict, context: DurableContext) -> dict:
 [↑ Back to index](index.md)
 
 ## Your development workflow
+
+```mermaid
+flowchart LR
+    subgraph dev["Development (Local)"]
+        direction LR
+        A["1. Write Function<br/>aws-durable-execution-sdk-python"]
+        B["2. Write Tests<br/>aws-durable-execution-sdk-python-testing"]
+        C["3. Run Tests<br/>pytest"]
+    end
+    
+    subgraph prod["Production (AWS)"]
+        direction LR
+        D["4. Deploy<br/>SAM/CDK/Terraform"]
+        E["5. Test in Cloud<br/>pytest --runner-mode=cloud"]
+    end
+    
+    A --> B --> C --> D --> E
+    
+    style dev fill:#e3f2fd
+    style prod fill:#fff3e0
+```
 
 Here's how you build and test durable functions:
 
