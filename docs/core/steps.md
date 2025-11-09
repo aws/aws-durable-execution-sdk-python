@@ -412,7 +412,7 @@ Each step is checkpointed independently. If the function is interrupted after st
 
 ## Best practices
 
-**Use @durable_step for reusable functions** - Decorate functions you'll use as steps to get automatic naming and convenient, succinct syntax.
+**Use @durable_step for reusable functions** - Decorate functions you'll use as steps to get automatic naming and convenient with succinct syntax.
 
 **Name steps for debugging** - Use explicit names for steps you'll need to inspect in logs or tests.
 
