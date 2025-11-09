@@ -20,7 +20,7 @@
 
 ## What are steps?
 
-Steps are the fundamental building blocks of durable functions. A step is a unit of work that executes your code and automatically checkpoints the result. If your function is interrupted or fails, completed steps don't re-execute—they return their saved results instantly.
+Steps are the fundamental building blocks of durable functions. A step is a unit of work that executes your code and automatically checkpoints the result. If your function is interrupted or fails, completed steps don't re-execute, they return their saved results instantly.
 
 Use steps to:
 - Execute business logic with automatic checkpointing
