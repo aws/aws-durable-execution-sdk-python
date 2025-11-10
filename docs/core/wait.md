@@ -3,6 +3,7 @@
 ## Table of Contents
 
 - [What are wait operations?](#what-are-wait-operations)
+- [When to use wait operations](#when-to-use-wait-operations)
 - [Terminology](#terminology)
 - [Key features](#key-features)
 - [Getting started](#getting-started)
@@ -13,24 +14,11 @@
 - [Understanding scheduled_end_timestamp](#understanding-scheduled_end_timestamp)
 - [Best practices](#best-practices)
 - [FAQ](#faq)
+- [Alternatives to wait operations](#alternatives-to-wait-operations)
 - [Testing](#testing)
 - [See also](#see-also)
 
 [← Back to main index](../index.md)
-
-## What are wait operations?
-
-Wait operations pause execution for a specified time. Your function suspends, the Lambda exits, and the system automatically resumes execution when the wait completes.
-
-Unlike `time.sleep()`, waits don't consume Lambda execution time. Your function checkpoints, exits cleanly, and resumes later, even if the wait lasts hours or days.
-
-Use wait operations to:
-- Add delays between operations
-- Rate limit API calls
-- Create polling intervals
-- Schedule future work
-
-[↑ Back to top](#table-of-contents)
 
 ## Terminology
 
@@ -43,6 +31,25 @@ Use wait operations to:
 **Suspend** - The process of pausing execution and saving state. The Lambda function exits and resumes later.
 
 **Resume** - The process of continuing execution after a wait completes. The SDK automatically invokes your function again.
+
+[↑ Back to top](#table-of-contents)
+
+## What are wait operations?
+
+Wait operations pause execution for a specified time. Your function suspends, the Lambda exits, and the system automatically resumes execution when the wait completes.
+
+Unlike `time.sleep()`, waits don't consume Lambda execution time. Your function checkpoints, exits cleanly, and resumes later, even if the wait lasts hours or days.
+
+[↑ Back to top](#table-of-contents)
+
+## When to use wait operations
+
+Use `context.wait()` when you need a simple time-based delay.
+
+**Choose a different method if you need:**
+- **Wait for external system response** → Use [`context.wait_for_callback()`](callbacks.md)
+- **Wait until a condition is met** → Use [`context.wait_for_condition()`](../advanced/wait-for-condition.md)
+- **Wait for a step to complete** → Use [`context.step()`](steps.md)
 
 [↑ Back to top](#table-of-contents)
 
@@ -95,7 +102,7 @@ def wait(
 **Parameters:**
 
 - `duration` (Duration, required) - How long to wait. Must be at least 1 second. Use `Duration.from_seconds()`, `Duration.from_minutes()`, `Duration.from_hours()`, or `Duration.from_days()` to create a duration.
-- `name` (str, optional) - A name for the wait operation. Useful for debugging and testing. If not provided, the SDK generates an identifier automatically.
+- `name` (str, optional) - A name for the wait operation. Useful for debugging and testing.
 
 **Returns:** None
 
@@ -153,36 +160,6 @@ Named waits are helpful when:
 - You have multiple waits in your function
 - You want to identify specific waits in test assertions
 - You're debugging execution flow
-
-[↑ Back to top](#table-of-contents)
-
-## Multiple sequential waits
-
-You can chain multiple wait operations together. Each wait executes in sequence:
-
-```python
-from aws_durable_execution_sdk_python import DurableContext, durable_execution
-from aws_durable_execution_sdk_python.config import Duration
-
-@durable_execution
-def handler(event: dict, context: DurableContext) -> dict:
-    """Handler demonstrating multiple sequential wait operations."""
-    context.wait(duration=Duration.from_seconds(5), name="wait-1")
-    context.wait(duration=Duration.from_seconds(5), name="wait-2")
-
-    return {
-        "completedWaits": 2,
-        "finalStep": "done",
-    }
-```
-
-When this function runs:
-1. First wait executes and suspends for 5 seconds
-2. Function resumes and executes second wait
-3. Second wait suspends for another 5 seconds
-4. Function resumes and returns the result
-
-Total execution time: approximately 10 seconds (plus Lambda invocation overhead).
 
 [↑ Back to top](#table-of-contents)
 
@@ -268,16 +245,9 @@ context.wait(duration=Duration.from_seconds(5))
 
 ### How long can a wait operation last?
 
-Wait operations can last as long as needed, but consider:
-- Lambda execution limits (15 minutes per invocation)
-- Your function's total execution time requirements
-- Cost implications of long-running executions
+There is an upper limit of 1 year - that's the maximum length of an execution.
 
-The wait itself doesn't consume Lambda execution time—your function suspends and resumes later.
-
-### What happens if my Lambda times out during a wait?
-
-Nothing bad happens. The wait operation is already checkpointed with its scheduled end time. When the wait duration expires, the system automatically invokes your function again, and execution resumes after the wait.
+The wait itself doesn't consume Lambda execution time, your function suspends and resumes later. However, consider cost implications of long-running executions.
 
 ### Can I cancel a wait operation?
 
@@ -285,7 +255,7 @@ No, once a wait operation is checkpointed, it will complete after the specified 
 
 ### Do waits execute in parallel?
 
-No, waits execute sequentially in the order they appear in your code. If you need parallel operations, use steps with `context.step()` instead.
+No, waits execute sequentially in the order they appear in your code. If you need parallel operations, use `context.parallel()` or `context.map()` instead.
 
 ### How accurate are wait durations?
 
@@ -294,27 +264,96 @@ Wait durations are approximate. The actual resume time depends on:
 - Lambda cold start time
 - Current system load
 
-Expect some variance (typically a few seconds) from the exact scheduled time.
-
 ### Can I use waits for polling?
 
-Yes, waits are commonly used for polling patterns. Combine waits with steps to check status periodically:
+You can, but we recommend using `context.wait_for_condition()` instead. It simplifies polling by handling the loop logic for you:
 
 ```python
+from aws_durable_execution_sdk_python.waits import WaitForConditionConfig, FixedWait
+
 @durable_execution
-def handler(event: dict, context: DurableContext) -> str:
+def handler(event: dict, context: DurableContext) -> dict:
     job_id = context.step(start_job())
     
-    for i in range(10):  # Poll up to 10 times
-        context.wait(duration=Duration.from_minutes(1), name=f"poll_wait_{i}")
-        status = context.step(check_status(job_id))
-        if status == "completed":
-            return "Job completed"
+    # wait_for_condition handles the polling loop
+    def check_status(state, check_context):
+        status = get_job_status(state["job_id"])
+        return {"job_id": state["job_id"], "status": status}
     
-    return "Job still running"
+    result = context.wait_for_condition(
+        check=check_status,
+        config=WaitForConditionConfig(
+            initial_state={"job_id": job_id},
+            condition=lambda state: state["status"] == "completed",
+            wait_strategy=FixedWait(Duration.from_minutes(1))
+        )
+    )
+    return result
 ```
 
-For more sophisticated polling, see the `wait_for_condition` operation.
+See [Wait for Condition](../advanced/wait-for-condition.md) for more details.
+
+[↑ Back to top](#table-of-contents)
+
+## Alternatives to wait operations
+
+### Using wait_for_callback for external responses
+
+When you need to wait for an external system to respond, use `context.wait_for_callback()`:
+
+```python
+from aws_durable_execution_sdk_python import DurableContext, durable_execution
+
+@durable_execution
+def handler(event: dict, context: DurableContext) -> dict:
+    # Wait for external approval
+    def submit_for_approval(callback_id: str):
+        # Send callback_id to external approval system
+        send_to_approval_system(callback_id)
+    
+    result = context.wait_for_callback(
+        submitter=submit_for_approval,
+        name="approval_wait"
+    )
+    return result
+```
+
+See [Callbacks](callbacks.md) for more details.
+
+### Using wait_for_condition for polling
+
+When you need to poll until a condition is met, use `context.wait_for_condition()`:
+
+```python
+from aws_durable_execution_sdk_python import DurableContext, durable_execution
+from aws_durable_execution_sdk_python.waits import WaitForConditionConfig, ExponentialBackoff
+from aws_durable_execution_sdk_python.config import Duration
+
+@durable_execution
+def handler(event: dict, context: DurableContext) -> dict:
+    # Poll until job completes
+    def check_job_status(state, check_context):
+        status = get_job_status(state["job_id"])
+        return {
+            "job_id": state["job_id"],
+            "status": status,
+            "done": status == "COMPLETED"
+        }
+    
+    result = context.wait_for_condition(
+        check=check_job_status,
+        config=WaitForConditionConfig(
+            initial_state={"job_id": "job-123", "done": False},
+            condition=lambda state: state["done"],
+            wait_strategy=ExponentialBackoff(
+                initial_wait=Duration.from_seconds(5)
+            )
+        )
+    )
+    return result
+```
+
+See [Wait for Condition](../advanced/wait-for-condition.md) for more details.
 
 [↑ Back to top](#table-of-contents)
 
