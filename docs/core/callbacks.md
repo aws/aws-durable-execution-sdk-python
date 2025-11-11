@@ -727,7 +727,7 @@ A: No, you can create a callback, send its ID to an external system, perform oth
 
 **Q: Can callbacks be used with steps?**
 
-A: Yes, you can create and wait for callbacks inside step functions. This is useful for combining retry logic with callback operations.
+A: Yes, you can create and wait for callbacks inside step functions. However, `context.wait_for_callback()` is a convenience method that already wraps the callback in a step with retry logic for you.
 
 **Q: What happens if the external system sends a result after the timeout?**
 
