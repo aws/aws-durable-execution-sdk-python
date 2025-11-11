@@ -178,18 +178,20 @@ The scheduled end time is calculated when the wait operation is first checkpoint
 
 ### Choose appropriate wait durations
 
-Consider Lambda execution limits and costs when choosing wait durations:
+When your function hits a wait, it terminates execution and doesn't incur compute charges during the wait period. The function resumes with a new invocation when the wait completes. Choose durations based on your workflow needs:
 
 ```python
-# Good - reasonable wait for rate limiting
+# Short wait for rate limiting
 context.wait(duration=Duration.from_seconds(30))
 
-# Good - polling interval
+# Medium wait for polling intervals
 context.wait(duration=Duration.from_minutes(5))
 
-# Consider - long wait increases total execution time
+# Long wait for scheduled tasks
 context.wait(duration=Duration.from_hours(24))
 ```
+
+**Note:** If you have concurrent operations running (like parallel or map operations), those continue executing even when the main execution hits a wait. The function waits for all concurrent operations to complete before terminating.
 
 ### Use named waits for clarity
 
