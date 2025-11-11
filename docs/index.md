@@ -226,6 +226,6 @@ The SDK helps you build:
 
 ## License
 
-See the LICENSE file for our project's licensing.
+See the [LICENSE](../LICENSE) file for our project's licensing.
 
 [↑ Back to top](#table-of-contents)

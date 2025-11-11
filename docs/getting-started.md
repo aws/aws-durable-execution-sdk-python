@@ -259,6 +259,6 @@ Now that you've built your first durable function, explore the core features:
 
 ## License
 
-See the LICENSE file for our project's licensing.
+See the [LICENSE](../LICENSE) file for our project's licensing.
 
 [↑ Back to top](#table-of-contents)

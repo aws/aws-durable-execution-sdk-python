@@ -18,18 +18,6 @@
 
 [← Back to main index](../index.md)
 
-## What are steps?
-
-Steps are the fundamental building blocks of durable functions. A step is a unit of work that executes your code and automatically checkpoints the result. A completed step won't execute again, it returns its saved result instantly. If a step fails to complete, it automatically retries and saves the error after all retry attempts are exhausted.
-
-Use steps to:
-- Execute business logic with automatic checkpointing
-- Retry operations that might fail
-- Control execution semantics (at-most-once or at-least-once)
-- Break complex workflows into manageable units
-
-[↑ Back to top](#table-of-contents)
-
 ## Terminology
 
 **Step** - A durable operation that executes a function and checkpoints its result. Created using `context.step()`.
@@ -43,6 +31,18 @@ Use steps to:
 **Step semantics** - Controls how many times a step executes per retry attempt. At-least-once (default) re-executes on retry. At-most-once executes only once per retry attempt.
 
 **StepContext** - A context object passed to step functions containing metadata about the current execution.
+
+[↑ Back to top](#table-of-contents)
+
+## What are steps?
+
+Steps are the fundamental building blocks of durable functions. A step is a unit of work that executes your code and automatically checkpoints the result. A completed step won't execute again, it returns its saved result instantly. If a step fails to complete, it automatically retries and saves the error after all retry attempts are exhausted.
+
+Use steps to:
+- Execute business logic with automatic checkpointing
+- Retry operations that might fail
+- Control execution semantics (at-most-once or at-least-once)
+- Break complex workflows into manageable units
 
 [↑ Back to top](#table-of-contents)
 
@@ -592,6 +592,6 @@ For more testing patterns, see:
 
 ## License
 
-See the LICENSE file for our project's licensing.
+See the [LICENSE](../../LICENSE) file for our project's licensing.
 
 [↑ Back to top](#table-of-contents)
