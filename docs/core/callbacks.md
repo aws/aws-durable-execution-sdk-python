@@ -118,7 +118,7 @@ def handler(event: Any, context: DurableContext) -> dict:
 
 When your external system finishes processing, you need to notify the callback using AWS Lambda APIs. You have three options:
 
-**SendDurableExecutionCallbackSuccess** - Notify success with a result:
+**send_durable_execution_callback_success** - Notify success with a result:
 
 ```python
 import boto3
@@ -127,43 +127,38 @@ import json
 lambda_client = boto3.client('lambda')
 
 # When external system succeeds
-lambda_client.invoke(
-    FunctionName='arn:aws:lambda:us-east-1:123456789012:function:my-function',
-    InvocationType='Event',
-    Payload=json.dumps({
-        'action': 'SendDurableExecutionCallbackSuccess',
-        'callbackId': callback_id,
-        'result': {'status': 'approved', 'amount': 1000}
-    })
+callback_id = "abc123-callback-id-from-durable-function"
+result_data = json.dumps({'status': 'approved', 'amount': 1000}).encode('utf-8')
+
+lambda_client.send_durable_execution_callback_success(
+    CallbackId=callback_id,
+    Result=result_data
 )
 ```
 
-**SendDurableExecutionCallbackFailure** - Notify failure with an error:
+**send_durable_execution_callback_failure** - Notify failure with an error:
 
 ```python
 # When external system fails
-lambda_client.invoke(
-    FunctionName='arn:aws:lambda:us-east-1:123456789012:function:my-function',
-    InvocationType='Event',
-    Payload=json.dumps({
-        'action': 'SendDurableExecutionCallbackFailure',
-        'callbackId': callback_id,
-        'error': {'message': 'Payment declined', 'code': 'INSUFFICIENT_FUNDS'}
-    })
+callback_id = "abc123-callback-id-from-durable-function"
+
+lambda_client.send_durable_execution_callback_failure(
+    CallbackId=callback_id,
+    Error={
+        'ErrorType': 'PaymentDeclined',
+        'ErrorMessage': 'Insufficient funds'
+    }
 )
 ```
 
-**SendDurableExecutionCallbackHeartbeat** - Send heartbeat to keep callback alive:
+**send_durable_execution_callback_heartbeat** - Send heartbeat to keep callback alive:
 
 ```python
 # Send heartbeat for long-running operations
-lambda_client.invoke(
-    FunctionName='arn:aws:lambda:us-east-1:123456789012:function:my-function',
-    InvocationType='Event',
-    Payload=json.dumps({
-        'action': 'SendDurableExecutionCallbackHeartbeat',
-        'callbackId': callback_id
-    })
+callback_id = "abc123-callback-id-from-durable-function"
+
+lambda_client.send_durable_execution_callback_heartbeat(
+    CallbackId=callback_id
 )
 ```
 
@@ -201,6 +196,11 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 ```python
 # Message processor side (separate Lambda or service)
+import boto3
+import json
+
+lambda_client = boto3.client('lambda')
+
 def process_payment_message(event: dict):
     """Process payment and notify callback."""
     callback_id = event["callback_id"]
@@ -212,28 +212,23 @@ def process_payment_message(event: dict):
         result = payment_processor.charge(customer_id, amount)
         
         # Notify success
-        lambda_client.invoke(
-            FunctionName='arn:aws:lambda:us-east-1:123456789012:function:my-durable-function',
-            InvocationType='Event',
-            Payload=json.dumps({
-                'action': 'SendDurableExecutionCallbackSuccess',
-                'callbackId': callback_id,
-                'result': {
-                    'status': 'completed',
-                    'transaction_id': result.transaction_id,
-                }
-            })
+        result_data = json.dumps({
+            'status': 'completed',
+            'transaction_id': result.transaction_id,
+        }).encode('utf-8')
+        
+        lambda_client.send_durable_execution_callback_success(
+            CallbackId=callback_id,
+            Result=result_data
         )
     except PaymentError as e:
         # Notify failure
-        lambda_client.invoke(
-            FunctionName='arn:aws:lambda:us-east-1:123456789012:function:my-durable-function',
-            InvocationType='Event',
-            Payload=json.dumps({
-                'action': 'SendDurableExecutionCallbackFailure',
-                'callbackId': callback_id,
-                'error': {'message': str(e), 'code': e.error_code}
-            })
+        lambda_client.send_durable_execution_callback_failure(
+            CallbackId=callback_id,
+            Error={
+                'ErrorType': 'PaymentError',
+                'ErrorMessage': f'{e.error_code}: {str(e)}'
+            }
         )
 ```
 
