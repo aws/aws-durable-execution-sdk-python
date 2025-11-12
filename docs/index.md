@@ -53,6 +53,7 @@ The SDK provides a `DurableContext` that gives you operations like steps, waits,
 
 **Advanced topics:**
 - [Error handling](advanced/error-handling.md) - Handle failures and implement retry strategies
+- [Testing modes](advanced/testing-modes.md) - Run tests locally or against deployed Lambda functions
 - [Serialization](advanced/serialization.md) - Customize how data is serialized in checkpoints
 - [Configuration](advanced/configuration.md) - Fine-tune operation behavior
 - [Performance optimization](advanced/performance.md) - Best practices for efficient workflows
