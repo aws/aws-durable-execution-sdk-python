@@ -34,7 +34,7 @@
 
 ## What are child contexts?
 
-Child contexts are primarily a unit of concurrency that let you run concurrent operations within your durable function. They create isolated execution scopes with their own set of operations, checkpoints, and state. You can also use child contexts to wrap large chunks of durable logic into a single piece - once completed, that logic won't run or replay again.
+A child context creates a scope in which you can nest durable operations. It creates an isolated execution scope with its own set of operations, checkpoints, and state. This is often useful as a unit of concurrency that lets you run concurrent operations within your durable function. You can also use child contexts to wrap large chunks of durable logic into a single piece - once completed, that logic won't run or replay again.
 
 Use child contexts to:
 - Run concurrent operations (steps, waits, callbacks) in parallel
@@ -64,16 +64,42 @@ Here's an example showing why child contexts are useful - they let you group mul
 from aws_durable_execution_sdk_python import (
     DurableContext,
     durable_execution,
+    durable_step,
     durable_with_child_context,
+    StepContext,
 )
+
+@durable_step
+def validate_order(step_context: StepContext, order_id: str) -> dict:
+    """Validate order details."""
+    # Validation logic here
+    return {"valid": True, "order_id": order_id}
+
+@durable_step
+def reserve_inventory(step_context: StepContext, order_id: str) -> dict:
+    """Reserve inventory for order."""
+    # Inventory logic here
+    return {"reserved": True, "order_id": order_id}
+
+@durable_step
+def charge_payment(step_context: StepContext, order_id: str) -> dict:
+    """Charge payment for order."""
+    # Payment logic here
+    return {"charged": True, "order_id": order_id}
+
+@durable_step
+def send_confirmation(step_context: StepContext, result: dict) -> dict:
+    """Send order confirmation."""
+    # Notification logic here
+    return {"sent": True, "order_id": result["order_id"]}
 
 @durable_with_child_context
 def process_order(ctx: DurableContext, order_id: str) -> dict:
     """Process an order with multiple steps."""
     # These three steps execute as a single unit
-    validation = ctx.step(lambda _: validate_order(order_id), name="validate")
-    inventory = ctx.step(lambda _: reserve_inventory(order_id), name="reserve")
-    payment = ctx.step(lambda _: charge_payment(order_id), name="charge")
+    validation = ctx.step(validate_order(order_id))
+    inventory = ctx.step(reserve_inventory(order_id))
+    payment = ctx.step(charge_payment(order_id))
     
     return {"order_id": order_id, "status": "completed"}
 
@@ -87,20 +113,20 @@ def handler(event: dict, context: DurableContext) -> dict:
     )
     
     # Additional operations here won't cause process_order to replay
-    context.step(lambda _: send_confirmation(result), name="notify")
+    context.step(send_confirmation(result))
     
     return result
 ```
 
 **Why use a child context here?**
 
-Without a child context, if your function replays after the notification step, all three order processing steps would replay. With a child context, once `process_order` completes, its result is saved just like a step - everything inside won't replay even if the function continues or restarts. This makes replays faster.
+Child contexts let you group related operations into a logical unit. Once `process_order` completes, its result is saved just like a step - everything inside won't replay even if the function continues or restarts. This provides organizational benefits and a small optimization by avoiding unnecessary replays.
 
-**Additional benefits:**
+**Key benefits:**
 
-- **Performance**: In functions with many steps, wrapping completed logic in a child context prevents unnecessary replays, making execution faster
-- **Reusability**: You can call `process_order` multiple times in the same function, and each execution is tracked independently
-- **Organization**: Child contexts act like checkpointed functions - once done, they're done
+- **Organization**: Group related operations together for better code structure and readability
+- **Reusability**: Call `process_order` multiple times in the same function, and each execution is tracked independently
+- **Isolation**: Child contexts act like checkpointed functions - once done, they're done
 
 [↑ Back to top](#table-of-contents)
 
@@ -194,7 +220,7 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 **Why use @durable_with_child_context?**
 
-The decorator wraps your function so it can be called with arguments and passed to `context.run_in_child_context()`. It provides a clean way to define reusable workflow components.
+The decorator wraps your function so it can be called with arguments and passed to `context.run_in_child_context()`. It provides a convenient way to define reusable workflow components.
 
 [↑ Back to top](#table-of-contents)
 
