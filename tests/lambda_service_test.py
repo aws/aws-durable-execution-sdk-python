@@ -1911,7 +1911,14 @@ def test_lambda_client_initialize_from_env_default(mock_boto_client):
     with patch.object(LambdaClient, "load_preview_botocore_models"):
         client = LambdaClient.initialize_from_env()
 
-    mock_boto_client.assert_called_with("lambdainternal")
+    # Check that boto3.client was called with the right service name and config
+    mock_boto_client.assert_called_once()
+    call_args = mock_boto_client.call_args
+    assert call_args[0][0] == "lambdainternal"
+    assert "config" in call_args[1]
+    config = call_args[1]["config"]
+    assert config.connect_timeout == 5
+    assert config.read_timeout == 50
     assert isinstance(client, LambdaClient)
 
 
@@ -1925,9 +1932,15 @@ def test_lambda_client_initialize_from_env_with_endpoint(mock_boto_client):
     with patch.object(LambdaClient, "load_preview_botocore_models"):
         client = LambdaClient.initialize_from_env()
 
-    mock_boto_client.assert_called_with(
-        "lambdainternal", endpoint_url="http://localhost:3000"
-    )
+    # Check that boto3.client was called with the right parameters and config
+    mock_boto_client.assert_called_once()
+    call_args = mock_boto_client.call_args
+    assert call_args[0][0] == "lambdainternal"
+    assert call_args[1]["endpoint_url"] == "http://localhost:3000"
+    assert "config" in call_args[1]
+    config = call_args[1]["config"]
+    assert config.connect_timeout == 5
+    assert config.read_timeout == 50
     assert isinstance(client, LambdaClient)
 
 
@@ -1939,11 +1952,16 @@ def test_lambda_client_initialize_local_runner_client(mock_boto3):
 
     lambda_client = LambdaClient.initialize_local_runner_client()
 
-    mock_boto3.client.assert_called_once_with(
-        "lambdainternal-local",
-        endpoint_url="http://host.docker.internal:5000",
-        region_name="us-west-2",
-    )
+    # Check that boto3.client was called with the right parameters and config
+    mock_boto3.client.assert_called_once()
+    call_args = mock_boto3.client.call_args
+    assert call_args[0][0] == "lambdainternal-local"
+    assert call_args[1]["endpoint_url"] == "http://host.docker.internal:5000"
+    assert call_args[1]["region_name"] == "us-west-2"
+    assert "config" in call_args[1]
+    config = call_args[1]["config"]
+    assert config.connect_timeout == 5
+    assert config.read_timeout == 50
     assert lambda_client.client == mock_client
 
 
@@ -1988,11 +2006,12 @@ def test_lambda_client_initialize_local_runner_client_defaults(mock_boto3):
 
     lambda_client = LambdaClient.initialize_local_runner_client()
 
-    mock_boto3.client.assert_called_once_with(
-        "lambdainternal-local",
-        endpoint_url="http://host.docker.internal:5000",
-        region_name="us-west-2",
-    )
+    # Verify the call was made with the expected arguments including config
+    call_args = mock_boto3.client.call_args
+    assert call_args[0] == ("lambdainternal-local",)
+    assert call_args[1]["endpoint_url"] == "http://host.docker.internal:5000"
+    assert call_args[1]["region_name"] == "us-west-2"
+    assert "config" in call_args[1]
     assert lambda_client.client == mock_client
 
 
@@ -2040,7 +2059,10 @@ def test_lambda_client_initialize_from_env_no_endpoint(mock_boto_client):
     with patch.object(LambdaClient, "load_preview_botocore_models"):
         client = LambdaClient.initialize_from_env()
 
-    mock_boto_client.assert_called_with("lambdainternal")
+    # Verify the call was made with the expected arguments including config
+    call_args = mock_boto_client.call_args
+    assert call_args[0] == ("lambdainternal",)
+    assert "config" in call_args[1]
     assert isinstance(client, LambdaClient)
 
 

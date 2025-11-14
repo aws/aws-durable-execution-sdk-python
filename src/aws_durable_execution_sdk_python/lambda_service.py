@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 import boto3  # type: ignore
+from botocore.config import Config  # type: ignore
 
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
@@ -959,6 +960,10 @@ class LambdaClient(DurableServiceClient):
             "lambdainternal-local",
             endpoint_url=endpoint,
             region_name=region,
+            config=Config(
+                connect_timeout=5,
+                read_timeout=50,
+            ),
         )
 
         logger.debug(
@@ -980,9 +985,20 @@ class LambdaClient(DurableServiceClient):
         if not endpoint_url:
             client = boto3.client(
                 "lambdainternal",
+                config=Config(
+                    connect_timeout=5,
+                    read_timeout=50,
+                ),
             )
         else:
-            client = boto3.client("lambdainternal", endpoint_url=endpoint_url)
+            client = boto3.client(
+                "lambdainternal",
+                endpoint_url=endpoint_url,
+                config=Config(
+                    connect_timeout=5,
+                    read_timeout=50,
+                ),
+            )
 
         return LambdaClient(client=client)
 
