@@ -372,6 +372,14 @@ class SerDes(ABC, Generic[T]):
         return False
 
 
+class PassThroughSerDes(SerDes[T]):
+    def serialize(self, value: T, _: SerDesContext) -> str:  # noqa: PLR6301
+        return value  # type: ignore
+
+    def deserialize(self, data: str, _: SerDesContext) -> T:  # noqa: PLR6301
+        return data  # type: ignore
+
+
 class JsonSerDes(SerDes[T]):
     def serialize(self, value: T, _: SerDesContext) -> str:  # noqa: PLR6301
         return json.dumps(value)

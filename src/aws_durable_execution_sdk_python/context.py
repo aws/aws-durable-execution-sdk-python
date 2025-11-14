@@ -36,7 +36,11 @@ from aws_durable_execution_sdk_python.operation.wait import wait_handler
 from aws_durable_execution_sdk_python.operation.wait_for_condition import (
     wait_for_condition_handler,
 )
-from aws_durable_execution_sdk_python.serdes import SerDes, deserialize
+from aws_durable_execution_sdk_python.serdes import (
+    PassThroughSerDes,
+    SerDes,
+    deserialize,
+)
 from aws_durable_execution_sdk_python.state import ExecutionState  # noqa: TCH001
 from aws_durable_execution_sdk_python.threading import OrderedCounter
 from aws_durable_execution_sdk_python.types import (
@@ -65,6 +69,8 @@ Params = ParamSpec("Params")
 
 
 logger = logging.getLogger(__name__)
+
+PASS_THROUGH_SERDES: SerDes[Any] = PassThroughSerDes()
 
 
 def durable_step(
@@ -144,7 +150,7 @@ class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
                 return None  # type: ignore
 
             return deserialize(
-                serdes=self.serdes,
+                serdes=self.serdes if self.serdes is not None else PASS_THROUGH_SERDES,
                 data=checkpointed_result.result,
                 operation_id=self.operation_id,
                 durable_execution_arn=self.state.durable_execution_arn,
