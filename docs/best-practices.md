@@ -7,6 +7,7 @@
 - [Timeout configuration](#timeout-configuration)
 - [Naming conventions](#naming-conventions)
 - [Performance optimization](#performance-optimization)
+- [Serialization](#serialization)
 - [Common mistakes](#common-mistakes)
 - [Code organization](#code-organization)
 - [FAQ](#faq)
@@ -500,6 +501,80 @@ def lambda_handler(event: dict, context: DurableContext) -> dict:
 
 [↑ Back to top](#table-of-contents)
 
+## Serialization
+
+### Use JSON-serializable types
+
+The SDK uses JSON serialization by default for checkpoints. Stick to JSON-compatible types (dict, list, str, int, float, bool, None) for operation inputs and results.
+
+**Good:**
+
+```python
+@durable_step
+def process_order(step_context: StepContext, order: dict) -> dict:
+    return {
+        "order_id": order["id"],
+        "total": 99.99,
+        "items": ["item1", "item2"],
+        "processed": True,
+    }
+```
+
+**Avoid:**
+
+```python
+from datetime import datetime
+from decimal import Decimal
+
+@durable_step
+def process_order(step_context: StepContext, order: dict) -> dict:
+    # datetime and Decimal aren't JSON-serializable by default
+    return {
+        "order_id": order["id"],
+        "total": Decimal("99.99"),  # Won't serialize!
+        "timestamp": datetime.now(),  # Won't serialize!
+    }
+```
+
+### Convert non-serializable types
+
+Convert complex types to JSON-compatible formats before returning from steps:
+
+```python
+from datetime import datetime
+from decimal import Decimal
+
+@durable_step
+def process_order(step_context: StepContext, order: dict) -> dict:
+    return {
+        "order_id": order["id"],
+        "total": float(Decimal("99.99")),  # Convert to float
+        "timestamp": datetime.now().isoformat(),  # Convert to string
+    }
+```
+
+### Use custom serialization for complex types
+
+For complex objects, implement custom serialization or use the SDK's SerDes system:
+
+```python
+from dataclasses import dataclass, asdict
+
+@dataclass
+class Order:
+    order_id: str
+    total: float
+    items: list
+
+@durable_step
+def process_order(step_context: StepContext, order_data: dict) -> dict:
+    order = Order(**order_data)
+    # Process order...
+    return asdict(order)  # Convert dataclass to dict
+```
+
+[↑ Back to top](#table-of-contents)
+
 ## Common mistakes
 
 ### ⚠️ Modifying mutable objects between steps
@@ -525,6 +600,51 @@ def lambda_handler(event: dict, context: DurableContext) -> dict:
     data = context.step(increment_count(data))
     return data
 ```
+
+### ⚠️ Using context inside its own operations
+
+**Wrong:**
+
+```python
+@durable_step
+def process_with_wait(step_context: StepContext, context: DurableContext) -> str:
+    # DON'T: Can't use context inside its own step operation
+    context.wait(seconds=1)  # Error: using context inside step!
+    result = context.step(nested_step(), name="step2")  # Error: nested context.step!
+    return result
+
+@durable_execution
+def lambda_handler(event: dict, context: DurableContext) -> dict:
+    # This will fail - context is being used inside its own step
+    result = context.step(process_with_wait(context), name="step1")
+    return {"result": result}
+```
+
+**Right:**
+
+```python
+@durable_step
+def nested_step(step_context: StepContext) -> str:
+    return "nested step"
+
+@durable_with_child_context
+def process_with_wait(child_ctx: DurableContext) -> str:
+    # Use child context for nested operations
+    child_ctx.wait(seconds=1)
+    result = child_ctx.step(nested_step(), name="step2")
+    return result
+
+@durable_execution
+def lambda_handler(event: dict, context: DurableContext) -> dict:
+    # Use run_in_child_context for nested operations
+    result = context.run_in_child_context(
+        process_with_wait(),
+        name="block1"
+    )
+    return {"result": result}
+```
+
+**Why:** You can't use a context object inside its own operations (like calling `context.step()` inside another `context.step()`). Use child contexts to create isolated execution scopes for nested operations.
 
 ### ⚠️ Forgetting to handle callback timeouts
 
@@ -685,7 +805,7 @@ def lambda_handler(event: dict, context: DurableContext) -> dict:
 
 **Q: How many steps should a durable function have?**
 
-A: There's no hard limit, but keep in mind that more steps mean more API operations and longer execution time. Balance granularity with performance - group related operations when it makes sense, but don't hesitate to break down complex logic into steps.
+A: There's a limit of 3,000 operations per execution. Keep in mind that more steps mean more API operations and longer execution time. Balance granularity with performance - group related operations when it makes sense, but don't hesitate to break down complex logic into steps.
 
 **Q: Should I create a step for every function call?**
 
