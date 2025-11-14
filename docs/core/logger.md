@@ -503,7 +503,37 @@ fields @timestamp, @message, execution_arn
 
 **Q: Can I use a custom logger?**
 
-Yes. Any logger that implements the `LoggerInterface` protocol (with `debug`, `info`, `warning`, `error`, `exception` methods) works with the SDK. Use `context.set_logger()` to set your custom logger.
+Yes. Any logger that implements the `LoggerInterface` protocol works with the SDK. Use `context.set_logger()` to set your custom logger.
+
+The protocol is defined in `aws_durable_execution_sdk_python.types`:
+
+```python
+from typing import Protocol
+from collections.abc import Mapping
+
+class LoggerInterface(Protocol):
+    def debug(
+        self, msg: object, *args: object, extra: Mapping[str, object] | None = None
+    ) -> None: ...
+
+    def info(
+        self, msg: object, *args: object, extra: Mapping[str, object] | None = None
+    ) -> None: ...
+
+    def warning(
+        self, msg: object, *args: object, extra: Mapping[str, object] | None = None
+    ) -> None: ...
+
+    def error(
+        self, msg: object, *args: object, extra: Mapping[str, object] | None = None
+    ) -> None: ...
+
+    def exception(
+        self, msg: object, *args: object, extra: Mapping[str, object] | None = None
+    ) -> None: ...
+```
+
+Any logger with these methods (like Python's standard `logging.Logger` or Powertools Logger) is compatible.
 
 **Q: What's the difference between the SDK logger and Powertools for AWS Lambda (Python)?**
 
