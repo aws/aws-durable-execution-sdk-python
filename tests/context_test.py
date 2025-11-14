@@ -75,6 +75,28 @@ def test_callback_result_succeeded():
     callback = Callback("callback1", "op1", mock_state)
     result = callback.result()
 
+    assert result == '"success_result"'
+    mock_state.get_checkpoint_result.assert_called_once_with("op1")
+
+
+def test_callback_result_succeeded_with_plain_str():
+    """Test Callback.result() when operation succeeded."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.CALLBACK,
+        status=OperationStatus.SUCCEEDED,
+        callback_details=CallbackDetails(
+            callback_id="callback1", result="success_result"
+        ),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    callback = Callback("callback1", "op1", mock_state)
+    result = callback.result()
+
     assert result == "success_result"
     mock_state.get_checkpoint_result.assert_called_once_with("op1")
 
