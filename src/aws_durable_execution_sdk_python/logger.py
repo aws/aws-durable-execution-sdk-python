@@ -56,7 +56,8 @@ class Logger(LoggerInterface):
         if info.parent_id:
             extra["parent_id"] = info.parent_id
         if info.name:
-            extra["name"] = info.name
+            # Use 'operation_name' instead of 'name' as key because the stdlib LogRecord internally reserved 'name' parameter
+            extra["operation_name"] = info.name
         if info.attempt:
             extra["attempt"] = info.attempt
         return cls(logger, extra)

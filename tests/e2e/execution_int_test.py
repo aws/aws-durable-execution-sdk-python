@@ -208,7 +208,7 @@ def test_step_with_logger():
             "from step %s %s",
             123,
             "str",
-            extra={"execution_arn": "test-arn", "name": "mystep"},
+            extra={"execution_arn": "test-arn", "operation_name": "mystep"},
         )
 
         assert result["Status"] == InvocationStatus.SUCCEEDED.value

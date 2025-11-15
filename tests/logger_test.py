@@ -1,5 +1,6 @@
 """Unit tests for logger module."""
 
+import logging
 from collections.abc import Mapping
 from unittest.mock import Mock
 
@@ -155,7 +156,7 @@ def test_logger_from_log_info_full():
     expected_extra = {
         "execution_arn": "arn:aws:test",
         "parent_id": "parent123",
-        "name": "test_name",
+        "operation_name": "test_name",
         "attempt": 5,
     }
     assert logger._default_extra == expected_extra  # noqa: SLF001
@@ -175,7 +176,7 @@ def test_logger_from_log_info_partial_fields():
     # Test with name but no parent_id or attempt
     log_info = LogInfo("arn:aws:test", None, "test_name")
     logger = Logger.from_log_info(mock_logger, log_info)
-    expected_extra = {"execution_arn": "arn:aws:test", "name": "test_name"}
+    expected_extra = {"execution_arn": "arn:aws:test", "operation_name": "test_name"}
     assert logger._default_extra == expected_extra  # noqa: SLF001
 
     # Test with attempt but no parent_id or name
@@ -207,7 +208,7 @@ def test_logger_with_log_info():
     expected_extra = {
         "execution_arn": "arn:aws:new",
         "parent_id": "parent2",
-        "name": "new_name",
+        "operation_name": "new_name",
     }
     assert new_logger._default_extra == expected_extra  # noqa: SLF001
     assert new_logger._logger is mock_logger  # noqa: SLF001
@@ -325,3 +326,13 @@ def test_logger_extra_override():
         "new_field": "value",
     }
     mock_logger.info.assert_called_once_with("test", extra=expected_extra)
+
+
+def test_logger_without_mocked_logger():
+    """Test Logger methods without mocking the underlying logger."""
+    log_info = LogInfo("arn:aws:test", "parent123", "test_name", 5)
+    logger = Logger.from_log_info(logging.getLogger(), log_info)
+
+    logger.info("test", extra={"execution_arn": "overridden", "new_field": "value"})
+    logger.warning("test", extra={"execution_arn": "overridden", "new_field": "value"})
+    logger.error("test", extra={"execution_arn": "overridden", "new_field": "value"})
