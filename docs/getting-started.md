@@ -228,6 +228,33 @@ def handler(event: dict, context: DurableContext) -> str:
 
 Deploy this to Lambda and you have a durable function. The `greet_user` step is checkpointed automatically.
 
+### Using a custom boto3 Lambda client
+
+If you need to customize the boto3 Lambda client used for durable execution operations (for example, to configure custom endpoints, retry settings, or credentials), you can pass a `boto3_client` parameter to the decorator. The client must be a boto3 Lambda client:
+
+```python
+import boto3
+from botocore.config import Config
+from aws_durable_execution_sdk_python import durable_execution, DurableContext
+
+# Create a custom boto3 Lambda client with specific configuration
+custom_lambda_client = boto3.client(
+    'lambda',
+    config=Config(
+        retries={'max_attempts': 5, 'mode': 'adaptive'},
+        connect_timeout=10,
+        read_timeout=60,
+    )
+)
+
+@durable_execution(boto3_client=custom_lambda_client)
+def handler(event: dict, context: DurableContext) -> dict:
+    # Your durable function logic
+    return {"status": "success"}
+```
+
+The custom Lambda client is used for all checkpoint and state management operations. If you don't provide a `boto3_client`, the SDK initializes a default Lambda client from your environment.
+
 [↑ Back to top](#table-of-contents)
 
 ## Next steps

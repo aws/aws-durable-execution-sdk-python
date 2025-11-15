@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +30,8 @@ from aws_durable_execution_sdk_python.lambda_service import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, MutableMapping
+
+    import boto3  # type: ignore
 
     from aws_durable_execution_sdk_python.types import LambdaContext
 
@@ -193,8 +196,15 @@ class DurableExecutionInvocationOutput:
 
 
 def durable_execution(
-    func: Callable[[Any, DurableContext], Any],
+    func: Callable[[Any, DurableContext], Any] | None = None,
+    *,
+    boto3_client: boto3.client | None = None,  # type: ignore
 ) -> Callable[[Any, LambdaContext], Any]:
+    # Decorator called with parameters
+    if func is None:
+        logger.debug("Decorator called with parameters")
+        return functools.partial(durable_execution, boto3_client=boto3_client)
+
     logger.debug("Starting durable execution handler...")
 
     def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
@@ -210,11 +220,15 @@ def durable_execution(
             logger.debug("durableExecutionArn: %s", event.get("DurableExecutionArn"))
             invocation_input = DurableExecutionInvocationInput.from_dict(event)
 
-            service_client = (
-                LambdaClient.initialize_local_runner_client()
-                if invocation_input.is_local_runner
-                else LambdaClient.initialize_from_env()
-            )
+            # Local runner always uses its own client, otherwise use custom or default
+            if invocation_input.is_local_runner:
+                service_client = LambdaClient.initialize_local_runner_client()
+            else:
+                service_client = (
+                    LambdaClient(client=boto3_client)
+                    if boto3_client is not None
+                    else LambdaClient.initialize_from_env()
+                )
 
         raw_input_payload: str | None = (
             invocation_input.initial_execution_state.get_input_payload()

@@ -1961,3 +1961,54 @@ def test_durable_execution_logs_checkpoint_error_extras_from_user_code():
     assert call_args[0][0] == "Checkpoint system failed"
     assert call_args[1]["extra"]["Error"] == error_obj
     assert call_args[1]["extra"]["ResponseMetadata"] == metadata_obj
+
+
+def test_durable_execution_with_boto3_client_parameter():
+    """Test durable_execution decorator accepts boto3_client parameter."""
+    # GIVEN a custom boto3 Lambda client
+    mock_boto3_client = Mock()
+    mock_boto3_client.checkpoint_durable_execution.return_value = {
+        "CheckpointToken": "new_token",
+        "NewExecutionState": {"Operations": [], "NextMarker": ""},
+    }
+    mock_boto3_client.get_durable_execution_state.return_value = {
+        "Operations": [],
+        "NextMarker": "",
+    }
+
+    # GIVEN a durable function decorated with the custom client
+    @durable_execution(boto3_client=mock_boto3_client)
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    event = {
+        "DurableExecutionArn": "arn:test:execution",
+        "CheckpointToken": "token123",
+        "InitialExecutionState": {
+            "Operations": [
+                {
+                    "Id": "exec1",
+                    "Type": "EXECUTION",
+                    "Status": "STARTED",
+                    "ExecutionDetails": {"InputPayload": '{"input": "test"}'},
+                }
+            ],
+            "NextMarker": "",
+        },
+        "LocalRunner": False,
+    }
+
+    lambda_context = Mock()
+    lambda_context.aws_request_id = "test-request"
+    lambda_context.client_context = None
+    lambda_context.identity = None
+    lambda_context._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
+    lambda_context.invoked_function_arn = None
+    lambda_context.tenant_id = None
+
+    # WHEN the handler is invoked
+    result = test_handler(event, lambda_context)
+
+    # THEN the execution succeeds using the custom client
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert result["Result"] == '{"result": "success"}'
