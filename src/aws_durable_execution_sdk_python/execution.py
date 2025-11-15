@@ -198,7 +198,7 @@ class DurableExecutionInvocationOutput:
 def durable_execution(
     func: Callable[[Any, DurableContext], Any] | None = None,
     *,
-    boto3_client: boto3.client | None = None,  # type: ignore
+    boto3_client: boto3.client | None = None,
 ) -> Callable[[Any, LambdaContext], Any]:
     # Decorator called with parameters
     if func is None:
