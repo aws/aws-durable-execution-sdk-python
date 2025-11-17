@@ -3,10 +3,11 @@ from __future__ import annotations
 import datetime
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Any, Protocol
 
 import boto3  # type: ignore
 from botocore.config import Config  # type: ignore
@@ -19,12 +20,19 @@ from aws_durable_execution_sdk_python.exceptions import (
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping
+    from typing import TypeAlias
 
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 
-ReplayChildren: TypeAlias = bool  # noqa UP040 ignore due to python3.11 minimum version
-OperationPayload: TypeAlias = str  # noqa UP040 ignore due to python3.11 minimum version
-TimeoutSeconds: TypeAlias = int  # noqa UP040 ignore due to python3.11 minimum version
+# Remove it when dropping support to Python 3.11
+if sys.version_info >= (3, 12):
+    type ReplayChildren = bool
+    type OperationPayload = str
+    type TimeoutSeconds = int
+else:
+    ReplayChildren: TypeAlias = bool
+    OperationPayload: TypeAlias = str
+    TimeoutSeconds: TypeAlias = int
 
 
 logger = logging.getLogger(__name__)
