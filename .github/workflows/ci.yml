@@ -43,6 +43,7 @@ jobs:
     - name: Install Hatch 
       run: |
         python -m pip install --upgrade hatch
+        python --version
     - name: static analysis
       run: hatch fmt --check
     - name: type checking
