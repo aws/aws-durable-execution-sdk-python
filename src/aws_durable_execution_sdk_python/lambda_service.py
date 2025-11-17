@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 import boto3  # type: ignore
 from botocore.config import Config  # type: ignore
@@ -20,11 +20,10 @@ from aws_durable_execution_sdk_python.exceptions import (
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping
-    from typing import TypeAlias
 
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 
-# Remove it when dropping support to Python 3.11
+# Replace with `type` it when dropping support to Python 3.11
 if sys.version_info >= (3, 12):
     type ReplayChildren = bool
     type OperationPayload = str
