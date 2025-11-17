@@ -7,14 +7,17 @@ name = "aws-durable-execution-sdk-python"
 dynamic = ["version"]
 description = 'This the Python SDK for AWS Lambda Durable Functions.'
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 keywords = []
 authors = [{ name = "yaythomas", email = "tgaigher@amazon.com" }]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
