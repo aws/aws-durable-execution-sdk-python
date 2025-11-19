@@ -17,19 +17,62 @@ jobs:
         python-version: ["3.13"]
 
     steps:
-    - name: Parse testing SDK branch from PR body
+    - name: Parse testing SDK branch from PR body (Python)
       id: parse
+      shell: bash
       run: |
-        # Look for a line like: TESTING_SDK_BRANCH: feature/foo
-        REF=$(printf '%s\n' '${{ github.event.pull_request.body }}' | sed -n 's/^TESTING_SDK_BRANCH:[[:space:]]*//p' | head -n1)
-        if [ -z "$REF" ]; then REF="main"; fi
-        echo "testing_ref=$REF" >> "$GITHUB_OUTPUT"
-        echo "Using testing SDK branch: $REF"
-
+        set -euo pipefail
+    
+        python - << 'PYTHON'
+        import os
+        import re
+    
+        body = os.environ.get("PR_BODY", "") or ""
+        default_ref = "main"
+    
+        # Regex:
+        # - (?i)            case-insensitive
+        # - TESTING_SDK_BRANCH
+        # - optional spaces
+        # - : or =
+        # - optional spaces
+        # - capture rest of line
+        pattern = re.compile(r"(?i)TESTING_SDK_BRANCH\s*[:=]\s*(.+)$")
+    
+        ref = None
+        for line in body.splitlines():
+          m = pattern.search(line)
+          if m:
+            # Strip trailing whitespace
+            candidate = m.group(1).strip()
+            if candidate:
+              ref = candidate
+              break
+    
+        if not ref:
+          ref = default_ref
+    
+        github_output = os.environ.get("GITHUB_OUTPUT")
+        if not github_output:
+          raise SystemExit("GITHUB_OUTPUT not set")
+    
+        with open(github_output, "a", encoding="utf-8") as fh:
+          fh.write(f"testing_ref={ref}\n")
+    
+        print(f"Using testing SDK branch: {ref}")
+        PYTHON
+      env:
+        PR_BODY: ${{ github.event.pull_request.body }}
     - name: Checkout Language SDK (this PR)
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
       with:
         path: language-sdk
+
+    - name: Parse testing SDK branch from PR body
+      id: parse
+      run: python ops/parse_sdk_branch.py
+      env:
+        PR_BODY: ${{ github.event.pull_request.body }}
 
     - name: Checkout Testing SDK
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
@@ -69,19 +112,16 @@ jobs:
       AWS_REGION: us-west-2
     
     steps:
-    - name: Parse testing SDK branch from PR body
-      id: parse
-      run: |
-        # Look for a line like: TESTING_SDK_BRANCH: feature/foo
-        REF=$(printf '%s\n' '${{ github.event.pull_request.body }}' | sed -n 's/^TESTING_SDK_BRANCH:[[:space:]]*//p' | head -n1)
-        if [ -z "$REF" ]; then REF="main"; fi
-        echo "testing_ref=$REF" >> "$GITHUB_OUTPUT"
-        echo "Using testing SDK branch: $REF"
-
     - name: Checkout Language SDK (this PR)
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
       with:
         path: language-sdk
+
+    - name: Parse testing SDK branch from PR body
+      id: parse
+      run: python ops/parse_sdk_branch.py
+      env:
+        PR_BODY: ${{ github.event.pull_request.body }}
 
     - name: Checkout Testing SDK
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
