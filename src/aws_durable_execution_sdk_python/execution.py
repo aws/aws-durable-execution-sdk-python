@@ -217,8 +217,18 @@ def durable_execution(
             invocation_input = event
             service_client = invocation_input.service_client
         else:
-            logger.debug("durableExecutionArn: %s", event.get("DurableExecutionArn"))
-            invocation_input = DurableExecutionInvocationInput.from_dict(event)
+            try:
+                logger.debug(
+                    "durableExecutionArn: %s", event.get("DurableExecutionArn")
+                )
+                invocation_input = DurableExecutionInvocationInput.from_dict(event)
+            except (KeyError, TypeError, AttributeError) as e:
+                msg = (
+                    "The function is not being invoked as a durable function. "
+                    "Please check the function configuration to ensure durability is turned on, "
+                    "or use the testing SDK for local testing."
+                )
+                raise ValueError(msg) from e
 
             # Local runner always uses its own client, otherwise use custom or default
             if invocation_input.is_local_runner:
