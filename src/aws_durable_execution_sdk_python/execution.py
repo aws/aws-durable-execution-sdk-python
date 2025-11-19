@@ -217,8 +217,17 @@ def durable_execution(
             invocation_input = event
             service_client = invocation_input.service_client
         else:
-            logger.debug("durableExecutionArn: %s", event.get("DurableExecutionArn"))
-            invocation_input = DurableExecutionInvocationInput.from_dict(event)
+            try:
+                logger.debug(
+                    "durableExecutionArn: %s", event.get("DurableExecutionArn")
+                )
+                invocation_input = DurableExecutionInvocationInput.from_dict(event)
+            except (KeyError, TypeError, AttributeError) as e:
+                msg = (
+                    "The payload is not the correct Durable Function input. "
+                    "Please set DurableConfig on the AWS Lambda to invoke it as a Durable Function."
+                )
+                raise ExecutionError(msg) from e
 
             # Local runner always uses its own client, otherwise use custom or default
             if invocation_input.is_local_runner:
