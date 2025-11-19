@@ -17,16 +17,16 @@ jobs:
         python-version: ["3.13"]
 
     steps:
-    - name: Checkout Language SDK (this PR)
-      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
-      with:
-        path: language-sdk
-
     - name: Parse testing SDK branch from PR body
       id: parse
       run: python ops/parse_sdk_branch.py
       env:
         PR_BODY: ${{ github.event.pull_request.body }}
+
+    - name: Checkout Language SDK (this PR)
+      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+      with:
+        path: language-sdk
 
     - name: Checkout Testing SDK
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
