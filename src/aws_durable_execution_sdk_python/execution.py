@@ -82,9 +82,7 @@ class InitialExecutionState:
             return None
         if not (execution_details := operations.execution_details):
             return None
-        if not (input_payload := execution_details.input_payload):
-            return None
-        return input_payload
+        return execution_details.input_payload
 
     def to_dict(self) -> MutableMapping[str, Any]:
         return {
