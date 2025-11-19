@@ -58,10 +58,15 @@ class InitialExecutionState:
             next_marker=input_dict.get("NextMarker", ""),
         )
 
-    def get_execution_operation(self) -> Operation:
+    def get_execution_operation(self) -> Operation | None:
         if len(self.operations) < 1:
+            # Due to payload size limitations we may have an empty operations list.
+            # This will only happen when loading the initial page of results and is
+            # expected behaviour. We don't fail, but instead return None
+            # as the execution operation does not exist
             msg: str = "No durable operations found in initial execution state."
-            raise DurableExecutionsError(msg)
+            logger.debug(msg)
+            return None
 
         candidate = self.operations[0]
         if candidate.operation_type is not OperationType.EXECUTION:
@@ -71,11 +76,15 @@ class InitialExecutionState:
         return candidate
 
     def get_input_payload(self) -> str | None:
-        # TODO: are these None checks necessary? i.e will there always be execution_details with input_payload
-        if execution_details := self.get_execution_operation().execution_details:
-            return execution_details.input_payload
-
-        return None
+        # It is possible that backend will not provide an execution operation
+        # for the initial page of results.
+        if not (operations := self.get_execution_operation()):
+            return None
+        if not (execution_details := operations.execution_details):
+            return None
+        if not (input_payload := execution_details.input_payload):
+            return None
+        return input_payload
 
     def to_dict(self) -> MutableMapping[str, Any]:
         return {

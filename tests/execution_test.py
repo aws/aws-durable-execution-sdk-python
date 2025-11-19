@@ -788,13 +788,16 @@ def test_durable_execution_client_selection_local_runner():
 
 
 def test_initial_execution_state_get_execution_operation_no_operations():
-    """Test get_execution_operation raises error when no operations exist."""
+    """Test get_execution_operation logs debug and returns None when no operations exist."""
     state = InitialExecutionState(operations=[], next_marker="")
 
-    with pytest.raises(
-        Exception, match="No durable operations found in initial execution state"
-    ):
-        state.get_execution_operation()
+    with patch("aws_durable_execution_sdk_python.execution.logger") as mock_logger:
+        result = state.get_execution_operation()
+
+        assert result is None
+        mock_logger.debug.assert_called_once_with(
+            "No durable operations found in initial execution state."
+        )
 
 
 def test_initial_execution_state_get_execution_operation_wrong_type():
