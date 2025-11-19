@@ -2036,8 +2036,8 @@ def test_durable_execution_with_non_durable_payload_raises_error():
     # WHEN the handler is invoked with a non-durable payload
     # THEN it raises a ValueError with a helpful message
     with pytest.raises(
-        ValueError,
-        match="The function is not being invoked as a durable function",
+        ExecutionError,
+        match="The payload is not the correct Durable Function input",
     ):
         test_handler(regular_event, lambda_context)
 
@@ -2064,7 +2064,7 @@ def test_durable_execution_with_non_dict_event_raises_error():
     # WHEN the handler is invoked with a non-dict event
     # THEN it raises a ValueError with a helpful message
     with pytest.raises(
-        ValueError,
-        match="The function is not being invoked as a durable function",
+        ExecutionError,
+        match="The payload is not the correct Durable Function input",
     ):
         test_handler(non_dict_event, lambda_context)
