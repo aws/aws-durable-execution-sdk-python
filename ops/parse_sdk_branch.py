@@ -4,10 +4,9 @@ import os
 import re
 
 
-
 def parse_sdk_branch(pr_body: str, default_ref: str = "main") -> str:
     """Parse PR body for TESTING_SDK_BRANCH and return the branch reference."""
-    pattern = re.compile(r"(?i)TESTING_SDK_BRANCH\s*[:=]\s*(.+)$", re.MULTILINE)
+    pattern = re.compile(r"(?i)TESTING_SDK_BRANCH\s*[:=]\s*(\S+)", re.MULTILINE)
 
     match = pattern.search(pr_body)
     if match:
@@ -26,8 +25,6 @@ def main():
     if github_output:
         with open(github_output, "a", encoding="utf-8") as f:
             f.write(f"testing_ref={ref}\n")
-
-    print(f"Using testing SDK branch: {ref}")
 
 
 if __name__ == "__main__":
