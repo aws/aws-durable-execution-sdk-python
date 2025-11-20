@@ -59,7 +59,7 @@ class InitialExecutionState:
         )
 
     def get_execution_operation(self) -> Operation | None:
-        if len(self.operations) < 1:
+        if not self.operations:
             # Due to payload size limitations we may have an empty operations list.
             # This will only happen when loading the initial page of results and is
             # expected behaviour. We don't fail, but instead return None
