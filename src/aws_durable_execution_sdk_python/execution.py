@@ -265,7 +265,7 @@ def durable_execution(
             invocation_input.initial_execution_state.get_input_payload()
         )
 
-        input_event: MutableMapping[str, Any] = {}  # type ignore
+        input_event: MutableMapping[str, Any] = {}
         if raw_input_payload and raw_input_payload.strip():
             input_event = deserialize(
                 serdes=input_serdes,
