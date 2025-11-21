@@ -184,6 +184,10 @@ class DurableContext(DurableContextProtocol):
             info=log_info,
         )
 
+    @property
+    def tenant_id(self) -> str | None:
+        return getattr(self.lambda_context, "tenant_id", None)
+
     # region factories
     @staticmethod
     def from_lambda_context(
@@ -299,9 +303,21 @@ class DurableContext(DurableContextProtocol):
             name: Optional name for the operation
             config: Optional configuration for the invoke operation
 
+        Notes:
+            config: InvokeConfig contains a tenant_id.
+            In the event that the tenant is not set, we will default to
+            using the same tenant as the current invocation.
+
+            In the event that the tenant is set, we will respect
+
         Returns:
             The result of the invoked function
         """
+
+        if config is None:
+            config = InvokeConfig()
+        config = config.with_tenant_id_if_unset(self.tenant_id)
+
         return invoke_handler(
             function_name=function_name,
             payload=payload,

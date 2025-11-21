@@ -308,10 +308,10 @@ def test_invoke_handler_no_config():
 
     # Verify default config was used
     operation_update = mock_state.create_checkpoint.call_args[1]["operation_update"]
-    assert (
-        operation_update.to_dict()["ChainedInvokeOptions"]["FunctionName"]
-        == "test_function"
-    )
+    chained_invoke_options = operation_update.to_dict()["ChainedInvokeOptions"]
+    assert chained_invoke_options["FunctionName"] == "test_function"
+    # tenant_id should be None when not specified
+    assert "TenantId" not in chained_invoke_options
 
 
 def test_invoke_handler_custom_serdes():

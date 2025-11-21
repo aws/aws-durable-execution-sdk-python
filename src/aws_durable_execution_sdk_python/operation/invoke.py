@@ -40,6 +40,8 @@ def invoke_handler(
 
     if not config:
         config = InvokeConfig[P, R]()
+    config = config.with_tenant_id_if_unset(None)
+    tenant_id = config.tenant_id
 
     # Check if we have existing step data
     checkpointed_result = state.get_checkpoint_result(operation_identifier.operation_id)
@@ -87,7 +89,10 @@ def invoke_handler(
     start_operation: OperationUpdate = OperationUpdate.create_invoke_start(
         identifier=operation_identifier,
         payload=serialized_payload,
-        chained_invoke_options=ChainedInvokeOptions(function_name=function_name),
+        chained_invoke_options=ChainedInvokeOptions(
+            function_name=function_name,
+            tenant_id=tenant_id,
+        ),
     )
 
     # Checkpoint invoke START with blocking (is_sync=True, default).

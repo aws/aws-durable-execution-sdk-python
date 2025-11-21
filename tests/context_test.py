@@ -512,16 +512,31 @@ def test_step_with_original_name(mock_handler):
 
 
 # region invoke
+@pytest.mark.parametrize(
+    ("lambda_tenant_id", "expected_tenant_id"),
+    [
+        (None, None),
+        ("test-tenant", "test-tenant"),
+    ],
+)
 @patch("aws_durable_execution_sdk_python.context.invoke_handler")
-def test_invoke_basic(mock_handler):
-    """Test invoke with basic parameters."""
+def test_invoke_basic(mock_handler, lambda_tenant_id, expected_tenant_id):
+    """Test invoke with basic parameters and tenant_id inheritance."""
     mock_handler.return_value = "invoke_result"
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state)
+    # Create mock lambda context with tenant_id
+    mock_lambda_context = Mock()
+    if lambda_tenant_id:
+        mock_lambda_context.tenant_id = lambda_tenant_id
+    else:
+        # Remove tenant_id attribute entirely when None
+        del mock_lambda_context.tenant_id
+
+    context = DurableContext(state=mock_state, lambda_context=mock_lambda_context)
     operation_ids = operation_id_sequence()
     expected_operation_id = next(operation_ids)
 
@@ -534,7 +549,7 @@ def test_invoke_basic(mock_handler):
         payload="test_payload",
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_operation_id, None, None),
-        config=None,
+        config=InvokeConfig(tenant_id=expected_tenant_id),
     )
 
 
@@ -561,12 +576,15 @@ def test_invoke_with_name_and_config(mock_handler):
     expected_id = next(seq)  # 6th
 
     assert result == "configured_result"
+    expected_config = InvokeConfig[str, str](
+        timeout=Duration.from_seconds(30), tenant_id=None
+    )
     mock_handler.assert_called_once_with(
         function_name="test_function",
         payload={"key": "value"},
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_id, None, "named_invoke"),
-        config=config,
+        config=expected_config,
     )
 
 
@@ -593,7 +611,7 @@ def test_invoke_with_parent_id(mock_handler):
         payload=None,
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_id, "parent123", None),
-        config=None,
+        config=InvokeConfig(tenant_id=None),
     )
 
 
@@ -649,7 +667,7 @@ def test_invoke_with_none_payload(mock_handler):
         payload=None,
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_id, None, None),
-        config=None,
+        config=InvokeConfig(tenant_id=None),
     )
 
 
@@ -662,9 +680,11 @@ def test_invoke_with_custom_serdes(mock_handler):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
+    payload_serdes = CustomDictSerDes()
+    result_serdes = CustomDictSerDes()
     config = InvokeConfig[dict, dict](
-        serdes_payload=CustomDictSerDes(),
-        serdes_result=CustomDictSerDes(),
+        serdes_payload=payload_serdes,
+        serdes_result=result_serdes,
         timeout=Duration.from_minutes(1),
     )
 
@@ -681,6 +701,12 @@ def test_invoke_with_custom_serdes(mock_handler):
     expected_id = next(seq)
 
     assert result == {"transformed": "data"}
+    expected_config = InvokeConfig[dict, dict](
+        serdes_payload=payload_serdes,
+        serdes_result=result_serdes,
+        timeout=Duration.from_minutes(1),
+        tenant_id=None,
+    )
     mock_handler.assert_called_once_with(
         function_name="test_function",
         payload={"original": "data"},
@@ -688,7 +714,7 @@ def test_invoke_with_custom_serdes(mock_handler):
         operation_identifier=OperationIdentifier(
             expected_id, None, "custom_serdes_invoke"
         ),
-        config=config,
+        config=expected_config,
     )
 
 
@@ -994,6 +1020,45 @@ def test_run_in_child_context_resolves_name_from_callable(mock_handler):
 
     call_args = mock_handler.call_args
     assert call_args[1]["operation_identifier"].name == "original_function_name"
+
+
+@pytest.mark.parametrize(
+    ("parent_tenant_id", "expected_tenant_id"),
+    [
+        (None, None),
+        ("parent-tenant", "parent-tenant"),
+    ],
+)
+def test_run_in_child_context_inherits_tenant_id(parent_tenant_id, expected_tenant_id):
+    """Test that child context inherits tenant_id from parent."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    # Create mock lambda context with tenant_id
+    mock_lambda_context = Mock()
+    if parent_tenant_id:
+        mock_lambda_context.tenant_id = parent_tenant_id
+    else:
+        del mock_lambda_context.tenant_id
+
+    parent_context = DurableContext(
+        state=mock_state, lambda_context=mock_lambda_context
+    )
+
+    def check_child_tenant_id(child_context):
+        # Verify child context has same tenant_id as parent
+        assert child_context.tenant_id == expected_tenant_id
+        return "result"
+
+    with patch(
+        "aws_durable_execution_sdk_python.context.child_handler"
+    ) as mock_handler:
+        # Make child_handler execute the function with a child context
+        mock_handler.side_effect = lambda func, **kwargs: func()
+
+        parent_context.run_in_child_context(check_child_tenant_id, "test_child")
 
 
 # endregion run_in_child_context

@@ -400,9 +400,10 @@ def test_callback_options_from_dict_partial():
 
 def test_invoke_options_from_dict():
     """Test ChainedInvokeOptions.from_dict method."""
-    data = {"FunctionName": "test-function", "TimeoutSeconds": 120}
+    data = {"FunctionName": "test-function", "TenantId": "test-tenant"}
     options = ChainedInvokeOptions.from_dict(data)
     assert options.function_name == "test-function"
+    assert options.tenant_id == "test-tenant"
 
 
 def test_invoke_options_from_dict_required_only():
@@ -410,6 +411,15 @@ def test_invoke_options_from_dict_required_only():
     data = {"FunctionName": "test-function"}
     options = ChainedInvokeOptions.from_dict(data)
     assert options.function_name == "test-function"
+    assert options.tenant_id is None
+
+
+def test_invoke_options_from_dict_with_none_tenant():
+    """Test ChainedInvokeOptions.from_dict with explicit None tenant_id."""
+    data = {"FunctionName": "test-function", "TenantId": None}
+    options = ChainedInvokeOptions.from_dict(data)
+    assert options.function_name == "test-function"
+    assert options.tenant_id is None
 
 
 def test_context_options_from_dict():

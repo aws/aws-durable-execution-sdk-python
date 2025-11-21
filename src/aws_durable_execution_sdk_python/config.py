@@ -27,6 +27,14 @@ if TYPE_CHECKING:
 Numeric = int | float  # deliberately leaving off complex
 
 
+class _UnsetType:
+    def __repr__(self):
+        return "<UNSET>"
+
+
+UNSET = _UnsetType()
+
+
 @dataclass(frozen=True)
 class Duration:
     """Represents a duration stored as total seconds."""
@@ -384,11 +392,30 @@ class InvokeConfig(Generic[P, R]):
     timeout: Duration = field(default_factory=Duration)
     serdes_payload: SerDes[P] | None = None
     serdes_result: SerDes[R] | None = None
+    # we want to distinguish between deliberate use of None
+    # and simply not setting the value.
+    # We use the sentinel to indicate that the user has not set
+    # the field, so that we can fall back to the fallback behaviour.
+    # The reason we want to accept None as a valid input is that we want to
+    # allow deliberate invocation without a tenant if the users desire.
+    # However, we should also, by default, accept a sane input — which is using
+    # the same tenant id as the current invocation
+    tenant_id: str | None = field(default=UNSET)  # type: ignore
 
     @property
     def timeout_seconds(self) -> int:
         """Get timeout in seconds."""
         return self.timeout.to_seconds()
+
+    def with_tenant_id_if_unset(self, tenant_id: str | None) -> InvokeConfig:
+        if self.tenant_id is UNSET:
+            return InvokeConfig(
+                timeout=self.timeout,
+                serdes_payload=self.serdes_payload,
+                serdes_result=self.serdes_result,
+                tenant_id=tenant_id,
+            )
+        return self
 
 
 @dataclass(frozen=True)
