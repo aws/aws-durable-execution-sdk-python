@@ -18,6 +18,13 @@ from aws_durable_execution_sdk_python.exceptions import (
 # Core decorator - used in every durable function
 from aws_durable_execution_sdk_python.execution import durable_execution
 
+# Serialization - for custom input/output serialization
+from aws_durable_execution_sdk_python.serdes import (
+    ExtendedTypeSerDes,
+    JsonSerDes,
+    SerDes,
+)
+
 # Essential context types - passed to user functions
 from aws_durable_execution_sdk_python.types import BatchResult, StepContext
 
@@ -25,7 +32,10 @@ __all__ = [
     "BatchResult",
     "DurableContext",
     "DurableExecutionsError",
+    "ExtendedTypeSerDes",
     "InvocationError",
+    "JsonSerDes",
+    "SerDes",
     "StepContext",
     "ValidationError",
     "durable_execution",

@@ -3,13 +3,19 @@
 import datetime
 import json
 import time
+from decimal import Decimal
 from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
 
+from aws_durable_execution_sdk_python import (
+    DurableContext,
+    ExtendedTypeSerDes,
+    JsonSerDes,
+    durable_execution,
+)
 from aws_durable_execution_sdk_python.config import StepConfig, StepSemantics
-from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     BotoClientError,
     CheckpointError,
@@ -24,7 +30,6 @@ from aws_durable_execution_sdk_python.execution import (
     DurableExecutionInvocationOutput,
     InitialExecutionState,
     InvocationStatus,
-    durable_execution,
 )
 
 # LambdaContext no longer needed - using duck typing
@@ -946,7 +951,7 @@ def test_durable_handler_invalid_json_input_payload():
     lambda_context.invoked_function_arn = None
     lambda_context.tenant_id = None
 
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(ExecutionError):
         test_handler(invocation_input, lambda_context)
 
 
@@ -2071,3 +2076,106 @@ def test_durable_execution_with_non_dict_event_raises_error():
         match="The payload is not the correct Durable Function input",
     ):
         test_handler(non_dict_event, lambda_context)
+
+
+# region SERDES
+
+
+@pytest.mark.parametrize(
+    ("input_serdes", "output_serdes", "input_data", "expected_output"),
+    [
+        # Both ExtendedTypeSerDes
+        (
+            ExtendedTypeSerDes(),
+            ExtendedTypeSerDes(),
+            {
+                "amount": Decimal("123.45"),
+                "timestamp": datetime.datetime(
+                    2025, 11, 20, 18, 0, 0, tzinfo=datetime.UTC
+                ),
+            },
+            {
+                "result_amount": Decimal("678.90"),
+                "processed_at": datetime.datetime(
+                    2025, 11, 20, 19, 0, 0, tzinfo=datetime.UTC
+                ),
+            },
+        ),
+        # Both JsonSerDes
+        (
+            JsonSerDes(),
+            JsonSerDes(),
+            {"name": "test", "value": 42},
+            {"result": "success", "count": 100},
+        ),
+        # Input ExtendedTypeSerDes, Output JsonSerDes
+        (
+            ExtendedTypeSerDes(),
+            JsonSerDes(),
+            {"amount": Decimal("123.45")},
+            {"result": "success"},
+        ),
+        # Input JsonSerDes, Output ExtendedTypeSerDes
+        (
+            JsonSerDes(),
+            ExtendedTypeSerDes(),
+            {"name": "test"},
+            {
+                "timestamp": datetime.datetime(
+                    2025, 11, 20, 19, 0, 0, tzinfo=datetime.UTC
+                )
+            },
+        ),
+    ],
+)
+def test_durable_execution_with_serdes(
+    input_serdes, output_serdes, input_data, expected_output
+):
+    """Test that input_serdes and output_serdes are invoked correctly."""
+    serialized_input = input_serdes.serialize(input_data, None)
+
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new-token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(
+            operations=[], next_marker=None
+        ),
+    )
+
+    execution_op = Operation(
+        operation_id="EXECUTION",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload=serialized_input),
+    )
+
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:aws:lambda:us-east-1:123456789012:function:test",
+        checkpoint_token="initial-token",  # noqa: S106
+        initial_execution_state=InitialExecutionState(
+            operations=[execution_op],
+            next_marker="",
+        ),
+        is_local_runner=False,
+        service_client=mock_client,
+    )
+
+    with (
+        patch.object(
+            input_serdes, "deserialize", wraps=input_serdes.deserialize
+        ) as mock_input_deser,
+        patch.object(
+            output_serdes, "serialize", wraps=output_serdes.serialize
+        ) as mock_output_ser,
+    ):
+
+        @durable_execution(input_serdes=input_serdes, output_serdes=output_serdes)
+        def handler(event, context: DurableContext):
+            return expected_output
+
+        handler(invocation_input, Mock())
+
+        mock_input_deser.assert_called_once()
+        mock_output_ser.assert_called_once_with(
+            expected_output, mock_output_ser.call_args[0][1]
+        )

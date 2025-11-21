@@ -27,6 +27,12 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     OperationUpdate,
 )
+from aws_durable_execution_sdk_python.serdes import (
+    JsonSerDes,
+    SerDes,
+    deserialize,
+    serialize,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, MutableMapping
@@ -206,15 +212,29 @@ def durable_execution(
     func: Callable[[Any, DurableContext], Any] | None = None,
     *,
     boto3_client: boto3.client | None = None,
+    input_serdes: SerDes | None = None,
+    output_serdes: SerDes | None = None,
 ) -> Callable[[Any, LambdaContext], Any]:
     # Decorator called with parameters
     if func is None:
         logger.debug("Decorator called with parameters")
-        return functools.partial(durable_execution, boto3_client=boto3_client)
+        return functools.partial(
+            durable_execution,
+            boto3_client=boto3_client,
+            input_serdes=input_serdes,
+            output_serdes=output_serdes,
+        )
 
     logger.debug("Starting durable execution handler...")
 
     def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
+        # Set default SerDes if not provided
+        nonlocal input_serdes, output_serdes
+        if input_serdes is None:
+            input_serdes = JsonSerDes()
+        if output_serdes is None:
+            output_serdes = JsonSerDes()
+
         invocation_input: DurableExecutionInvocationInput
         service_client: DurableServiceClient
 
@@ -250,18 +270,14 @@ def durable_execution(
             invocation_input.initial_execution_state.get_input_payload()
         )
 
-        # Python RIC LambdaMarshaller just uses standard json deserialization for event
-        # https://github.com/aws/aws-lambda-python-runtime-interface-client/blob/main/awslambdaric/lambda_runtime_marshaller.py#L46
-        input_event: MutableMapping[str, Any] = {}
+        input_event: MutableMapping[str, Any] = {}  # type ignore
         if raw_input_payload and raw_input_payload.strip():
-            try:
-                input_event = json.loads(raw_input_payload)
-            except json.JSONDecodeError:
-                logger.exception(
-                    "Failed to parse input payload as JSON: payload: %r",
-                    raw_input_payload,
-                )
-                raise
+            input_event = deserialize(
+                serdes=input_serdes,
+                data=raw_input_payload,
+                operation_id="EXECUTION",
+                durable_execution_arn=invocation_input.durable_execution_arn,
+            )
 
         execution_state: ExecutionState = ExecutionState(
             durable_execution_arn=invocation_input.durable_execution_arn,
@@ -310,7 +326,15 @@ def durable_execution(
                     "%s exiting user-space...",
                     invocation_input.durable_execution_arn,
                 )
-                serialized_result = json.dumps(result)
+
+                # Serialize result using output_serdes if provided
+                serialized_result = serialize(
+                    serdes=output_serdes,
+                    value=result,
+                    operation_id="EXECUTION",
+                    durable_execution_arn=invocation_input.durable_execution_arn,
+                )
+
                 # large response handling here. Remember if checkpointing to complete, NOT to include
                 # payload in response
                 if (
