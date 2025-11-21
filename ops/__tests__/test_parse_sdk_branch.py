@@ -73,7 +73,10 @@ TESTING_SDK_BRANCH = second-branch""",
 
     for input_text, expected in test_cases:
         result = parse_sdk_branch(input_text)
-        assert result == expected  # noqa: S101
+        if result != expected:
+            return False
+
+    return True
 
 
 if __name__ == "__main__":

@@ -226,15 +226,10 @@ def durable_execution(
         )
 
     logger.debug("Starting durable execution handler...")
+    input_serdes = input_serdes or JsonSerDes()
+    output_serdes = output_serdes or JsonSerDes()
 
     def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
-        # Set default SerDes if not provided
-        nonlocal input_serdes, output_serdes
-        if input_serdes is None:
-            input_serdes = JsonSerDes()
-        if output_serdes is None:
-            output_serdes = JsonSerDes()
-
         invocation_input: DurableExecutionInvocationInput
         service_client: DurableServiceClient
 
