@@ -11,6 +11,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Self, TypedDict
 
 BAD_REQUEST_ERROR: int = 400
+TOO_MANY_REQUESTS_ERROR: int = 429
 SERVICE_ERROR: int = 500
 
 if TYPE_CHECKING:
@@ -160,10 +161,11 @@ class CheckpointError(BotoClientError):
         status_code: int | None = (metadata and metadata.get("HTTPStatusCode")) or None
         if (
             status_code
-            # if we are in 4xx range and is not an InvalidParameterValueException with Invalid Checkpoint Token
+            # if we are in 4xx range (except 429) and is not an InvalidParameterValueException with Invalid Checkpoint Token
             # then it's an execution error
             and status_code < SERVICE_ERROR
             and status_code >= BAD_REQUEST_ERROR
+            and status_code != TOO_MANY_REQUESTS_ERROR
             and error
             and (
                 # is not InvalidParam => Execution
