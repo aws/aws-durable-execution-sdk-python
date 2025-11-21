@@ -308,7 +308,15 @@ class DurableContext(DurableContextProtocol):
             In the event that the tenant is not set, we will default to
             using the same tenant as the current invocation.
 
-            In the event that the tenant is set, we will respect
+            In the event that the tenant is set for this invocation, we will
+            respect it, and propagate it.
+            
+            In the event that the tenant is not set for this invocation, we
+            will not impose a tenant.
+            
+            At the same time, we allow setting up tenant to None, or a key,
+            so that an isolated function can call a non-isolated function,
+            and vice versa.
 
         Returns:
             The result of the invoked function
