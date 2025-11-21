@@ -4,7 +4,6 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
 from aws_durable_execution_sdk_python.config import (
-    UNSET,
     BatchedInput,
     CallbackConfig,
     CheckpointMode,
@@ -279,16 +278,10 @@ def test_step_future_without_name():
         assert result == 42
 
 
-def test_unset_type():
-    """Test UNSET sentinel value."""
-    assert str(UNSET) == "<UNSET>"
-    assert repr(UNSET) == "<UNSET>"
-
-
 def test_invoke_config_defaults():
     """Test InvokeConfig defaults."""
     config = InvokeConfig()
-    assert config.tenant_id is UNSET
+    assert config.tenant_id is None
     assert config.timeout_seconds == 0
 
 
@@ -296,31 +289,3 @@ def test_invoke_config_with_tenant_id():
     """Test InvokeConfig with explicit tenant_id."""
     config = InvokeConfig(tenant_id="test-tenant")
     assert config.tenant_id == "test-tenant"
-
-
-def test_invoke_config_with_tenant_id_if_unset_when_unset():
-    """Test with_tenant_id_if_unset when tenant_id is UNSET."""
-    config = InvokeConfig()
-    new_config = config.with_tenant_id_if_unset("new-tenant")
-
-    assert config.tenant_id is UNSET  # Original unchanged
-    assert new_config.tenant_id == "new-tenant"
-    assert new_config.timeout == config.timeout
-
-
-def test_invoke_config_with_tenant_id_if_unset_when_set():
-    """Test with_tenant_id_if_unset when tenant_id is already set."""
-    config = InvokeConfig(tenant_id="existing-tenant")
-    new_config = config.with_tenant_id_if_unset("new-tenant")
-
-    assert new_config is config  # Same object returned
-    assert new_config.tenant_id == "existing-tenant"
-
-
-def test_invoke_config_with_tenant_id_if_unset_with_none():
-    """Test with_tenant_id_if_unset with None value."""
-    config = InvokeConfig()
-    new_config = config.with_tenant_id_if_unset(None)
-
-    assert config.tenant_id is UNSET  # Original unchanged
-    assert new_config.tenant_id is None

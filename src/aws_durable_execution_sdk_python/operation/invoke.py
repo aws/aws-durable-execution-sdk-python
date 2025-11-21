@@ -40,7 +40,6 @@ def invoke_handler(
 
     if not config:
         config = InvokeConfig[P, R]()
-    config = config.with_tenant_id_if_unset(None)
     tenant_id = config.tenant_id
 
     # Check if we have existing step data

@@ -533,3 +533,82 @@ def test_invoke_handler_suspend_does_not_raise(mock_suspend):
         )
 
     mock_suspend.assert_called_once()
+
+
+def test_invoke_handler_with_tenant_id():
+    """Test invoke_handler passes tenant_id to checkpoint."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+
+    config = InvokeConfig(tenant_id="test-tenant-123")
+
+    with pytest.raises(SuspendExecution):
+        invoke_handler(
+            function_name="test_function",
+            payload="test_input",
+            state=mock_state,
+            operation_identifier=OperationIdentifier("invoke1", None, None),
+            config=config,
+        )
+
+    # Verify checkpoint was called with tenant_id
+    mock_state.create_checkpoint.assert_called_once()
+    operation_update = mock_state.create_checkpoint.call_args[1]["operation_update"]
+    chained_invoke_options = operation_update.to_dict()["ChainedInvokeOptions"]
+    assert chained_invoke_options["FunctionName"] == "test_function"
+    assert chained_invoke_options["TenantId"] == "test-tenant-123"
+
+
+def test_invoke_handler_without_tenant_id():
+    """Test invoke_handler without tenant_id doesn't include it in checkpoint."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+
+    config = InvokeConfig(tenant_id=None)
+
+    with pytest.raises(SuspendExecution):
+        invoke_handler(
+            function_name="test_function",
+            payload="test_input",
+            state=mock_state,
+            operation_identifier=OperationIdentifier("invoke1", None, None),
+            config=config,
+        )
+
+    # Verify checkpoint was called without tenant_id
+    mock_state.create_checkpoint.assert_called_once()
+    operation_update = mock_state.create_checkpoint.call_args[1]["operation_update"]
+    chained_invoke_options = operation_update.to_dict()["ChainedInvokeOptions"]
+    assert chained_invoke_options["FunctionName"] == "test_function"
+    assert "TenantId" not in chained_invoke_options
+
+
+def test_invoke_handler_default_config_no_tenant_id():
+    """Test invoke_handler with default config has no tenant_id."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+
+    with pytest.raises(SuspendExecution):
+        invoke_handler(
+            function_name="test_function",
+            payload="test_input",
+            state=mock_state,
+            operation_identifier=OperationIdentifier("invoke1", None, None),
+            config=None,
+        )
+
+    # Verify checkpoint was called without tenant_id
+    mock_state.create_checkpoint.assert_called_once()
+    operation_update = mock_state.create_checkpoint.call_args[1]["operation_update"]
+    chained_invoke_options = operation_update.to_dict()["ChainedInvokeOptions"]
+    assert chained_invoke_options["FunctionName"] == "test_function"
+    assert "TenantId" not in chained_invoke_options
