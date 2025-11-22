@@ -204,13 +204,6 @@ def test_step_with_logger():
         # Execute the handler
         result = my_handler(event, lambda_context)
 
-        my_logger.info.assert_called_once_with(
-            "from step %s %s",
-            123,
-            "str",
-            extra={"execution_arn": "test-arn", "operation_name": "mystep"},
-        )
-
         assert result["Status"] == InvocationStatus.SUCCEEDED.value
 
         # 1 START checkpoint, 1 SUCCEED checkpoint (batched together)
@@ -218,6 +211,18 @@ def test_step_with_logger():
         all_operations = [op for batch in checkpoint_calls for op in batch]
         assert len(all_operations) == 2
         operation_id = next(operation_id_sequence())
+
+        my_logger.info.assert_called_once_with(
+            "from step %s %s",
+            123,
+            "str",
+            extra={
+                "execution_arn": "test-arn",
+                "operation_name": "mystep",
+                "attempt": 1,
+                "operation_id": operation_id,
+            },
+        )
 
         # Check the START operation
         start_op = all_operations[0]

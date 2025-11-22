@@ -101,9 +101,10 @@ def test_powertools_logger_compatibility():
 
 def test_log_info_creation():
     """Test LogInfo creation with all parameters."""
-    log_info = LogInfo("arn:aws:test", "parent123", "test_name", 5)
+    log_info = LogInfo("arn:aws:test", "parent123", "operation123", "test_name", 5)
     assert log_info.execution_arn == "arn:aws:test"
     assert log_info.parent_id == "parent123"
+    assert log_info.operation_id == "operation123"
     assert log_info.name == "test_name"
     assert log_info.attempt == 5
 
@@ -113,6 +114,7 @@ def test_log_info_creation_minimal():
     log_info = LogInfo("arn:aws:test")
     assert log_info.execution_arn == "arn:aws:test"
     assert log_info.parent_id is None
+    assert log_info.operation_id is None
     assert log_info.name is None
     assert log_info.attempt is None
 
@@ -123,6 +125,7 @@ def test_log_info_from_operation_identifier():
     log_info = LogInfo.from_operation_identifier("arn:aws:test", op_id, 3)
     assert log_info.execution_arn == "arn:aws:test"
     assert log_info.parent_id == "parent456"
+    assert log_info.operation_id == "op123"
     assert log_info.name == "op_name"
     assert log_info.attempt == 3
 
@@ -133,16 +136,18 @@ def test_log_info_from_operation_identifier_no_attempt():
     log_info = LogInfo.from_operation_identifier("arn:aws:test", op_id)
     assert log_info.execution_arn == "arn:aws:test"
     assert log_info.parent_id == "parent456"
+    assert log_info.operation_id == "op123"
     assert log_info.name == "op_name"
     assert log_info.attempt is None
 
 
 def test_log_info_with_parent_id():
     """Test LogInfo.with_parent_id."""
-    original = LogInfo("arn:aws:test", "old_parent", "test_name", 2)
+    original = LogInfo("arn:aws:test", "old_parent", "op123", "test_name", 2)
     new_log_info = original.with_parent_id("new_parent")
     assert new_log_info.execution_arn == "arn:aws:test"
     assert new_log_info.parent_id == "new_parent"
+    assert new_log_info.operation_id == "op123"
     assert new_log_info.name == "test_name"
     assert new_log_info.attempt == 2
 
@@ -150,14 +155,15 @@ def test_log_info_with_parent_id():
 def test_logger_from_log_info_full():
     """Test Logger.from_log_info with all LogInfo fields."""
     mock_logger = Mock()
-    log_info = LogInfo("arn:aws:test", "parent123", "test_name", 5)
+    log_info = LogInfo("arn:aws:test", "parent123", "op123", "test_name", 5)
     logger = Logger.from_log_info(mock_logger, log_info)
 
     expected_extra = {
         "execution_arn": "arn:aws:test",
         "parent_id": "parent123",
+        "operation_id": "op123",
         "operation_name": "test_name",
-        "attempt": 5,
+        "attempt": 6,
     }
     assert logger._default_extra == expected_extra  # noqa: SLF001
     assert logger._logger is mock_logger  # noqa: SLF001
@@ -174,15 +180,15 @@ def test_logger_from_log_info_partial_fields():
     assert logger._default_extra == expected_extra  # noqa: SLF001
 
     # Test with name but no parent_id or attempt
-    log_info = LogInfo("arn:aws:test", None, "test_name")
+    log_info = LogInfo("arn:aws:test", None, None, "test_name")
     logger = Logger.from_log_info(mock_logger, log_info)
     expected_extra = {"execution_arn": "arn:aws:test", "operation_name": "test_name"}
     assert logger._default_extra == expected_extra  # noqa: SLF001
 
     # Test with attempt but no parent_id or name
-    log_info = LogInfo("arn:aws:test", None, None, 5)
+    log_info = LogInfo("arn:aws:test", None, None, None, 5)
     logger = Logger.from_log_info(mock_logger, log_info)
-    expected_extra = {"execution_arn": "arn:aws:test", "attempt": 5}
+    expected_extra = {"execution_arn": "arn:aws:test", "attempt": 6}
     assert logger._default_extra == expected_extra  # noqa: SLF001
 
 
@@ -202,12 +208,13 @@ def test_logger_with_log_info():
     original_info = LogInfo("arn:aws:test", "parent1")
     logger = Logger.from_log_info(mock_logger, original_info)
 
-    new_info = LogInfo("arn:aws:new", "parent2", "new_name")
+    new_info = LogInfo("arn:aws:new", "parent2", "op123", "new_name")
     new_logger = logger.with_log_info(new_info)
 
     expected_extra = {
         "execution_arn": "arn:aws:new",
         "parent_id": "parent2",
+        "operation_id": "op123",
         "operation_name": "new_name",
     }
     assert new_logger._default_extra == expected_extra  # noqa: SLF001

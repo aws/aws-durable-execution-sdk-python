@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 class LogInfo:
     execution_arn: str
     parent_id: str | None = None
+    operation_id: str | None = None
     name: str | None = None
     attempt: int | None = None
 
@@ -28,6 +29,7 @@ class LogInfo:
         return cls(
             execution_arn=execution_arn,
             parent_id=op_id.parent_id,
+            operation_id=op_id.operation_id,
             name=op_id.name,
             attempt=attempt,
         )
@@ -37,6 +39,7 @@ class LogInfo:
         return LogInfo(
             execution_arn=self.execution_arn,
             parent_id=parent_id,
+            operation_id=self.operation_id,
             name=self.name,
             attempt=self.attempt,
         )
@@ -58,8 +61,10 @@ class Logger(LoggerInterface):
         if info.name:
             # Use 'operation_name' instead of 'name' as key because the stdlib LogRecord internally reserved 'name' parameter
             extra["operation_name"] = info.name
-        if info.attempt:
-            extra["attempt"] = info.attempt
+        if info.attempt is not None:
+            extra["attempt"] = info.attempt + 1
+        if info.operation_id:
+            extra["operation_id"] = info.operation_id
         return cls(logger, extra)
 
     def with_log_info(self, info: LogInfo) -> Logger:
