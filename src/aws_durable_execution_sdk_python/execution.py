@@ -97,7 +97,6 @@ class DurableExecutionInvocationInput:
     durable_execution_arn: str
     checkpoint_token: str
     initial_execution_state: InitialExecutionState
-    is_local_runner: bool
 
     @staticmethod
     def from_dict(
@@ -109,7 +108,6 @@ class DurableExecutionInvocationInput:
             initial_execution_state=InitialExecutionState.from_dict(
                 input_dict.get("InitialExecutionState", {})
             ),
-            is_local_runner=input_dict.get("LocalRunner", False),
         )
 
     def to_dict(self) -> MutableMapping[str, Any]:
@@ -117,7 +115,6 @@ class DurableExecutionInvocationInput:
             "DurableExecutionArn": self.durable_execution_arn,
             "CheckpointToken": self.checkpoint_token,
             "InitialExecutionState": self.initial_execution_state.to_dict(),
-            "LocalRunner": self.is_local_runner,
         }
 
 
@@ -139,7 +136,6 @@ class DurableExecutionInvocationInputWithClient(DurableExecutionInvocationInput)
             durable_execution_arn=invocation_input.durable_execution_arn,
             checkpoint_token=invocation_input.checkpoint_token,
             initial_execution_state=invocation_input.initial_execution_state,
-            is_local_runner=invocation_input.is_local_runner,
             service_client=service_client,
         )
 
@@ -237,15 +233,12 @@ def durable_execution(
                 )
                 raise ExecutionError(msg) from e
 
-            # Local runner always uses its own client, otherwise use custom or default
-            if invocation_input.is_local_runner:
-                service_client = LambdaClient.initialize_local_runner_client()
-            else:
-                service_client = (
-                    LambdaClient(client=boto3_client)
-                    if boto3_client is not None
-                    else LambdaClient.initialize_from_env()
-                )
+            # Use custom client if provided, otherwise initialize from environment
+            service_client = (
+                LambdaClient(client=boto3_client)
+                if boto3_client is not None
+                else LambdaClient.initialize_from_env()
+            )
 
         raw_input_payload: str | None = (
             invocation_input.initial_execution_state.get_input_payload()
