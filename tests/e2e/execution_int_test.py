@@ -217,10 +217,10 @@ def test_step_with_logger():
             123,
             "str",
             extra={
-                "execution_arn": "test-arn",
-                "operation_name": "mystep",
+                "executionArn": "test-arn",
+                "operationName": "mystep",
                 "attempt": 1,
-                "operation_id": operation_id,
+                "operationId": operation_id,
             },
         )
 

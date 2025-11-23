@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from aws_durable_execution_sdk_python.context import DurableContext, ExecutionState
+from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     BotoClientError,
@@ -27,6 +27,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     OperationUpdate,
 )
+from aws_durable_execution_sdk_python.state import ExecutionState, ReplayStatus
 
 if TYPE_CHECKING:
     from collections.abc import Callable, MutableMapping
@@ -268,6 +269,10 @@ def durable_execution(
             initial_checkpoint_token=invocation_input.checkpoint_token,
             operations={},
             service_client=service_client,
+            # If there are operations other than the initial EXECUTION one, current state is in replay mode
+            replay_status=ReplayStatus.REPLAY
+            if len(invocation_input.initial_execution_state.operations) > 1
+            else ReplayStatus.NEW,
         )
 
         execution_state.fetch_paginated_operations(

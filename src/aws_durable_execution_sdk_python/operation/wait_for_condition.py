@@ -133,7 +133,7 @@ def wait_for_condition_handler(
         check_context = WaitForConditionCheckContext(
             logger=context_logger.with_log_info(
                 LogInfo.from_operation_identifier(
-                    execution_arn=state.durable_execution_arn,
+                    execution_state=state,
                     op_id=operation_identifier,
                     attempt=attempt,
                 )

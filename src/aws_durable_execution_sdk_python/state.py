@@ -8,6 +8,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
+from enum import Enum
 from threading import Lock
 from typing import TYPE_CHECKING
 
@@ -210,6 +211,13 @@ class CheckpointedResult:
 CHECKPOINT_NOT_FOUND = CheckpointedResult.create_not_found()
 
 
+class ReplayStatus(Enum):
+    """Status indicating whether execution is replaying or executing new operations."""
+
+    REPLAY = "replay"
+    NEW = "new"
+
+
 class ExecutionState:
     """Get, set and maintain execution state. This is mutable. Create and check checkpoints."""
 
@@ -220,6 +228,7 @@ class ExecutionState:
         operations: MutableMapping[str, Operation],
         service_client: DurableServiceClient,
         batcher_config: CheckpointBatcherConfig | None = None,
+        replay_status: ReplayStatus = ReplayStatus.NEW,
     ):
         self.durable_execution_arn: str = durable_execution_arn
         self._current_checkpoint_token: str = initial_checkpoint_token
@@ -247,6 +256,8 @@ class ExecutionState:
 
         # Protects parent_to_children and parent_done
         self._parent_done_lock: Lock = Lock()
+        self._replay_status: ReplayStatus = replay_status
+        self._replay_status_lock: Lock = Lock()
 
     def fetch_paginated_operations(
         self,
@@ -276,6 +287,42 @@ class ExecutionState:
             next_marker = output.next_marker
         with self._operations_lock:
             self.operations.update({op.operation_id: op for op in all_operations})
+
+    def track_replay(self, operation_id: str) -> None:
+        """Check if operation exists with completed status; if not, transition to NEW status.
+
+        This method is called before each operation (step, wait, invoke, etc.) to determine
+        if we've reached the replay boundary. Once we encounter an operation that doesn't
+        exist or isn't completed, we transition from REPLAY to NEW status, which enables
+        logging for all subsequent code.
+
+        Args:
+            operation_id: The operation ID to check
+        """
+        with self._replay_status_lock:
+            if self._replay_status == ReplayStatus.REPLAY:
+                operation = self.operations.get(operation_id)
+                # Transition if operation doesn't exist OR isn't in a completed state
+                if not operation or operation.status not in {
+                    OperationStatus.SUCCEEDED,
+                    OperationStatus.FAILED,
+                    OperationStatus.CANCELLED,
+                    OperationStatus.STOPPED,
+                }:
+                    logger.debug(
+                        "Transitioning from REPLAY to NEW status at operation %s",
+                        operation_id,
+                    )
+                    self._replay_status = ReplayStatus.NEW
+
+    def is_replaying(self) -> bool:
+        """Check if execution is currently in replay mode.
+
+        Returns:
+            True if in REPLAY status, False if in NEW status
+        """
+        with self._replay_status_lock:
+            return self._replay_status is ReplayStatus.REPLAY
 
     def get_checkpoint_result(self, checkpoint_id: str) -> CheckpointedResult:
         """Get checkpoint result.
