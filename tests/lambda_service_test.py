@@ -1633,13 +1633,6 @@ def test_checkpoint_updated_execution_state_from_dict_with_operations():
     assert state.next_marker == "marker123"
 
 
-@patch.dict(
-    "os.environ",
-    {
-        "DURABLE_LOCAL_RUNNER_ENDPOINT": "http://test:5000",
-        "DURABLE_LOCAL_RUNNER_REGION": "us-west-1",
-    },
-)
 @patch("aws_durable_execution_sdk_python.lambda_service.boto3")
 def test_lambda_client_checkpoint(mock_boto3):
     """Test LambdaClient.checkpoint method."""
@@ -1944,27 +1937,6 @@ def test_lambda_client_initialize_from_env_with_endpoint(mock_boto_client):
     assert isinstance(client, LambdaClient)
 
 
-@patch("aws_durable_execution_sdk_python.lambda_service.boto3")
-def test_lambda_client_initialize_local_runner_client(mock_boto3):
-    """Test LambdaClient.initialize_local_runner_client method."""
-    mock_client = Mock()
-    mock_boto3.client.return_value = mock_client
-
-    lambda_client = LambdaClient.initialize_local_runner_client()
-
-    # Check that boto3.client was called with the right parameters and config
-    mock_boto3.client.assert_called_once()
-    call_args = mock_boto3.client.call_args
-    assert call_args[0][0] == "lambdainternal-local"
-    assert call_args[1]["endpoint_url"] == "http://host.docker.internal:5000"
-    assert call_args[1]["region_name"] == "us-west-2"
-    assert "config" in call_args[1]
-    config = call_args[1]["config"]
-    assert config.connect_timeout == 5
-    assert config.read_timeout == 50
-    assert lambda_client.client == mock_client
-
-
 def test_lambda_client_get_execution_state():
     """Test LambdaClient.get_execution_state method."""
     mock_client = Mock()
@@ -1996,23 +1968,6 @@ def test_durable_service_client_protocol_get_execution_state():
         "arn123", "token", "marker", 1000
     )
     assert result == mock_output
-
-
-@patch("aws_durable_execution_sdk_python.lambda_service.boto3")
-def test_lambda_client_initialize_local_runner_client_defaults(mock_boto3):
-    """Test LambdaClient.initialize_local_runner_client with default environment values."""
-    mock_client = Mock()
-    mock_boto3.client.return_value = mock_client
-
-    lambda_client = LambdaClient.initialize_local_runner_client()
-
-    # Verify the call was made with the expected arguments including config
-    call_args = mock_boto3.client.call_args
-    assert call_args[0] == ("lambdainternal-local",)
-    assert call_args[1]["endpoint_url"] == "http://host.docker.internal:5000"
-    assert call_args[1]["region_name"] == "us-west-2"
-    assert "config" in call_args[1]
-    assert lambda_client.client == mock_client
 
 
 @patch.dict("os.environ", {}, clear=True)

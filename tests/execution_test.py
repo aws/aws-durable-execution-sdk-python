@@ -162,7 +162,6 @@ def test_durable_execution_invocation_input_to_dict():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=True,
     )
 
     result = invocation_input.to_dict()
@@ -170,21 +169,18 @@ def test_durable_execution_invocation_input_to_dict():
         "DurableExecutionArn": "arn:test:execution",
         "CheckpointToken": "token123",
         "InitialExecutionState": initial_state.to_dict(),
-        "LocalRunner": True,
     }
 
     assert result == expected
 
 
 def test_durable_execution_invocation_input_to_dict_not_local():
-    """Test DurableExecutionInvocationInput.to_dict with is_local_runner=False."""
     initial_state = InitialExecutionState(operations=[], next_marker="")
 
     invocation_input = DurableExecutionInvocationInput(
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
     )
 
     result = invocation_input.to_dict()
@@ -192,7 +188,6 @@ def test_durable_execution_invocation_input_to_dict_not_local():
         "DurableExecutionArn": "arn:test:execution",
         "CheckpointToken": "token123",
         "InitialExecutionState": initial_state.to_dict(),
-        "LocalRunner": False,
     }
 
     assert result == expected
@@ -207,7 +202,6 @@ def test_durable_execution_invocation_input_with_client_inheritance():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=True,
         service_client=mock_client,
     )
 
@@ -217,7 +211,6 @@ def test_durable_execution_invocation_input_with_client_inheritance():
         "DurableExecutionArn": "arn:test:execution",
         "CheckpointToken": "token123",
         "InitialExecutionState": initial_state.to_dict(),
-        "LocalRunner": True,
     }
 
     assert result == expected
@@ -233,7 +226,6 @@ def test_durable_execution_invocation_input_with_client_from_parent():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
     )
 
     with_client = DurableExecutionInvocationInputWithClient.from_durable_execution_invocation_input(
@@ -243,7 +235,6 @@ def test_durable_execution_invocation_input_with_client_from_parent():
     assert with_client.durable_execution_arn == parent_input.durable_execution_arn
     assert with_client.checkpoint_token == parent_input.checkpoint_token
     assert with_client.initial_execution_state == parent_input.initial_execution_state
-    assert with_client.is_local_runner == parent_input.is_local_runner
     assert with_client.service_client == mock_client
 
 
@@ -374,7 +365,6 @@ def test_durable_execution_client_selection_env_normal_result():
                 ],
                 "NextMarker": "",
             },
-            "LocalRunner": False,
         }
 
         lambda_context = Mock()
@@ -427,7 +417,6 @@ def test_durable_execution_client_selection_env_large_result():
                 ],
                 "NextMarker": "",
             },
-            "LocalRunner": False,
         }
 
         lambda_context = Mock()
@@ -475,7 +464,6 @@ def test_durable_execution_with_injected_client_success_normal_result():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -523,7 +511,6 @@ def test_durable_execution_with_injected_client_success_large_result():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -579,7 +566,6 @@ def test_durable_execution_with_injected_client_failure():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -626,7 +612,6 @@ def test_durable_execution_with_large_error_payload():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -674,7 +659,6 @@ def test_durable_execution_fatal_error_handling():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -713,7 +697,6 @@ def test_durable_execution_execution_error_handling():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -736,13 +719,13 @@ def test_durable_execution_execution_error_handling():
     assert error_data["ErrorType"] == "ExecutionError"
 
 
-def test_durable_execution_client_selection_local_runner():
-    """Test durable_execution selects correct client for local runner."""
+def test_durable_execution_client_selection_default():
+    """Test durable_execution selects correct client using default initialization."""
     with patch(
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_lambda_client:
         mock_client = Mock(spec=DurableServiceClient)
-        mock_lambda_client.initialize_local_runner_client.return_value = mock_client
+        mock_lambda_client.initialize_from_env.return_value = mock_client
 
         # Mock successful checkpoint
         mock_output = CheckpointOutput(
@@ -770,7 +753,6 @@ def test_durable_execution_client_selection_local_runner():
                 ],
                 "NextMarker": "",
             },
-            "LocalRunner": True,
         }
 
         lambda_context = Mock()
@@ -784,7 +766,7 @@ def test_durable_execution_client_selection_local_runner():
         result = test_handler(event, lambda_context)
 
         assert result["Status"] == InvocationStatus.SUCCEEDED.value
-        mock_lambda_client.initialize_local_runner_client.assert_called_once()
+        mock_lambda_client.initialize_from_env.assert_called_once()
 
 
 def test_initial_execution_state_get_execution_operation_no_operations():
@@ -851,7 +833,6 @@ def test_durable_handler_empty_input_payload():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -891,7 +872,6 @@ def test_durable_handler_whitespace_input_payload():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -931,7 +911,6 @@ def test_durable_handler_invalid_json_input_payload():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -975,7 +954,6 @@ def test_durable_handler_background_thread_failure():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1016,7 +994,6 @@ def test_durable_execution_suspend_execution():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1067,7 +1044,6 @@ def test_durable_execution_checkpoint_error_in_background_thread():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1116,7 +1092,6 @@ def test_durable_execution_checkpoint_execution_error_stops_background():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1168,7 +1143,6 @@ def test_durable_execution_checkpoint_invocation_error_stops_background():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1220,7 +1194,6 @@ def test_durable_execution_background_thread_execution_error_retries():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1264,7 +1237,6 @@ def test_durable_execution_background_thread_invocation_error_returns_failed():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1310,7 +1282,6 @@ def test_durable_execution_final_success_checkpoint_execution_error_retries():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1356,7 +1327,6 @@ def test_durable_execution_final_success_checkpoint_invocation_error_returns_fai
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1405,7 +1375,6 @@ def test_durable_execution_final_failure_checkpoint_execution_error_retries():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1452,7 +1421,6 @@ def test_durable_execution_final_failure_checkpoint_invocation_error_returns_fai
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1521,7 +1489,6 @@ def test_durable_handler_background_thread_failure_on_succeed_checkpoint():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1612,7 +1579,6 @@ def test_durable_handler_background_thread_failure_on_start_checkpoint():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1696,7 +1662,6 @@ def test_durable_handler_background_thread_failure_on_large_result_checkpoint():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1767,7 +1732,6 @@ def test_durable_handler_background_thread_failure_on_error_checkpoint():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1823,7 +1787,6 @@ def test_durable_execution_logs_checkpoint_error_extras_from_background_thread()
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1882,7 +1845,6 @@ def test_durable_execution_logs_boto_client_error_extras_from_background_thread(
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1940,7 +1902,6 @@ def test_durable_execution_logs_checkpoint_error_extras_from_user_code():
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
-        is_local_runner=False,
         service_client=mock_client,
     )
 
@@ -1995,7 +1956,6 @@ def test_durable_execution_with_boto3_client_parameter():
             ],
             "NextMarker": "",
         },
-        "LocalRunner": False,
     }
 
     lambda_context = Mock()

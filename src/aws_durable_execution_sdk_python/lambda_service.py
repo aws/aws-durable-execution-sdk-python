@@ -947,33 +947,6 @@ class LambdaClient(DurableServiceClient):
         )
 
     @staticmethod
-    def initialize_local_runner_client() -> LambdaClient:
-        endpoint = os.getenv(
-            "DURABLE_LOCAL_RUNNER_ENDPOINT", "http://host.docker.internal:5000"
-        )
-        region = os.getenv("DURABLE_LOCAL_RUNNER_REGION", "us-west-2")
-
-        # The local runner client needs execute-api as the signing service name,
-        # so we have a second `lambdainternal-local` boto model with this.
-        LambdaClient.load_preview_botocore_models()
-        client = boto3.client(
-            "lambdainternal-local",
-            endpoint_url=endpoint,
-            region_name=region,
-            config=Config(
-                connect_timeout=5,
-                read_timeout=50,
-            ),
-        )
-
-        logger.debug(
-            "Initialized lambda client with endpoint: '%s', region: '%s'",
-            endpoint,
-            region,
-        )
-        return LambdaClient(client=client)
-
-    @staticmethod
     def initialize_from_env() -> LambdaClient:
         LambdaClient.load_preview_botocore_models()
 

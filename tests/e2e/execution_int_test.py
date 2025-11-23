@@ -68,7 +68,7 @@ def test_step_different_ways_to_pass_args():
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
-        mock_client_class.initialize_local_runner_client.return_value = mock_client
+        mock_client_class.initialize_from_env.return_value = mock_client
 
         # Mock the checkpoint method to track calls
         checkpoint_calls = []
@@ -154,7 +154,7 @@ def test_step_with_logger():
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
-        mock_client_class.initialize_local_runner_client.return_value = mock_client
+        mock_client_class.initialize_from_env.return_value = mock_client
 
         # Mock the checkpoint method to track calls
         checkpoint_calls = []
@@ -250,7 +250,7 @@ def test_wait_inside_run_in_childcontext():
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
-        mock_client_class.initialize_local_runner_client.return_value = mock_client
+        mock_client_class.initialize_from_env.return_value = mock_client
 
         # Mock the checkpoint method to track calls
         checkpoint_calls = []
@@ -356,7 +356,7 @@ def test_step_checkpoint_failure_propagates_error():
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
-        mock_client_class.initialize_local_runner_client.return_value = mock_client
+        mock_client_class.initialize_from_env.return_value = mock_client
 
         # Mock the checkpoint method to raise an error (using RuntimeError as a generic exception)
         def mock_checkpoint_failure(
@@ -419,7 +419,7 @@ def test_wait_not_caught_by_exception():
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
-        mock_client_class.initialize_local_runner_client.return_value = mock_client
+        mock_client_class.initialize_from_env.return_value = mock_client
 
         # Mock the checkpoint method to track calls
         checkpoint_calls = []
