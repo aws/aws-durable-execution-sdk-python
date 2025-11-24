@@ -415,10 +415,14 @@ class ExtendedTypeSerDes(SerDes[T]):
         if not (isinstance(obj, dict) and TYPE_TOKEN in obj and VALUE_TOKEN in obj):
             msg = 'Malformed envelope: missing "t" or "v" at root.'
             raise SerDesError(msg)
-        if obj[TYPE_TOKEN] not in TypeTag:
+        # Python 3.11 compatibility: Using try-except instead of 'in' operator
+        # because checking 'str in EnumType' raises TypeError in Python 3.11
+        try:
+            tag = TypeTag(obj[TYPE_TOKEN])
+        except ValueError:
             msg = f'Unknown type tag: "{obj[TYPE_TOKEN]}"'
-            raise SerDesError(msg)
-        tag = TypeTag(obj[TYPE_TOKEN])
+            raise SerDesError(msg) from None
+
         return self._codec.decode(tag, obj[VALUE_TOKEN])
 
     def _to_json_serializable(self, obj: Any) -> Any:
