@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from aws_durable_execution_sdk_python.context import DurableContext, ExecutionState
+from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     BotoClientError,
@@ -27,6 +27,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     OperationUpdate,
 )
+from aws_durable_execution_sdk_python.state import ExecutionState, ReplayStatus
 
 if TYPE_CHECKING:
     from collections.abc import Callable, MutableMapping
@@ -58,10 +59,15 @@ class InitialExecutionState:
             next_marker=input_dict.get("NextMarker", ""),
         )
 
-    def get_execution_operation(self) -> Operation:
-        if len(self.operations) < 1:
+    def get_execution_operation(self) -> Operation | None:
+        if not self.operations:
+            # Due to payload size limitations we may have an empty operations list.
+            # This will only happen when loading the initial page of results and is
+            # expected behaviour. We don't fail, but instead return None
+            # as the execution operation does not exist
             msg: str = "No durable operations found in initial execution state."
-            raise DurableExecutionsError(msg)
+            logger.debug(msg)
+            return None
 
         candidate = self.operations[0]
         if candidate.operation_type is not OperationType.EXECUTION:
@@ -71,11 +77,13 @@ class InitialExecutionState:
         return candidate
 
     def get_input_payload(self) -> str | None:
-        # TODO: are these None checks necessary? i.e will there always be execution_details with input_payload
-        if execution_details := self.get_execution_operation().execution_details:
-            return execution_details.input_payload
-
-        return None
+        # It is possible that backend will not provide an execution operation
+        # for the initial page of results.
+        if not (operations := self.get_execution_operation()):
+            return None
+        if not (execution_details := operations.execution_details):
+            return None
+        return execution_details.input_payload
 
     def to_dict(self) -> MutableMapping[str, Any]:
         return {
@@ -217,8 +225,17 @@ def durable_execution(
             invocation_input = event
             service_client = invocation_input.service_client
         else:
-            logger.debug("durableExecutionArn: %s", event.get("DurableExecutionArn"))
-            invocation_input = DurableExecutionInvocationInput.from_dict(event)
+            try:
+                logger.debug(
+                    "durableExecutionArn: %s", event.get("DurableExecutionArn")
+                )
+                invocation_input = DurableExecutionInvocationInput.from_dict(event)
+            except (KeyError, TypeError, AttributeError) as e:
+                msg = (
+                    "The payload is not the correct Durable Function input. "
+                    "Please set DurableConfig on the AWS Lambda to invoke it as a Durable Function."
+                )
+                raise ExecutionError(msg) from e
 
             # Local runner always uses its own client, otherwise use custom or default
             if invocation_input.is_local_runner:
@@ -252,6 +269,10 @@ def durable_execution(
             initial_checkpoint_token=invocation_input.checkpoint_token,
             operations={},
             service_client=service_client,
+            # If there are operations other than the initial EXECUTION one, current state is in replay mode
+            replay_status=ReplayStatus.REPLAY
+            if len(invocation_input.initial_execution_state.operations) > 1
+            else ReplayStatus.NEW,
         )
 
         execution_state.fetch_paginated_operations(

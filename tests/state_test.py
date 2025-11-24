@@ -39,6 +39,7 @@ from aws_durable_execution_sdk_python.state import (
     CheckpointedResult,
     ExecutionState,
     QueuedOperation,
+    ReplayStatus,
 )
 from aws_durable_execution_sdk_python.threading import CompletionEvent
 
@@ -3242,3 +3243,24 @@ def test_create_checkpoint_sync_always_synchronous():
     finally:
         state.stop_checkpointing()
         executor.shutdown(wait=True)
+
+
+def test_state_replay_mode():
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+    )
+    execution_state = ExecutionState(
+        durable_execution_arn="arn:aws:test",
+        initial_checkpoint_token="test_token",  # noqa: S106
+        operations={"op1": operation},
+        service_client=Mock(),
+        replay_status=ReplayStatus.REPLAY,
+    )
+
+    execution_state.track_replay(operation_id="op1")
+    assert execution_state.is_replaying() is True
+
+    execution_state.track_replay(operation_id="op2")
+    assert execution_state.is_replaying() is False

@@ -788,13 +788,16 @@ def test_durable_execution_client_selection_local_runner():
 
 
 def test_initial_execution_state_get_execution_operation_no_operations():
-    """Test get_execution_operation raises error when no operations exist."""
+    """Test get_execution_operation logs debug and returns None when no operations exist."""
     state = InitialExecutionState(operations=[], next_marker="")
 
-    with pytest.raises(
-        Exception, match="No durable operations found in initial execution state"
-    ):
-        state.get_execution_operation()
+    with patch("aws_durable_execution_sdk_python.execution.logger") as mock_logger:
+        result = state.get_execution_operation()
+
+        assert result is None
+        mock_logger.debug.assert_called_once_with(
+            "No durable operations found in initial execution state."
+        )
 
 
 def test_initial_execution_state_get_execution_operation_wrong_type():
@@ -2012,3 +2015,59 @@ def test_durable_execution_with_boto3_client_parameter():
     # THEN the execution succeeds using the custom client
     assert result["Status"] == InvocationStatus.SUCCEEDED.value
     assert result["Result"] == '{"result": "success"}'
+
+
+def test_durable_execution_with_non_durable_payload_raises_error():
+    """Test that invoking a durable function with a regular event raises a helpful error."""
+
+    # GIVEN a durable function
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    # GIVEN a regular Lambda event (not a durable execution payload)
+    regular_event = {"key": "value", "data": "test"}
+
+    lambda_context = Mock()
+    lambda_context.aws_request_id = "test-request"
+    lambda_context.client_context = None
+    lambda_context.identity = None
+    lambda_context._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
+    lambda_context.invoked_function_arn = None
+    lambda_context.tenant_id = None
+
+    # WHEN the handler is invoked with a non-durable payload
+    # THEN it raises a ValueError with a helpful message
+    with pytest.raises(
+        ExecutionError,
+        match="The payload is not the correct Durable Function input",
+    ):
+        test_handler(regular_event, lambda_context)
+
+
+def test_durable_execution_with_non_dict_event_raises_error():
+    """Test that invoking a durable function with a non-dict event raises a helpful error."""
+
+    # GIVEN a durable function
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    # GIVEN a non-dict event
+    non_dict_event = "not a dict"
+
+    lambda_context = Mock()
+    lambda_context.aws_request_id = "test-request"
+    lambda_context.client_context = None
+    lambda_context.identity = None
+    lambda_context._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
+    lambda_context.invoked_function_arn = None
+    lambda_context.tenant_id = None
+
+    # WHEN the handler is invoked with a non-dict event
+    # THEN it raises a ValueError with a helpful message
+    with pytest.raises(
+        ExecutionError,
+        match="The payload is not the correct Durable Function input",
+    ):
+        test_handler(non_dict_event, lambda_context)

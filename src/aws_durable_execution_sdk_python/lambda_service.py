@@ -303,17 +303,22 @@ class ChainedInvokeOptions:
     """
 
     function_name: str
+    tenant_id: str | None = None
 
     @classmethod
     def from_dict(cls, data: MutableMapping[str, Any]) -> ChainedInvokeOptions:
         return cls(
             function_name=data["FunctionName"],
+            tenant_id=data.get("TenantId"),
         )
 
     def to_dict(self) -> MutableMapping[str, Any]:
         result: MutableMapping[str, Any] = {
             "FunctionName": self.function_name,
         }
+        if self.tenant_id is not None:
+            result["TenantId"] = self.tenant_id
+
         return result
 
 

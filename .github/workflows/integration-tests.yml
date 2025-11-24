@@ -17,19 +17,16 @@ jobs:
         python-version: ["3.13"]
 
     steps:
-    - name: Parse testing SDK branch from PR body
-      id: parse
-      run: |
-        # Look for a line like: TESTING_SDK_BRANCH: feature/foo
-        REF=$(printf '%s\n' '${{ github.event.pull_request.body }}' | sed -n 's/^TESTING_SDK_BRANCH:[[:space:]]*//p' | head -n1)
-        if [ -z "$REF" ]; then REF="main"; fi
-        echo "testing_ref=$REF" >> "$GITHUB_OUTPUT"
-        echo "Using testing SDK branch: $REF"
-
     - name: Checkout Language SDK (this PR)
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
       with:
         path: language-sdk
+
+    - name: Parse testing SDK branch from PR body
+      id: parse
+      run: python language-sdk/ops/parse_sdk_branch.py
+      env:
+        PR_BODY: ${{ github.event.pull_request.body }}
 
     - name: Checkout Testing SDK
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
@@ -67,21 +64,18 @@ jobs:
     if: github.event_name == 'pull_request'
     env:
       AWS_REGION: us-west-2
-    
-    steps:
-    - name: Parse testing SDK branch from PR body
-      id: parse
-      run: |
-        # Look for a line like: TESTING_SDK_BRANCH: feature/foo
-        REF=$(printf '%s\n' '${{ github.event.pull_request.body }}' | sed -n 's/^TESTING_SDK_BRANCH:[[:space:]]*//p' | head -n1)
-        if [ -z "$REF" ]; then REF="main"; fi
-        echo "testing_ref=$REF" >> "$GITHUB_OUTPUT"
-        echo "Using testing SDK branch: $REF"
 
+    steps:
     - name: Checkout Language SDK (this PR)
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
       with:
         path: language-sdk
+
+    - name: Parse testing SDK branch from PR body
+      id: parse
+      run: python language-sdk/ops/parse_sdk_branch.py
+      env:
+        PR_BODY: ${{ github.event.pull_request.body }}
 
     - name: Checkout Testing SDK
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
@@ -133,20 +127,20 @@ jobs:
       run: |
         echo "Building examples..."
         hatch run examples:build
-        
+
         # Get first integration example for testing
         EXAMPLE_NAME=$(echo '${{ steps.get-examples.outputs.examples }}' | jq -r '.[0].name')
         EXAMPLE_NAME_CLEAN=$(echo "$EXAMPLE_NAME" | sed 's/ //g')
         FUNCTION_NAME="${EXAMPLE_NAME_CLEAN}-LanguageSDK-PR-${{ github.event.number }}"
-        
+
         echo "Deploying example: $EXAMPLE_NAME as $FUNCTION_NAME"
         hatch run examples:deploy "$EXAMPLE_NAME" --function-name "$FUNCTION_NAME"
-        
+
         QUALIFIED_FUNCTION_NAME="$FUNCTION_NAME:\$LATEST"
-        
+
         echo "Waiting for function to be ready..."
         aws lambda wait function-active --function-name "$FUNCTION_NAME" --endpoint-url "$LAMBDA_ENDPOINT" --region "${{ env.AWS_REGION }}"
-        
+
         echo "Invoking Lambda function: $QUALIFIED_FUNCTION_NAME"
         aws lambda invoke \
           --function-name "$QUALIFIED_FUNCTION_NAME" \
@@ -156,10 +150,10 @@ jobs:
           --endpoint-url "$LAMBDA_ENDPOINT" \
           /tmp/response.json \
           > /tmp/invoke_response.json
-        
+
         echo "Response:"
         cat /tmp/response.json
-        
+
         # Check for function errors
         FUNCTION_ERROR=$(jq -r '.FunctionError // empty' /tmp/invoke_response.json)
         if [ -n "$FUNCTION_ERROR" ]; then
@@ -167,7 +161,7 @@ jobs:
           cat /tmp/response.json
           exit 1
         fi
-        
+
         echo "Getting durable executions..."
         aws lambda list-durable-executions-by-function \
           --function-name "$QUALIFIED_FUNCTION_NAME" \
@@ -176,15 +170,13 @@ jobs:
           --endpoint-url "$LAMBDA_ENDPOINT" \
           --cli-binary-format raw-in-base64-out \
           > /tmp/executions.json
-        
+
         echo "Durable Executions:"
         cat /tmp/executions.json
-        
+
         # Cleanup
         echo "Cleaning up function: $FUNCTION_NAME"
         aws lambda delete-function \
           --function-name "$FUNCTION_NAME" \
           --endpoint-url "$LAMBDA_ENDPOINT" \
           --region "${{ env.AWS_REGION }}" || echo "Function cleanup failed or already deleted"
-
-

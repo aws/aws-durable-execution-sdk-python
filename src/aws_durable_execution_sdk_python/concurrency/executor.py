@@ -381,6 +381,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
             executor_context._parent_id,  # noqa: SLF001
             name,
         )
+        child_context.state.track_replay(operation_id=operation_id)
 
         def run_in_child_handler():
             return self.execute_item(child_context, executable)

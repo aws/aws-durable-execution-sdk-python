@@ -176,7 +176,8 @@ class DurableContext(DurableContextProtocol):
         self._step_counter: OrderedCounter = OrderedCounter()
 
         log_info = LogInfo(
-            execution_arn=state.durable_execution_arn, parent_id=parent_id
+            execution_state=state,
+            parent_id=parent_id,
         )
         self._log_info = log_info
         self.logger: Logger = logger or Logger.from_log_info(
@@ -205,7 +206,8 @@ class DurableContext(DurableContextProtocol):
             parent_id=parent_id,
             logger=self.logger.with_log_info(
                 LogInfo(
-                    execution_arn=self.state.durable_execution_arn, parent_id=parent_id
+                    execution_state=self.state,
+                    parent_id=parent_id,
                 )
             ),
         )
@@ -269,6 +271,7 @@ class DurableContext(DurableContextProtocol):
         if not config:
             config = CallbackConfig()
         operation_id: str = self._create_step_id()
+        self.state.track_replay(operation_id=operation_id)
         callback_id: str = create_callback_handler(
             state=self.state,
             operation_identifier=OperationIdentifier(
@@ -302,12 +305,14 @@ class DurableContext(DurableContextProtocol):
         Returns:
             The result of the invoked function
         """
+        operation_id = self._create_step_id()
+        self.state.track_replay(operation_id=operation_id)
         return invoke_handler(
             function_name=function_name,
             payload=payload,
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=self._create_step_id(),
+                operation_id=operation_id,
                 parent_id=self._parent_id,
                 name=name,
             ),
@@ -325,6 +330,7 @@ class DurableContext(DurableContextProtocol):
         map_name: str | None = self._resolve_step_name(name, func)
 
         operation_id = self._create_step_id()
+        self.state.track_replay(operation_id=operation_id)
         operation_identifier = OperationIdentifier(
             operation_id=operation_id, parent_id=self._parent_id, name=map_name
         )
@@ -367,6 +373,7 @@ class DurableContext(DurableContextProtocol):
         """Execute multiple callables in parallel."""
         # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
         operation_id = self._create_step_id()
+        self.state.track_replay(operation_id=operation_id)
         parallel_context = self.create_child_context(parent_id=operation_id)
         operation_identifier = OperationIdentifier(
             operation_id=operation_id, parent_id=self._parent_id, name=name
@@ -420,6 +427,7 @@ class DurableContext(DurableContextProtocol):
         step_name: str | None = self._resolve_step_name(name, func)
         # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
         operation_id = self._create_step_id()
+        self.state.track_replay(operation_id=operation_id)
 
         def callable_with_child_context():
             return func(self.create_child_context(parent_id=operation_id))
@@ -441,13 +449,15 @@ class DurableContext(DurableContextProtocol):
     ) -> T:
         step_name = self._resolve_step_name(name, func)
         logger.debug("Step name: %s", step_name)
+        operation_id = self._create_step_id()
+        self.state.track_replay(operation_id=operation_id)
 
         return step_handler(
             func=func,
             config=config,
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=self._create_step_id(),
+                operation_id=operation_id,
                 parent_id=self._parent_id,
                 name=step_name,
             ),
@@ -465,11 +475,13 @@ class DurableContext(DurableContextProtocol):
         if seconds < 1:
             msg = "duration must be at least 1 second"
             raise ValidationError(msg)
+        operation_id = self._create_step_id()
+        self.state.track_replay(operation_id=operation_id)
         wait_handler(
             seconds=seconds,
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=self._create_step_id(),
+                operation_id=operation_id,
                 parent_id=self._parent_id,
                 name=name,
             ),
@@ -515,12 +527,14 @@ class DurableContext(DurableContextProtocol):
             msg = "`config` is required for wait_for_condition"
             raise ValidationError(msg)
 
+        operation_id = self._create_step_id()
+        self.state.track_replay(operation_id=operation_id)
         return wait_for_condition_handler(
             check=check,
             config=config,
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=self._create_step_id(),
+                operation_id=operation_id,
                 parent_id=self._parent_id,
                 name=name,
             ),

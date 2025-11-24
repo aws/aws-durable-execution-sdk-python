@@ -1,0 +1,21 @@
+name: Test Parser
+
+on:
+  pull_request:
+    paths:
+      - 'ops/parse_sdk_branch.py'
+      - 'ops/__tests__/**'
+  push:
+    branches: [ main ]
+    paths:
+      - 'ops/parse_sdk_branch.py'
+      - 'ops/__tests__/**'
+
+jobs:
+  test-parser:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+    
+    - name: Run parser tests
+      run: python ops/__tests__/test_parse_sdk_branch.py

@@ -662,9 +662,11 @@ def test_invoke_with_custom_serdes(mock_handler):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
+    payload_serdes = CustomDictSerDes()
+    result_serdes = CustomDictSerDes()
     config = InvokeConfig[dict, dict](
-        serdes_payload=CustomDictSerDes(),
-        serdes_result=CustomDictSerDes(),
+        serdes_payload=payload_serdes,
+        serdes_result=result_serdes,
         timeout=Duration.from_minutes(1),
     )
 
@@ -1680,3 +1682,41 @@ def test_operation_id_generation_unique():
 
     for i in range(len(ids) - 1):
         assert ids[i] != ids[i + 1]
+
+
+@patch("aws_durable_execution_sdk_python.context.invoke_handler")
+def test_invoke_with_explicit_tenant_id(mock_handler):
+    """Test invoke with explicit tenant_id in config."""
+    mock_handler.return_value = "result"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    config = InvokeConfig(tenant_id="explicit-tenant")
+    context = DurableContext(state=mock_state)
+
+    result = context.invoke("test_function", "payload", config=config)
+
+    assert result == "result"
+    call_args = mock_handler.call_args[1]
+    assert call_args["config"].tenant_id == "explicit-tenant"
+
+
+@patch("aws_durable_execution_sdk_python.context.invoke_handler")
+def test_invoke_without_tenant_id_defaults_to_none(mock_handler):
+    """Test invoke without tenant_id defaults to None."""
+    mock_handler.return_value = "result"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    context = DurableContext(state=mock_state)
+
+    result = context.invoke("test_function", "payload")
+
+    assert result == "result"
+    # Config should be None when not provided
+    call_args = mock_handler.call_args[1]
+    assert call_args["config"] is None
