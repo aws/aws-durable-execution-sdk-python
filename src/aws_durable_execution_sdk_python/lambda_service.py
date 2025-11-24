@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 import boto3  # type: ignore
 from botocore.config import Config  # type: ignore
@@ -22,11 +22,10 @@ if TYPE_CHECKING:
 
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 
-# Keep it simple without TypeAlias
 # Replace with `type` it when dropping support to Python 3.11
-ReplayChildren = bool
-OperationPayload = str
-TimeoutSeconds = int
+ReplayChildren: TypeAlias = bool
+OperationPayload: TypeAlias = str
+TimeoutSeconds: TypeAlias = int
 
 logger = logging.getLogger(__name__)
 
