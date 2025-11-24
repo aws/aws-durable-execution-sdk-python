@@ -46,7 +46,7 @@ cov = "pytest --cov-report=term-missing --cov-config=pyproject.toml --cov=src/aw
 [tool.hatch.envs.types]
 extra-dependencies = ["mypy>=1.0.0", "pytest"]
 [tool.hatch.envs.types.scripts]
-check = "mypy --pretty {args:src/aws_durable_execution_sdk_python tests}"
+check = "mypy --install-types --non-interactive {args:src/aws_durable_execution_sdk_python tests}"
 
 [tool.coverage.run]
 source_pkgs = ["aws_durable_execution_sdk_python"]

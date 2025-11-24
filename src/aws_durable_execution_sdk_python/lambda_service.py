@@ -3,11 +3,10 @@ from __future__ import annotations
 import datetime
 import logging
 import os
-import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Any, Protocol
 
 import boto3  # type: ignore
 from botocore.config import Config  # type: ignore
@@ -23,16 +22,11 @@ if TYPE_CHECKING:
 
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 
+# Keep it simple without TypeAlias
 # Replace with `type` it when dropping support to Python 3.11
-if sys.version_info >= (3, 12):
-    type ReplayChildren = bool
-    type OperationPayload = str
-    type TimeoutSeconds = int
-else:
-    ReplayChildren: TypeAlias = bool
-    OperationPayload: TypeAlias = str
-    TimeoutSeconds: TypeAlias = int
-
+ReplayChildren = bool
+OperationPayload = str
+TimeoutSeconds = int
 
 logger = logging.getLogger(__name__)
 
