@@ -4,7 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aws-durable-execution-sdk-python"
-version = "0.0.1-alpha"
+dynamic = ["version"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/foo"]
+
+[tool.hatch.version]
+path = "src/aws_durable_execution_sdk_python/__about__.py"
