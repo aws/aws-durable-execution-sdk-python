@@ -392,10 +392,12 @@ class InvokeConfig(Generic[P, R]):
             from blocking execution indefinitely.
 
         serdes_payload: Custom serialization/deserialization for the payload
-            sent to the invoked function. If None, uses default JSON serialization.
+            sent to the invoked function. Defaults to DEFAULT_JSON_SERDES when
+            not set.
 
         serdes_result: Custom serialization/deserialization for the result
-            returned from the invoked function. If None, uses default JSON serialization.
+            returned from the invoked function. Defaults to DEFAULT_JSON_SERDES when
+            not set.
 
         tenant_id: Optional tenant identifier for multi-tenant isolation.
             If provided, the invocation will be scoped to this tenant.

@@ -612,3 +612,57 @@ def test_invoke_handler_default_config_no_tenant_id():
     chained_invoke_options = operation_update.to_dict()["ChainedInvokeOptions"]
     assert chained_invoke_options["FunctionName"] == "test_function"
     assert "TenantId" not in chained_invoke_options
+
+
+def test_invoke_handler_defaults_to_json_serdes():
+    """Test invoke_handler uses DEFAULT_JSON_SERDES when config has no serdes."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+
+    config = InvokeConfig[dict, dict](serdes_payload=None, serdes_result=None)
+    payload = {"key": "value", "number": 42}
+
+    with pytest.raises(SuspendExecution):
+        invoke_handler(
+            function_name="test_function",
+            payload=payload,
+            state=mock_state,
+            operation_identifier=OperationIdentifier("invoke_json", None, None),
+            config=config,
+        )
+
+    # Verify JSON serialization was used (not extended types)
+    operation_update = mock_state.create_checkpoint.call_args[1]["operation_update"]
+    assert operation_update.payload == json.dumps(payload)
+
+
+def test_invoke_handler_result_defaults_to_json_serdes():
+    """Test invoke_handler uses DEFAULT_JSON_SERDES for result deserialization."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+
+    result_data = {"key": "value", "number": 42}
+    operation = Operation(
+        operation_id="invoke_result_json",
+        operation_type=OperationType.CHAINED_INVOKE,
+        status=OperationStatus.SUCCEEDED,
+        chained_invoke_details=ChainedInvokeDetails(result=json.dumps(result_data)),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    config = InvokeConfig[dict, dict](serdes_payload=None, serdes_result=None)
+
+    result = invoke_handler(
+        function_name="test_function",
+        payload={"input": "data"},
+        state=mock_state,
+        operation_identifier=OperationIdentifier("invoke_result_json", None, None),
+        config=config,
+    )
+
+    # Verify JSON deserialization was used (not extended types)
+    assert result == result_data

@@ -73,12 +73,12 @@ TESTING_SDK_BRANCH = second-branch""",
 
     for input_text, expected in test_cases:
         result = parse_sdk_branch(input_text)
-        if result != expected:
-            return False
-
-    return True
+        # Assert is expected in test functions
+        assert result == expected, (  # noqa: S101
+            f"Expected '{expected}' but got '{result}' for input: {input_text[:50]}..."
+        )
 
 
 if __name__ == "__main__":
-    success = test_parse_sdk_branch()
-    sys.exit(0 if success else 1)
+    test_parse_sdk_branch()
+    sys.exit(0)
