@@ -2000,7 +2000,10 @@ def test_durable_execution_with_non_durable_payload_raises_error():
     # THEN it raises a ValueError with a helpful message
     with pytest.raises(
         ExecutionError,
-        match="The payload is not the correct Durable Function input",
+        match=(
+            "Unexpected payload provided to start the durable execution. "
+            "Check your resource configurations to confirm the durability is set."
+        ),
     ):
         test_handler(regular_event, lambda_context)
 
@@ -2028,6 +2031,9 @@ def test_durable_execution_with_non_dict_event_raises_error():
     # THEN it raises a ValueError with a helpful message
     with pytest.raises(
         ExecutionError,
-        match="The payload is not the correct Durable Function input",
+        match=(
+            "Unexpected payload provided to start the durable execution. "
+            "Check your resource configurations to confirm the durability is set."
+        ),
     ):
         test_handler(non_dict_event, lambda_context)

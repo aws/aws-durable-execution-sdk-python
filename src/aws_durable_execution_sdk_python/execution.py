@@ -228,8 +228,8 @@ def durable_execution(
                 invocation_input = DurableExecutionInvocationInput.from_dict(event)
             except (KeyError, TypeError, AttributeError) as e:
                 msg = (
-                    "The payload is not the correct Durable Function input. "
-                    "Please set DurableConfig on the AWS Lambda to invoke it as a Durable Function."
+                    "Unexpected payload provided to start the durable execution. "
+                    "Check your resource configurations to confirm the durability is set."
                 )
                 raise ExecutionError(msg) from e
 
