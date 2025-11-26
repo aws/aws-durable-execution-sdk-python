@@ -441,8 +441,8 @@ class ExtendedTypeSerDes(SerDes[T]):
                 return obj
 
 
-_DEFAULT_JSON_SERDES: SerDes[Any] = JsonSerDes()
-_EXTENDED_TYPES_SERDES: SerDes[Any] = ExtendedTypeSerDes()
+DEFAULT_JSON_SERDES: SerDes[Any] = JsonSerDes()
+EXTENDED_TYPES_SERDES: SerDes[Any] = ExtendedTypeSerDes()
 
 
 def serialize(
@@ -463,7 +463,7 @@ def serialize(
         FatalError: If serialization fails
     """
     serdes_context: SerDesContext = SerDesContext(operation_id, durable_execution_arn)
-    active_serdes: SerDes[T] = serdes or _EXTENDED_TYPES_SERDES
+    active_serdes: SerDes[T] = serdes or EXTENDED_TYPES_SERDES
     try:
         return active_serdes.serialize(value, serdes_context)
     except Exception as e:
@@ -493,7 +493,7 @@ def deserialize(
         FatalError: If deserialization fails
     """
     serdes_context: SerDesContext = SerDesContext(operation_id, durable_execution_arn)
-    active_serdes: SerDes[T] = serdes or _EXTENDED_TYPES_SERDES
+    active_serdes: SerDes[T] = serdes or EXTENDED_TYPES_SERDES
     try:
         return active_serdes.deserialize(data, serdes_context)
     except Exception as e:
