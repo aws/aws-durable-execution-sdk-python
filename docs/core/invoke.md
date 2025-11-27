@@ -37,7 +37,7 @@
 Invoke operations let you call other Lambda functions from within your durable function. You can invoke both durable functions and regular on-demand Lambda functions. This enables function composition, where you break complex workflows into smaller, reusable functions. The calling function suspends while the invoked function executes, and resumes when the result is available.
 
 Use invoke operations to:
-- Decompose complex workflows into manageable functions
+- Modularize complex workflows into manageable functions
 - Call existing Lambda functions (durable or on-demand) from your workflow
 - Isolate different parts of your business logic
 - Build hierarchical execution patterns
@@ -137,7 +137,6 @@ def invoke(
 
 **Raises:** 
 - `CallableRuntimeError` - If the invoked function fails or times out
-- `SuspendExecution` - When the operation is first started or still in progress (internal)
 
 [↑ Back to top](#table-of-contents)
 
@@ -313,11 +312,13 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 ### InvokeConfig parameters
 
-**timeout** - A `Duration` object specifying the maximum time to wait for the invoked function to complete. If the timeout is exceeded, the invoke operation fails. Default is no timeout.
+**timeout** - Maximum duration to wait for the invoked function to complete. Default is no timeout. Use this to prevent long-running invocations from blocking execution indefinitely.
 
-**serdes_payload** - Custom serialization/deserialization for the payload sent to the invoked function. If not provided, uses JSON serialization.
+**serdes_payload** - Custom serialization/deserialization for the payload sent to the invoked function. If None, uses default JSON serialization.
 
-**serdes_result** - Custom serialization/deserialization for the result returned by the invoked function. If not provided, uses JSON serialization.
+**serdes_result** - Custom serialization/deserialization for the result returned from the invoked function. If None, uses default JSON serialization.
+
+**tenant_id** - Optional tenant identifier for multi-tenant isolation. If provided, the invocation will be scoped to this tenant.
 
 ### Setting timeouts
 
@@ -566,7 +567,7 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 **Consider cost implications** - Each invoke operation triggers a separate Lambda invocation, which has cost implications.
 
-**Mix durable and on-demand functions** - You can invoke both durable and regular Lambda functions. Use durable functions for complex workflows and on-demand functions for simple operations.
+**Mix durable and on-demand functions** - You can invoke both durable and regular Lambda functions. The orchestrator can be durable and compose regular on-demand functions. The orchestrator provides durability for the results of the invoked on-demand functions without needing to provide durability on the invoked functions themselves. Use durable functions for complex workflows and on-demand functions for simple operations.
 
 [↑ Back to top](#table-of-contents)
 
@@ -580,9 +581,10 @@ A: `invoke()` calls another durable function (Lambda), while `step()` executes c
 
 A: Yes, `context.invoke()` can call both durable functions and regular on-demand Lambda functions. The invoke operation works with any Lambda function that accepts and returns JSON-serializable data.
 
+
 **Q: How do I pass the result from one invoke to another?**
 
-A: Simply use the return value:
+A: Simply use the return value. The type of the return value is governed by the `serdes_result` configuration:
 
 ```python
 result1 = context.invoke("function-1", payload1)
