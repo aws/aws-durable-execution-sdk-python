@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 
 Numeric = int | float
 
+# Default pattern that matches all error messages
+_DEFAULT_RETRYABLE_ERROR_PATTERN = re.compile(r".*")
+
 
 @dataclass
 class RetryDecision:
@@ -75,7 +78,7 @@ def create_retry_strategy(
     retryable_errors: list[str | re.Pattern] = (
         config.retryable_errors
         if config.retryable_errors is not None
-        else ([re.compile(r".*")] if should_use_default_errors else [])
+        else ([_DEFAULT_RETRYABLE_ERROR_PATTERN] if should_use_default_errors else [])
     )
     retryable_error_types: list[type[Exception]] = config.retryable_error_types or []
 
