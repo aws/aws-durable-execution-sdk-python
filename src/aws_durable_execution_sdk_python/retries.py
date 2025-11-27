@@ -47,10 +47,8 @@ class RetryStrategyConfig:
     )  # 5 minutes
     backoff_rate: Numeric = 2.0
     jitter_strategy: JitterStrategy = field(default=JitterStrategy.FULL)
-    retryable_errors: list[str | re.Pattern] = field(
-        default_factory=lambda: [re.compile(r".*")]
-    )
-    retryable_error_types: list[type[Exception]] = field(default_factory=list)
+    retryable_errors: list[str | re.Pattern] | None = None
+    retryable_error_types: list[type[Exception]] | None = None
 
     @property
     def initial_delay_seconds(self) -> int:
@@ -64,10 +62,22 @@ class RetryStrategyConfig:
 
 
 def create_retry_strategy(
-    config: RetryStrategyConfig,
+    config: RetryStrategyConfig | None = None,
 ) -> Callable[[Exception, int], RetryDecision]:
     if config is None:
         config = RetryStrategyConfig()
+
+    # Apply default retryableErrors only if user didn't specify either filter
+    should_use_default_errors: bool = (
+        config.retryable_errors is None and config.retryable_error_types is None
+    )
+
+    retryable_errors: list[str | re.Pattern] = (
+        config.retryable_errors
+        if config.retryable_errors is not None
+        else ([re.compile(r".*")] if should_use_default_errors else [])
+    )
+    retryable_error_types: list[type[Exception]] = config.retryable_error_types or []
 
     def retry_strategy(error: Exception, attempts_made: int) -> RetryDecision:
         # Check if we've exceeded max attempts
@@ -75,31 +85,32 @@ def create_retry_strategy(
             return RetryDecision.no_retry()
 
         # Check if error is retryable based on error message
-        is_retryable_error_message = any(
+        is_retryable_error_message: bool = any(
             pattern.search(str(error))
             if isinstance(pattern, re.Pattern)
             else pattern in str(error)
-            for pattern in config.retryable_errors
+            for pattern in retryable_errors
         )
 
         # Check if error is retryable based on error type
-        is_retryable_error_type = any(
-            isinstance(error, error_type) for error_type in config.retryable_error_types
+        is_retryable_error_type: bool = any(
+            isinstance(error, error_type) for error_type in retryable_error_types
         )
 
         if not is_retryable_error_message and not is_retryable_error_type:
             return RetryDecision.no_retry()
 
         # Calculate delay with exponential backoff
-        delay = min(
+        base_delay: float = min(
             config.initial_delay_seconds * (config.backoff_rate ** (attempts_made - 1)),
             config.max_delay_seconds,
         )
-        delay_with_jitter = delay + config.jitter_strategy.compute_jitter(delay)
-        delay_with_jitter = math.ceil(delay_with_jitter)
-        final_delay = max(1, delay_with_jitter)
+        # Apply jitter to get final delay
+        delay_with_jitter: float = config.jitter_strategy.apply_jitter(base_delay)
+        # Round up and ensure minimum of 1 second
+        final_delay: int = max(1, math.ceil(delay_with_jitter))
 
-        return RetryDecision.retry(Duration(seconds=round(final_delay)))
+        return RetryDecision.retry(Duration(seconds=final_delay))
 
     return retry_strategy
 

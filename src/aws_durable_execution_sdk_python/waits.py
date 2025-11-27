@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic
 
@@ -81,17 +82,16 @@ def create_wait_strategy(
             return WaitDecision.no_wait()
 
         # Calculate delay with exponential backoff
-        base_delay = min(
+        base_delay: float = min(
             config.initial_delay_seconds * (config.backoff_rate ** (attempts_made - 1)),
             config.max_delay_seconds,
         )
 
-        # Apply jitter (add jitter to base delay)
-        jitter = config.jitter_strategy.compute_jitter(base_delay)
-        delay_with_jitter = base_delay + jitter
+        # Apply jitter to get final delay
+        delay_with_jitter: float = config.jitter_strategy.apply_jitter(base_delay)
 
-        # Ensure delay is an integer >= 1
-        final_delay = max(1, round(delay_with_jitter))
+        # Round up and ensure minimum of 1 second
+        final_delay: int = max(1, math.ceil(delay_with_jitter))
 
         return WaitDecision.wait(Duration(seconds=final_delay))
 
