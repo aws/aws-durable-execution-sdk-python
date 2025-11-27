@@ -93,8 +93,8 @@ class TestRetryStrategyConfig:
         assert config.max_delay_seconds == 300
         assert config.backoff_rate == 2.0
         assert config.jitter_strategy == JitterStrategy.FULL
-        assert len(config.retryable_errors) == 1
-        assert config.retryable_error_types == []
+        assert config.retryable_errors is None
+        assert config.retryable_error_types is None
 
 
 class TestCreateRetryStrategy:
@@ -413,4 +413,81 @@ class TestEdgeCases:
         # Should retry on ValueError even without message match
         error = ValueError("some value error")
         decision = strategy(error, 1)
+        assert decision.should_retry is True
+
+    def test_only_retryable_error_types_specified(self):
+        """Test that specifying only retryable_error_types doesn't retry all errors."""
+        class TimeoutError(Exception):
+            pass
+
+        config = RetryStrategyConfig(retryable_error_types=[TimeoutError])
+        strategy = create_retry_strategy(config)
+
+        # Should retry: matches error type
+        timeout_error = TimeoutError("Operation timed out")
+        decision = strategy(timeout_error, 1)
+        assert decision.should_retry is True
+
+        # Should NOT retry: generic Error doesn't match type
+        generic_error = Exception("Some random error")
+        decision = strategy(generic_error, 1)
+        assert decision.should_retry is False
+
+    def test_only_retryable_errors_specified(self):
+        """Test that specifying only retryable_errors doesn't retry all errors."""
+        config = RetryStrategyConfig(retryable_errors=[re.compile(r"timeout")])
+        strategy = create_retry_strategy(config)
+
+        # Should retry: matches pattern
+        timeout_error = Exception("Request timeout")
+        decision = strategy(timeout_error, 1)
+        assert decision.should_retry is True
+
+        # Should NOT retry: doesn't match pattern
+        other_error = Exception("Invalid input")
+        decision = strategy(other_error, 1)
+        assert decision.should_retry is False
+
+    def test_combine_retryable_errors_and_types_with_or_logic(self):
+        """Test that retryable_errors and retryable_error_types use OR logic."""
+        class NetworkError(Exception):
+            pass
+
+        config = RetryStrategyConfig(
+            retryable_errors=[re.compile(r"timeout")],
+            retryable_error_types=[NetworkError],
+        )
+        strategy = create_retry_strategy(config)
+
+        # Should retry: matches error type
+        network_error = NetworkError("Connection failed")
+        decision = strategy(network_error, 1)
+        assert decision.should_retry is True
+
+        # Should retry: matches error message pattern
+        timeout_error = Exception("Request timeout")
+        decision = strategy(timeout_error, 1)
+        assert decision.should_retry is True
+
+        # Should NOT retry: matches neither
+        other_error = Exception("Invalid input")
+        decision = strategy(other_error, 1)
+        assert decision.should_retry is False
+
+    def test_default_retries_all_errors_when_no_filters_specified(self):
+        """Test that default behavior retries all errors when no filters specified."""
+        config = RetryStrategyConfig(max_attempts=5)
+        strategy = create_retry_strategy(config)
+
+        # Should retry: default regex matches all errors
+        error1 = Exception("Network error")
+        decision = strategy(error1, 1)
+        assert decision.should_retry is True
+
+        error2 = ValueError("Validation error")
+        decision = strategy(error2, 1)
+        assert decision.should_retry is True
+
+        error3 = RuntimeError("Random error")
+        decision = strategy(error3, 1)
         assert decision.should_retry is True

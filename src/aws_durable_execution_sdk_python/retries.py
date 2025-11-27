@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 
 Numeric = int | float
 
+# Pre-compiled regex for default retry behavior (retry all errors)
+_DEFAULT_RETRY_PATTERN = re.compile(r".*")
+
 
 @dataclass
 class RetryDecision:
@@ -47,10 +50,8 @@ class RetryStrategyConfig:
     )  # 5 minutes
     backoff_rate: Numeric = 2.0
     jitter_strategy: JitterStrategy = field(default=JitterStrategy.FULL)
-    retryable_errors: list[str | re.Pattern] = field(
-        default_factory=lambda: [re.compile(r".*")]
-    )
-    retryable_error_types: list[type[Exception]] = field(default_factory=list)
+    retryable_errors: list[str | re.Pattern] | None = None
+    retryable_error_types: list[type[Exception]] | None = None
 
     @property
     def initial_delay_seconds(self) -> int:
@@ -69,6 +70,18 @@ def create_retry_strategy(
     if config is None:
         config = RetryStrategyConfig()
 
+    # Only apply default retryable_errors if user didn't specify either filter
+    should_use_default_errors = (
+        config.retryable_errors is None and config.retryable_error_types is None
+    )
+
+    retryable_errors = (
+        config.retryable_errors
+        if config.retryable_errors is not None
+        else ([_DEFAULT_RETRY_PATTERN] if should_use_default_errors else [])
+    )
+    retryable_error_types = config.retryable_error_types or []
+
     def retry_strategy(error: Exception, attempts_made: int) -> RetryDecision:
         # Check if we've exceeded max attempts
         if attempts_made >= config.max_attempts:
@@ -79,12 +92,12 @@ def create_retry_strategy(
             pattern.search(str(error))
             if isinstance(pattern, re.Pattern)
             else pattern in str(error)
-            for pattern in config.retryable_errors
+            for pattern in retryable_errors
         )
 
         # Check if error is retryable based on error type
         is_retryable_error_type = any(
-            isinstance(error, error_type) for error_type in config.retryable_error_types
+            isinstance(error, error_type) for error_type in retryable_error_types
         )
 
         if not is_retryable_error_message and not is_retryable_error_type:
