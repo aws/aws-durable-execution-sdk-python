@@ -272,7 +272,6 @@ class DurableContext(DurableContextProtocol):
         if not config:
             config = CallbackConfig()
         operation_id: str = self._create_step_id()
-        self.state.track_replay(operation_id=operation_id)
         callback_id: str = create_callback_handler(
             state=self.state,
             operation_identifier=OperationIdentifier(
@@ -280,13 +279,14 @@ class DurableContext(DurableContextProtocol):
             ),
             config=config,
         )
-
-        return Callback(
+        result: Callback = Callback(
             callback_id=callback_id,
             operation_id=operation_id,
             state=self.state,
             serdes=config.serdes,
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
     def invoke(
         self,
@@ -307,8 +307,7 @@ class DurableContext(DurableContextProtocol):
             The result of the invoked function
         """
         operation_id = self._create_step_id()
-        self.state.track_replay(operation_id=operation_id)
-        return invoke_handler(
+        result: R = invoke_handler(
             function_name=function_name,
             payload=payload,
             state=self.state,
@@ -319,6 +318,8 @@ class DurableContext(DurableContextProtocol):
             ),
             config=config,
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
     def map(
         self,
@@ -331,7 +332,6 @@ class DurableContext(DurableContextProtocol):
         map_name: str | None = self._resolve_step_name(name, func)
 
         operation_id = self._create_step_id()
-        self.state.track_replay(operation_id=operation_id)
         operation_identifier = OperationIdentifier(
             operation_id=operation_id, parent_id=self._parent_id, name=map_name
         )
@@ -351,7 +351,7 @@ class DurableContext(DurableContextProtocol):
                 operation_identifier=operation_identifier,
             )
 
-        return child_handler(
+        result: BatchResult[R] = child_handler(
             func=map_in_child_context,
             state=self.state,
             operation_identifier=operation_identifier,
@@ -364,6 +364,8 @@ class DurableContext(DurableContextProtocol):
                 item_serdes=None,
             ),
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
     def parallel(
         self,
@@ -374,7 +376,6 @@ class DurableContext(DurableContextProtocol):
         """Execute multiple callables in parallel."""
         # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
         operation_id = self._create_step_id()
-        self.state.track_replay(operation_id=operation_id)
         parallel_context = self.create_child_context(parent_id=operation_id)
         operation_identifier = OperationIdentifier(
             operation_id=operation_id, parent_id=self._parent_id, name=name
@@ -393,7 +394,7 @@ class DurableContext(DurableContextProtocol):
                 operation_identifier=operation_identifier,
             )
 
-        return child_handler(
+        result: BatchResult[T] = child_handler(
             func=parallel_in_child_context,
             state=self.state,
             operation_identifier=operation_identifier,
@@ -406,6 +407,8 @@ class DurableContext(DurableContextProtocol):
                 item_serdes=None,
             ),
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
     def run_in_child_context(
         self,
@@ -428,12 +431,11 @@ class DurableContext(DurableContextProtocol):
         step_name: str | None = self._resolve_step_name(name, func)
         # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
         operation_id = self._create_step_id()
-        self.state.track_replay(operation_id=operation_id)
 
         def callable_with_child_context():
             return func(self.create_child_context(parent_id=operation_id))
 
-        return child_handler(
+        result: T = child_handler(
             func=callable_with_child_context,
             state=self.state,
             operation_identifier=OperationIdentifier(
@@ -441,6 +443,8 @@ class DurableContext(DurableContextProtocol):
             ),
             config=config,
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
     def step(
         self,
@@ -451,9 +455,7 @@ class DurableContext(DurableContextProtocol):
         step_name = self._resolve_step_name(name, func)
         logger.debug("Step name: %s", step_name)
         operation_id = self._create_step_id()
-        self.state.track_replay(operation_id=operation_id)
-
-        return step_handler(
+        result: T = step_handler(
             func=func,
             config=config,
             state=self.state,
@@ -464,6 +466,8 @@ class DurableContext(DurableContextProtocol):
             ),
             context_logger=self.logger,
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
     def wait(self, duration: Duration, name: str | None = None) -> None:
         """Wait for a specified amount of time.
@@ -477,7 +481,6 @@ class DurableContext(DurableContextProtocol):
             msg = "duration must be at least 1 second"
             raise ValidationError(msg)
         operation_id = self._create_step_id()
-        self.state.track_replay(operation_id=operation_id)
         wait_handler(
             seconds=seconds,
             state=self.state,
@@ -487,6 +490,7 @@ class DurableContext(DurableContextProtocol):
                 name=name,
             ),
         )
+        self.state.track_replay(operation_id=operation_id)
 
     def wait_for_callback(
         self,
@@ -529,8 +533,7 @@ class DurableContext(DurableContextProtocol):
             raise ValidationError(msg)
 
         operation_id = self._create_step_id()
-        self.state.track_replay(operation_id=operation_id)
-        return wait_for_condition_handler(
+        result: T = wait_for_condition_handler(
             check=check,
             config=config,
             state=self.state,
@@ -541,6 +544,8 @@ class DurableContext(DurableContextProtocol):
             ),
             context_logger=self.logger,
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
 
 # endregion Operations

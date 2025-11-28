@@ -42,7 +42,7 @@ jobs:
         python-version: ${{ matrix.python-version }}
 
     - name: Install Hatch
-      run: python -m pip install --upgrade hatch
+      run: python -m pip install hatch==1.15.0
 
     - name: Setup and run Testing SDK
       working-directory: testing-sdk

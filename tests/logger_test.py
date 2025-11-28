@@ -381,22 +381,27 @@ def test_logger_replay_no_logging():
     log_info = LogInfo(replay_execution_state, "parent123", "test_name", 5)
     mock_logger = Mock()
     logger = Logger.from_log_info(mock_logger, log_info)
-    replay_execution_state.track_replay(operation_id="op1")
     logger.info("logging info")
+    replay_execution_state.track_replay(operation_id="op1")
 
     mock_logger.info.assert_not_called()
 
 
 def test_logger_replay_then_new_logging():
-    operation = Operation(
+    operation1 = Operation(
         operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+    )
+    operation2 = Operation(
+        operation_id="op2",
         operation_type=OperationType.STEP,
         status=OperationStatus.SUCCEEDED,
     )
     execution_state = ExecutionState(
         durable_execution_arn="arn:aws:test",
         initial_checkpoint_token="test_token",  # noqa: S106
-        operations={"op1": operation},
+        operations={"op1": operation1, "op2": operation2},
         service_client=Mock(),
         replay_status=ReplayStatus.REPLAY,
     )

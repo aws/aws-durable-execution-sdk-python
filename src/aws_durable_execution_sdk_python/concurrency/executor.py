@@ -381,12 +381,11 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
             executor_context._parent_id,  # noqa: SLF001
             name,
         )
-        child_context.state.track_replay(operation_id=operation_id)
 
         def run_in_child_handler():
             return self.execute_item(child_context, executable)
 
-        return child_handler(
+        result: ResultType = child_handler(
             run_in_child_handler,
             child_context.state,
             operation_identifier=operation_identifier,
@@ -396,6 +395,8 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
                 summary_generator=self.summary_generator,
             ),
         )
+        child_context.state.track_replay(operation_id=operation_id)
+        return result
 
     def replay(self, execution_state: ExecutionState, executor_context: DurableContext):
         """
