@@ -258,6 +258,7 @@ class ExecutionState:
         self._parent_done_lock: Lock = Lock()
         self._replay_status: ReplayStatus = replay_status
         self._replay_status_lock: Lock = Lock()
+        self._visited_operations: set[str] = set()
 
     def fetch_paginated_operations(
         self,
@@ -301,14 +302,20 @@ class ExecutionState:
         """
         with self._replay_status_lock:
             if self._replay_status == ReplayStatus.REPLAY:
-                operation = self.operations.get(operation_id)
-                # Transition if operation doesn't exist OR isn't in a completed state
-                if not operation or operation.status not in {
-                    OperationStatus.SUCCEEDED,
-                    OperationStatus.FAILED,
-                    OperationStatus.CANCELLED,
-                    OperationStatus.STOPPED,
-                }:
+                self._visited_operations.add(operation_id)
+                completed_ops = {
+                    op_id
+                    for op_id, op in self.operations.items()
+                    if op.operation_type != OperationType.EXECUTION
+                    and op.status
+                    in {
+                        OperationStatus.SUCCEEDED,
+                        OperationStatus.FAILED,
+                        OperationStatus.CANCELLED,
+                        OperationStatus.STOPPED,
+                    }
+                }
+                if completed_ops.issubset(self._visited_operations):
                     logger.debug(
                         "Transitioning from REPLAY to NEW status at operation %s",
                         operation_id,
