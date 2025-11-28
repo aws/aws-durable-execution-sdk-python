@@ -47,6 +47,7 @@ from aws_durable_execution_sdk_python.types import (
     BatchResult,
     LoggerInterface,
     StepContext,
+    WaitForCallbackContext,
     WaitForConditionCheckContext,
 )
 from aws_durable_execution_sdk_python.types import Callback as CallbackProtocol
@@ -489,7 +490,7 @@ class DurableContext(DurableContextProtocol):
 
     def wait_for_callback(
         self,
-        submitter: Callable[[str], None],
+        submitter: Callable[[str, WaitForCallbackContext], None],
         name: str | None = None,
         config: WaitForCallbackConfig | None = None,
     ) -> Any:
