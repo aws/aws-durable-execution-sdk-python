@@ -2,7 +2,7 @@ name: Integration Tests
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ main, runtime-deployed-version-2025-12-01 ]
 
 permissions:
   contents: read
@@ -42,7 +42,7 @@ jobs:
         python-version: ${{ matrix.python-version }}
 
     - name: Install Hatch
-      run: python -m pip install --upgrade hatch
+      run: python -m pip install hatch==1.15.0
 
     - name: Setup and run Testing SDK
       working-directory: testing-sdk
