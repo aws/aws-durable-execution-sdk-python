@@ -186,6 +186,11 @@ class DurableContext(DurableContextProtocol):
             info=log_info,
         )
 
+    @property
+    def durable_execution_arn(self) -> str:
+        """Get the durable execution ARN."""
+        return self.state.durable_execution_arn
+
     # region factories
     @staticmethod
     def from_lambda_context(

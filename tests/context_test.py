@@ -45,6 +45,16 @@ def test_durable_context():
     assert DurableContext is not None
 
 
+def test_durable_context_exposes_durable_execution_arn():
+    """Test that DurableContext exposes durable_execution_arn property."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test-arn"
+
+    context = DurableContext(state=mock_state)
+
+    assert context.durable_execution_arn == "test-arn"
+
+
 # region Callback
 def test_callback_init():
     """Test Callback initialization."""
