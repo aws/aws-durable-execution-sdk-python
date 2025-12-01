@@ -107,7 +107,7 @@ jobs:
       env:
         AWS_DURABLE_SDK_URL: file://${{ github.workspace }}/language-sdk
       run: |
-        pip install hatch
+        python -m pip install hatch==1.15.0
         python -m pip install -e .
 
     - name: Get integration examples
