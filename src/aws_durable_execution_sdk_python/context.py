@@ -182,7 +182,7 @@ class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
 
         if not checkpointed_result.is_existent():
             msg = "Callback operation must exist"
-            raise CallbackError(msg)
+            raise CallbackError(message=msg, callback_id=self.callback_id)
 
         if (
             checkpointed_result.is_failed()
@@ -190,7 +190,12 @@ class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
             or checkpointed_result.is_timed_out()
             or checkpointed_result.is_stopped()
         ):
-            checkpointed_result.raise_callable_error()
+            msg = (
+                checkpointed_result.error.message
+                if checkpointed_result.error and checkpointed_result.error.message
+                else "Callback failed"
+            )
+            raise CallbackError(message=msg, callback_id=self.callback_id)
 
         if checkpointed_result.is_succeeded():
             if checkpointed_result.result is None:
