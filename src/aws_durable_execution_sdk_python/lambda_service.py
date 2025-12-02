@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import datetime
 import logging
-import os
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 import boto3  # type: ignore
@@ -943,41 +941,14 @@ class LambdaClient(DurableServiceClient):
         self.client = client
 
     @staticmethod
-    def load_preview_botocore_models() -> None:
-        """
-        Load boto3 models from the Python path for custom preview client.
-        """
-        os.environ["AWS_DATA_PATH"] = str(
-            Path(__file__).parent.joinpath("botocore", "data")
+    def initialize_client() -> LambdaClient:
+        client = boto3.client(
+            "lambda",
+            config=Config(
+                connect_timeout=5,
+                read_timeout=50,
+            ),
         )
-
-    @staticmethod
-    def initialize_from_env() -> LambdaClient:
-        LambdaClient.load_preview_botocore_models()
-
-        """
-        TODO - we can remove this when were using the actual lambda client,
-        but we need this with the preview model because boto won't match against lambdainternal.
-        """
-        endpoint_url = os.getenv("AWS_ENDPOINT_URL_LAMBDA", None)
-        if not endpoint_url:
-            client = boto3.client(
-                "lambdainternal",
-                config=Config(
-                    connect_timeout=5,
-                    read_timeout=50,
-                ),
-            )
-        else:
-            client = boto3.client(
-                "lambdainternal",
-                endpoint_url=endpoint_url,
-                config=Config(
-                    connect_timeout=5,
-                    read_timeout=50,
-                ),
-            )
-
         return LambdaClient(client=client)
 
     def checkpoint(

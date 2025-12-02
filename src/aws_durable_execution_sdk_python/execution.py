@@ -237,7 +237,7 @@ def durable_execution(
             service_client = (
                 LambdaClient(client=boto3_client)
                 if boto3_client is not None
-                else LambdaClient.initialize_from_env()
+                else LambdaClient.initialize_client()
             )
 
         raw_input_payload: str | None = (
