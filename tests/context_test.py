@@ -18,7 +18,6 @@ from aws_durable_execution_sdk_python.config import (
 )
 from aws_durable_execution_sdk_python.context import Callback, DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
-    CallableRuntimeError,
     CallbackError,
     SuspendExecution,
     ValidationError,
@@ -172,7 +171,7 @@ def test_callback_result_failed():
 
     callback = Callback("callback5", "op5", mock_state)
 
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(CallbackError):
         callback.result()
 
 
@@ -231,7 +230,7 @@ def test_callback_result_timed_out():
 
     callback = Callback("callback_timeout", "op_timeout", mock_state)
 
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(CallbackError):
         callback.result()
 
 
