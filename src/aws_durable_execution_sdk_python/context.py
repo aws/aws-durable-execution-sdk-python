@@ -104,6 +104,52 @@ def durable_with_child_context(
     return wrapper
 
 
+def durable_wait_for_callback(
+    func: Callable[Concatenate[str, WaitForCallbackContext, Params], T],
+) -> Callable[Params, Callable[[str, WaitForCallbackContext], T]]:
+    """Wrap your callable into a wait_for_callback submitter function.
+
+    This decorator allows you to define a submitter function with additional
+    parameters that will be bound when called.
+
+    Args:
+        func: A callable that takes callback_id, context, and additional parameters
+
+    Returns:
+        A wrapper function that binds the additional parameters and returns
+        a submitter function compatible with wait_for_callback
+
+    Example:
+        @durable_wait_for_callback
+        def submit_to_external_system(
+            callback_id: str,
+            context: WaitForCallbackContext,
+            task_name: str,
+            priority: int
+        ):
+            context.logger.info(f"Submitting {task_name} with callback {callback_id}")
+            external_api.submit_task(
+                task_name=task_name,
+                priority=priority,
+                callback_id=callback_id
+            )
+
+        # Usage in durable handler:
+        result = context.wait_for_callback(
+            submit_to_external_system("my_task", priority=5)
+        )
+    """
+
+    def wrapper(*args, **kwargs):
+        def submitter_with_arguments(callback_id: str, context: WaitForCallbackContext):
+            return func(callback_id, context, *args, **kwargs)
+
+        submitter_with_arguments._original_name = func.__name__  # noqa: SLF001
+        return submitter_with_arguments
+
+    return wrapper
+
+
 class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
     """A future that will block on result() until callback_id returns."""
 
