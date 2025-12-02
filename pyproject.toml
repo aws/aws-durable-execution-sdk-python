@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "aws-durable-execution-sdk-python"
 dynamic = ["version"]
-description = 'This the Python SDK for AWS Lambda Durable Functions.'
+description = 'This is the Python SDK for AWS Lambda Durable Functions.'
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
