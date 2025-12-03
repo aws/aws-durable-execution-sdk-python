@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "aws-durable-execution-sdk-python"
 dynamic = ["version"]
-description = 'This the Python SDK for AWS Lambda Durable Functions.'
+description = 'AWS Durable Execution SDK for Python'
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -21,7 +21,7 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
-dependencies = ["boto3>=1.40.30"]
+dependencies = ["boto3>=1.42.1"]
 
 [project.urls]
 Documentation = "https://github.com/aws/aws-durable-execution-sdk-python#readme"

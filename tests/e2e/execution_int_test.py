@@ -11,18 +11,20 @@ from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
     durable_step,
+    durable_wait_for_callback,
     durable_with_child_context,
 )
 from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
     durable_execution,
 )
-
-# LambdaContext no longer needed - using duck typing
 from aws_durable_execution_sdk_python.lambda_service import (
+    CallbackDetails,
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
+    Operation,
     OperationAction,
+    OperationStatus,
     OperationType,
 )
 from aws_durable_execution_sdk_python.logger import LoggerInterface
@@ -68,7 +70,7 @@ def test_step_different_ways_to_pass_args():
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
-        mock_client_class.initialize_from_env.return_value = mock_client
+        mock_client_class.initialize_client.return_value = mock_client
 
         # Mock the checkpoint method to track calls
         checkpoint_calls = []
@@ -154,7 +156,7 @@ def test_step_with_logger():
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
-        mock_client_class.initialize_from_env.return_value = mock_client
+        mock_client_class.initialize_client.return_value = mock_client
 
         # Mock the checkpoint method to track calls
         checkpoint_calls = []
@@ -255,7 +257,7 @@ def test_wait_inside_run_in_childcontext():
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
-        mock_client_class.initialize_from_env.return_value = mock_client
+        mock_client_class.initialize_client.return_value = mock_client
 
         # Mock the checkpoint method to track calls
         checkpoint_calls = []
@@ -361,7 +363,7 @@ def test_step_checkpoint_failure_propagates_error():
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
-        mock_client_class.initialize_from_env.return_value = mock_client
+        mock_client_class.initialize_client.return_value = mock_client
 
         # Mock the checkpoint method to raise an error (using RuntimeError as a generic exception)
         def mock_checkpoint_failure(
@@ -424,7 +426,7 @@ def test_wait_not_caught_by_exception():
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
         mock_client = Mock()
-        mock_client_class.initialize_from_env.return_value = mock_client
+        mock_client_class.initialize_client.return_value = mock_client
 
         # Mock the checkpoint method to track calls
         checkpoint_calls = []
@@ -487,3 +489,120 @@ def test_wait_not_caught_by_exception():
         assert checkpoint.action is OperationAction.START
         assert checkpoint.operation_id == next(operation_ids)
         assert checkpoint.wait_options.wait_seconds == 1
+
+
+def test_durable_wait_for_callback_decorator():
+    """Test the durable_wait_for_callback decorator with additional parameters."""
+
+    mock_submitter = Mock()
+
+    @durable_wait_for_callback
+    def submit_to_external_system(callback_id, context, task_name, priority):
+        mock_submitter(callback_id, task_name, priority)
+        context.logger.info("Submitting %s with callback %s", task_name, callback_id)
+
+    @durable_execution
+    def my_handler(event, context):
+        context.wait_for_callback(submit_to_external_system("my_task", priority=5))
+
+    with patch(
+        "aws_durable_execution_sdk_python.execution.LambdaClient"
+    ) as mock_client_class:
+        mock_client = Mock()
+        mock_client_class.initialize_client.return_value = mock_client
+
+        checkpoint_calls = []
+
+        def mock_checkpoint(
+            durable_execution_arn,
+            checkpoint_token,
+            updates,
+            client_token="token",  # noqa: S107
+        ):
+            checkpoint_calls.append(updates)
+
+            # For CALLBACK operations, return the operation with callback details
+            operations = [
+                Operation(
+                    operation_id=update.operation_id,
+                    operation_type=OperationType.CALLBACK,
+                    status=OperationStatus.STARTED,
+                    callback_details=CallbackDetails(
+                        callback_id=f"callback-{update.operation_id[:8]}"
+                    ),
+                )
+                for update in updates
+                if update.operation_type == OperationType.CALLBACK
+            ]
+
+            return CheckpointOutput(
+                checkpoint_token="new_token",  # noqa: S106
+                new_execution_state=CheckpointUpdatedExecutionState(
+                    operations=operations, next_marker=None
+                ),
+            )
+
+        mock_client.checkpoint = mock_checkpoint
+
+        event = {
+            "DurableExecutionArn": "test-arn",
+            "CheckpointToken": "test-token",
+            "InitialExecutionState": {
+                "Operations": [
+                    {
+                        "Id": "execution-1",
+                        "Type": "EXECUTION",
+                        "Status": "STARTED",
+                        "ExecutionDetails": {"InputPayload": "{}"},
+                    }
+                ],
+                "NextMarker": "",
+            },
+            "LocalRunner": True,
+        }
+
+        lambda_context = Mock()
+        lambda_context.aws_request_id = "test-request-id"
+        lambda_context.client_context = None
+        lambda_context.identity = None
+        lambda_context._epoch_deadline_time_in_ms = 0  # noqa: SLF001
+        lambda_context.invoked_function_arn = "test-arn"
+        lambda_context.tenant_id = None
+
+        result = my_handler(event, lambda_context)
+
+        assert result["Status"] == InvocationStatus.PENDING.value
+
+        all_operations = [op for batch in checkpoint_calls for op in batch]
+        assert len(all_operations) == 4
+
+        # First: CONTEXT START
+        first_checkpoint = all_operations[0]
+        assert first_checkpoint.operation_type is OperationType.CONTEXT
+        assert first_checkpoint.action is OperationAction.START
+        assert first_checkpoint.name == "submit_to_external_system"
+
+        # Second: CALLBACK START
+        second_checkpoint = all_operations[1]
+        assert second_checkpoint.operation_type is OperationType.CALLBACK
+        assert second_checkpoint.action is OperationAction.START
+        assert second_checkpoint.parent_id == first_checkpoint.operation_id
+        assert second_checkpoint.name == "submit_to_external_system create callback id"
+
+        # Third: STEP START
+        third_checkpoint = all_operations[2]
+        assert third_checkpoint.operation_type is OperationType.STEP
+        assert third_checkpoint.action is OperationAction.START
+        assert third_checkpoint.parent_id == first_checkpoint.operation_id
+        assert third_checkpoint.name == "submit_to_external_system submitter"
+
+        # Fourth: STEP SUCCEED
+        fourth_checkpoint = all_operations[3]
+        assert fourth_checkpoint.operation_type is OperationType.STEP
+        assert fourth_checkpoint.action is OperationAction.SUCCEED
+        assert fourth_checkpoint.operation_id == third_checkpoint.operation_id
+
+        mock_submitter.assert_called_once()
+        call_args = mock_submitter.call_args[0]
+        assert call_args[1] == "my_task"
+        assert call_args[2] == 5

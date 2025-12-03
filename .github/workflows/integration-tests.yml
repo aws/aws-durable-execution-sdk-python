@@ -97,17 +97,12 @@ jobs:
         role-session-name: languageSDKIntegrationTest
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Install custom Lambda model
-      working-directory: testing-sdk
-      run: |
-        aws configure add-model --service-model file://.github/model/lambda.json --service-name lambda
-
     - name: Install Hatch and setup Testing SDK
       working-directory: testing-sdk
       env:
         AWS_DURABLE_SDK_URL: file://${{ github.workspace }}/language-sdk
       run: |
-        pip install hatch
+        pip install hatch==1.15.0
         python -m pip install -e .
 
     - name: Get integration examples
@@ -116,6 +111,13 @@ jobs:
       run: |
         echo "examples=$(jq -c '.examples | map(select(.integration == true)) | .[0:2]' examples-catalog.json)" >> $GITHUB_OUTPUT
 
+    - name: Install AWS CLI v2
+      run: |
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+        unzip -q /tmp/awscliv2.zip -d /tmp
+        rm /tmp/awscliv2.zip
+        sudo /tmp/aws/install --update
+        rm -rf /tmp/aws/
     - name: Deploy and test examples
       working-directory: testing-sdk
       env:

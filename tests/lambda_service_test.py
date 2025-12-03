@@ -1906,18 +1906,17 @@ def test_lambda_client_constructor():
 
 @patch.dict("os.environ", {}, clear=True)
 @patch("boto3.client")
-def test_lambda_client_initialize_from_env_default(mock_boto_client):
-    """Test LambdaClient.initialize_from_env with default endpoint."""
+def test_lambda_client_initialize_client_default(mock_boto_client):
+    """Test LambdaClient.initialize_client with default endpoint."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
 
-    with patch.object(LambdaClient, "load_preview_botocore_models"):
-        client = LambdaClient.initialize_from_env()
+    client = LambdaClient.initialize_client()
 
     # Check that boto3.client was called with the right service name and config
     mock_boto_client.assert_called_once()
     call_args = mock_boto_client.call_args
-    assert call_args[0][0] == "lambdainternal"
+    assert call_args[0][0] == "lambda"
     assert "config" in call_args[1]
     config = call_args[1]["config"]
     assert config.connect_timeout == 5
@@ -1927,19 +1926,18 @@ def test_lambda_client_initialize_from_env_default(mock_boto_client):
 
 @patch.dict("os.environ", {"AWS_ENDPOINT_URL_LAMBDA": "http://localhost:3000"})
 @patch("boto3.client")
-def test_lambda_client_initialize_from_env_with_endpoint(mock_boto_client):
-    """Test LambdaClient.initialize_from_env with custom endpoint."""
+def test_lambda_client_initialize_client_with_endpoint(mock_boto_client):
+    """Test LambdaClient.initialize_client with custom endpoint (boto3 handles it automatically)."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
 
-    with patch.object(LambdaClient, "load_preview_botocore_models"):
-        client = LambdaClient.initialize_from_env()
+    client = LambdaClient.initialize_client()
 
     # Check that boto3.client was called with the right parameters and config
+    # Note: boto3 automatically picks up AWS_ENDPOINT_URL_LAMBDA from environment
     mock_boto_client.assert_called_once()
     call_args = mock_boto_client.call_args
-    assert call_args[0][0] == "lambdainternal"
-    assert call_args[1]["endpoint_url"] == "http://localhost:3000"
+    assert call_args[0][0] == "lambda"
     assert "config" in call_args[1]
     config = call_args[1]["config"]
     assert config.connect_timeout == 5
@@ -1981,21 +1979,11 @@ def test_durable_service_client_protocol_get_execution_state():
 
 
 @patch.dict("os.environ", {}, clear=True)
-@patch(
-    "aws_durable_execution_sdk_python.lambda_service.LambdaClient.initialize_from_env"
-)
-def test_lambda_client_initialize_from_env_defaults(mock_init):
-    """Test LambdaClient.initialize_from_env with default environment values."""
-    LambdaClient.initialize_from_env()
+@patch("aws_durable_execution_sdk_python.lambda_service.LambdaClient.initialize_client")
+def test_lambda_client_initialize_client_defaults(mock_init):
+    """Test LambdaClient.initialize_client with default environment values."""
+    LambdaClient.initialize_client()
     mock_init.assert_called_once_with()
-
-
-@patch("os.environ")
-def test_lambda_client_load_preview_botocore_models(mock_environ):
-    """Test LambdaClient.load_preview_botocore_models method."""
-    LambdaClient.load_preview_botocore_models()
-    # Verify that AWS_DATA_PATH is set
-    assert "AWS_DATA_PATH" in mock_environ.__setitem__.call_args[0]
 
 
 def test_checkpoint_error_handling():
@@ -2016,17 +2004,16 @@ def test_checkpoint_error_handling():
 
 @patch.dict("os.environ", {}, clear=True)
 @patch("boto3.client")
-def test_lambda_client_initialize_from_env_no_endpoint(mock_boto_client):
-    """Test LambdaClient.initialize_from_env without AWS_ENDPOINT_URL_LAMBDA."""
+def test_lambda_client_initialize_client_no_endpoint(mock_boto_client):
+    """Test LambdaClient.initialize_client without AWS_ENDPOINT_URL_LAMBDA."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
 
-    with patch.object(LambdaClient, "load_preview_botocore_models"):
-        client = LambdaClient.initialize_from_env()
+    client = LambdaClient.initialize_client()
 
     # Verify the call was made with the expected arguments including config
     call_args = mock_boto_client.call_args
-    assert call_args[0] == ("lambdainternal",)
+    assert call_args[0] == ("lambda",)
     assert "config" in call_args[1]
     assert isinstance(client, LambdaClient)
 

@@ -337,7 +337,7 @@ def test_durable_execution_client_selection_env_normal_result():
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_lambda_client:
         mock_client = Mock(spec=DurableServiceClient)
-        mock_lambda_client.initialize_from_env.return_value = mock_client
+        mock_lambda_client.initialize_client.return_value = mock_client
 
         # Mock successful checkpoint
         mock_output = CheckpointOutput(
@@ -379,7 +379,7 @@ def test_durable_execution_client_selection_env_normal_result():
 
         assert result["Status"] == InvocationStatus.SUCCEEDED.value
         assert result["Result"] == '{"result": "success"}'
-        mock_lambda_client.initialize_from_env.assert_called_once()
+        mock_lambda_client.initialize_client.assert_called_once()
         mock_client.checkpoint.assert_not_called()
 
 
@@ -389,7 +389,7 @@ def test_durable_execution_client_selection_env_large_result():
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_lambda_client:
         mock_client = Mock(spec=DurableServiceClient)
-        mock_lambda_client.initialize_from_env.return_value = mock_client
+        mock_lambda_client.initialize_client.return_value = mock_client
 
         # Mock successful checkpoint
         mock_output = CheckpointOutput(
@@ -431,7 +431,7 @@ def test_durable_execution_client_selection_env_large_result():
 
         assert result["Status"] == InvocationStatus.SUCCEEDED.value
         assert not result["Result"]
-        mock_lambda_client.initialize_from_env.assert_called_once()
+        mock_lambda_client.initialize_client.assert_called_once()
         mock_client.checkpoint.assert_called_once()
 
 
@@ -725,7 +725,7 @@ def test_durable_execution_client_selection_default():
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_lambda_client:
         mock_client = Mock(spec=DurableServiceClient)
-        mock_lambda_client.initialize_from_env.return_value = mock_client
+        mock_lambda_client.initialize_client.return_value = mock_client
 
         # Mock successful checkpoint
         mock_output = CheckpointOutput(
@@ -766,7 +766,7 @@ def test_durable_execution_client_selection_default():
         result = test_handler(event, lambda_context)
 
         assert result["Status"] == InvocationStatus.SUCCEEDED.value
-        mock_lambda_client.initialize_from_env.assert_called_once()
+        mock_lambda_client.initialize_client.assert_called_once()
 
 
 def test_initial_execution_state_get_execution_operation_no_operations():
