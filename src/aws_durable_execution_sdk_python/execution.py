@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -8,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from aws_durable_execution_sdk_python.context import DurableContext, ExecutionState
+from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     BotoClientError,
@@ -26,9 +27,12 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     OperationUpdate,
 )
+from aws_durable_execution_sdk_python.state import ExecutionState, ReplayStatus
 
 if TYPE_CHECKING:
     from collections.abc import Callable, MutableMapping
+
+    import boto3  # type: ignore
 
     from aws_durable_execution_sdk_python.types import LambdaContext
 
@@ -55,10 +59,15 @@ class InitialExecutionState:
             next_marker=input_dict.get("NextMarker", ""),
         )
 
-    def get_execution_operation(self) -> Operation:
-        if len(self.operations) < 1:
+    def get_execution_operation(self) -> Operation | None:
+        if not self.operations:
+            # Due to payload size limitations we may have an empty operations list.
+            # This will only happen when loading the initial page of results and is
+            # expected behaviour. We don't fail, but instead return None
+            # as the execution operation does not exist
             msg: str = "No durable operations found in initial execution state."
-            raise DurableExecutionsError(msg)
+            logger.debug(msg)
+            return None
 
         candidate = self.operations[0]
         if candidate.operation_type is not OperationType.EXECUTION:
@@ -68,11 +77,13 @@ class InitialExecutionState:
         return candidate
 
     def get_input_payload(self) -> str | None:
-        # TODO: are these None checks necessary? i.e will there always be execution_details with input_payload
-        if execution_details := self.get_execution_operation().execution_details:
-            return execution_details.input_payload
-
-        return None
+        # It is possible that backend will not provide an execution operation
+        # for the initial page of results.
+        if not (operations := self.get_execution_operation()):
+            return None
+        if not (execution_details := operations.execution_details):
+            return None
+        return execution_details.input_payload
 
     def to_dict(self) -> MutableMapping[str, Any]:
         return {
@@ -86,7 +97,6 @@ class DurableExecutionInvocationInput:
     durable_execution_arn: str
     checkpoint_token: str
     initial_execution_state: InitialExecutionState
-    is_local_runner: bool
 
     @staticmethod
     def from_dict(
@@ -98,7 +108,6 @@ class DurableExecutionInvocationInput:
             initial_execution_state=InitialExecutionState.from_dict(
                 input_dict.get("InitialExecutionState", {})
             ),
-            is_local_runner=input_dict.get("LocalRunner", False),
         )
 
     def to_dict(self) -> MutableMapping[str, Any]:
@@ -106,7 +115,6 @@ class DurableExecutionInvocationInput:
             "DurableExecutionArn": self.durable_execution_arn,
             "CheckpointToken": self.checkpoint_token,
             "InitialExecutionState": self.initial_execution_state.to_dict(),
-            "LocalRunner": self.is_local_runner,
         }
 
 
@@ -128,7 +136,6 @@ class DurableExecutionInvocationInputWithClient(DurableExecutionInvocationInput)
             durable_execution_arn=invocation_input.durable_execution_arn,
             checkpoint_token=invocation_input.checkpoint_token,
             initial_execution_state=invocation_input.initial_execution_state,
-            is_local_runner=invocation_input.is_local_runner,
             service_client=service_client,
         )
 
@@ -193,8 +200,15 @@ class DurableExecutionInvocationOutput:
 
 
 def durable_execution(
-    func: Callable[[Any, DurableContext], Any],
+    func: Callable[[Any, DurableContext], Any] | None = None,
+    *,
+    boto3_client: boto3.client | None = None,
 ) -> Callable[[Any, LambdaContext], Any]:
+    # Decorator called with parameters
+    if func is None:
+        logger.debug("Decorator called with parameters")
+        return functools.partial(durable_execution, boto3_client=boto3_client)
+
     logger.debug("Starting durable execution handler...")
 
     def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
@@ -207,13 +221,23 @@ def durable_execution(
             invocation_input = event
             service_client = invocation_input.service_client
         else:
-            logger.debug("durableExecutionArn: %s", event.get("DurableExecutionArn"))
-            invocation_input = DurableExecutionInvocationInput.from_dict(event)
+            try:
+                logger.debug(
+                    "durableExecutionArn: %s", event.get("DurableExecutionArn")
+                )
+                invocation_input = DurableExecutionInvocationInput.from_dict(event)
+            except (KeyError, TypeError, AttributeError) as e:
+                msg = (
+                    "Unexpected payload provided to start the durable execution. "
+                    "Check your resource configurations to confirm the durability is set."
+                )
+                raise ExecutionError(msg) from e
 
+            # Use custom client if provided, otherwise initialize from environment
             service_client = (
-                LambdaClient.initialize_local_runner_client()
-                if invocation_input.is_local_runner
-                else LambdaClient.initialize_from_env()
+                LambdaClient(client=boto3_client)
+                if boto3_client is not None
+                else LambdaClient.initialize_client()
             )
 
         raw_input_payload: str | None = (
@@ -238,6 +262,10 @@ def durable_execution(
             initial_checkpoint_token=invocation_input.checkpoint_token,
             operations={},
             service_client=service_client,
+            # If there are operations other than the initial EXECUTION one, current state is in replay mode
+            replay_status=ReplayStatus.REPLAY
+            if len(invocation_input.initial_execution_state.operations) > 1
+            else ReplayStatus.NEW,
         )
 
         execution_state.fetch_paginated_operations(

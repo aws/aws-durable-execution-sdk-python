@@ -1,7 +1,7 @@
-# aws-durable-functions-sdk-python
+# AWS Durable Execution SDK for Python
 
-[![PyPI - Version](https://img.shields.io/pypi/v/aws-durable-functions-sdk-python.svg)](https://pypi.org/project/aws-durable-functions-sdk-python)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/aws-durable-functions-sdk-python.svg)](https://pypi.org/project/aws-durable-functions-sdk-python)
+[![PyPI - Version](https://img.shields.io/pypi/v/aws-durable-execution-sdk-python.svg)](https://pypi.org/project/aws-durable-execution-sdk-python)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/aws-durable-execution-sdk-python.svg)](https://pypi.org/project/aws-durable-execution-sdk-python)
 
 -----
 

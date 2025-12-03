@@ -10,6 +10,7 @@ from aws_durable_execution_sdk_python.config import (
     ChildConfig,
     CompletionConfig,
     Duration,
+    InvokeConfig,
     ItemBatcher,
     ItemsPerBatchUnit,
     MapConfig,
@@ -275,3 +276,16 @@ def test_step_future_without_name():
 
         result = step_future.result()
         assert result == 42
+
+
+def test_invoke_config_defaults():
+    """Test InvokeConfig defaults."""
+    config = InvokeConfig()
+    assert config.tenant_id is None
+    assert config.timeout_seconds == 0
+
+
+def test_invoke_config_with_tenant_id():
+    """Test InvokeConfig with explicit tenant_id."""
+    config = InvokeConfig(tenant_id="test-tenant")
+    assert config.tenant_id == "test-tenant"

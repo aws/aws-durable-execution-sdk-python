@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import datetime
 import logging
-import os
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 import boto3  # type: ignore
+from botocore.config import Config  # type: ignore
 
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
@@ -21,10 +20,10 @@ if TYPE_CHECKING:
 
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 
-ReplayChildren: TypeAlias = bool  # noqa UP040 ignore due to python3.11 minimum version
-OperationPayload: TypeAlias = str  # noqa UP040 ignore due to python3.11 minimum version
-TimeoutSeconds: TypeAlias = int  # noqa UP040 ignore due to python3.11 minimum version
-
+# Replace with `type` it when dropping support to Python 3.11
+ReplayChildren: TypeAlias = bool
+OperationPayload: TypeAlias = str
+TimeoutSeconds: TypeAlias = int
 
 logger = logging.getLogger(__name__)
 
@@ -302,17 +301,22 @@ class ChainedInvokeOptions:
     """
 
     function_name: str
+    tenant_id: str | None = None
 
     @classmethod
     def from_dict(cls, data: MutableMapping[str, Any]) -> ChainedInvokeOptions:
         return cls(
             function_name=data["FunctionName"],
+            tenant_id=data.get("TenantId"),
         )
 
     def to_dict(self) -> MutableMapping[str, Any]:
         result: MutableMapping[str, Any] = {
             "FunctionName": self.function_name,
         }
+        if self.tenant_id is not None:
+            result["TenantId"] = self.tenant_id
+
         return result
 
 
@@ -937,53 +941,14 @@ class LambdaClient(DurableServiceClient):
         self.client = client
 
     @staticmethod
-    def load_preview_botocore_models() -> None:
-        """
-        Load boto3 models from the Python path for custom preview client.
-        """
-        os.environ["AWS_DATA_PATH"] = str(
-            Path(__file__).parent.joinpath("botocore", "data")
-        )
-
-    @staticmethod
-    def initialize_local_runner_client() -> LambdaClient:
-        endpoint = os.getenv(
-            "DURABLE_LOCAL_RUNNER_ENDPOINT", "http://host.docker.internal:5000"
-        )
-        region = os.getenv("DURABLE_LOCAL_RUNNER_REGION", "us-west-2")
-
-        # The local runner client needs execute-api as the signing service name,
-        # so we have a second `lambdainternal-local` boto model with this.
-        LambdaClient.load_preview_botocore_models()
+    def initialize_client() -> LambdaClient:
         client = boto3.client(
-            "lambdainternal-local",
-            endpoint_url=endpoint,
-            region_name=region,
+            "lambda",
+            config=Config(
+                connect_timeout=5,
+                read_timeout=50,
+            ),
         )
-
-        logger.debug(
-            "Initialized lambda client with endpoint: '%s', region: '%s'",
-            endpoint,
-            region,
-        )
-        return LambdaClient(client=client)
-
-    @staticmethod
-    def initialize_from_env() -> LambdaClient:
-        LambdaClient.load_preview_botocore_models()
-
-        """
-        TODO - we can remove this when were using the actual lambda client,
-        but we need this with the preview model because boto won't match against lambdainternal.
-        """
-        endpoint_url = os.getenv("AWS_ENDPOINT_URL_LAMBDA", None)
-        if not endpoint_url:
-            client = boto3.client(
-                "lambdainternal",
-            )
-        else:
-            client = boto3.client("lambdainternal", endpoint_url=endpoint_url)
-
         return LambdaClient(client=client)
 
     def checkpoint(

@@ -10,6 +10,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     CallbackOptions,
     OperationUpdate,
 )
+from aws_durable_execution_sdk_python.types import WaitForCallbackContext
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -23,7 +24,11 @@ if TYPE_CHECKING:
         CheckpointedResult,
         ExecutionState,
     )
-    from aws_durable_execution_sdk_python.types import Callback, DurableContext
+    from aws_durable_execution_sdk_python.types import (
+        Callback,
+        DurableContext,
+        StepContext,
+    )
 
 
 def create_callback_handler(
@@ -85,7 +90,7 @@ def create_callback_handler(
 
 def wait_for_callback_handler(
     context: DurableContext,
-    submitter: Callable[[str], None],
+    submitter: Callable[[str, WaitForCallbackContext], None],
     name: str | None = None,
     config: WaitForCallbackConfig | None = None,
 ) -> Any:
@@ -98,8 +103,10 @@ def wait_for_callback_handler(
         name=f"{name_with_space}create callback id", config=config
     )
 
-    def submitter_step(step_context):  # noqa: ARG001
-        return submitter(callback.callback_id)
+    def submitter_step(step_context: StepContext):
+        return submitter(
+            callback.callback_id, WaitForCallbackContext(logger=step_context.logger)
+        )
 
     step_config = (
         StepConfig(

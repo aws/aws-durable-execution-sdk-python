@@ -400,9 +400,10 @@ def test_callback_options_from_dict_partial():
 
 def test_invoke_options_from_dict():
     """Test ChainedInvokeOptions.from_dict method."""
-    data = {"FunctionName": "test-function", "TimeoutSeconds": 120}
+    data = {"FunctionName": "test-function", "TenantId": "test-tenant"}
     options = ChainedInvokeOptions.from_dict(data)
     assert options.function_name == "test-function"
+    assert options.tenant_id == "test-tenant"
 
 
 def test_invoke_options_from_dict_required_only():
@@ -410,6 +411,15 @@ def test_invoke_options_from_dict_required_only():
     data = {"FunctionName": "test-function"}
     options = ChainedInvokeOptions.from_dict(data)
     assert options.function_name == "test-function"
+    assert options.tenant_id is None
+
+
+def test_invoke_options_from_dict_with_none_tenant():
+    """Test ChainedInvokeOptions.from_dict with explicit None tenant_id."""
+    data = {"FunctionName": "test-function", "TenantId": None}
+    options = ChainedInvokeOptions.from_dict(data)
+    assert options.function_name == "test-function"
+    assert options.tenant_id is None
 
 
 def test_context_options_from_dict():
@@ -1633,13 +1643,6 @@ def test_checkpoint_updated_execution_state_from_dict_with_operations():
     assert state.next_marker == "marker123"
 
 
-@patch.dict(
-    "os.environ",
-    {
-        "DURABLE_LOCAL_RUNNER_ENDPOINT": "http://test:5000",
-        "DURABLE_LOCAL_RUNNER_REGION": "us-west-1",
-    },
-)
 @patch("aws_durable_execution_sdk_python.lambda_service.boto3")
 def test_lambda_client_checkpoint(mock_boto3):
     """Test LambdaClient.checkpoint method."""
@@ -1903,48 +1906,43 @@ def test_lambda_client_constructor():
 
 @patch.dict("os.environ", {}, clear=True)
 @patch("boto3.client")
-def test_lambda_client_initialize_from_env_default(mock_boto_client):
-    """Test LambdaClient.initialize_from_env with default endpoint."""
+def test_lambda_client_initialize_client_default(mock_boto_client):
+    """Test LambdaClient.initialize_client with default endpoint."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
 
-    with patch.object(LambdaClient, "load_preview_botocore_models"):
-        client = LambdaClient.initialize_from_env()
+    client = LambdaClient.initialize_client()
 
-    mock_boto_client.assert_called_with("lambdainternal")
+    # Check that boto3.client was called with the right service name and config
+    mock_boto_client.assert_called_once()
+    call_args = mock_boto_client.call_args
+    assert call_args[0][0] == "lambda"
+    assert "config" in call_args[1]
+    config = call_args[1]["config"]
+    assert config.connect_timeout == 5
+    assert config.read_timeout == 50
     assert isinstance(client, LambdaClient)
 
 
 @patch.dict("os.environ", {"AWS_ENDPOINT_URL_LAMBDA": "http://localhost:3000"})
 @patch("boto3.client")
-def test_lambda_client_initialize_from_env_with_endpoint(mock_boto_client):
-    """Test LambdaClient.initialize_from_env with custom endpoint."""
+def test_lambda_client_initialize_client_with_endpoint(mock_boto_client):
+    """Test LambdaClient.initialize_client with custom endpoint (boto3 handles it automatically)."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
 
-    with patch.object(LambdaClient, "load_preview_botocore_models"):
-        client = LambdaClient.initialize_from_env()
+    client = LambdaClient.initialize_client()
 
-    mock_boto_client.assert_called_with(
-        "lambdainternal", endpoint_url="http://localhost:3000"
-    )
+    # Check that boto3.client was called with the right parameters and config
+    # Note: boto3 automatically picks up AWS_ENDPOINT_URL_LAMBDA from environment
+    mock_boto_client.assert_called_once()
+    call_args = mock_boto_client.call_args
+    assert call_args[0][0] == "lambda"
+    assert "config" in call_args[1]
+    config = call_args[1]["config"]
+    assert config.connect_timeout == 5
+    assert config.read_timeout == 50
     assert isinstance(client, LambdaClient)
-
-
-@patch("aws_durable_execution_sdk_python.lambda_service.boto3")
-def test_lambda_client_initialize_local_runner_client(mock_boto3):
-    """Test LambdaClient.initialize_local_runner_client method."""
-    mock_client = Mock()
-    mock_boto3.client.return_value = mock_client
-
-    lambda_client = LambdaClient.initialize_local_runner_client()
-
-    mock_boto3.client.assert_called_once_with(
-        "lambdainternal-local",
-        endpoint_url="http://host.docker.internal:5000",
-        region_name="us-west-2",
-    )
-    assert lambda_client.client == mock_client
 
 
 def test_lambda_client_get_execution_state():
@@ -1980,38 +1978,12 @@ def test_durable_service_client_protocol_get_execution_state():
     assert result == mock_output
 
 
-@patch("aws_durable_execution_sdk_python.lambda_service.boto3")
-def test_lambda_client_initialize_local_runner_client_defaults(mock_boto3):
-    """Test LambdaClient.initialize_local_runner_client with default environment values."""
-    mock_client = Mock()
-    mock_boto3.client.return_value = mock_client
-
-    lambda_client = LambdaClient.initialize_local_runner_client()
-
-    mock_boto3.client.assert_called_once_with(
-        "lambdainternal-local",
-        endpoint_url="http://host.docker.internal:5000",
-        region_name="us-west-2",
-    )
-    assert lambda_client.client == mock_client
-
-
 @patch.dict("os.environ", {}, clear=True)
-@patch(
-    "aws_durable_execution_sdk_python.lambda_service.LambdaClient.initialize_from_env"
-)
-def test_lambda_client_initialize_from_env_defaults(mock_init):
-    """Test LambdaClient.initialize_from_env with default environment values."""
-    LambdaClient.initialize_from_env()
+@patch("aws_durable_execution_sdk_python.lambda_service.LambdaClient.initialize_client")
+def test_lambda_client_initialize_client_defaults(mock_init):
+    """Test LambdaClient.initialize_client with default environment values."""
+    LambdaClient.initialize_client()
     mock_init.assert_called_once_with()
-
-
-@patch("os.environ")
-def test_lambda_client_load_preview_botocore_models(mock_environ):
-    """Test LambdaClient.load_preview_botocore_models method."""
-    LambdaClient.load_preview_botocore_models()
-    # Verify that AWS_DATA_PATH is set
-    assert "AWS_DATA_PATH" in mock_environ.__setitem__.call_args[0]
 
 
 def test_checkpoint_error_handling():
@@ -2032,15 +2004,17 @@ def test_checkpoint_error_handling():
 
 @patch.dict("os.environ", {}, clear=True)
 @patch("boto3.client")
-def test_lambda_client_initialize_from_env_no_endpoint(mock_boto_client):
-    """Test LambdaClient.initialize_from_env without AWS_ENDPOINT_URL_LAMBDA."""
+def test_lambda_client_initialize_client_no_endpoint(mock_boto_client):
+    """Test LambdaClient.initialize_client without AWS_ENDPOINT_URL_LAMBDA."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
 
-    with patch.object(LambdaClient, "load_preview_botocore_models"):
-        client = LambdaClient.initialize_from_env()
+    client = LambdaClient.initialize_client()
 
-    mock_boto_client.assert_called_with("lambdainternal")
+    # Verify the call was made with the expected arguments including config
+    call_args = mock_boto_client.call_args
+    assert call_args[0] == ("lambda",)
+    assert "config" in call_args[1]
     assert isinstance(client, LambdaClient)
 
 

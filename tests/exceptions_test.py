@@ -83,6 +83,20 @@ def test_checkpoint_error_classification_other_4xx_execution():
     assert result.is_retriable()
 
 
+def test_checkpoint_error_classification_429_invocation():
+    """Test 429 errors are invocation errors (retryable)."""
+    error_response = {
+        "Error": {"Code": "TooManyRequestsException", "Message": "Rate limit exceeded"},
+        "ResponseMetadata": {"HTTPStatusCode": 429},
+    }
+    client_error = ClientError(error_response, "Checkpoint")
+
+    result = CheckpointError.from_exception(client_error)
+
+    assert result.error_category == CheckpointErrorCategory.INVOCATION
+    assert not result.is_retriable()
+
+
 def test_checkpoint_error_classification_invalid_param_without_token_execution():
     """Test 4xx InvalidParameterValueException without Invalid Checkpoint Token is execution error."""
     error_response = {

@@ -58,6 +58,11 @@ class StepContext(OperationContext):
 
 
 @dataclass(frozen=True)
+class WaitForCallbackContext(OperationContext):
+    """Context provided to waitForCallback submitter functions."""
+
+
+@dataclass(frozen=True)
 class WaitForConditionCheckContext(OperationContext):
     pass
 

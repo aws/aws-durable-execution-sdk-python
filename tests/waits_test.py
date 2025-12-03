@@ -105,13 +105,13 @@ class TestCreateWaitStrategy:
 
         result = "pending"
 
-        # First attempt: 2 * (2^0) = 2, jitter adds 1, total = 3
+        # First attempt: 2 * (2^0) = 2, FULL jitter with 0.5 = 0.5 * 2 = 1
         decision = strategy(result, 1)
-        assert decision.delay_seconds == 3
+        assert decision.delay_seconds == 1
 
-        # Second attempt: 2 * (2^1) = 4, jitter adds 2, total = 6
+        # Second attempt: 2 * (2^1) = 4, FULL jitter with 0.5 = 0.5 * 4 = 2
         decision = strategy(result, 2)
-        assert decision.delay_seconds == 6
+        assert decision.delay_seconds == 2
 
     def test_max_delay_cap(self):
         """Test delay is capped at max_delay_seconds."""
@@ -154,8 +154,8 @@ class TestCreateWaitStrategy:
 
         result = "pending"
         decision = strategy(result, 1)
-        # 10 + (0.8 * 10) = 18
-        assert decision.delay_seconds == 18
+        # FULL jitter: 0.8 * 10 = 8
+        assert decision.delay_seconds == 8
 
     @patch("random.random")
     def test_half_jitter_integration(self, mock_random):
@@ -170,8 +170,8 @@ class TestCreateWaitStrategy:
 
         result = "pending"
         decision = strategy(result, 1)
-        # base: 10, jitter: 10 * (0.5 + 0.0 * 0.5) = 5, total: 10 + 5 = 15
-        assert decision.delay_seconds == 15
+        # HALF jitter: 10/2 + 0.0 * (10/2) = 5
+        assert decision.delay_seconds == 5
 
     def test_none_jitter_integration(self):
         """Test no jitter integration in wait strategy."""
@@ -330,8 +330,8 @@ class TestEdgeCases:
 
         result = "pending"
         decision = strategy(result, 1)
-        # 3 + (0.3 * 3) = 3.9, round(3.9) = 4
-        assert decision.delay_seconds == 4
+        # FULL jitter: 0.3 * 3 = 0.9, ceil(0.9) = 1
+        assert decision.delay_seconds == 1
 
 
 class TestWaitForConditionConfig:

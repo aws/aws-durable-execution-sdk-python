@@ -378,12 +378,36 @@ class MapConfig:
     summary_generator: SummaryGenerator | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class InvokeConfig(Generic[P, R]):
+    """
+    Configuration for invoke operations.
+
+    This class configures how function invocations are executed, including
+    timeout behavior, serialization, and tenant isolation.
+
+    Args:
+        timeout: Maximum duration to wait for the invoked function to complete.
+            Default is no timeout. Use this to prevent long-running invocations
+            from blocking execution indefinitely.
+
+        serdes_payload: Custom serialization/deserialization for the payload
+            sent to the invoked function. Defaults to DEFAULT_JSON_SERDES when
+            not set.
+
+        serdes_result: Custom serialization/deserialization for the result
+            returned from the invoked function. Defaults to DEFAULT_JSON_SERDES when
+            not set.
+
+        tenant_id: Optional tenant identifier for multi-tenant isolation.
+            If provided, the invocation will be scoped to this tenant.
+    """
+
     # retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
     timeout: Duration = field(default_factory=Duration)
     serdes_payload: SerDes[P] | None = None
     serdes_result: SerDes[R] | None = None
+    tenant_id: str | None = None
 
     @property
     def timeout_seconds(self) -> int:
@@ -440,23 +464,35 @@ class JitterStrategy(StrEnum):
 
     Jitter is meant to be used to spread operations across time.
 
+    Based on AWS Architecture Blog: https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
+
     members:
         :NONE: No jitter; use the exact calculated delay
         :FULL: Full jitter; random delay between 0 and calculated delay
-        :HALF: Half jitter; random delay between 0.5x and 1.0x of the calculated delay
+        :HALF: Equal jitter; random delay between 0.5x and 1.0x of the calculated delay
     """
 
     NONE = "NONE"
     FULL = "FULL"
     HALF = "HALF"
 
-    def compute_jitter(self, delay) -> float:
+    def apply_jitter(self, delay: float) -> float:
+        """Apply jitter to a delay value and return the final delay.
+
+        Args:
+            delay: The base delay value to apply jitter to
+
+        Returns:
+            The final delay after applying jitter strategy
+        """
         match self:
             case JitterStrategy.NONE:
-                return 0
+                return delay
             case JitterStrategy.HALF:
-                return delay * (random.random() * 0.5 + 0.5)  # noqa: S311
+                # Equal jitter: delay/2 + random(0, delay/2)
+                return delay / 2 + random.random() * (delay / 2)  # noqa: S311
             case _:  # default is FULL
+                # Full jitter: random(0, delay)
                 return random.random() * delay  # noqa: S311
 
 

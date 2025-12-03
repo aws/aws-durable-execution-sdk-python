@@ -128,7 +128,7 @@ def step_handler(
     step_context = StepContext(
         logger=context_logger.with_log_info(
             LogInfo.from_operation_identifier(
-                execution_arn=state.durable_execution_arn,
+                execution_state=state,
                 op_id=operation_identifier,
                 attempt=attempt,
             )

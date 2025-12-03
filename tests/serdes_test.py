@@ -28,6 +28,7 @@ from aws_durable_execution_sdk_python.serdes import (
     EncodedValue,
     ExtendedTypeSerDes,
     JsonSerDes,
+    PassThroughSerDes,
     PrimitiveCodec,
     SerDes,
     SerDesContext,
@@ -735,6 +736,18 @@ def test_extended_serdes_errors():
 
 
 # endregion
+
+
+def test_pass_through_serdes():
+    serdes = PassThroughSerDes()
+
+    data = '"name": "test", "value": 123'
+    serialized = serialize(serdes, data, "test-op", "test-arn")
+    assert isinstance(serialized, str)
+    assert serialized == '"name": "test", "value": 123'
+    # Dict uses envelope format, so roundtrip through deserialize
+    deserialized = deserialize(serdes, serialized, "test-op", "test-arn")
+    assert deserialized == data
 
 
 # region EnvelopeSerDes Performance and Edge Cases

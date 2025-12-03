@@ -11,7 +11,11 @@ from aws_durable_execution_sdk_python.lambda_service import (
     ChainedInvokeOptions,
     OperationUpdate,
 )
-from aws_durable_execution_sdk_python.serdes import deserialize, serialize
+from aws_durable_execution_sdk_python.serdes import (
+    DEFAULT_JSON_SERDES,
+    deserialize,
+    serialize,
+)
 from aws_durable_execution_sdk_python.suspend import suspend_with_optional_resume_delay
 
 if TYPE_CHECKING:
@@ -40,6 +44,7 @@ def invoke_handler(
 
     if not config:
         config = InvokeConfig[P, R]()
+    tenant_id = config.tenant_id
 
     # Check if we have existing step data
     checkpointed_result = state.get_checkpoint_result(operation_identifier.operation_id)
@@ -52,7 +57,7 @@ def invoke_handler(
             and checkpointed_result.operation.chained_invoke_details.result
         ):
             return deserialize(
-                serdes=config.serdes_result,
+                serdes=config.serdes_result or DEFAULT_JSON_SERDES,
                 data=checkpointed_result.operation.chained_invoke_details.result,
                 operation_id=operation_identifier.operation_id,
                 durable_execution_arn=state.durable_execution_arn,
@@ -77,7 +82,7 @@ def invoke_handler(
         suspend_with_optional_resume_delay(msg, config.timeout_seconds)
 
     serialized_payload: str = serialize(
-        serdes=config.serdes_payload,
+        serdes=config.serdes_payload or DEFAULT_JSON_SERDES,
         value=payload,
         operation_id=operation_identifier.operation_id,
         durable_execution_arn=state.durable_execution_arn,
@@ -87,7 +92,10 @@ def invoke_handler(
     start_operation: OperationUpdate = OperationUpdate.create_invoke_start(
         identifier=operation_identifier,
         payload=serialized_payload,
-        chained_invoke_options=ChainedInvokeOptions(function_name=function_name),
+        chained_invoke_options=ChainedInvokeOptions(
+            function_name=function_name,
+            tenant_id=tenant_id,
+        ),
     )
 
     # Checkpoint invoke START with blocking (is_sync=True, default).

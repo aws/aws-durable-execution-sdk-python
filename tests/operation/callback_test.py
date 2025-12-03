@@ -303,13 +303,18 @@ def test_wait_for_callback_handler_submitter_called_with_callback_id():
     def capture_step_call(func, name, config=None):
         # Execute the step callable to verify submitter is called correctly
         step_context = Mock(spec=StepContext)
+        step_context.logger = Mock()
         func(step_context)
 
     mock_context.step.side_effect = capture_step_call
 
     wait_for_callback_handler(mock_context, mock_submitter, "test")
 
-    mock_submitter.assert_called_once_with("callback_test_id")
+    # Verify submitter was called with callback_id and WaitForCallbackContext
+    assert mock_submitter.call_count == 1
+    call_args = mock_submitter.call_args[0]
+    assert call_args[0] == "callback_test_id"
+    assert hasattr(call_args[1], "logger")
 
 
 def test_create_callback_handler_with_none_operation_in_result():
@@ -350,6 +355,7 @@ def test_wait_for_callback_handler_with_none_callback_id():
 
     def execute_step(func, name, config=None):
         step_context = Mock(spec=StepContext)
+        step_context.logger = Mock()
         return func(step_context)
 
     mock_context.step.side_effect = execute_step
@@ -357,7 +363,11 @@ def test_wait_for_callback_handler_with_none_callback_id():
     result = wait_for_callback_handler(mock_context, mock_submitter, "test")
 
     assert result == "result_with_none_id"
-    mock_submitter.assert_called_once_with(None)
+    # Verify submitter was called with None callback_id and WaitForCallbackContext
+    assert mock_submitter.call_count == 1
+    call_args = mock_submitter.call_args[0]
+    assert call_args[0] is None
+    assert hasattr(call_args[1], "logger")
 
 
 def test_wait_for_callback_handler_with_empty_string_callback_id():
@@ -371,6 +381,7 @@ def test_wait_for_callback_handler_with_empty_string_callback_id():
 
     def execute_step(func, name, config=None):
         step_context = Mock(spec=StepContext)
+        step_context.logger = Mock()
         return func(step_context)
 
     mock_context.step.side_effect = execute_step
@@ -378,7 +389,11 @@ def test_wait_for_callback_handler_with_empty_string_callback_id():
     result = wait_for_callback_handler(mock_context, mock_submitter, "test")
 
     assert result == "result_with_empty_id"
-    mock_submitter.assert_called_once_with("")
+    # Verify submitter was called with empty string callback_id and WaitForCallbackContext
+    assert mock_submitter.call_count == 1
+    call_args = mock_submitter.call_args[0]
+    assert call_args[0] == ""  # noqa: PLC1901 - explicitly testing empty string, not just falsey
+    assert hasattr(call_args[1], "logger")
 
 
 def test_wait_for_callback_handler_with_large_data():
@@ -585,12 +600,13 @@ def test_wait_for_callback_handler_submitter_exception_handling():
     mock_callback.result.return_value = "exception_result"
     mock_context.create_callback.return_value = mock_callback
 
-    def failing_submitter(callback_id):
+    def failing_submitter(callback_id, context):
         msg = "Submitter failed"
         raise ValueError(msg)
 
     def step_side_effect(func, name, config=None):
         step_context = Mock(spec=StepContext)
+        step_context.logger = Mock()
         func(step_context)
 
     mock_context.step.side_effect = step_side_effect
@@ -775,12 +791,14 @@ def test_callback_lifecycle_complete_flow():
 
     assert callback_id == "lifecycle_cb123"
 
-    def mock_submitter(cb_id):
+    def mock_submitter(cb_id, context):
         assert cb_id == "lifecycle_cb123"
+        assert hasattr(context, "logger")
         return "submitted"
 
     def execute_step(func, name, config=None):
         step_context = Mock(spec=StepContext)
+        step_context.logger = Mock()
         return func(step_context)
 
     mock_context.step.side_effect = execute_step
@@ -889,7 +907,7 @@ def test_callback_with_complex_submitter():
 
     submission_log = []
 
-    def complex_submitter(callback_id):
+    def complex_submitter(callback_id, context):
         submission_log.append(f"received_id: {callback_id}")
         if callback_id == "complex_cb789":
             submission_log.append("api_call_success")
@@ -901,6 +919,7 @@ def test_callback_with_complex_submitter():
 
     def execute_step(func, name, config):
         step_context = Mock(spec=StepContext)
+        step_context.logger = Mock()
         return func(step_context)
 
     mock_context.step.side_effect = execute_step

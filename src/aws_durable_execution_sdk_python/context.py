@@ -36,13 +36,18 @@ from aws_durable_execution_sdk_python.operation.wait import wait_handler
 from aws_durable_execution_sdk_python.operation.wait_for_condition import (
     wait_for_condition_handler,
 )
-from aws_durable_execution_sdk_python.serdes import SerDes, deserialize
+from aws_durable_execution_sdk_python.serdes import (
+    PassThroughSerDes,
+    SerDes,
+    deserialize,
+)
 from aws_durable_execution_sdk_python.state import ExecutionState  # noqa: TCH001
 from aws_durable_execution_sdk_python.threading import OrderedCounter
 from aws_durable_execution_sdk_python.types import (
     BatchResult,
     LoggerInterface,
     StepContext,
+    WaitForCallbackContext,
     WaitForConditionCheckContext,
 )
 from aws_durable_execution_sdk_python.types import Callback as CallbackProtocol
@@ -65,6 +70,8 @@ Params = ParamSpec("Params")
 
 
 logger = logging.getLogger(__name__)
+
+PASS_THROUGH_SERDES: SerDes[Any] = PassThroughSerDes()
 
 
 def durable_step(
@@ -93,6 +100,52 @@ def durable_with_child_context(
 
         function_with_arguments._original_name = func.__name__  # noqa: SLF001
         return function_with_arguments
+
+    return wrapper
+
+
+def durable_wait_for_callback(
+    func: Callable[Concatenate[str, WaitForCallbackContext, Params], T],
+) -> Callable[Params, Callable[[str, WaitForCallbackContext], T]]:
+    """Wrap your callable into a wait_for_callback submitter function.
+
+    This decorator allows you to define a submitter function with additional
+    parameters that will be bound when called.
+
+    Args:
+        func: A callable that takes callback_id, context, and additional parameters
+
+    Returns:
+        A wrapper function that binds the additional parameters and returns
+        a submitter function compatible with wait_for_callback
+
+    Example:
+        @durable_wait_for_callback
+        def submit_to_external_system(
+            callback_id: str,
+            context: WaitForCallbackContext,
+            task_name: str,
+            priority: int
+        ):
+            context.logger.info(f"Submitting {task_name} with callback {callback_id}")
+            external_api.submit_task(
+                task_name=task_name,
+                priority=priority,
+                callback_id=callback_id
+            )
+
+        # Usage in durable handler:
+        result = context.wait_for_callback(
+            submit_to_external_system("my_task", priority=5)
+        )
+    """
+
+    def wrapper(*args, **kwargs):
+        def submitter_with_arguments(callback_id: str, context: WaitForCallbackContext):
+            return func(callback_id, context, *args, **kwargs)
+
+        submitter_with_arguments._original_name = func.__name__  # noqa: SLF001
+        return submitter_with_arguments
 
     return wrapper
 
@@ -144,7 +197,7 @@ class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
                 return None  # type: ignore
 
             return deserialize(
-                serdes=self.serdes,
+                serdes=self.serdes if self.serdes is not None else PASS_THROUGH_SERDES,
                 data=checkpointed_result.result,
                 operation_id=self.operation_id,
                 durable_execution_arn=self.state.durable_execution_arn,
@@ -170,7 +223,8 @@ class DurableContext(DurableContextProtocol):
         self._step_counter: OrderedCounter = OrderedCounter()
 
         log_info = LogInfo(
-            execution_arn=state.durable_execution_arn, parent_id=parent_id
+            execution_state=state,
+            parent_id=parent_id,
         )
         self._log_info = log_info
         self.logger: Logger = logger or Logger.from_log_info(
@@ -199,7 +253,8 @@ class DurableContext(DurableContextProtocol):
             parent_id=parent_id,
             logger=self.logger.with_log_info(
                 LogInfo(
-                    execution_arn=self.state.durable_execution_arn, parent_id=parent_id
+                    execution_state=self.state,
+                    parent_id=parent_id,
                 )
             ),
         )
@@ -270,13 +325,14 @@ class DurableContext(DurableContextProtocol):
             ),
             config=config,
         )
-
-        return Callback(
+        result: Callback = Callback(
             callback_id=callback_id,
             operation_id=operation_id,
             state=self.state,
             serdes=config.serdes,
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
     def invoke(
         self,
@@ -296,17 +352,20 @@ class DurableContext(DurableContextProtocol):
         Returns:
             The result of the invoked function
         """
-        return invoke_handler(
+        operation_id = self._create_step_id()
+        result: R = invoke_handler(
             function_name=function_name,
             payload=payload,
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=self._create_step_id(),
+                operation_id=operation_id,
                 parent_id=self._parent_id,
                 name=name,
             ),
             config=config,
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
     def map(
         self,
@@ -338,7 +397,7 @@ class DurableContext(DurableContextProtocol):
                 operation_identifier=operation_identifier,
             )
 
-        return child_handler(
+        result: BatchResult[R] = child_handler(
             func=map_in_child_context,
             state=self.state,
             operation_identifier=operation_identifier,
@@ -351,6 +410,8 @@ class DurableContext(DurableContextProtocol):
                 item_serdes=None,
             ),
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
     def parallel(
         self,
@@ -379,7 +440,7 @@ class DurableContext(DurableContextProtocol):
                 operation_identifier=operation_identifier,
             )
 
-        return child_handler(
+        result: BatchResult[T] = child_handler(
             func=parallel_in_child_context,
             state=self.state,
             operation_identifier=operation_identifier,
@@ -392,6 +453,8 @@ class DurableContext(DurableContextProtocol):
                 item_serdes=None,
             ),
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
     def run_in_child_context(
         self,
@@ -418,7 +481,7 @@ class DurableContext(DurableContextProtocol):
         def callable_with_child_context():
             return func(self.create_child_context(parent_id=operation_id))
 
-        return child_handler(
+        result: T = child_handler(
             func=callable_with_child_context,
             state=self.state,
             operation_identifier=OperationIdentifier(
@@ -426,6 +489,8 @@ class DurableContext(DurableContextProtocol):
             ),
             config=config,
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
     def step(
         self,
@@ -435,18 +500,20 @@ class DurableContext(DurableContextProtocol):
     ) -> T:
         step_name = self._resolve_step_name(name, func)
         logger.debug("Step name: %s", step_name)
-
-        return step_handler(
+        operation_id = self._create_step_id()
+        result: T = step_handler(
             func=func,
             config=config,
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=self._create_step_id(),
+                operation_id=operation_id,
                 parent_id=self._parent_id,
                 name=step_name,
             ),
             context_logger=self.logger,
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
     def wait(self, duration: Duration, name: str | None = None) -> None:
         """Wait for a specified amount of time.
@@ -459,19 +526,21 @@ class DurableContext(DurableContextProtocol):
         if seconds < 1:
             msg = "duration must be at least 1 second"
             raise ValidationError(msg)
+        operation_id = self._create_step_id()
         wait_handler(
             seconds=seconds,
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=self._create_step_id(),
+                operation_id=operation_id,
                 parent_id=self._parent_id,
                 name=name,
             ),
         )
+        self.state.track_replay(operation_id=operation_id)
 
     def wait_for_callback(
         self,
-        submitter: Callable[[str], None],
+        submitter: Callable[[str, WaitForCallbackContext], None],
         name: str | None = None,
         config: WaitForCallbackConfig | None = None,
     ) -> Any:
@@ -509,17 +578,20 @@ class DurableContext(DurableContextProtocol):
             msg = "`config` is required for wait_for_condition"
             raise ValidationError(msg)
 
-        return wait_for_condition_handler(
+        operation_id = self._create_step_id()
+        result: T = wait_for_condition_handler(
             check=check,
             config=config,
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=self._create_step_id(),
+                operation_id=operation_id,
                 parent_id=self._parent_id,
                 name=name,
             ),
             context_logger=self.logger,
         )
+        self.state.track_replay(operation_id=operation_id)
+        return result
 
 
 # endregion Operations

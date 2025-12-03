@@ -372,6 +372,14 @@ class SerDes(ABC, Generic[T]):
         return False
 
 
+class PassThroughSerDes(SerDes[T]):
+    def serialize(self, value: T, _: SerDesContext) -> str:  # noqa: PLR6301
+        return value  # type: ignore
+
+    def deserialize(self, data: str, _: SerDesContext) -> T:  # noqa: PLR6301
+        return data  # type: ignore
+
+
 class JsonSerDes(SerDes[T]):
     def serialize(self, value: T, _: SerDesContext) -> str:  # noqa: PLR6301
         return json.dumps(value)
@@ -407,10 +415,14 @@ class ExtendedTypeSerDes(SerDes[T]):
         if not (isinstance(obj, dict) and TYPE_TOKEN in obj and VALUE_TOKEN in obj):
             msg = 'Malformed envelope: missing "t" or "v" at root.'
             raise SerDesError(msg)
-        if obj[TYPE_TOKEN] not in TypeTag:
+        # Python 3.11 compatibility: Using try-except instead of 'in' operator
+        # because checking 'str in EnumType' raises TypeError in Python 3.11
+        try:
+            tag = TypeTag(obj[TYPE_TOKEN])
+        except ValueError:
             msg = f'Unknown type tag: "{obj[TYPE_TOKEN]}"'
-            raise SerDesError(msg)
-        tag = TypeTag(obj[TYPE_TOKEN])
+            raise SerDesError(msg) from None
+
         return self._codec.decode(tag, obj[VALUE_TOKEN])
 
     def _to_json_serializable(self, obj: Any) -> Any:
@@ -429,8 +441,8 @@ class ExtendedTypeSerDes(SerDes[T]):
                 return obj
 
 
-_DEFAULT_JSON_SERDES: SerDes[Any] = JsonSerDes()
-_EXTENDED_TYPES_SERDES: SerDes[Any] = ExtendedTypeSerDes()
+DEFAULT_JSON_SERDES: SerDes[Any] = JsonSerDes()
+EXTENDED_TYPES_SERDES: SerDes[Any] = ExtendedTypeSerDes()
 
 
 def serialize(
@@ -451,7 +463,7 @@ def serialize(
         FatalError: If serialization fails
     """
     serdes_context: SerDesContext = SerDesContext(operation_id, durable_execution_arn)
-    active_serdes: SerDes[T] = serdes or _EXTENDED_TYPES_SERDES
+    active_serdes: SerDes[T] = serdes or EXTENDED_TYPES_SERDES
     try:
         return active_serdes.serialize(value, serdes_context)
     except Exception as e:
@@ -481,7 +493,7 @@ def deserialize(
         FatalError: If deserialization fails
     """
     serdes_context: SerDesContext = SerDesContext(operation_id, durable_execution_arn)
-    active_serdes: SerDes[T] = serdes or _EXTENDED_TYPES_SERDES
+    active_serdes: SerDes[T] = serdes or EXTENDED_TYPES_SERDES
     try:
         return active_serdes.deserialize(data, serdes_context)
     except Exception as e:

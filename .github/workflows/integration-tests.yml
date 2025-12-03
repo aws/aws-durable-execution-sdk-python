@@ -17,22 +17,19 @@ jobs:
         python-version: ["3.13"]
 
     steps:
-    - name: Parse testing SDK branch from PR body
-      id: parse
-      run: |
-        # Look for a line like: TESTING_SDK_BRANCH: feature/foo
-        REF=$(printf '%s\n' '${{ github.event.pull_request.body }}' | sed -n 's/^TESTING_SDK_BRANCH:[[:space:]]*//p' | head -n1)
-        if [ -z "$REF" ]; then REF="main"; fi
-        echo "testing_ref=$REF" >> "$GITHUB_OUTPUT"
-        echo "Using testing SDK branch: $REF"
-
     - name: Checkout Language SDK (this PR)
-      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+      uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
       with:
         path: language-sdk
 
+    - name: Parse testing SDK branch from PR body
+      id: parse
+      run: python language-sdk/ops/parse_sdk_branch.py
+      env:
+        PR_BODY: ${{ github.event.pull_request.body }}
+
     - name: Checkout Testing SDK
-      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+      uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
       with:
         repository: aws/aws-durable-execution-sdk-python-testing
         ref: ${{ steps.parse.outputs.testing_ref }}
@@ -45,7 +42,7 @@ jobs:
         python-version: ${{ matrix.python-version }}
 
     - name: Install Hatch
-      run: python -m pip install --upgrade hatch
+      run: python -m pip install hatch==1.15.0
 
     - name: Setup and run Testing SDK
       working-directory: testing-sdk
@@ -67,24 +64,21 @@ jobs:
     if: github.event_name == 'pull_request'
     env:
       AWS_REGION: us-west-2
-    
-    steps:
-    - name: Parse testing SDK branch from PR body
-      id: parse
-      run: |
-        # Look for a line like: TESTING_SDK_BRANCH: feature/foo
-        REF=$(printf '%s\n' '${{ github.event.pull_request.body }}' | sed -n 's/^TESTING_SDK_BRANCH:[[:space:]]*//p' | head -n1)
-        if [ -z "$REF" ]; then REF="main"; fi
-        echo "testing_ref=$REF" >> "$GITHUB_OUTPUT"
-        echo "Using testing SDK branch: $REF"
 
+    steps:
     - name: Checkout Language SDK (this PR)
-      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+      uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
       with:
         path: language-sdk
 
+    - name: Parse testing SDK branch from PR body
+      id: parse
+      run: python language-sdk/ops/parse_sdk_branch.py
+      env:
+        PR_BODY: ${{ github.event.pull_request.body }}
+
     - name: Checkout Testing SDK
-      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+      uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
       with:
         repository: aws/aws-durable-execution-sdk-python-testing
         ref: ${{ steps.parse.outputs.testing_ref }}
@@ -97,23 +91,18 @@ jobs:
         python-version: '3.13'
 
     - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
+      uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
       with:
         role-to-assume: "${{ secrets.ACTIONS_INTEGRATION_ROLE_NAME }}"
         role-session-name: languageSDKIntegrationTest
         aws-region: ${{ env.AWS_REGION }}
-
-    - name: Install custom Lambda model
-      working-directory: testing-sdk
-      run: |
-        aws configure add-model --service-model file://.github/model/lambda.json --service-name lambda
 
     - name: Install Hatch and setup Testing SDK
       working-directory: testing-sdk
       env:
         AWS_DURABLE_SDK_URL: file://${{ github.workspace }}/language-sdk
       run: |
-        pip install hatch
+        pip install hatch==1.15.0
         python -m pip install -e .
 
     - name: Get integration examples
@@ -122,6 +111,13 @@ jobs:
       run: |
         echo "examples=$(jq -c '.examples | map(select(.integration == true)) | .[0:2]' examples-catalog.json)" >> $GITHUB_OUTPUT
 
+    - name: Install AWS CLI v2
+      run: |
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+        unzip -q /tmp/awscliv2.zip -d /tmp
+        rm /tmp/awscliv2.zip
+        sudo /tmp/aws/install --update
+        rm -rf /tmp/aws/
     - name: Deploy and test examples
       working-directory: testing-sdk
       env:
@@ -133,20 +129,20 @@ jobs:
       run: |
         echo "Building examples..."
         hatch run examples:build
-        
+
         # Get first integration example for testing
         EXAMPLE_NAME=$(echo '${{ steps.get-examples.outputs.examples }}' | jq -r '.[0].name')
         EXAMPLE_NAME_CLEAN=$(echo "$EXAMPLE_NAME" | sed 's/ //g')
         FUNCTION_NAME="${EXAMPLE_NAME_CLEAN}-LanguageSDK-PR-${{ github.event.number }}"
-        
+
         echo "Deploying example: $EXAMPLE_NAME as $FUNCTION_NAME"
         hatch run examples:deploy "$EXAMPLE_NAME" --function-name "$FUNCTION_NAME"
-        
+
         QUALIFIED_FUNCTION_NAME="$FUNCTION_NAME:\$LATEST"
-        
+
         echo "Waiting for function to be ready..."
         aws lambda wait function-active --function-name "$FUNCTION_NAME" --endpoint-url "$LAMBDA_ENDPOINT" --region "${{ env.AWS_REGION }}"
-        
+
         echo "Invoking Lambda function: $QUALIFIED_FUNCTION_NAME"
         aws lambda invoke \
           --function-name "$QUALIFIED_FUNCTION_NAME" \
@@ -156,10 +152,10 @@ jobs:
           --endpoint-url "$LAMBDA_ENDPOINT" \
           /tmp/response.json \
           > /tmp/invoke_response.json
-        
+
         echo "Response:"
         cat /tmp/response.json
-        
+
         # Check for function errors
         FUNCTION_ERROR=$(jq -r '.FunctionError // empty' /tmp/invoke_response.json)
         if [ -n "$FUNCTION_ERROR" ]; then
@@ -167,7 +163,7 @@ jobs:
           cat /tmp/response.json
           exit 1
         fi
-        
+
         echo "Getting durable executions..."
         aws lambda list-durable-executions-by-function \
           --function-name "$QUALIFIED_FUNCTION_NAME" \
@@ -176,15 +172,13 @@ jobs:
           --endpoint-url "$LAMBDA_ENDPOINT" \
           --cli-binary-format raw-in-base64-out \
           > /tmp/executions.json
-        
+
         echo "Durable Executions:"
         cat /tmp/executions.json
-        
+
         # Cleanup
         echo "Cleaning up function: $FUNCTION_NAME"
         aws lambda delete-function \
           --function-name "$FUNCTION_NAME" \
           --endpoint-url "$LAMBDA_ENDPOINT" \
           --region "${{ env.AWS_REGION }}" || echo "Function cleanup failed or already deleted"
-
-

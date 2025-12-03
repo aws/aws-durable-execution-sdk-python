@@ -5,6 +5,7 @@
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
     durable_step,
+    durable_wait_for_callback,
     durable_with_child_context,
 )
 
@@ -30,5 +31,6 @@ __all__ = [
     "ValidationError",
     "durable_execution",
     "durable_step",
+    "durable_wait_for_callback",
     "durable_with_child_context",
 ]

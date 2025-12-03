@@ -45,6 +45,7 @@ The SDK provides a `DurableContext` that gives you operations like steps, waits,
 - [Steps](core/steps.md) - Execute code with automatic checkpointing and retry support
 - [Wait operations](core/wait.md) - Pause execution without blocking Lambda resources
 - [Callbacks](core/callbacks.md) - Wait for external systems to respond
+- [Invoke operations](core/invoke.md) - Call other durable functions and compose workflows
 - [Child contexts](core/child-contexts.md) - Organize complex workflows into isolated units
 - [Parallel operations](core/parallel.md) - Run multiple operations concurrently
 - [Map operations](core/map.md) - Process collections in parallel with batching
@@ -146,6 +147,7 @@ Operations are units of work in a durable execution. Each operation type serves 
 - **Steps** - Execute code and checkpoint the result with retry support
 - **Waits** - Pause execution for a specified duration without blocking Lambda
 - **Callbacks** - Wait for external systems to respond with results
+- **Invoke** - Call other durable functions to compose complex workflows
 - **Child contexts** - Isolate nested workflows for better organization
 - **Parallel** - Execute multiple operations concurrently with completion criteria
 - **Map** - Process collections in parallel with batching and failure tolerance
