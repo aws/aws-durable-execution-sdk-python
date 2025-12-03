@@ -97,17 +97,12 @@ jobs:
         role-session-name: languageSDKIntegrationTest
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Install custom Lambda model
-      working-directory: testing-sdk
-      run: |
-        aws configure add-model --service-model file://.github/model/lambda.json --service-name lambda
-
     - name: Install Hatch and setup Testing SDK
       working-directory: testing-sdk
       env:
         AWS_DURABLE_SDK_URL: file://${{ github.workspace }}/language-sdk
       run: |
-        pip install hatch
+        pip install hatch==1.15.0
         python -m pip install -e .
 
     - name: Get integration examples
