@@ -28,9 +28,6 @@ Documentation = "https://github.com/aws/aws-durable-execution-sdk-python#readme"
 Issues = "https://github.com/aws/aws-durable-execution-sdk-python/issues"
 Source = "https://github.com/aws/aws-durable-execution-sdk-python"
 
-[tool.hatch.build.targets.sdist]
-packages = ["src/aws_durable_execution_sdk_python"]
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/aws_durable_execution_sdk_python"]
 
