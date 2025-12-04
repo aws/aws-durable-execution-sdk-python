@@ -11,6 +11,9 @@ on:
       - 'ops/parse_sdk_branch.py'
       - 'ops/__tests__/**'
 
+permissions:
+  contents: read
+
 jobs:
   test-parser:
     runs-on: ubuntu-latest

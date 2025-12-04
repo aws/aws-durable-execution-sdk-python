@@ -27,7 +27,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install Hatch
         run: |
-          python -m pip install --upgrade hatch
+          python -m pip install --upgrade hatch==1.15.0
       - name: Build distribution
         run: hatch build
       - name: configure aws credentials
