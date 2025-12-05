@@ -1,5 +1,7 @@
 """Unit tests for child handler."""
 
+from __future__ import annotations
+
 import json
 from typing import cast
 from unittest.mock import Mock
@@ -7,7 +9,10 @@ from unittest.mock import Mock
 import pytest
 
 from aws_durable_execution_sdk_python.config import ChildConfig
-from aws_durable_execution_sdk_python.exceptions import CallableRuntimeError
+from aws_durable_execution_sdk_python.exceptions import (
+    CallableRuntimeError,
+    InvocationError,
+)
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
@@ -34,16 +39,21 @@ from tests.serdes_test import CustomDictSerDes
     ],
 )
 def test_child_handler_not_started(
-    config: ChildConfig, expected_sub_type: OperationSubType
+    config: ChildConfig | None, expected_sub_type: OperationSubType
 ):
-    """Test child_handler when operation not started."""
+    """Test child_handler when operation not started.
+
+    Verifies:
+    - get_checkpoint_result is called once (async checkpoint, no second check)
+    - create_checkpoint is called with is_sync=False for START
+    - Operation executes and creates SUCCEED checkpoint
+    """
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
-    mock_result.is_replay_children.return_value = False
     mock_result.is_replay_children.return_value = False
     mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
@@ -54,10 +64,15 @@ def test_child_handler_not_started(
     )
 
     assert result == "fresh_result"
-    mock_state.create_checkpoint.assert_called()
-    assert mock_state.create_checkpoint.call_count == 2  # start and succeed
 
-    # Verify start checkpoint
+    # Verify get_checkpoint_result called once (async checkpoint, no second check)
+    assert mock_state.get_checkpoint_result.call_count == 1
+
+    # Verify create_checkpoint called twice (start and succeed)
+    mock_state.create_checkpoint.assert_called()
+    assert mock_state.create_checkpoint.call_count == 2
+
+    # Verify start checkpoint with is_sync=False
     start_call = mock_state.create_checkpoint.call_args_list[0]
     start_operation = start_call[1]["operation_update"]
     assert start_operation.operation_id == "op1"
@@ -65,6 +80,8 @@ def test_child_handler_not_started(
     assert start_operation.operation_type is OperationType.CONTEXT
     assert start_operation.sub_type is expected_sub_type
     assert start_operation.action is OperationAction.START
+    # CRITICAL: Verify is_sync=False for START checkpoint (async, no immediate response)
+    assert start_call[1]["is_sync"] is False
 
     # Verify success checkpoint
     success_call = mock_state.create_checkpoint.call_args_list[1]
@@ -80,7 +97,13 @@ def test_child_handler_not_started(
 
 
 def test_child_handler_already_succeeded():
-    """Test child_handler when operation already succeeded."""
+    """Test child_handler when operation already succeeded without replay_children.
+
+    Verifies:
+    - Returns cached result without executing function
+    - No checkpoint created
+    - get_checkpoint_result called once
+    """
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
@@ -95,8 +118,12 @@ def test_child_handler_already_succeeded():
     )
 
     assert result == "cached_result"
+    # Verify function not executed
     mock_callable.assert_not_called()
+    # Verify no checkpoint created
     mock_state.create_checkpoint.assert_not_called()
+    # Verify get_checkpoint_result called once
+    assert mock_state.get_checkpoint_result.call_count == 1
 
 
 def test_child_handler_already_succeeded_none_result():
@@ -119,7 +146,13 @@ def test_child_handler_already_succeeded_none_result():
 
 
 def test_child_handler_already_failed():
-    """Test child_handler when operation already failed."""
+    """Test child_handler when operation already failed.
+
+    Verifies:
+    - Already failed: raises error without executing function
+    - No checkpoint created
+    - get_checkpoint_result called once
+    """
     mock_state = Mock(spec=ExecutionState)
     mock_result = Mock()
     mock_result.is_succeeded.return_value = False
@@ -138,7 +171,10 @@ def test_child_handler_already_failed():
             None,
         )
 
+    # Verify function not executed
     mock_callable.assert_not_called()
+    # Verify get_checkpoint_result called once
+    assert mock_state.get_checkpoint_result.call_count == 1
 
 
 @pytest.mark.parametrize(
@@ -153,9 +189,15 @@ def test_child_handler_already_failed():
     ],
 )
 def test_child_handler_already_started(
-    config: ChildConfig, expected_sub_type: OperationSubType
+    config: ChildConfig | None, expected_sub_type: OperationSubType
 ):
-    """Test child_handler when operation already started."""
+    """Test child_handler when operation already started.
+
+    Verifies:
+    - Operation executes when already started
+    - Only SUCCEED checkpoint created (no START)
+    - get_checkpoint_result called once
+    """
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
@@ -172,7 +214,11 @@ def test_child_handler_already_started(
 
     assert result == "started_result"
 
-    # Verify success checkpoint
+    # Verify get_checkpoint_result called once
+    assert mock_state.get_checkpoint_result.call_count == 1
+
+    # Verify only success checkpoint (no START since already started)
+    assert mock_state.create_checkpoint.call_count == 1
     success_call = mock_state.create_checkpoint.call_args_list[0]
     success_operation = success_call[1]["operation_update"]
     assert success_operation.operation_id == "op5"
@@ -197,9 +243,15 @@ def test_child_handler_already_started(
     ],
 )
 def test_child_handler_callable_exception(
-    config: ChildConfig, expected_sub_type: OperationSubType
+    config: ChildConfig | None, expected_sub_type: OperationSubType
 ):
-    """Test child_handler when callable raises exception."""
+    """Test child_handler when callable raises exception.
+
+    Verifies:
+    - Error handling: checkpoints FAIL and raises wrapped error
+    - get_checkpoint_result called once
+    - create_checkpoint called with is_sync=False for START
+    """
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
@@ -218,10 +270,14 @@ def test_child_handler_callable_exception(
             config,
         )
 
-    mock_state.create_checkpoint.assert_called()
-    assert mock_state.create_checkpoint.call_count == 2  # start and fail
+    # Verify get_checkpoint_result called once
+    assert mock_state.get_checkpoint_result.call_count == 1
 
-    # Verify start checkpoint
+    # Verify create_checkpoint called twice (start and fail)
+    mock_state.create_checkpoint.assert_called()
+    assert mock_state.create_checkpoint.call_count == 2
+
+    # Verify start checkpoint with is_sync=False
     start_call = mock_state.create_checkpoint.call_args_list[0]
     start_operation = start_call[1]["operation_update"]
     assert start_operation.operation_id == "op6"
@@ -229,6 +285,7 @@ def test_child_handler_callable_exception(
     assert start_operation.operation_type is OperationType.CONTEXT
     assert start_operation.sub_type is expected_sub_type
     assert start_operation.action is OperationAction.START
+    assert start_call[1]["is_sync"] is False
 
     # Verify fail checkpoint
     fail_call = mock_state.create_checkpoint.call_args_list[1]
@@ -242,13 +299,19 @@ def test_child_handler_callable_exception(
 
 
 def test_child_handler_error_wrapped():
-    """Test child_handler wraps regular errors as CallableRuntimeError."""
+    """Test child_handler wraps regular errors as CallableRuntimeError.
+
+    Verifies:
+    - Regular exceptions are wrapped as CallableRuntimeError
+    - FAIL checkpoint is created
+    """
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
+    mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     test_error = RuntimeError("Test error")
     mock_callable = Mock(side_effect=test_error)
@@ -261,6 +324,46 @@ def test_child_handler_error_wrapped():
             None,
         )
 
+    # Verify FAIL checkpoint was created
+    assert mock_state.create_checkpoint.call_count == 2  # start and fail
+
+
+def test_child_handler_invocation_error_reraised():
+    """Test child_handler re-raises InvocationError after checkpointing FAIL.
+
+    Verifies:
+    - InvocationError: checkpoints FAIL and re-raises (for retry)
+    - FAIL checkpoint is created
+    - Original InvocationError is re-raised (not wrapped)
+    """
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = False
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = False
+    mock_result.is_existent.return_value = False
+    mock_state.get_checkpoint_result.return_value = mock_result
+    test_error = InvocationError("Invocation failed")
+    mock_callable = Mock(side_effect=test_error)
+
+    with pytest.raises(InvocationError, match="Invocation failed"):
+        child_handler(
+            mock_callable,
+            mock_state,
+            OperationIdentifier("op7b", None, "test_name"),
+            None,
+        )
+
+    # Verify FAIL checkpoint was created
+    assert mock_state.create_checkpoint.call_count == 2  # start and fail
+
+    # Verify fail checkpoint
+    fail_call = mock_state.create_checkpoint.call_args_list[1]
+    fail_operation = fail_call[1]["operation_update"]
+    assert fail_operation.action is OperationAction.FAIL
+
 
 def test_child_handler_with_config():
     """Test child_handler with config parameter."""
@@ -270,6 +373,7 @@ def test_child_handler_with_config():
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
+    mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(return_value="config_result")
     config = ChildConfig()
@@ -280,6 +384,8 @@ def test_child_handler_with_config():
 
     assert result == "config_result"
     mock_callable.assert_called_once()
+    # Verify get_checkpoint_result called once
+    assert mock_state.get_checkpoint_result.call_count == 1
 
 
 def test_child_handler_default_serialization():
@@ -291,6 +397,7 @@ def test_child_handler_default_serialization():
     mock_result.is_failed.return_value = False
     mock_result.is_started.return_value = False
     mock_result.is_replay_children.return_value = False
+    mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
     mock_callable = Mock(return_value=complex_result)
@@ -300,6 +407,8 @@ def test_child_handler_default_serialization():
     )
 
     assert result == complex_result
+    # Verify get_checkpoint_result called once
+    assert mock_state.get_checkpoint_result.call_count == 1
     # Verify JSON serialization was used in checkpoint
     success_call = [
         call
@@ -362,6 +471,8 @@ def test_child_handler_custom_serdes_already_succeeded() -> None:
     expected_checkpoointed_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
 
     assert actual_result == expected_checkpoointed_result
+    # Verify get_checkpoint_result called once
+    assert mock_state.get_checkpoint_result.call_count == 1
 
 
 # endregion child_handler
@@ -369,7 +480,12 @@ def test_child_handler_custom_serdes_already_succeeded() -> None:
 
 # large payload with summary generator
 def test_child_handler_large_payload_with_summary_generator() -> None:
-    """Test child_handler with large payload and summary generator."""
+    """Test child_handler with large payload and summary generator.
+
+    Verifies:
+    - Large payload: uses ReplayChildren mode with summary_generator
+    - get_checkpoint_result called once
+    """
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
@@ -397,6 +513,9 @@ def test_child_handler_large_payload_with_summary_generator() -> None:
     )
 
     assert large_result == actual_result
+    # Verify get_checkpoint_result called once
+    assert mock_state.get_checkpoint_result.call_count == 1
+    # Verify replay_children mode with summary
     success_call = mock_state.create_checkpoint.call_args_list[1]
     success_operation = success_call[1]["operation_update"]
     assert success_operation.context_options.replay_children
@@ -406,7 +525,12 @@ def test_child_handler_large_payload_with_summary_generator() -> None:
 
 # large payload without summary generator
 def test_child_handler_large_payload_without_summary_generator() -> None:
-    """Test child_handler with large payload and no summary generator."""
+    """Test child_handler with large payload and no summary generator.
+
+    Verifies:
+    - Large payload without summary_generator: uses ReplayChildren mode with empty string
+    - get_checkpoint_result called once
+    """
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
@@ -428,6 +552,9 @@ def test_child_handler_large_payload_without_summary_generator() -> None:
     )
 
     assert large_result == actual_result
+    # Verify get_checkpoint_result called once
+    assert mock_state.get_checkpoint_result.call_count == 1
+    # Verify replay_children mode with empty string
     success_call = mock_state.create_checkpoint.call_args_list[1]
     success_operation = success_call[1]["operation_update"]
     assert success_operation.context_options.replay_children
@@ -437,7 +564,13 @@ def test_child_handler_large_payload_without_summary_generator() -> None:
 
 # mocked children replay mode execute the function again
 def test_child_handler_replay_children_mode() -> None:
-    """Test child_handler in ReplayChildren mode."""
+    """Test child_handler in ReplayChildren mode.
+
+    Verifies:
+    - Already succeeded with replay_children: re-executes function
+    - No checkpoint created (returns without checkpointing)
+    - get_checkpoint_result called once
+    """
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
@@ -458,12 +591,21 @@ def test_child_handler_replay_children_mode() -> None:
     )
 
     assert actual_result == complex_result
-
+    # Verify function was executed (replay_children mode)
+    mock_callable.assert_called_once()
+    # Verify no checkpoint created (returns without checkpointing in replay mode)
     mock_state.create_checkpoint.assert_not_called()
+    # Verify get_checkpoint_result called once
+    assert mock_state.get_checkpoint_result.call_count == 1
 
 
 def test_small_payload_with_summary_generator():
-    """Test: Small payload with summary_generator -> replay_children = False"""
+    """Test: Small payload with summary_generator -> replay_children = False
+
+    Verifies:
+    - Small payload does NOT trigger replay_children even with summary_generator
+    - get_checkpoint_result called once
+    """
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
@@ -491,6 +633,8 @@ def test_small_payload_with_summary_generator():
     )
 
     assert actual_result == small_result
+    # Verify get_checkpoint_result called once
+    assert mock_state.get_checkpoint_result.call_count == 1
     success_call = mock_state.create_checkpoint.call_args_list[1]
     success_operation = success_call[1]["operation_update"]
 
@@ -501,7 +645,12 @@ def test_small_payload_with_summary_generator():
 
 
 def test_small_payload_without_summary_generator():
-    """Test: Small payload without summary_generator -> replay_children = False"""
+    """Test: Small payload without summary_generator -> replay_children = False
+
+    Verifies:
+    - Small payload does NOT trigger replay_children
+    - get_checkpoint_result called once
+    """
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
@@ -526,6 +675,8 @@ def test_small_payload_without_summary_generator():
     )
 
     assert actual_result == small_result
+    # Verify get_checkpoint_result called once
+    assert mock_state.get_checkpoint_result.call_count == 1
     success_call = mock_state.create_checkpoint.call_args_list[1]
     success_operation = success_call[1]["operation_update"]
 
