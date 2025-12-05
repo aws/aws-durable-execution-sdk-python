@@ -3,7 +3,7 @@
 import json
 import random
 from itertools import islice
-from unittest.mock import ANY, Mock, patch
+from unittest.mock import ANY, MagicMock, Mock, patch
 
 import pytest
 
@@ -238,10 +238,13 @@ def test_callback_result_timed_out():
 
 
 # region create_callback
-@patch("aws_durable_execution_sdk_python.context.create_callback_handler")
-def test_create_callback_basic(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.CallbackOperationExecutor")
+def test_create_callback_basic(mock_executor_class):
     """Test create_callback with basic parameters."""
-    mock_handler.return_value = "callback123"
+    mock_executor = MagicMock()
+    mock_executor.process.return_value = "callback123"
+    mock_executor_class.return_value = mock_executor
+
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -258,17 +261,21 @@ def test_create_callback_basic(mock_handler):
     assert callback.operation_id == expected_operation_id
     assert callback.state is mock_state
 
-    mock_handler.assert_called_once_with(
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_operation_id, None, None),
         config=CallbackConfig(),
     )
+    mock_executor.process.assert_called_once()
 
 
-@patch("aws_durable_execution_sdk_python.context.create_callback_handler")
-def test_create_callback_with_name_and_config(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.CallbackOperationExecutor")
+def test_create_callback_with_name_and_config(mock_executor_class):
     """Test create_callback with name and config."""
-    mock_handler.return_value = "callback456"
+    mock_executor = MagicMock()
+    mock_executor.process.return_value = "callback456"
+    mock_executor_class.return_value = mock_executor
+
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -286,18 +293,23 @@ def test_create_callback_with_name_and_config(mock_handler):
     assert callback.callback_id == "callback456"
     assert callback.operation_id == expected_operation_id
 
-    mock_handler.assert_called_once_with(
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_operation_id, None, None),
         config=config,
     )
+    mock_executor.process.assert_called_once()
 
 
-@patch("aws_durable_execution_sdk_python.context.create_callback_handler")
-def test_create_callback_with_parent_id(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.CallbackOperationExecutor")
+def test_create_callback_with_parent_id(mock_executor_class):
     """Test create_callback with parent_id."""
 
-    mock_handler.return_value = "callback789"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "callback789"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -313,17 +325,21 @@ def test_create_callback_with_parent_id(mock_handler):
 
     assert callback.operation_id == expected_operation_id
 
-    mock_handler.assert_called_once_with(
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_operation_id, "parent123"),
         config=CallbackConfig(),
     )
 
 
-@patch("aws_durable_execution_sdk_python.context.create_callback_handler")
-def test_create_callback_increments_counter(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.CallbackOperationExecutor")
+def test_create_callback_increments_counter(mock_executor_class):
     """Test create_callback increments step counter."""
-    mock_handler.return_value = "callback_test"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "callback_test"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -350,10 +366,14 @@ def test_create_callback_increments_counter(mock_handler):
 
 
 # region step
-@patch("aws_durable_execution_sdk_python.context.step_handler")
-def test_step_basic(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
+def test_step_basic(mock_executor_class):
     """Test step with basic parameters."""
-    mock_handler.return_value = "step_result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "step_result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -370,19 +390,24 @@ def test_step_basic(mock_handler):
     result = context.step(mock_callable)
 
     assert result == "step_result"
-    mock_handler.assert_called_once_with(
-        func=mock_callable,
-        config=None,
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_operation_id, None, None),
+        config=ANY,  # StepConfig() is created in context.step()
+        func=mock_callable,
         context_logger=ANY,
     )
+    mock_executor.process.assert_called_once()
 
 
-@patch("aws_durable_execution_sdk_python.context.step_handler")
-def test_step_with_name_and_config(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
+def test_step_with_name_and_config(mock_executor_class):
     """Test step with name and config."""
-    mock_handler.return_value = "configured_result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "configured_result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -404,19 +429,24 @@ def test_step_with_name_and_config(mock_handler):
     expected_id = next(seq)  # 6th
 
     assert result == "configured_result"
-    mock_handler.assert_called_once_with(
-        func=mock_callable,
-        config=config,
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_id, None, None),
+        config=config,
+        func=mock_callable,
         context_logger=ANY,
     )
+    mock_executor.process.assert_called_once()
 
 
-@patch("aws_durable_execution_sdk_python.context.step_handler")
-def test_step_with_parent_id(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
+def test_step_with_parent_id(mock_executor_class):
     """Test step with parent_id."""
-    mock_handler.return_value = "parent_result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "parent_result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -436,19 +466,24 @@ def test_step_with_parent_id(mock_handler):
     [next(seq) for _ in range(2)]  # Skip first 2
     expected_id = next(seq)  # 3rd
 
-    mock_handler.assert_called_once_with(
-        func=mock_callable,
-        config=None,
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_id, "parent123"),
+        config=ANY,
+        func=mock_callable,
         context_logger=ANY,
     )
+    mock_executor.process.assert_called_once()
 
 
-@patch("aws_durable_execution_sdk_python.context.step_handler")
-def test_step_increments_counter(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
+def test_step_increments_counter(mock_executor_class):
     """Test step increments step counter."""
-    mock_handler.return_value = "result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -471,18 +506,22 @@ def test_step_increments_counter(mock_handler):
     expected_id2 = next(seq)  # 12th
 
     assert context._step_counter.get_current() == 12  # noqa: SLF001
-    assert mock_handler.call_args_list[0][1][
+    assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
     ] == OperationIdentifier(expected_id1, None, None)
-    assert mock_handler.call_args_list[1][1][
+    assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
     ] == OperationIdentifier(expected_id2, None, None)
 
 
-@patch("aws_durable_execution_sdk_python.context.step_handler")
-def test_step_with_original_name(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
+def test_step_with_original_name(mock_executor_class):
     """Test step with callable that has _original_name attribute."""
-    mock_handler.return_value = "named_result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "named_result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -498,23 +537,28 @@ def test_step_with_original_name(mock_handler):
     seq = operation_id_sequence()
     expected_id = next(seq)  # 1st
 
-    mock_handler.assert_called_once_with(
-        func=mock_callable,
-        config=None,
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_id, None, "override_name"),
+        config=ANY,
+        func=mock_callable,
         context_logger=ANY,
     )
+    mock_executor.process.assert_called_once()
 
 
 # endregion step
 
 
 # region invoke
-@patch("aws_durable_execution_sdk_python.context.invoke_handler")
-def test_invoke_basic(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.InvokeOperationExecutor")
+def test_invoke_basic(mock_executor_class):
     """Test invoke with basic parameters."""
-    mock_handler.return_value = "invoke_result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "invoke_result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -528,19 +572,24 @@ def test_invoke_basic(mock_handler):
 
     assert result == "invoke_result"
 
-    mock_handler.assert_called_once_with(
-        function_name="test_function",
-        payload="test_payload",
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_operation_id, None, None),
-        config=None,
+        function_name="test_function",
+        payload="test_payload",
+        config=ANY,  # InvokeConfig() is created in context.invoke()
     )
+    mock_executor.process.assert_called_once()
 
 
-@patch("aws_durable_execution_sdk_python.context.invoke_handler")
-def test_invoke_with_name_and_config(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.InvokeOperationExecutor")
+def test_invoke_with_name_and_config(mock_executor_class):
     """Test invoke with name and config."""
-    mock_handler.return_value = "configured_result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "configured_result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -560,19 +609,24 @@ def test_invoke_with_name_and_config(mock_handler):
     expected_id = next(seq)  # 6th
 
     assert result == "configured_result"
-    mock_handler.assert_called_once_with(
-        function_name="test_function",
-        payload={"key": "value"},
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_id, None, "named_invoke"),
+        function_name="test_function",
+        payload={"key": "value"},
         config=config,
     )
+    mock_executor.process.assert_called_once()
 
 
-@patch("aws_durable_execution_sdk_python.context.invoke_handler")
-def test_invoke_with_parent_id(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.InvokeOperationExecutor")
+def test_invoke_with_parent_id(mock_executor_class):
     """Test invoke with parent_id."""
-    mock_handler.return_value = "parent_result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "parent_result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -587,19 +641,24 @@ def test_invoke_with_parent_id(mock_handler):
     [next(seq) for _ in range(2)]
     expected_id = next(seq)
 
-    mock_handler.assert_called_once_with(
-        function_name="test_function",
-        payload=None,
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_id, "parent123", None),
-        config=None,
+        function_name="test_function",
+        payload=None,
+        config=ANY,
     )
+    mock_executor.process.assert_called_once()
 
 
-@patch("aws_durable_execution_sdk_python.context.invoke_handler")
-def test_invoke_increments_counter(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.InvokeOperationExecutor")
+def test_invoke_increments_counter(mock_executor_class):
     """Test invoke increments step counter."""
-    mock_handler.return_value = "result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -617,18 +676,22 @@ def test_invoke_increments_counter(mock_handler):
     expected_id2 = next(seq)
 
     assert context._step_counter.get_current() == 12  # noqa: SLF001
-    assert mock_handler.call_args_list[0][1][
+    assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
     ] == OperationIdentifier(expected_id1, None, None)
-    assert mock_handler.call_args_list[1][1][
+    assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
     ] == OperationIdentifier(expected_id2, None, None)
 
 
-@patch("aws_durable_execution_sdk_python.context.invoke_handler")
-def test_invoke_with_none_payload(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.InvokeOperationExecutor")
+def test_invoke_with_none_payload(mock_executor_class):
     """Test invoke with None payload."""
-    mock_handler.return_value = None
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = None
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -643,19 +706,24 @@ def test_invoke_with_none_payload(mock_handler):
 
     assert result is None
 
-    mock_handler.assert_called_once_with(
-        function_name="test_function",
-        payload=None,
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_id, None, None),
-        config=None,
+        function_name="test_function",
+        payload=None,
+        config=ANY,
     )
+    mock_executor.process.assert_called_once()
 
 
-@patch("aws_durable_execution_sdk_python.context.invoke_handler")
-def test_invoke_with_custom_serdes(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.InvokeOperationExecutor")
+def test_invoke_with_custom_serdes(mock_executor_class):
     """Test invoke with custom serialization config."""
-    mock_handler.return_value = {"transformed": "data"}
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = {"transformed": "data"}
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -682,24 +750,29 @@ def test_invoke_with_custom_serdes(mock_handler):
     expected_id = next(seq)
 
     assert result == {"transformed": "data"}
-    mock_handler.assert_called_once_with(
-        function_name="test_function",
-        payload={"original": "data"},
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
             expected_id, None, "custom_serdes_invoke"
         ),
+        function_name="test_function",
+        payload={"original": "data"},
         config=config,
     )
+    mock_executor.process.assert_called_once()
 
 
 # endregion invoke
 
 
 # region wait
-@patch("aws_durable_execution_sdk_python.context.wait_handler")
-def test_wait_basic(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.WaitOperationExecutor")
+def test_wait_basic(mock_executor_class):
     """Test wait with basic parameters."""
+    mock_executor = MagicMock()
+    mock_executor.process.return_value = None
+    mock_executor_class.return_value = mock_executor
+
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -711,16 +784,21 @@ def test_wait_basic(mock_handler):
 
     context.wait(Duration.from_seconds(30))
 
-    mock_handler.assert_called_once_with(
-        seconds=30,
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_operation_id, None, None),
+        seconds=30,
     )
+    mock_executor.process.assert_called_once()
 
 
-@patch("aws_durable_execution_sdk_python.context.wait_handler")
-def test_wait_with_name(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.WaitOperationExecutor")
+def test_wait_with_name(mock_executor_class):
     """Test wait with name parameter."""
+    mock_executor = MagicMock()
+    mock_executor.process.return_value = None
+    mock_executor_class.return_value = mock_executor
+
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -735,16 +813,21 @@ def test_wait_with_name(mock_handler):
     [next(seq) for _ in range(5)]
     expected_id = next(seq)
 
-    mock_handler.assert_called_once_with(
-        seconds=60,
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_id, None, "test_wait"),
+        seconds=60,
     )
+    mock_executor.process.assert_called_once()
 
 
-@patch("aws_durable_execution_sdk_python.context.wait_handler")
-def test_wait_with_parent_id(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.WaitOperationExecutor")
+def test_wait_with_parent_id(mock_executor_class):
     """Test wait with parent_id."""
+    mock_executor = MagicMock()
+    mock_executor.process.return_value = None
+    mock_executor_class.return_value = mock_executor
+
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -759,16 +842,21 @@ def test_wait_with_parent_id(mock_handler):
     [next(seq) for _ in range(2)]
     expected_id = next(seq)
 
-    mock_handler.assert_called_once_with(
-        seconds=45,
+    mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(expected_id, "parent123"),
+        seconds=45,
     )
+    mock_executor.process.assert_called_once()
 
 
-@patch("aws_durable_execution_sdk_python.context.wait_handler")
-def test_wait_increments_counter(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.WaitOperationExecutor")
+def test_wait_increments_counter(mock_executor_class):
     """Test wait increments step counter."""
+    mock_executor = MagicMock()
+    mock_executor.process.return_value = None
+    mock_executor_class.return_value = mock_executor
+
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -786,17 +874,21 @@ def test_wait_increments_counter(mock_handler):
     expected_id2 = next(seq)
 
     assert context._step_counter.get_current() == 12  # noqa: SLF001
-    assert mock_handler.call_args_list[0][1][
+    assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
     ] == OperationIdentifier(expected_id1, None, None)
-    assert mock_handler.call_args_list[1][1][
+    assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
     ] == OperationIdentifier(expected_id2, None, None)
 
 
-@patch("aws_durable_execution_sdk_python.context.wait_handler")
-def test_wait_returns_none(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.WaitOperationExecutor")
+def test_wait_returns_none(mock_executor_class):
     """Test wait returns None."""
+    mock_executor = MagicMock()
+    mock_executor.process.return_value = None
+    mock_executor_class.return_value = mock_executor
+
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -809,9 +901,13 @@ def test_wait_returns_none(mock_handler):
     assert result is None
 
 
-@patch("aws_durable_execution_sdk_python.context.wait_handler")
-def test_wait_with_time_less_than_one(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.WaitOperationExecutor")
+def test_wait_with_time_less_than_one(mock_executor_class):
     """Test wait with time less than one."""
+    mock_executor = MagicMock()
+    mock_executor.process.return_value = None
+    mock_executor_class.return_value = mock_executor
+
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -889,9 +985,13 @@ def test_run_in_child_context_with_name_and_config(mock_handler):
 
 
 @patch("aws_durable_execution_sdk_python.context.child_handler")
-def test_run_in_child_context_with_parent_id(mock_handler):
+def test_run_in_child_context_with_parent_id(mock_executor_class):
     """Test run_in_child_context with parent_id."""
-    mock_handler.return_value = "parent_child_result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "parent_child_result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -910,14 +1010,14 @@ def test_run_in_child_context_with_parent_id(mock_handler):
     [next(seq) for _ in range(1)]
     expected_id = next(seq)
 
-    call_args = mock_handler.call_args
+    call_args = mock_executor_class.call_args
     assert call_args[1]["operation_identifier"] == OperationIdentifier(
         expected_id, "parent456", None
     )
 
 
 @patch("aws_durable_execution_sdk_python.context.child_handler")
-def test_run_in_child_context_creates_child_context(mock_handler):
+def test_run_in_child_context_creates_child_context(mock_executor_class):
     """Test run_in_child_context creates proper child context."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
@@ -935,7 +1035,7 @@ def test_run_in_child_context_creates_child_context(mock_handler):
         return "child_executed"
 
     mock_callable = Mock(side_effect=capture_child_context)
-    mock_handler.side_effect = lambda func, **kwargs: func()
+    mock_executor_class.side_effect = lambda func, **kwargs: func()
 
     context = DurableContext(state=mock_state)
 
@@ -946,9 +1046,13 @@ def test_run_in_child_context_creates_child_context(mock_handler):
 
 
 @patch("aws_durable_execution_sdk_python.context.child_handler")
-def test_run_in_child_context_increments_counter(mock_handler):
+def test_run_in_child_context_increments_counter(mock_executor_class):
     """Test run_in_child_context increments step counter."""
-    mock_handler.return_value = "result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -970,18 +1074,22 @@ def test_run_in_child_context_increments_counter(mock_handler):
     expected_id2 = next(seq)
 
     assert context._step_counter.get_current() == 7  # noqa: SLF001
-    assert mock_handler.call_args_list[0][1][
+    assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
     ] == OperationIdentifier(expected_id1, None, None)
-    assert mock_handler.call_args_list[1][1][
+    assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
     ] == OperationIdentifier(expected_id2, None, None)
 
 
 @patch("aws_durable_execution_sdk_python.context.child_handler")
-def test_run_in_child_context_resolves_name_from_callable(mock_handler):
+def test_run_in_child_context_resolves_name_from_callable(mock_executor_class):
     """Test run_in_child_context resolves name from callable._original_name."""
-    mock_handler.return_value = "named_result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "named_result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -993,7 +1101,7 @@ def test_run_in_child_context_resolves_name_from_callable(mock_handler):
 
     context.run_in_child_context(mock_callable)
 
-    call_args = mock_handler.call_args
+    call_args = mock_executor_class.call_args
     assert call_args[1]["operation_identifier"].name == "original_function_name"
 
 
@@ -1002,9 +1110,13 @@ def test_run_in_child_context_resolves_name_from_callable(mock_handler):
 
 # region wait_for_callback
 @patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
-def test_wait_for_callback_basic(mock_handler):
+def test_wait_for_callback_basic(mock_executor_class):
     """Test wait_for_callback with basic parameters."""
-    mock_handler.return_value = "callback_result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "callback_result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -1029,9 +1141,13 @@ def test_wait_for_callback_basic(mock_handler):
 
 
 @patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
-def test_wait_for_callback_with_name_and_config(mock_handler):
+def test_wait_for_callback_with_name_and_config(mock_executor_class):
     """Test wait_for_callback with name and config."""
-    mock_handler.return_value = "configured_callback_result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "configured_callback_result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -1054,9 +1170,13 @@ def test_wait_for_callback_with_name_and_config(mock_handler):
 
 
 @patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
-def test_wait_for_callback_resolves_name_from_submitter(mock_handler):
+def test_wait_for_callback_resolves_name_from_submitter(mock_executor_class):
     """Test wait_for_callback resolves name from submitter._original_name."""
-    mock_handler.return_value = "named_callback_result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "named_callback_result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -1075,7 +1195,7 @@ def test_wait_for_callback_resolves_name_from_submitter(mock_handler):
 
 
 @patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
-def test_wait_for_callback_passes_child_context(mock_handler):
+def test_wait_for_callback_passes_child_context(mock_executor_class):
     """Test wait_for_callback passes child context to handler."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
@@ -1088,7 +1208,7 @@ def test_wait_for_callback_passes_child_context(mock_handler):
         assert submitter is mock_submitter
         return "handler_result"
 
-    mock_handler.side_effect = capture_handler_call
+    mock_executor_class.side_effect = capture_handler_call
 
     with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
 
@@ -1103,7 +1223,7 @@ def test_wait_for_callback_passes_child_context(mock_handler):
         result = context.wait_for_callback(mock_submitter)
 
         assert result == "handler_result"
-        mock_handler.assert_called_once()
+        mock_executor_class.assert_called_once()
 
 
 # endregion wait_for_callback
@@ -1606,17 +1726,20 @@ def test_context_wait_for_condition_handler_call():
         wait_strategy=test_wait_strategy, initial_state="test"
     )
 
-    # Mock the handler to track calls
+    # Mock the executor to track calls
     with patch(
-        "aws_durable_execution_sdk_python.context.wait_for_condition_handler"
-    ) as mock_handler:
-        mock_handler.return_value = "final_state"
+        "aws_durable_execution_sdk_python.context.WaitForConditionOperationExecutor"
+    ) as mock_executor_class:
+        mock_executor = MagicMock()
+        mock_executor.process.return_value = "final_state"
+        mock_executor_class.return_value = mock_executor
 
         # Call wait_for_condition method
         result = context.wait_for_condition(test_check, config)
 
-        # Verify wait_for_condition_handler was called (line 425)
-        mock_handler.assert_called_once()
+        # Verify executor was called
+        mock_executor_class.assert_called_once()
+        mock_executor.process.assert_called_once()
         assert result == "final_state"
 
 
@@ -1683,10 +1806,14 @@ def test_operation_id_generation_unique():
         assert ids[i] != ids[i + 1]
 
 
-@patch("aws_durable_execution_sdk_python.context.invoke_handler")
-def test_invoke_with_explicit_tenant_id(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.InvokeOperationExecutor")
+def test_invoke_with_explicit_tenant_id(mock_executor_class):
     """Test invoke with explicit tenant_id in config."""
-    mock_handler.return_value = "result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -1698,14 +1825,18 @@ def test_invoke_with_explicit_tenant_id(mock_handler):
     result = context.invoke("test_function", "payload", config=config)
 
     assert result == "result"
-    call_args = mock_handler.call_args[1]
+    call_args = mock_executor_class.call_args[1]
     assert call_args["config"].tenant_id == "explicit-tenant"
 
 
-@patch("aws_durable_execution_sdk_python.context.invoke_handler")
-def test_invoke_without_tenant_id_defaults_to_none(mock_handler):
+@patch("aws_durable_execution_sdk_python.context.InvokeOperationExecutor")
+def test_invoke_without_tenant_id_defaults_to_none(mock_executor_class):
     """Test invoke without tenant_id defaults to None."""
-    mock_handler.return_value = "result"
+    mock_executor = MagicMock()
+
+    mock_executor.process.return_value = "result"
+
+    mock_executor_class.return_value = mock_executor
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
@@ -1716,6 +1847,7 @@ def test_invoke_without_tenant_id_defaults_to_none(mock_handler):
     result = context.invoke("test_function", "payload")
 
     assert result == "result"
-    # Config should be None when not provided
-    call_args = mock_handler.call_args[1]
-    assert call_args["config"] is None
+    # Config is created as InvokeConfig() when not provided
+    call_args = mock_executor_class.call_args[1]
+    assert isinstance(call_args["config"], InvokeConfig)
+    assert call_args["config"].tenant_id is None

@@ -34,6 +34,49 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.types import StepContext
 
 
+def create_mock_checkpoint_with_operations():
+    """Create a mock checkpoint function that properly tracks operations.
+
+    Returns a tuple of (mock_checkpoint_function, checkpoint_calls_list).
+    The mock properly maintains an operations list that gets updated with each checkpoint.
+    """
+    checkpoint_calls = []
+    operations = [
+        Operation(
+            operation_id="execution-1",
+            operation_type=OperationType.EXECUTION,
+            status=OperationStatus.STARTED,
+        )
+    ]
+
+    def mock_checkpoint(
+        durable_execution_arn,
+        checkpoint_token,
+        updates,
+        client_token="token",  # noqa: S107
+    ):
+        checkpoint_calls.append(updates)
+
+        # Convert updates to Operation objects and add to operations list
+        for update in updates:
+            op = Operation(
+                operation_id=update.operation_id,
+                operation_type=update.operation_type,
+                status=OperationStatus.STARTED,  # New operations start as STARTED
+                parent_id=update.parent_id,
+            )
+            operations.append(op)
+
+        return CheckpointOutput(
+            checkpoint_token="new_token",  # noqa: S106
+            new_execution_state=CheckpointUpdatedExecutionState(
+                operations=operations.copy()
+            ),
+        )
+
+    return mock_checkpoint, checkpoint_calls
+
+
 def test_step_different_ways_to_pass_args():
     def step_plain(step_context: StepContext) -> str:
         return "from step plain"
@@ -259,22 +302,8 @@ def test_wait_inside_run_in_childcontext():
         mock_client = Mock()
         mock_client_class.initialize_client.return_value = mock_client
 
-        # Mock the checkpoint method to track calls
-        checkpoint_calls = []
-
-        def mock_checkpoint(
-            durable_execution_arn,
-            checkpoint_token,
-            updates,
-            client_token="token",  # noqa: S107
-        ):
-            checkpoint_calls.append(updates)
-
-            return CheckpointOutput(
-                checkpoint_token="new_token",  # noqa: S106
-                new_execution_state=CheckpointUpdatedExecutionState(),
-            )
-
+        # Use helper to create mock that properly tracks operations
+        mock_checkpoint, checkpoint_calls = create_mock_checkpoint_with_operations()
         mock_client.checkpoint = mock_checkpoint
 
         # Create test event
@@ -428,22 +457,8 @@ def test_wait_not_caught_by_exception():
         mock_client = Mock()
         mock_client_class.initialize_client.return_value = mock_client
 
-        # Mock the checkpoint method to track calls
-        checkpoint_calls = []
-
-        def mock_checkpoint(
-            durable_execution_arn,
-            checkpoint_token,
-            updates,
-            client_token="token",  # noqa: S107
-        ):
-            checkpoint_calls.append(updates)
-
-            return CheckpointOutput(
-                checkpoint_token="new_token",  # noqa: S106
-                new_execution_state=CheckpointUpdatedExecutionState(),
-            )
-
+        # Use helper to create mock that properly tracks operations
+        mock_checkpoint, checkpoint_calls = create_mock_checkpoint_with_operations()
         mock_client.checkpoint = mock_checkpoint
 
         # Create test event
