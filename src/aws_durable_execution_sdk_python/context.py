@@ -24,17 +24,17 @@ from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.logger import Logger, LogInfo
 from aws_durable_execution_sdk_python.operation.callback import (
-    create_callback_handler,
+    CallbackOperationExecutor,
     wait_for_callback_handler,
 )
 from aws_durable_execution_sdk_python.operation.child import child_handler
-from aws_durable_execution_sdk_python.operation.invoke import invoke_handler
+from aws_durable_execution_sdk_python.operation.invoke import InvokeOperationExecutor
 from aws_durable_execution_sdk_python.operation.map import map_handler
 from aws_durable_execution_sdk_python.operation.parallel import parallel_handler
-from aws_durable_execution_sdk_python.operation.step import step_handler
-from aws_durable_execution_sdk_python.operation.wait import wait_handler
+from aws_durable_execution_sdk_python.operation.step import StepOperationExecutor
+from aws_durable_execution_sdk_python.operation.wait import WaitOperationExecutor
 from aws_durable_execution_sdk_python.operation.wait_for_condition import (
-    wait_for_condition_handler,
+    WaitForConditionOperationExecutor,
 )
 from aws_durable_execution_sdk_python.serdes import (
     PassThroughSerDes,
@@ -323,13 +323,14 @@ class DurableContext(DurableContextProtocol):
         if not config:
             config = CallbackConfig()
         operation_id: str = self._create_step_id()
-        callback_id: str = create_callback_handler(
+        executor: CallbackOperationExecutor = CallbackOperationExecutor(
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id, parent_id=self._parent_id, name=name
             ),
             config=config,
         )
+        callback_id: str = executor.process()
         result: Callback = Callback(
             callback_id=callback_id,
             operation_id=operation_id,
@@ -357,8 +358,10 @@ class DurableContext(DurableContextProtocol):
         Returns:
             The result of the invoked function
         """
+        if not config:
+            config = InvokeConfig[P, R]()
         operation_id = self._create_step_id()
-        result: R = invoke_handler(
+        executor: InvokeOperationExecutor[R] = InvokeOperationExecutor(
             function_name=function_name,
             payload=payload,
             state=self.state,
@@ -369,6 +372,7 @@ class DurableContext(DurableContextProtocol):
             ),
             config=config,
         )
+        result: R = executor.process()
         self.state.track_replay(operation_id=operation_id)
         return result
 
@@ -505,8 +509,10 @@ class DurableContext(DurableContextProtocol):
     ) -> T:
         step_name = self._resolve_step_name(name, func)
         logger.debug("Step name: %s", step_name)
+        if not config:
+            config = StepConfig()
         operation_id = self._create_step_id()
-        result: T = step_handler(
+        executor: StepOperationExecutor[T] = StepOperationExecutor(
             func=func,
             config=config,
             state=self.state,
@@ -517,6 +523,7 @@ class DurableContext(DurableContextProtocol):
             ),
             context_logger=self.logger,
         )
+        result: T = executor.process()
         self.state.track_replay(operation_id=operation_id)
         return result
 
@@ -532,8 +539,9 @@ class DurableContext(DurableContextProtocol):
             msg = "duration must be at least 1 second"
             raise ValidationError(msg)
         operation_id = self._create_step_id()
-        wait_handler(
-            seconds=seconds,
+        wait_seconds = duration.seconds
+        executor: WaitOperationExecutor = WaitOperationExecutor(
+            seconds=wait_seconds,
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
@@ -541,6 +549,7 @@ class DurableContext(DurableContextProtocol):
                 name=name,
             ),
         )
+        executor.process()
         self.state.track_replay(operation_id=operation_id)
 
     def wait_for_callback(
@@ -584,17 +593,20 @@ class DurableContext(DurableContextProtocol):
             raise ValidationError(msg)
 
         operation_id = self._create_step_id()
-        result: T = wait_for_condition_handler(
-            check=check,
-            config=config,
-            state=self.state,
-            operation_identifier=OperationIdentifier(
-                operation_id=operation_id,
-                parent_id=self._parent_id,
-                name=name,
-            ),
-            context_logger=self.logger,
+        executor: WaitForConditionOperationExecutor[T] = (
+            WaitForConditionOperationExecutor(
+                check=check,
+                config=config,
+                state=self.state,
+                operation_identifier=OperationIdentifier(
+                    operation_id=operation_id,
+                    parent_id=self._parent_id,
+                    name=name,
+                ),
+                context_logger=self.logger,
+            )
         )
+        result: T = executor.process()
         self.state.track_replay(operation_id=operation_id)
         return result
 
