@@ -272,7 +272,7 @@ Now that you've built your first durable function, explore the core features:
 **Dive deeper:**
 - [Error handling](advanced/error-handling.md) - Handle failures and implement retry strategies
 - [Testing patterns](testing-patterns/basic-tests.md) - Write effective tests for your workflows
-- [Best practices](testing-patterns/best-practices.md) - Avoid common pitfalls
+- [Best practices](best-practices.md) - Avoid common pitfalls
 
 [↑ Back to top](#table-of-contents)
 
