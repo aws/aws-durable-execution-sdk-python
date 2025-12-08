@@ -18,7 +18,7 @@ jobs:
 
     steps:
     - name: Checkout Language SDK (this PR)
-      uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+      uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
       with:
         path: language-sdk
 
@@ -29,7 +29,7 @@ jobs:
         PR_BODY: ${{ github.event.pull_request.body }}
 
     - name: Checkout Testing SDK
-      uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+      uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
       with:
         repository: aws/aws-durable-execution-sdk-python-testing
         ref: ${{ steps.parse.outputs.testing_ref }}
@@ -67,7 +67,7 @@ jobs:
 
     steps:
     - name: Checkout Language SDK (this PR)
-      uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+      uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
       with:
         path: language-sdk
 
@@ -78,7 +78,7 @@ jobs:
         PR_BODY: ${{ github.event.pull_request.body }}
 
     - name: Checkout Testing SDK
-      uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+      uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
       with:
         repository: aws/aws-durable-execution-sdk-python-testing
         ref: ${{ steps.parse.outputs.testing_ref }}
