@@ -16,6 +16,7 @@ import pytest
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     CallableRuntimeError,
+    OrphanedChildException,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -1091,20 +1092,18 @@ def test_rejection_of_operations_from_completed_parents():
     )
     state.create_checkpoint(parent_complete, is_sync=False)
 
-    # Get initial queue size
-    initial_queue_size = state._checkpoint_queue.qsize()
-
-    # Try to checkpoint child operation (should be rejected)
+    # Try to checkpoint child operation (should raise OrphanedChildException)
     child_checkpoint = OperationUpdate(
         operation_id="child_1",
         operation_type=OperationType.STEP,
         action=OperationAction.SUCCEED,
         parent_id="parent_1",
     )
-    state.create_checkpoint(child_checkpoint, is_sync=False)
+    with pytest.raises(OrphanedChildException) as exc_info:
+        state.create_checkpoint(child_checkpoint, is_sync=False)
 
-    # Verify operation was rejected (queue size unchanged)
-    assert state._checkpoint_queue.qsize() == initial_queue_size
+    # Verify exception contains operation_id
+    assert exc_info.value.operation_id == "child_1"
 
 
 def test_nested_parallel_operations_deep_hierarchy():
@@ -1474,20 +1473,18 @@ def test_create_checkpoint_sync_rejects_orphaned_operation():
     state.create_checkpoint(parent_complete, is_sync=True)
     processor.join(timeout=1.0)
 
-    # Get queue size before attempting to checkpoint orphaned child
-    initial_queue_size = state._checkpoint_queue.qsize()
-
-    # Try to checkpoint child (should be rejected)
+    # Try to checkpoint child (should raise OrphanedChildException)
     child_checkpoint = OperationUpdate(
         operation_id="child_1",
         operation_type=OperationType.STEP,
         action=OperationAction.SUCCEED,
         parent_id="parent_1",
     )
-    state.create_checkpoint(child_checkpoint, is_sync=True)
+    with pytest.raises(OrphanedChildException) as exc_info:
+        state.create_checkpoint(child_checkpoint, is_sync=True)
 
-    # Verify operation was rejected (queue size unchanged)
-    assert state._checkpoint_queue.qsize() == initial_queue_size
+    # Verify exception contains operation_id
+    assert exc_info.value.operation_id == "child_1"
 
 
 def test_mark_orphans_handles_cycles():

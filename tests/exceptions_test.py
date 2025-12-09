@@ -15,6 +15,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     ExecutionError,
     InvocationError,
     OrderedLockError,
+    OrphanedChildException,
     StepInterruptedError,
     SuspendExecution,
     TerminationReason,
@@ -332,3 +333,44 @@ def test_execution_error_with_custom_termination_reason():
     error = ExecutionError("custom error", TerminationReason.SERIALIZATION_ERROR)
     assert str(error) == "custom error"
     assert error.termination_reason == TerminationReason.SERIALIZATION_ERROR
+
+
+def test_orphaned_child_exception_is_base_exception():
+    """Test that OrphanedChildException is a BaseException, not Exception."""
+    assert issubclass(OrphanedChildException, BaseException)
+    assert not issubclass(OrphanedChildException, Exception)
+
+
+def test_orphaned_child_exception_bypasses_user_exception_handler():
+    """Test that OrphanedChildException cannot be caught by user's except Exception handler."""
+    caught_by_exception = False
+    caught_by_base_exception = False
+    exception_instance = None
+
+    try:
+        msg = "test message"
+        raise OrphanedChildException(msg, operation_id="test_op_123")
+    except Exception:  # noqa: BLE001
+        caught_by_exception = True
+    except BaseException as e:  # noqa: BLE001
+        caught_by_base_exception = True
+        exception_instance = e
+
+    expected_msg = "OrphanedChildException should not be caught by except Exception"
+    assert not caught_by_exception, expected_msg
+    expected_base_msg = (
+        "OrphanedChildException should be caught by except BaseException"
+    )
+    assert caught_by_base_exception, expected_base_msg
+
+    # Verify operation_id is preserved
+    assert isinstance(exception_instance, OrphanedChildException)
+    assert exception_instance.operation_id == "test_op_123"
+    assert str(exception_instance) == "test message"
+
+
+def test_orphaned_child_exception_with_operation_id():
+    """Test OrphanedChildException stores operation_id correctly."""
+    exception = OrphanedChildException("parent completed", operation_id="child_op_456")
+    assert exception.operation_id == "child_op_456"
+    assert str(exception) == "parent completed"

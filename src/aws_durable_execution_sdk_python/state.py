@@ -16,6 +16,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     CallableRuntimeError,
     DurableExecutionsError,
+    OrphanedChildException,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
@@ -449,7 +450,13 @@ class ExecutionState:
                         "Rejecting checkpoint for operation %s - parent is done",
                         operation_update.operation_id,
                     )
-                    return
+                    error_msg = (
+                        "Parent context completed, child operation cannot checkpoint"
+                    )
+                    raise OrphanedChildException(
+                        error_msg,
+                        operation_id=operation_update.operation_id,
+                    )
 
         # Check if background checkpointing has failed
         if self._checkpointing_failed.is_set():

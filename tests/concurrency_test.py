@@ -32,7 +32,9 @@ from aws_durable_execution_sdk_python.exceptions import (
     SuspendExecution,
     TimedSuspendExecution,
 )
-from aws_durable_execution_sdk_python.lambda_service import ErrorObject
+from aws_durable_execution_sdk_python.lambda_service import (
+    ErrorObject,
+)
 from aws_durable_execution_sdk_python.operation.map import MapExecutor
 
 
@@ -2838,3 +2840,194 @@ def test_executor_terminates_quickly_when_impossible_to_succeed():
     assert (
         sum(1 for item in result.all if item.status == BatchItemStatus.SUCCEEDED) < 98
     )
+
+
+def test_executor_exits_early_with_min_successful():
+    """Test that parallel exits immediately when min_successful is reached without waiting for other branches."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return executable.func()
+
+    execution_times = []
+
+    def fast_branch():
+        execution_times.append(("fast", time.time()))
+        return "fast_result"
+
+    def slow_branch():
+        execution_times.append(("slow_start", time.time()))
+        time.sleep(2)  # Long sleep
+        execution_times.append(("slow_end", time.time()))
+        return "slow_result"
+
+    executables = [
+        Executable(0, fast_branch),
+        Executable(1, slow_branch),
+    ]
+
+    completion_config = CompletionConfig(min_successful=1)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=2,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    execution_state = Mock()
+    execution_state.create_checkpoint = Mock()
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"  # noqa: SLF001
+    executor_context._parent_id = "parent"  # noqa: SLF001
+
+    def create_child_context(op_id):
+        child = Mock()
+        child.state = execution_state
+        return child
+
+    executor_context.create_child_context = create_child_context
+
+    start_time = time.time()
+    result = executor.execute(execution_state, executor_context)
+    elapsed_time = time.time() - start_time
+
+    # Should complete in less than 1.5 second (not wait for 2-second sleep)
+    assert elapsed_time < 1.5, f"Took {elapsed_time}s, expected < 1.5s"
+
+    # Result should show MIN_SUCCESSFUL_REACHED
+    assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
+
+    # Fast branch should succeed
+    assert result.all[0].status == BatchItemStatus.SUCCEEDED
+    assert result.all[0].result == "fast_result"
+
+    # Slow branch should be marked as STARTED (incomplete)
+    assert result.all[1].status == BatchItemStatus.STARTED
+
+    # Verify counts
+    assert result.success_count == 1
+    assert result.failure_count == 0
+    assert result.started_count == 1
+    assert result.total_count == 2
+
+
+def test_executor_returns_with_incomplete_branches():
+    """Test that executor returns when min_successful is reached, leaving other branches incomplete."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return executable.func()
+
+    operation_tracker = Mock()
+
+    def fast_branch():
+        operation_tracker.fast_executed()
+        return "fast_result"
+
+    def slow_branch():
+        operation_tracker.slow_started()
+        time.sleep(2)  # Long sleep
+        operation_tracker.slow_completed()
+        return "slow_result"
+
+    executables = [
+        Executable(0, fast_branch),
+        Executable(1, slow_branch),
+    ]
+
+    completion_config = CompletionConfig(min_successful=1)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=2,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    execution_state = Mock()
+    execution_state.create_checkpoint = Mock()
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"  # noqa: SLF001
+    executor_context._parent_id = "parent"  # noqa: SLF001
+    executor_context.create_child_context = lambda op_id: Mock(state=execution_state)
+
+    result = executor.execute(execution_state, executor_context)
+
+    # Verify fast branch executed
+    assert operation_tracker.fast_executed.call_count == 1
+
+    # Slow branch may or may not have started (depends on thread scheduling)
+    # but it definitely should not have completed
+    assert (
+        operation_tracker.slow_completed.call_count == 0
+    ), "Executor should return before slow branch completes"
+
+    # Result should show MIN_SUCCESSFUL_REACHED
+    assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
+
+    # Verify counts - one succeeded, one incomplete
+    assert result.success_count == 1
+    assert result.failure_count == 0
+    assert result.started_count == 1
+    assert result.total_count == 2
+
+
+def test_executor_returns_before_slow_branch_completes():
+    """Test that executor returns immediately when min_successful is reached, not waiting for slow branches."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return executable.func()
+
+    slow_branch_mock = Mock()
+
+    def fast_func():
+        return "fast"
+
+    def slow_func():
+        time.sleep(3)  # Sleep
+        slow_branch_mock.completed()  # Should not be called before executor returns
+        return "slow"
+
+    executables = [Executable(0, fast_func), Executable(1, slow_func)]
+    completion_config = CompletionConfig(min_successful=1)
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=2,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    execution_state = Mock()
+    execution_state.create_checkpoint = Mock()
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"  # noqa: SLF001
+    executor_context._parent_id = "parent"  # noqa: SLF001
+    executor_context.create_child_context = lambda op_id: Mock(state=execution_state)
+
+    result = executor.execute(execution_state, executor_context)
+
+    # Executor should have returned before slow branch completed
+    assert (
+        not slow_branch_mock.completed.called
+    ), "Executor should return before slow branch completes"
+
+    # Result should show MIN_SUCCESSFUL_REACHED
+    assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
+
+    # Verify counts
+    assert result.success_count == 1
+    assert result.failure_count == 0
+    assert result.started_count == 1
+    assert result.total_count == 2

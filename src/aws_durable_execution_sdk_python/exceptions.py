@@ -372,3 +372,32 @@ class CallableRuntimeErrorSerializableDetails:
 
 class SerDesError(DurableExecutionsError):
     """Raised when serialization fails."""
+
+
+class OrphanedChildException(BaseException):
+    """Raised when a child operation attempts to checkpoint after its parent context has completed.
+
+    This exception inherits from BaseException (not Exception) so that user-space doesn't
+    accidentally catch it with broad exception handlers like 'except Exception'.
+
+    This exception will happen when a parallel branch or map item tries to create a checkpoint
+    after its parent context (i.e the parallel/map operation) has already completed due to meeting
+    completion criteria (e.g., min_successful reached, failure tolerance exceeded).
+
+    Although you cannot cancel running futures in user-space, this will at least terminate the
+    child operation on the next checkpoint attempt, preventing subsequent operations in the
+    child scope from executing.
+
+    Attributes:
+        operation_id: Operation ID of the orphaned child
+    """
+
+    def __init__(self, message: str, operation_id: str):
+        """Initialize OrphanedChildException.
+
+        Args:
+            message: Human-readable error message
+            operation_id: Operation ID of the orphaned child (required)
+        """
+        super().__init__(message)
+        self.operation_id = operation_id
