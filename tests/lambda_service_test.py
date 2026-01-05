@@ -2042,3 +2042,306 @@ def test_lambda_client_checkpoint_with_non_none_client_token():
     call_args = mock_client.checkpoint_durable_execution.call_args[1]
     assert call_args["ClientToken"] == "client_token_123"
     assert result.checkpoint_token == "new_token"  # noqa: S105
+
+
+def test_operation_create_succeeded():
+    """Test Operation.create_succeeded factory method."""
+    original = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.STARTED,
+        name="test_step",
+    )
+
+    end_time = datetime.datetime(2023, 1, 2, tzinfo=datetime.UTC)
+    updated = original.create_succeeded(end_timestamp=end_time)
+
+    assert updated.operation_id == "op1"
+    assert updated.status == OperationStatus.SUCCEEDED
+    assert updated.end_timestamp == end_time
+    assert updated.name == "test_step"
+
+
+def test_operation_create_failed():
+    """Test Operation.create_failed factory method."""
+    original = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.STARTED,
+    )
+
+    end_time = datetime.datetime(2023, 1, 2, tzinfo=datetime.UTC)
+    updated = original.create_failed(end_timestamp=end_time)
+
+    assert updated.status == OperationStatus.FAILED
+    assert updated.end_timestamp == end_time
+
+
+def test_operation_create_ready():
+    """Test Operation.create_ready factory method."""
+    original = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.PENDING,
+        step_details=StepDetails(
+            attempt=1,
+            result="test_result",
+            next_attempt_timestamp=datetime.datetime(2023, 1, 1, tzinfo=datetime.UTC),
+        ),
+    )
+
+    updated = original.create_ready()
+
+    assert updated.status == OperationStatus.READY
+    assert updated.step_details.attempt == 1
+    assert updated.step_details.result == "test_result"
+    assert updated.step_details.next_attempt_timestamp is None  # Cleared
+
+
+def test_operation_create_callback_result():
+    """Test Operation.create_callback_result factory method."""
+    original = Operation(
+        operation_id="op1",
+        operation_type=OperationType.CALLBACK,
+        status=OperationStatus.STARTED,
+        callback_details=CallbackDetails(callback_id="cb123"),
+    )
+
+    end_time = datetime.datetime(2023, 1, 2, tzinfo=datetime.UTC)
+    updated = original.create_callback_result(result="success", end_timestamp=end_time)
+
+    assert updated.status == OperationStatus.SUCCEEDED
+    assert updated.callback_details.result == "success"
+    assert updated.callback_details.callback_id == "cb123"  # Preserved
+    assert updated.end_timestamp == end_time
+
+
+def test_operation_create_callback_failure():
+    """Test Operation.create_callback_failure factory method."""
+    original = Operation(
+        operation_id="op1",
+        operation_type=OperationType.CALLBACK,
+        status=OperationStatus.STARTED,
+        callback_details=CallbackDetails(callback_id="cb123"),
+    )
+
+    error = ErrorObject.from_message("callback failed")
+    updated = original.create_callback_failure(error=error)
+
+    assert updated.status == OperationStatus.FAILED
+    assert updated.callback_details.error.message == "callback failed"
+    assert updated.callback_details.callback_id == "cb123"  # Preserved from original
+
+
+def test_operation_create_execution_end():
+    """Test Operation.create_execution_end factory method."""
+    original = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+    )
+
+    end_time = datetime.datetime(2023, 1, 2, tzinfo=datetime.UTC)
+    updated = original.create_execution_end(
+        status=OperationStatus.SUCCEEDED, end_timestamp=end_time
+    )
+
+    assert updated.status == OperationStatus.SUCCEEDED
+    assert updated.end_timestamp == end_time
+
+
+def test_operation_create_merged_from_previous():
+    """Test Operation.create_merged_from_previous factory method."""
+    previous = Operation(
+        operation_id="prev1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        parent_id="parent1",
+        name="previous_step",
+        start_timestamp=datetime.datetime(2023, 1, 1, tzinfo=datetime.UTC),
+        end_timestamp=datetime.datetime(2023, 1, 2, tzinfo=datetime.UTC),
+        sub_type=OperationSubType.STEP,
+        step_details=StepDetails(attempt=1, result="prev_result"),
+    )
+
+    current = Operation(
+        operation_id="curr1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.PENDING,
+        name="current_step",
+    )
+
+    merged = current.create_merged_from_previous(previous)
+
+    assert merged.operation_id == "curr1"  # Current operation ID preserved
+    assert merged.status == OperationStatus.PENDING  # Current status preserved
+    assert merged.name == "current_step"  # Current name takes precedence
+    assert merged.parent_id == "parent1"  # Previous parent_id used
+    assert (
+        merged.start_timestamp == previous.start_timestamp
+    )  # Previous timestamps preserved
+    assert merged.end_timestamp == previous.end_timestamp
+    assert merged.sub_type == OperationSubType.STEP  # Previous sub_type used
+    assert merged.step_details == previous.step_details  # Previous details preserved
+
+
+def test_operation_create_with_start_timestamp():
+    """Test Operation.create_with_start_timestamp factory method."""
+    original = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.STARTED,
+    )
+
+    new_timestamp = datetime.datetime(2023, 1, 1, 10, 0, 0, tzinfo=datetime.UTC)
+    updated = original.create_with_start_timestamp(new_timestamp)
+
+    assert updated.start_timestamp == new_timestamp
+    assert updated.operation_id == "op1"
+    assert updated.status == OperationStatus.STARTED
+
+
+def test_operation_create_with_end_timestamp():
+    """Test Operation.create_with_end_timestamp factory method."""
+    original = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+    )
+
+    new_timestamp = datetime.datetime(2023, 1, 1, 11, 0, 0, tzinfo=datetime.UTC)
+    updated = original.create_with_end_timestamp(new_timestamp)
+
+    assert updated.end_timestamp == new_timestamp
+    assert updated.operation_id == "op1"
+    assert updated.status == OperationStatus.SUCCEEDED
+
+
+def test_operation_create_with_execution_details():
+    """Test Operation.create_with_execution_details factory method."""
+    original = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+    )
+
+    execution_details = ExecutionDetails(input_payload="test_input")
+    updated = original.create_with_execution_details(execution_details)
+
+    assert updated.execution_details == execution_details
+    assert updated.execution_details.input_payload == "test_input"
+    assert updated.operation_id == "exec1"
+
+
+def test_operation_create_with_callback_details():
+    """Test Operation.create_with_callback_details factory method."""
+    original = Operation(
+        operation_id="cb1",
+        operation_type=OperationType.CALLBACK,
+        status=OperationStatus.STARTED,
+    )
+
+    callback_details = CallbackDetails(callback_id="cb123", result="success")
+    updated = original.create_with_callback_details(callback_details)
+
+    assert updated.callback_details == callback_details
+    assert updated.callback_details.callback_id == "cb123"
+    assert updated.callback_details.result == "success"
+
+
+def test_operation_create_with_step_details():
+    """Test Operation.create_with_step_details factory method."""
+    original = Operation(
+        operation_id="step1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.READY,
+    )
+
+    step_details = StepDetails(attempt=2, result="step_result")
+    updated = original.create_with_step_details(step_details)
+
+    assert updated.step_details == step_details
+    assert updated.step_details.attempt == 2
+    assert updated.step_details.result == "step_result"
+
+
+def test_operation_create_with_wait_details():
+    """Test Operation.create_with_wait_details factory method."""
+    original = Operation(
+        operation_id="wait1",
+        operation_type=OperationType.WAIT,
+        status=OperationStatus.STARTED,
+    )
+
+    scheduled_time = datetime.datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
+    wait_details = WaitDetails(scheduled_end_timestamp=scheduled_time)
+    updated = original.create_with_wait_details(wait_details)
+
+    assert updated.wait_details == wait_details
+    assert updated.wait_details.scheduled_end_timestamp == scheduled_time
+
+
+def test_operation_create_with_context_details():
+    """Test Operation.create_with_context_details factory method."""
+    original = Operation(
+        operation_id="ctx1",
+        operation_type=OperationType.CONTEXT,
+        status=OperationStatus.SUCCEEDED,
+    )
+
+    context_details = ContextDetails(result="context_result", replay_children=True)
+    updated = original.create_with_context_details(context_details)
+
+    assert updated.context_details == context_details
+    assert updated.context_details.result == "context_result"
+    assert updated.context_details.replay_children is True
+
+
+def test_operation_create_with_chained_invoke_details():
+    """Test Operation.create_with_chained_invoke_details factory method."""
+    original = Operation(
+        operation_id="invoke1",
+        operation_type=OperationType.CHAINED_INVOKE,
+        status=OperationStatus.SUCCEEDED,
+    )
+
+    invoke_details = ChainedInvokeDetails(result="invoke_result")
+    updated = original.create_with_chained_invoke_details(invoke_details)
+
+    assert updated.chained_invoke_details == invoke_details
+    assert updated.chained_invoke_details.result == "invoke_result"
+
+
+def test_operation_create_callback_failure_without_existing_callback_details():
+    """Test Operation.create_callback_failure when no existing callback_details."""
+    original = Operation(
+        operation_id="op1",
+        operation_type=OperationType.CALLBACK,
+        status=OperationStatus.STARTED,
+        callback_details=None,
+    )
+
+    error = ErrorObject.from_message("callback failed")
+    updated = original.create_callback_failure(error=error)
+
+    assert updated.status == OperationStatus.FAILED
+    assert updated.callback_details is None  # No existing details to update
+
+
+def test_operation_create_completed_retry():
+    """Test Operation.create_completed_retry factory method."""
+    original = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.PENDING,
+        step_details=StepDetails(
+            attempt=2,
+            next_attempt_timestamp=datetime.datetime(2023, 1, 1, tzinfo=datetime.UTC),
+        ),
+    )
+
+    updated = original.create_completed_retry()
+
+    assert updated.status == OperationStatus.READY
+    assert updated.step_details.attempt == 2  # Preserved
+    assert updated.step_details.next_attempt_timestamp is None  # Cleared
