@@ -659,7 +659,7 @@ A: Test both the failure case (verify the error is raised) and the recovery case
 ## See also
 
 - [Basic test patterns](basic-tests.md) - Simple testing patterns
-- [Best practices](best-practices.md) - Testing recommendations
+- [Best practices](../best-practices.md) - Testing recommendations
 - [Steps](../core/steps.md) - Step operations
 - [Wait operations](../core/wait.md) - Wait operations
 - [Callbacks](../core/callbacks.md) - Callback operations

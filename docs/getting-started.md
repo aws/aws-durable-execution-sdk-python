@@ -278,8 +278,9 @@ Now that you've built your first durable function, explore the core features:
 
 ## See also
 
-- [DurableContext API](api-reference/context.md) - Complete reference for the context object
-- [Decorators](api-reference/decorators.md) - All available decorators
+- [Documentation index](index.md) - Browse all guides and examples
+- [Architecture diagrams](architecture.md) - Class diagrams and concurrency flows
+- [Logger integration](core/logger.md) - Replay-safe structured logging
 - [Examples directory](https://github.com/awslabs/aws-durable-execution-sdk-python/tree/main/examples) - More working examples
 
 [↑ Back to top](#table-of-contents)
