@@ -914,12 +914,6 @@ class StateOutput:
 
 
 # region client
-# Module-level cache for boto3 Lambda client to optimize warm starts.
-# Reusing the client across invocations avoids repeated credential resolution,
-# endpoint configuration, and connection pool setup.
-_cached_lambda_client: LambdaClient | None = None
-
-
 class DurableServiceClient(Protocol):
     """Durable Service clients must implement this interface."""
 
@@ -943,14 +937,16 @@ class DurableServiceClient(Protocol):
 class LambdaClient(DurableServiceClient):
     """Persist durable operations to the Lambda Durable Function APIs."""
 
+    boto3_instance: LambdaClient | None = None
+
     def __init__(self, client: Any) -> None:
         self.client = client
 
-    @staticmethod
-    def initialize_client() -> LambdaClient:
+    @classmethod
+    def initialize_client(cls) -> LambdaClient:
         """Initialize or return cached Lambda client.
 
-        Implements lazy initialization with module-level caching to optimize
+        Implements lazy initialization with class-level caching to optimize
         Lambda warm starts. The client is created once and reused across
         invocations, avoiding repeated credential resolution and connection
         pool setup.
@@ -958,8 +954,7 @@ class LambdaClient(DurableServiceClient):
         Returns:
             LambdaClient: The cached or newly created Lambda client.
         """
-        global _cached_lambda_client
-        if _cached_lambda_client is None:
+        if cls.boto3_instance is None:
             client = boto3.client(
                 "lambda",
                 config=Config(
@@ -967,8 +962,8 @@ class LambdaClient(DurableServiceClient):
                     read_timeout=50,
                 ),
             )
-            _cached_lambda_client = LambdaClient(client=client)
-        return _cached_lambda_client
+            cls.boto3_instance = cls(client=client)
+        return cls.boto3_instance
 
     def checkpoint(
         self,

@@ -11,7 +11,6 @@ from aws_durable_execution_sdk_python.exceptions import (
     GetExecutionStateError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
-import aws_durable_execution_sdk_python.lambda_service as lambda_service_module
 from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
     CallbackOptions,
@@ -37,6 +36,20 @@ from aws_durable_execution_sdk_python.lambda_service import (
     WaitDetails,
     WaitOptions,
 )
+
+
+# =============================================================================
+# Fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def reset_lambda_client_cache():
+    """Reset the class-level Lambda client cache before and after each test."""
+    LambdaClient.boto3_instance = None
+    yield
+    LambdaClient.boto3_instance = None
+
 
 # =============================================================================
 # Tests for Data Classes (ExecutionDetails, ContextDetails, ErrorObject, etc.)
@@ -1909,7 +1922,7 @@ def test_lambda_client_constructor():
 
 @patch.dict("os.environ", {}, clear=True)
 @patch("boto3.client")
-def test_lambda_client_initialize_client_default(mock_boto_client):
+def test_lambda_client_initialize_client_default(mock_boto_client, reset_lambda_client_cache):
     """Test LambdaClient.initialize_client with default endpoint."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
@@ -1929,7 +1942,7 @@ def test_lambda_client_initialize_client_default(mock_boto_client):
 
 @patch.dict("os.environ", {"AWS_ENDPOINT_URL_LAMBDA": "http://localhost:3000"})
 @patch("boto3.client")
-def test_lambda_client_initialize_client_with_endpoint(mock_boto_client):
+def test_lambda_client_initialize_client_with_endpoint(mock_boto_client, reset_lambda_client_cache):
     """Test LambdaClient.initialize_client with custom endpoint (boto3 handles it automatically)."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
@@ -2007,7 +2020,7 @@ def test_checkpoint_error_handling():
 
 @patch.dict("os.environ", {}, clear=True)
 @patch("boto3.client")
-def test_lambda_client_initialize_client_no_endpoint(mock_boto_client):
+def test_lambda_client_initialize_client_no_endpoint(mock_boto_client, reset_lambda_client_cache):
     """Test LambdaClient.initialize_client without AWS_ENDPOINT_URL_LAMBDA."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
@@ -2050,14 +2063,6 @@ def test_lambda_client_checkpoint_with_non_none_client_token():
 # =============================================================================
 
 
-@pytest.fixture
-def reset_lambda_client_cache():
-    """Reset the module-level Lambda client cache before and after each test."""
-    lambda_service_module._cached_lambda_client = None
-    yield
-    lambda_service_module._cached_lambda_client = None
-
-
 @patch("boto3.client")
 def test_lambda_client_cache_reuses_client(mock_boto_client, reset_lambda_client_cache):
     """Test that initialize_client returns the same cached client on subsequent calls."""
@@ -2094,16 +2099,16 @@ def test_lambda_client_cache_creates_client_only_once(
 
 
 @patch("boto3.client")
-def test_lambda_client_cache_is_module_level(
+def test_lambda_client_cache_is_class_level(
     mock_boto_client, reset_lambda_client_cache
 ):
-    """Test that the cache is stored at module level and persists across calls."""
+    """Test that the cache is stored at class level and persists across calls."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
 
     # Create client
     client = LambdaClient.initialize_client()
 
-    # Verify the cache is set at module level
-    assert lambda_service_module._cached_lambda_client is client
-    assert lambda_service_module._cached_lambda_client is not None
+    # Verify the cache is set at class level
+    assert LambdaClient.boto3_instance is client
+    assert LambdaClient.boto3_instance is not None
