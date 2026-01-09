@@ -37,7 +37,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
     WaitOptions,
 )
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -1922,7 +1921,9 @@ def test_lambda_client_constructor():
 
 @patch.dict("os.environ", {}, clear=True)
 @patch("boto3.client")
-def test_lambda_client_initialize_client_default(mock_boto_client, reset_lambda_client_cache):
+def test_lambda_client_initialize_client_default(
+    mock_boto_client, reset_lambda_client_cache
+):
     """Test LambdaClient.initialize_client with default endpoint."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
@@ -1942,7 +1943,9 @@ def test_lambda_client_initialize_client_default(mock_boto_client, reset_lambda_
 
 @patch.dict("os.environ", {"AWS_ENDPOINT_URL_LAMBDA": "http://localhost:3000"})
 @patch("boto3.client")
-def test_lambda_client_initialize_client_with_endpoint(mock_boto_client, reset_lambda_client_cache):
+def test_lambda_client_initialize_client_with_endpoint(
+    mock_boto_client, reset_lambda_client_cache
+):
     """Test LambdaClient.initialize_client with custom endpoint (boto3 handles it automatically)."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
@@ -2020,7 +2023,9 @@ def test_checkpoint_error_handling():
 
 @patch.dict("os.environ", {}, clear=True)
 @patch("boto3.client")
-def test_lambda_client_initialize_client_no_endpoint(mock_boto_client, reset_lambda_client_cache):
+def test_lambda_client_initialize_client_no_endpoint(
+    mock_boto_client, reset_lambda_client_cache
+):
     """Test LambdaClient.initialize_client without AWS_ENDPOINT_URL_LAMBDA."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
