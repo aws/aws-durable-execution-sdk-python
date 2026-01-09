@@ -11,6 +11,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     GetExecutionStateError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+import aws_durable_execution_sdk_python.lambda_service as lambda_service_module
 from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
     CallbackOptions,
@@ -2042,3 +2043,67 @@ def test_lambda_client_checkpoint_with_non_none_client_token():
     call_args = mock_client.checkpoint_durable_execution.call_args[1]
     assert call_args["ClientToken"] == "client_token_123"
     assert result.checkpoint_token == "new_token"  # noqa: S105
+
+
+# =============================================================================
+# Tests for LambdaClient caching behavior
+# =============================================================================
+
+
+@pytest.fixture
+def reset_lambda_client_cache():
+    """Reset the module-level Lambda client cache before and after each test."""
+    lambda_service_module._cached_lambda_client = None
+    yield
+    lambda_service_module._cached_lambda_client = None
+
+
+@patch("boto3.client")
+def test_lambda_client_cache_reuses_client(mock_boto_client, reset_lambda_client_cache):
+    """Test that initialize_client returns the same cached client on subsequent calls."""
+    mock_client = Mock()
+    mock_boto_client.return_value = mock_client
+
+    # First call should create the client
+    client1 = LambdaClient.initialize_client()
+
+    # Second call should return the same cached client
+    client2 = LambdaClient.initialize_client()
+
+    # boto3.client should only be called once
+    mock_boto_client.assert_called_once()
+
+    # Both calls should return the same instance
+    assert client1 is client2
+
+
+@patch("boto3.client")
+def test_lambda_client_cache_creates_client_only_once(
+    mock_boto_client, reset_lambda_client_cache
+):
+    """Test that boto3.client is called only once even with multiple initialize_client calls."""
+    mock_client = Mock()
+    mock_boto_client.return_value = mock_client
+
+    # Call initialize_client multiple times
+    for _ in range(5):
+        LambdaClient.initialize_client()
+
+    # boto3.client should only be called once
+    assert mock_boto_client.call_count == 1
+
+
+@patch("boto3.client")
+def test_lambda_client_cache_is_module_level(
+    mock_boto_client, reset_lambda_client_cache
+):
+    """Test that the cache is stored at module level and persists across calls."""
+    mock_client = Mock()
+    mock_boto_client.return_value = mock_client
+
+    # Create client
+    client = LambdaClient.initialize_client()
+
+    # Verify the cache is set at module level
+    assert lambda_service_module._cached_lambda_client is client
+    assert lambda_service_module._cached_lambda_client is not None
