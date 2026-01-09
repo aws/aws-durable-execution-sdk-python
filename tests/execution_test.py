@@ -29,15 +29,20 @@ from aws_durable_execution_sdk_python.execution import (
 
 # LambdaContext no longer needed - using duck typing
 from aws_durable_execution_sdk_python.lambda_service import (
+    CallbackDetails,
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
+    ContextDetails,
     DurableServiceClient,
+    ErrorObject,
     ExecutionDetails,
     Operation,
     OperationAction,
     OperationStatus,
     OperationType,
     OperationUpdate,
+    StepDetails,
+    WaitDetails,
 )
 
 LARGE_RESULT = "large_success" * 1024 * 1024
@@ -2037,3 +2042,512 @@ def test_durable_execution_with_non_dict_event_raises_error():
         ),
     ):
         test_handler(non_dict_event, lambda_context)
+
+
+# =============================================================================
+# Tests for JSON Serialization Methods
+# =============================================================================
+
+
+def test_initial_execution_state_to_json_dict_minimal():
+    """Test InitialExecutionState.to_json_dict with minimal data."""
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+    )
+
+    state = InitialExecutionState(operations=[operation], next_marker="marker123")
+
+    result = state.to_json_dict()
+    expected = {"Operations": [operation.to_json_dict()], "NextMarker": "marker123"}
+
+    assert result == expected
+
+
+def test_initial_execution_state_to_json_dict_with_timestamps():
+    """Test InitialExecutionState.to_json_dict converts datetime objects to millisecond timestamps."""
+    start_time = datetime.datetime(2023, 1, 1, 10, 0, 0, tzinfo=datetime.UTC)
+    end_time = datetime.datetime(2023, 1, 1, 11, 0, 0, tzinfo=datetime.UTC)
+
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        start_timestamp=start_time,
+        end_timestamp=end_time,
+        execution_details=ExecutionDetails(input_payload="test_payload"),
+    )
+
+    state = InitialExecutionState(operations=[operation], next_marker="marker123")
+
+    result = state.to_json_dict()
+
+    # Verify that timestamps are converted to milliseconds in the operation
+    operation_result = result["Operations"][0]
+    expected_start_ms = int(start_time.timestamp() * 1000)
+    expected_end_ms = int(end_time.timestamp() * 1000)
+
+    assert operation_result["StartTimestamp"] == expected_start_ms
+    assert operation_result["EndTimestamp"] == expected_end_ms
+    assert result["NextMarker"] == "marker123"
+
+
+def test_initial_execution_state_to_json_dict_empty():
+    """Test InitialExecutionState.to_json_dict with empty operations."""
+    state = InitialExecutionState(operations=[], next_marker="")
+
+    result = state.to_json_dict()
+    expected = {"Operations": [], "NextMarker": ""}
+
+    assert result == expected
+
+
+def test_initial_execution_state_from_json_dict_minimal():
+    """Test InitialExecutionState.from_json_dict with minimal data."""
+    data = {
+        "Operations": [
+            {
+                "Id": "op1",
+                "Type": "EXECUTION",
+                "Status": "STARTED",
+            }
+        ],
+        "NextMarker": "test-marker",
+    }
+
+    result = InitialExecutionState.from_json_dict(data)
+
+    assert len(result.operations) == 1
+    assert result.next_marker == "test-marker"
+    assert result.operations[0].operation_id == "op1"
+    assert result.operations[0].operation_type is OperationType.EXECUTION
+    assert result.operations[0].status is OperationStatus.STARTED
+
+
+def test_initial_execution_state_from_json_dict_with_timestamps():
+    """Test InitialExecutionState.from_json_dict converts millisecond timestamps to datetime objects."""
+    start_ms = 1672574400000  # 2023-01-01 12:00:00 UTC
+    end_ms = 1672578000000  # 2023-01-01 13:00:00 UTC
+
+    data = {
+        "Operations": [
+            {
+                "Id": "op1",
+                "Type": "EXECUTION",
+                "Status": "STARTED",
+                "StartTimestamp": start_ms,
+                "EndTimestamp": end_ms,
+                "ExecutionDetails": {"InputPayload": "test_payload"},
+            }
+        ],
+        "NextMarker": "test-marker",
+    }
+
+    result = InitialExecutionState.from_json_dict(data)
+
+    expected_start = datetime.datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
+    expected_end = datetime.datetime(2023, 1, 1, 13, 0, 0, tzinfo=datetime.UTC)
+
+    assert len(result.operations) == 1
+    operation = result.operations[0]
+    assert operation.start_timestamp == expected_start
+    assert operation.end_timestamp == expected_end
+    assert operation.execution_details.input_payload == "test_payload"
+
+
+def test_initial_execution_state_from_json_dict_no_operations():
+    """Test InitialExecutionState.from_json_dict handles missing Operations key."""
+    data = {"NextMarker": "test-marker"}
+
+    result = InitialExecutionState.from_json_dict(data)
+
+    assert len(result.operations) == 0
+    assert result.next_marker == "test-marker"
+
+
+def test_initial_execution_state_from_json_dict_empty_operations():
+    """Test InitialExecutionState.from_json_dict handles empty Operations list."""
+    data = {"Operations": [], "NextMarker": "test-marker"}
+
+    result = InitialExecutionState.from_json_dict(data)
+
+    assert len(result.operations) == 0
+    assert result.next_marker == "test-marker"
+
+
+def test_initial_execution_state_json_roundtrip():
+    """Test InitialExecutionState to_json_dict -> from_json_dict roundtrip preserves all data."""
+    start_time = datetime.datetime(2023, 1, 1, 10, 0, 0, tzinfo=datetime.UTC)
+    next_attempt_time = datetime.datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
+
+    error = ErrorObject(
+        message="Test error",
+        type="TestError",
+        data="error_data",
+        stack_trace=["line1", "line2"],
+    )
+
+    step_details = StepDetails(
+        attempt=2,
+        next_attempt_timestamp=next_attempt_time,
+        result="step_result",
+        error=error,
+    )
+
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.PENDING,
+        parent_id="parent1",
+        name="test_step",
+        start_timestamp=start_time,
+        step_details=step_details,
+    )
+
+    original = InitialExecutionState(operations=[operation], next_marker="marker123")
+
+    # Convert to JSON dict and back
+    json_data = original.to_json_dict()
+    restored = InitialExecutionState.from_json_dict(json_data)
+
+    # Verify all fields are preserved
+    assert len(restored.operations) == len(original.operations)
+    assert restored.next_marker == original.next_marker
+
+    restored_op = restored.operations[0]
+    original_op = original.operations[0]
+
+    assert restored_op.operation_id == original_op.operation_id
+    assert restored_op.operation_type == original_op.operation_type
+    assert restored_op.status == original_op.status
+    assert restored_op.parent_id == original_op.parent_id
+    assert restored_op.name == original_op.name
+    assert restored_op.start_timestamp == original_op.start_timestamp
+    assert restored_op.step_details.attempt == original_op.step_details.attempt
+    assert (
+        restored_op.step_details.next_attempt_timestamp
+        == original_op.step_details.next_attempt_timestamp
+    )
+    assert restored_op.step_details.result == original_op.step_details.result
+    assert (
+        restored_op.step_details.error.message == original_op.step_details.error.message
+    )
+
+
+def test_durable_execution_invocation_input_to_json_dict_minimal():
+    """Test DurableExecutionInvocationInput.to_json_dict with minimal data."""
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+    )
+
+    initial_state = InitialExecutionState(
+        operations=[operation], next_marker="test_marker"
+    )
+
+    invocation_input = DurableExecutionInvocationInput(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=initial_state,
+    )
+
+    result = invocation_input.to_json_dict()
+    expected = {
+        "DurableExecutionArn": "arn:test:execution",
+        "CheckpointToken": "token123",
+        "InitialExecutionState": initial_state.to_json_dict(),
+    }
+
+    assert result == expected
+
+
+def test_durable_execution_invocation_input_to_json_dict_with_timestamps():
+    """Test DurableExecutionInvocationInput.to_json_dict converts datetime objects to millisecond timestamps."""
+    start_time = datetime.datetime(2023, 1, 1, 10, 0, 0, tzinfo=datetime.UTC)
+    end_time = datetime.datetime(2023, 1, 1, 11, 0, 0, tzinfo=datetime.UTC)
+
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        start_timestamp=start_time,
+        end_timestamp=end_time,
+        execution_details=ExecutionDetails(input_payload="test_payload"),
+    )
+
+    initial_state = InitialExecutionState(
+        operations=[operation], next_marker="test_marker"
+    )
+
+    invocation_input = DurableExecutionInvocationInput(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=initial_state,
+    )
+
+    result = invocation_input.to_json_dict()
+
+    # Verify that timestamps are converted to milliseconds in nested operations
+    operation_result = result["InitialExecutionState"]["Operations"][0]
+    expected_start_ms = int(start_time.timestamp() * 1000)
+    expected_end_ms = int(end_time.timestamp() * 1000)
+
+    assert operation_result["StartTimestamp"] == expected_start_ms
+    assert operation_result["EndTimestamp"] == expected_end_ms
+    assert result["DurableExecutionArn"] == "arn:test:execution"
+    assert result["CheckpointToken"] == "token123"
+
+
+def test_durable_execution_invocation_input_to_json_dict_empty_operations():
+    """Test DurableExecutionInvocationInput.to_json_dict with empty operations."""
+    initial_state = InitialExecutionState(operations=[], next_marker="")
+
+    invocation_input = DurableExecutionInvocationInput(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=initial_state,
+    )
+
+    result = invocation_input.to_json_dict()
+    expected = {
+        "DurableExecutionArn": "arn:test:execution",
+        "CheckpointToken": "token123",
+        "InitialExecutionState": {"Operations": [], "NextMarker": ""},
+    }
+
+    assert result == expected
+
+
+def test_durable_execution_invocation_input_from_json_dict_minimal():
+    """Test DurableExecutionInvocationInput.from_json_dict with minimal data."""
+    data = {
+        "DurableExecutionArn": "arn:test:execution",
+        "CheckpointToken": "token123",
+        "InitialExecutionState": {
+            "Operations": [
+                {
+                    "Id": "exec1",
+                    "Type": "EXECUTION",
+                    "Status": "STARTED",
+                }
+            ],
+            "NextMarker": "test_marker",
+        },
+    }
+
+    result = DurableExecutionInvocationInput.from_json_dict(data)
+
+    assert result.durable_execution_arn == "arn:test:execution"
+    assert result.checkpoint_token == "token123"  # noqa: S105
+    assert isinstance(result.initial_execution_state, InitialExecutionState)
+    assert len(result.initial_execution_state.operations) == 1
+    assert result.initial_execution_state.next_marker == "test_marker"
+    assert result.initial_execution_state.operations[0].operation_id == "exec1"
+
+
+def test_durable_execution_invocation_input_from_json_dict_with_timestamps():
+    """Test DurableExecutionInvocationInput.from_json_dict converts millisecond timestamps to datetime objects."""
+    start_ms = 1672574400000  # 2023-01-01 12:00:00 UTC
+    end_ms = 1672578000000  # 2023-01-01 13:00:00 UTC
+
+    data = {
+        "DurableExecutionArn": "arn:test:execution",
+        "CheckpointToken": "token123",
+        "InitialExecutionState": {
+            "Operations": [
+                {
+                    "Id": "exec1",
+                    "Type": "EXECUTION",
+                    "Status": "STARTED",
+                    "StartTimestamp": start_ms,
+                    "EndTimestamp": end_ms,
+                    "ExecutionDetails": {"InputPayload": "test_payload"},
+                }
+            ],
+            "NextMarker": "test_marker",
+        },
+    }
+
+    result = DurableExecutionInvocationInput.from_json_dict(data)
+
+    expected_start = datetime.datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
+    expected_end = datetime.datetime(2023, 1, 1, 13, 0, 0, tzinfo=datetime.UTC)
+
+    operation = result.initial_execution_state.operations[0]
+    assert operation.start_timestamp == expected_start
+    assert operation.end_timestamp == expected_end
+    assert operation.execution_details.input_payload == "test_payload"
+
+
+def test_durable_execution_invocation_input_from_json_dict_empty_initial_state():
+    """Test DurableExecutionInvocationInput.from_json_dict handles missing InitialExecutionState."""
+    data = {
+        "DurableExecutionArn": "arn:test:execution",
+        "CheckpointToken": "token123",
+    }
+
+    result = DurableExecutionInvocationInput.from_json_dict(data)
+
+    assert result.durable_execution_arn == "arn:test:execution"
+    assert result.checkpoint_token == "token123"  # noqa: S105
+    assert isinstance(result.initial_execution_state, InitialExecutionState)
+    assert len(result.initial_execution_state.operations) == 0
+    assert not result.initial_execution_state.next_marker
+
+
+def test_durable_execution_invocation_input_json_roundtrip():
+    """Test DurableExecutionInvocationInput to_json_dict -> from_json_dict roundtrip preserves all data."""
+    start_time = datetime.datetime(2023, 1, 1, 10, 0, 0, tzinfo=datetime.UTC)
+    end_time = datetime.datetime(2023, 1, 1, 11, 0, 0, tzinfo=datetime.UTC)
+    next_attempt_time = datetime.datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
+
+    error = ErrorObject(
+        message="Test error",
+        type="TestError",
+        data="error_data",
+        stack_trace=["line1", "line2"],
+    )
+
+    step_details = StepDetails(
+        attempt=2,
+        next_attempt_timestamp=next_attempt_time,
+        result="step_result",
+        error=error,
+    )
+
+    wait_details = WaitDetails(scheduled_end_timestamp=next_attempt_time)
+
+    execution_operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        start_timestamp=start_time,
+        end_timestamp=end_time,
+        execution_details=ExecutionDetails(input_payload="test_payload"),
+    )
+
+    step_operation = Operation(
+        operation_id="step1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.PENDING,
+        parent_id="exec1",
+        name="test_step",
+        start_timestamp=start_time,
+        step_details=step_details,
+        wait_details=wait_details,
+    )
+
+    initial_state = InitialExecutionState(
+        operations=[execution_operation, step_operation], next_marker="marker123"
+    )
+
+    original = DurableExecutionInvocationInput(
+        durable_execution_arn="arn:test:execution:12345",
+        checkpoint_token="token123456",  # noqa: S106
+        initial_execution_state=initial_state,
+    )
+
+    # Convert to JSON dict and back
+    json_data = original.to_json_dict()
+    restored = DurableExecutionInvocationInput.from_json_dict(json_data)
+
+    # Verify all top-level fields are preserved
+    assert restored.durable_execution_arn == original.durable_execution_arn
+    assert restored.checkpoint_token == original.checkpoint_token
+
+    # Verify initial execution state is preserved
+    assert len(restored.initial_execution_state.operations) == len(
+        original.initial_execution_state.operations
+    )
+    assert (
+        restored.initial_execution_state.next_marker
+        == original.initial_execution_state.next_marker
+    )
+
+    # Verify execution operation is preserved
+    restored_exec_op = restored.initial_execution_state.operations[0]
+    original_exec_op = original.initial_execution_state.operations[0]
+
+    assert restored_exec_op.operation_id == original_exec_op.operation_id
+    assert restored_exec_op.operation_type == original_exec_op.operation_type
+    assert restored_exec_op.status == original_exec_op.status
+    assert restored_exec_op.start_timestamp == original_exec_op.start_timestamp
+    assert restored_exec_op.end_timestamp == original_exec_op.end_timestamp
+    assert (
+        restored_exec_op.execution_details.input_payload
+        == original_exec_op.execution_details.input_payload
+    )
+
+    # Verify step operation is preserved
+    restored_step_op = restored.initial_execution_state.operations[1]
+    original_step_op = original.initial_execution_state.operations[1]
+
+    assert restored_step_op.operation_id == original_step_op.operation_id
+    assert restored_step_op.operation_type == original_step_op.operation_type
+    assert restored_step_op.status == original_step_op.status
+    assert restored_step_op.parent_id == original_step_op.parent_id
+    assert restored_step_op.name == original_step_op.name
+    assert restored_step_op.start_timestamp == original_step_op.start_timestamp
+    assert (
+        restored_step_op.step_details.attempt == original_step_op.step_details.attempt
+    )
+    assert (
+        restored_step_op.step_details.next_attempt_timestamp
+        == original_step_op.step_details.next_attempt_timestamp
+    )
+    assert restored_step_op.step_details.result == original_step_op.step_details.result
+    assert (
+        restored_step_op.step_details.error.message
+        == original_step_op.step_details.error.message
+    )
+    assert (
+        restored_step_op.wait_details.scheduled_end_timestamp
+        == original_step_op.wait_details.scheduled_end_timestamp
+    )
+
+
+def test_durable_execution_invocation_input_json_dict_preserves_non_timestamp_fields():
+    """Test that to_json_dict preserves all non-timestamp fields unchanged."""
+
+    context_details = ContextDetails(replay_children=True, result="context_result")
+
+    callback_details = CallbackDetails(callback_id="cb123", result="callback_result")
+
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.CONTEXT,
+        status=OperationStatus.SUCCEEDED,
+        parent_id="parent1",
+        name="test_context",
+        context_details=context_details,
+        callback_details=callback_details,
+    )
+
+    initial_state = InitialExecutionState(
+        operations=[operation], next_marker="marker123"
+    )
+
+    invocation_input = DurableExecutionInvocationInput(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=initial_state,
+    )
+
+    result = invocation_input.to_json_dict()
+
+    # Verify non-timestamp fields are unchanged
+    operation_result = result["InitialExecutionState"]["Operations"][0]
+    assert operation_result["Id"] == "op1"
+    assert operation_result["Type"] == "CONTEXT"
+    assert operation_result["Status"] == "SUCCEEDED"
+    assert operation_result["ParentId"] == "parent1"
+    assert operation_result["Name"] == "test_context"
+    assert operation_result["ContextDetails"]["Result"] == "context_result"
+    assert operation_result["CallbackDetails"]["CallbackId"] == "cb123"
+    assert operation_result["CallbackDetails"]["Result"] == "callback_result"
+
+    assert result["DurableExecutionArn"] == "arn:test:execution"
+    assert result["CheckpointToken"] == "token123"
+    assert result["InitialExecutionState"]["NextMarker"] == "marker123"

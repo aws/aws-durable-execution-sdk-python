@@ -59,6 +59,16 @@ class InitialExecutionState:
             next_marker=input_dict.get("NextMarker", ""),
         )
 
+    @staticmethod
+    def from_json_dict(input_dict: MutableMapping[str, Any]) -> InitialExecutionState:
+        operations = []
+        if input_operations := input_dict.get("Operations"):
+            operations = [Operation.from_json_dict(op) for op in input_operations]
+        return InitialExecutionState(
+            operations=operations,
+            next_marker=input_dict.get("NextMarker", ""),
+        )
+
     def get_execution_operation(self) -> Operation | None:
         if not self.operations:
             # Due to payload size limitations we may have an empty operations list.
@@ -91,6 +101,12 @@ class InitialExecutionState:
             "NextMarker": self.next_marker,
         }
 
+    def to_json_dict(self) -> MutableMapping[str, Any]:
+        return {
+            "Operations": [op.to_json_dict() for op in self.operations],
+            "NextMarker": self.next_marker,
+        }
+
 
 @dataclass(frozen=True)
 class DurableExecutionInvocationInput:
@@ -110,11 +126,30 @@ class DurableExecutionInvocationInput:
             ),
         )
 
+    @staticmethod
+    def from_json_dict(
+        input_dict: MutableMapping[str, Any],
+    ) -> DurableExecutionInvocationInput:
+        return DurableExecutionInvocationInput(
+            durable_execution_arn=input_dict["DurableExecutionArn"],
+            checkpoint_token=input_dict["CheckpointToken"],
+            initial_execution_state=InitialExecutionState.from_json_dict(
+                input_dict.get("InitialExecutionState", {})
+            ),
+        )
+
     def to_dict(self) -> MutableMapping[str, Any]:
         return {
             "DurableExecutionArn": self.durable_execution_arn,
             "CheckpointToken": self.checkpoint_token,
             "InitialExecutionState": self.initial_execution_state.to_dict(),
+        }
+
+    def to_json_dict(self) -> MutableMapping[str, Any]:
+        return {
+            "DurableExecutionArn": self.durable_execution_arn,
+            "CheckpointToken": self.checkpoint_token,
+            "InitialExecutionState": self.initial_execution_state.to_json_dict(),
         }
 
 
