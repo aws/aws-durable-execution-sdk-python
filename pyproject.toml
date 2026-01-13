@@ -76,4 +76,5 @@ preview = true
   "PLR6301",
   "SIM117",
   "TRY301",
+  "SLF001",
 ]
