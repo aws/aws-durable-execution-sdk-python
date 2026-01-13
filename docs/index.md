@@ -6,7 +6,6 @@
 
 - [What is the Durable Execution SDK?](#what-is-the-durable-execution-sdk)
 - [Key features](#key-features)
-- [Quick navigation](#quick-navigation)
 - [Installation](#installation)
 - [Quick example](#quick-example)
 - [Core concepts](#core-concepts)
@@ -33,37 +32,6 @@ The SDK provides a `DurableContext` that gives you operations like steps, waits,
 - **Map operations** - Process collections in parallel with batching and failure tolerance
 - **Child contexts** - Isolate nested workflows for better organization and error handling
 - **Structured logging** - Integrate with your logger to track execution flow and debug issues
-
-[↑ Back to top](#table-of-contents)
-
-## Quick navigation
-
-**New to durable functions?**
-- [Getting started guide](getting-started.md) - Build your first durable function
-
-**Core operations:**
-- [Steps](core/steps.md) - Execute code with automatic checkpointing and retry support
-- [Wait operations](core/wait.md) - Pause execution without blocking Lambda resources
-- [Callbacks](core/callbacks.md) - Wait for external systems to respond
-- [Invoke operations](core/invoke.md) - Call other durable functions and compose workflows
-- [Child contexts](core/child-contexts.md) - Organize complex workflows into isolated units
-- [Parallel operations](core/parallel.md) - Run multiple operations concurrently
-- [Map operations](core/map.md) - Process collections in parallel with batching
-- [Logger integration](core/logger.md) - Add structured logging to track execution
-
-**Advanced topics:**
-- [Error handling](advanced/error-handling.md) - Handle failures and implement retry strategies
-- [Testing modes](advanced/testing-modes.md) - Run tests locally or against deployed Lambda functions
-- [Serialization](advanced/serialization.md) - Customize how data is serialized in checkpoints
-- [Configuration](advanced/configuration.md) - Fine-tune operation behavior
-- [Performance optimization](advanced/performance.md) - Best practices for efficient workflows
-
-**API reference:**
-- [DurableContext](api-reference/context.md) - Main context class and methods
-- [Configuration classes](api-reference/config.md) - StepConfig, CallbackConfig, and more
-- [Decorators](api-reference/decorators.md) - @durable_execution, @durable_step, etc.
-- [Types and protocols](api-reference/types.md) - Type definitions and interfaces
-- [Exceptions](api-reference/exceptions.md) - DurableExecutionsError, InvocationError, and more
 
 [↑ Back to top](#table-of-contents)
 
@@ -194,6 +162,8 @@ The SDK integrates with AWS Lambda's durable execution service to provide reliab
 ### Checkpointing
 
 The SDK uses a background thread to batch checkpoints for efficiency. Critical operations (like step starts with at-most-once semantics) block until the checkpoint is confirmed. Non-critical operations (like observability checkpoints) are asynchronous for better performance
+
+[**See architecture diagrams**](architecture.md) for class diagrams and concurrency flows.
 
 [↑ Back to top](#table-of-contents)
 

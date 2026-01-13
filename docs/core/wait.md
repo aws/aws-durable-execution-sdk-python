@@ -48,7 +48,7 @@ Use `context.wait()` when you need a simple time-based delay.
 
 **Choose a different method if you need:**
 - **Wait for external system response** → Use [`context.wait_for_callback()`](callbacks.md)
-- **Wait until a condition is met** → Use [`context.wait_for_condition()`](../advanced/wait-for-condition.md)
+- **Wait until a condition is met** → Use `context.wait_for_condition()`
 - **Wait for a step to complete** → Use [`context.step()`](steps.md)
 
 [↑ Back to top](#table-of-contents)
@@ -293,8 +293,6 @@ def handler(event: dict, context: DurableContext) -> dict:
     return result
 ```
 
-See [Wait for Condition](../advanced/wait-for-condition.md) for more details.
-
 [↑ Back to top](#table-of-contents)
 
 ## Alternatives to wait operations
@@ -354,8 +352,6 @@ def handler(event: dict, context: DurableContext) -> dict:
     )
     return result
 ```
-
-See [Wait for Condition](../advanced/wait-for-condition.md) for more details.
 
 [↑ Back to top](#table-of-contents)
 
@@ -438,7 +434,6 @@ def test_named_wait(durable_runner):
 
 - [Steps](steps.md) - Execute business logic with automatic checkpointing
 - [Callbacks](callbacks.md) - Wait for external system responses
-- [Wait for Condition](../advanced/wait-for-condition.md) - Poll until a condition is met
 - [Getting Started](../getting-started.md) - Learn the basics of durable functions
 
 [↑ Back to top](#table-of-contents)
