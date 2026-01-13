@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import datetime
 import logging
 from dataclasses import dataclass, field
@@ -692,6 +693,24 @@ class OperationUpdate:
     # endregion wait
 
 
+class TimestampConverter:
+    """Converter for datetime/Unix timestamp conversions."""
+
+    @staticmethod
+    def to_unix_millis(dt: datetime.datetime | None) -> int | None:
+        """Convert datetime to Unix timestamp in milliseconds."""
+        return int(dt.timestamp() * 1000) if dt else None
+
+    @staticmethod
+    def from_unix_millis(ms: int | None) -> datetime.datetime | None:
+        """Convert Unix timestamp in milliseconds to datetime."""
+        return (
+            datetime.datetime.fromtimestamp(ms / 1000, tz=datetime.UTC)
+            if ms is not None
+            else None
+        )
+
+
 @dataclass(frozen=True)
 class Operation:
     """Represent the Operation type for GetDurableExecutionState and CheckpointDurableExecution."""
@@ -805,9 +824,11 @@ class Operation:
                 step_dict["Error"] = self.step_details.error.to_dict()
             result["StepDetails"] = step_dict
         if self.wait_details:
-            result["WaitDetails"] = {
-                "ScheduledEndTimestamp": self.wait_details.scheduled_end_timestamp
-            }
+            result["WaitDetails"] = (
+                {"ScheduledEndTimestamp": self.wait_details.scheduled_end_timestamp}
+                if self.wait_details.scheduled_end_timestamp
+                else {}
+            )
         if self.callback_details:
             callback_dict: MutableMapping[str, Any] = {
                 "CallbackId": self.callback_details.callback_id
@@ -825,6 +846,79 @@ class Operation:
                 invoke_dict["Error"] = self.chained_invoke_details.error.to_dict()
             result["ChainedInvokeDetails"] = invoke_dict
         return result
+
+    def to_json_dict(self) -> MutableMapping[str, Any]:
+        """Convert the Operation to a JSON-serializable dictionary.
+
+        Converts datetime objects to millisecond timestamps for JSON compatibility.
+
+        Returns:
+            A dictionary with JSON-serializable values
+        """
+        # Start with the regular to_dict output
+        result = self.to_dict()
+
+        # Convert datetime objects to millisecond timestamps
+        if ts := result.get("StartTimestamp"):
+            result["StartTimestamp"] = TimestampConverter.to_unix_millis(ts)
+
+        if ts := result.get("EndTimestamp"):
+            result["EndTimestamp"] = TimestampConverter.to_unix_millis(ts)
+
+        if (step_details := result.get("StepDetails")) and (
+            ts := step_details.get("NextAttemptTimestamp")
+        ):
+            result["StepDetails"]["NextAttemptTimestamp"] = (
+                TimestampConverter.to_unix_millis(ts)
+            )
+
+        if (wait_details := result.get("WaitDetails")) and (
+            ts := wait_details.get("ScheduledEndTimestamp")
+        ):
+            result["WaitDetails"]["ScheduledEndTimestamp"] = (
+                TimestampConverter.to_unix_millis(ts)
+            )
+
+        return result
+
+    @classmethod
+    def from_json_dict(cls, data: MutableMapping[str, Any]) -> Operation:
+        """Create an Operation from a JSON-serializable dictionary.
+
+        Converts millisecond timestamps back to datetime objects.
+
+        Args:
+            data: Dictionary with JSON-serializable values (millisecond timestamps)
+
+        Returns:
+            An Operation instance with datetime objects
+        """
+        # Make a copy to avoid modifying the original data
+        data_copy = copy.deepcopy(data)
+
+        # Convert millisecond timestamps back to datetime objects
+        if ms := data_copy.get("StartTimestamp"):
+            data_copy["StartTimestamp"] = TimestampConverter.from_unix_millis(ms)
+
+        if ms := data_copy.get("EndTimestamp"):
+            data_copy["EndTimestamp"] = TimestampConverter.from_unix_millis(ms)
+
+        if (step_details := data_copy.get("StepDetails")) and (
+            ms := step_details.get("NextAttemptTimestamp")
+        ):
+            step_details["NextAttemptTimestamp"] = TimestampConverter.from_unix_millis(
+                ms
+            )
+
+        if (wait_details := data_copy.get("WaitDetails")) and (
+            ms := wait_details.get("ScheduledEndTimestamp")
+        ):
+            wait_details["ScheduledEndTimestamp"] = TimestampConverter.from_unix_millis(
+                ms
+            )
+
+        # Use the existing from_dict method with the converted data
+        return cls.from_dict(data_copy)
 
 
 @dataclass(frozen=True)
@@ -937,7 +1031,7 @@ class DurableServiceClient(Protocol):
 class LambdaClient(DurableServiceClient):
     """Persist durable operations to the Lambda Durable Function APIs."""
 
-    boto3_instance: LambdaClient | None = None
+    _cached_boto_client: Any = None
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -947,23 +1041,22 @@ class LambdaClient(DurableServiceClient):
         """Initialize or return cached Lambda client.
 
         Implements lazy initialization with class-level caching to optimize
-        Lambda warm starts. The client is created once and reused across
+        Lambda warm starts. The boto3 client is created once and reused across
         invocations, avoiding repeated credential resolution and connection
         pool setup.
 
         Returns:
-            LambdaClient: The cached or newly created Lambda client.
+            LambdaClient: A new LambdaClient instance wrapping the cached boto3 client.
         """
-        if cls.boto3_instance is None:
-            client = boto3.client(
+        if cls._cached_boto_client is None:
+            cls._cached_boto_client = boto3.client(
                 "lambda",
                 config=Config(
                     connect_timeout=5,
                     read_timeout=50,
                 ),
             )
-            cls.boto3_instance = cls(client=client)
-        return cls.boto3_instance
+        return cls(client=cls._cached_boto_client)
 
     def checkpoint(
         self,

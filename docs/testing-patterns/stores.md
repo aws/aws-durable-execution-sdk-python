@@ -250,9 +250,8 @@ A: Each execution typically uses a few KB to a few MB depending on the number of
 ## See also
 
 - [Basic tests](basic-tests.md) - Simple test patterns
-- [Cloud testing](../advanced/cloud-testing.md) - Testing with deployed functions
-- [Test runner](../core/test-runner.md) - Test runner configuration
-- [Best practices](best-practices.md) - Testing recommendations
+- [Testing modes](../advanced/testing-modes.md) - Local and cloud test execution
+- [Best practices](../best-practices.md) - Testing recommendations
 
 [↑ Back to top](#table-of-contents)
 

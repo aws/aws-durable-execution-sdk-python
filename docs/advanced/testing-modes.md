@@ -488,9 +488,8 @@ Fix the error in your function code and redeploy.
 
 ## See also
 
-- [Test Runner](../core/test-runner.md) - Learn about the test runner interface
 - [Getting Started](../getting-started.md) - Set up your development environment
-- [Pytest Integration](pytest-integration.md) - Advanced pytest configuration
+- [Testing patterns](../testing-patterns/basic-tests.md) - Practical pytest examples
 - [Examples README](../../examples/test/README.md) - More examples and configuration details
 
 [↑ Back to top](#table-of-contents)

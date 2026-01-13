@@ -1,6 +1,7 @@
 """Tests for the service module."""
 
 import datetime
+from datetime import UTC
 from unittest.mock import Mock, patch
 
 import pytest
@@ -33,6 +34,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     StateOutput,
     StepDetails,
     StepOptions,
+    TimestampConverter,
     WaitDetails,
     WaitOptions,
 )
@@ -44,10 +46,10 @@ from aws_durable_execution_sdk_python.lambda_service import (
 
 @pytest.fixture
 def reset_lambda_client_cache():
-    """Reset the class-level Lambda client cache before and after each test."""
-    LambdaClient.boto3_instance = None
+    """Reset the class-level boto3 client cache before and after each test."""
+    LambdaClient._cached_boto_client = None
     yield
-    LambdaClient.boto3_instance = None
+    LambdaClient._cached_boto_client = None
 
 
 # =============================================================================
@@ -2070,21 +2072,21 @@ def test_lambda_client_checkpoint_with_non_none_client_token():
 
 @patch("boto3.client")
 def test_lambda_client_cache_reuses_client(mock_boto_client, reset_lambda_client_cache):
-    """Test that initialize_client returns the same cached client on subsequent calls."""
+    """Test that initialize_client reuses the same boto3 client on subsequent calls."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
 
-    # First call should create the client
+    # First call should create the boto3 client
     client1 = LambdaClient.initialize_client()
 
-    # Second call should return the same cached client
+    # Second call should reuse the same boto3 client
     client2 = LambdaClient.initialize_client()
 
     # boto3.client should only be called once
     mock_boto_client.assert_called_once()
 
-    # Both calls should return the same instance
-    assert client1 is client2
+    # Both LambdaClient instances should wrap the same boto3 client
+    assert client1.client is client2.client
 
 
 @patch("boto3.client")
@@ -2107,13 +2109,625 @@ def test_lambda_client_cache_creates_client_only_once(
 def test_lambda_client_cache_is_class_level(
     mock_boto_client, reset_lambda_client_cache
 ):
-    """Test that the cache is stored at class level and persists across calls."""
+    """Test that the boto3 client cache is stored at class level."""
     mock_client = Mock()
     mock_boto_client.return_value = mock_client
 
     # Create client
-    client = LambdaClient.initialize_client()
+    LambdaClient.initialize_client()
 
-    # Verify the cache is set at class level
-    assert LambdaClient.boto3_instance is client
-    assert LambdaClient.boto3_instance is not None
+    # Verify the boto3 client is cached at class level
+    assert LambdaClient._cached_boto_client is mock_client
+# Tests for Operation JSON Serialization Methods
+# =============================================================================
+
+
+def test_operation_to_json_dict_minimal():
+    """Test Operation.to_json_dict with minimal required fields."""
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+    )
+
+    result = operation.to_json_dict()
+    expected = {
+        "Id": "op1",
+        "Type": "STEP",
+        "Status": "SUCCEEDED",
+    }
+    assert result == expected
+
+
+def test_operation_to_json_dict_with_timestamps():
+    """Test Operation.to_json_dict converts datetime objects to millisecond timestamps."""
+    start_time = datetime.datetime(2023, 1, 1, 10, 0, 0, tzinfo=datetime.UTC)
+    end_time = datetime.datetime(2023, 1, 1, 11, 30, 0, tzinfo=datetime.UTC)
+
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        start_timestamp=start_time,
+        end_timestamp=end_time,
+    )
+
+    result = operation.to_json_dict()
+
+    # Convert expected timestamps to milliseconds
+    expected_start_ms = int(start_time.timestamp() * 1000)  # 1672574400000
+    expected_end_ms = int(end_time.timestamp() * 1000)  # 1672579800000
+
+    assert result["StartTimestamp"] == expected_start_ms
+    assert result["EndTimestamp"] == expected_end_ms
+    assert result["Id"] == "op1"
+    assert result["Type"] == "STEP"
+    assert result["Status"] == "SUCCEEDED"
+
+
+def test_operation_to_json_dict_with_step_details_timestamp():
+    """Test Operation.to_json_dict converts StepDetails.NextAttemptTimestamp to milliseconds."""
+    next_attempt_time = datetime.datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
+    step_details = StepDetails(
+        attempt=2, next_attempt_timestamp=next_attempt_time, result="step_result"
+    )
+
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.PENDING,
+        step_details=step_details,
+    )
+
+    result = operation.to_json_dict()
+    expected_ms = int(next_attempt_time.timestamp() * 1000)  # 1672581600000
+
+    assert result["StepDetails"]["NextAttemptTimestamp"] == expected_ms
+    assert result["StepDetails"]["Attempt"] == 2
+    assert result["StepDetails"]["Result"] == "step_result"
+
+
+def test_operation_to_json_dict_with_wait_details_timestamp():
+    """Test Operation.to_json_dict converts WaitDetails.ScheduledEndTimestamp to milliseconds."""
+    scheduled_end_time = datetime.datetime(2023, 1, 1, 15, 0, 0, tzinfo=datetime.UTC)
+    wait_details = WaitDetails(scheduled_end_timestamp=scheduled_end_time)
+
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.WAIT,
+        status=OperationStatus.PENDING,
+        wait_details=wait_details,
+    )
+
+    result = operation.to_json_dict()
+    expected_ms = int(scheduled_end_time.timestamp() * 1000)  # 1672592400000
+
+    assert result["WaitDetails"]["ScheduledEndTimestamp"] == expected_ms
+
+
+def test_operation_to_json_dict_with_all_timestamps():
+    """Test Operation.to_json_dict with all timestamp fields present."""
+    start_time = datetime.datetime(2023, 1, 1, 10, 0, 0, tzinfo=datetime.UTC)
+    end_time = datetime.datetime(2023, 1, 1, 11, 0, 0, tzinfo=datetime.UTC)
+    next_attempt_time = datetime.datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
+    scheduled_end_time = datetime.datetime(2023, 1, 1, 13, 0, 0, tzinfo=datetime.UTC)
+
+    step_details = StepDetails(
+        attempt=1, next_attempt_timestamp=next_attempt_time, result="step_result"
+    )
+    wait_details = WaitDetails(scheduled_end_timestamp=scheduled_end_time)
+
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.PENDING,
+        start_timestamp=start_time,
+        end_timestamp=end_time,
+        step_details=step_details,
+        wait_details=wait_details,
+    )
+
+    result = operation.to_json_dict()
+
+    # Verify all timestamps are converted to milliseconds
+    assert result["StartTimestamp"] == int(start_time.timestamp() * 1000)
+    assert result["EndTimestamp"] == int(end_time.timestamp() * 1000)
+    assert result["StepDetails"]["NextAttemptTimestamp"] == int(
+        next_attempt_time.timestamp() * 1000
+    )
+    assert result["WaitDetails"]["ScheduledEndTimestamp"] == int(
+        scheduled_end_time.timestamp() * 1000
+    )
+
+
+def test_operation_to_json_dict_with_none_timestamps():
+    """Test Operation.to_json_dict handles None timestamp values correctly."""
+    step_details = StepDetails(
+        attempt=1, next_attempt_timestamp=None, result="step_result"
+    )
+    wait_details = WaitDetails(scheduled_end_timestamp=None)
+
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        start_timestamp=None,
+        end_timestamp=None,
+        step_details=step_details,
+        wait_details=wait_details,
+    )
+
+    result = operation.to_json_dict()
+
+    # None timestamps should not be present in the result
+    assert "StartTimestamp" not in result
+    assert "EndTimestamp" not in result
+    assert "NextAttemptTimestamp" not in result["StepDetails"]
+    assert result["WaitDetails"] == {}  # Empty dict when no scheduled end timestamp
+
+
+def test_operation_from_json_dict_minimal():
+    """Test Operation.from_json_dict with minimal required fields."""
+    data = {
+        "Id": "op1",
+        "Type": "STEP",
+        "Status": "SUCCEEDED",
+    }
+
+    operation = Operation.from_json_dict(data)
+    assert operation.operation_id == "op1"
+    assert operation.operation_type is OperationType.STEP
+    assert operation.status is OperationStatus.SUCCEEDED
+    assert operation.start_timestamp is None
+    assert operation.end_timestamp is None
+
+
+def test_operation_from_json_dict_with_timestamps():
+    """Test Operation.from_json_dict converts millisecond timestamps to datetime objects."""
+    start_ms = 1672574400000  # 2023-01-01 12:00:00 UTC
+    end_ms = 1672579800000  # 2023-01-01 13:30:00 UTC
+
+    data = {
+        "Id": "op1",
+        "Type": "STEP",
+        "Status": "SUCCEEDED",
+        "StartTimestamp": start_ms,
+        "EndTimestamp": end_ms,
+    }
+
+    operation = Operation.from_json_dict(data)
+
+    expected_start = datetime.datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
+    expected_end = datetime.datetime(2023, 1, 1, 13, 30, 0, tzinfo=datetime.UTC)
+
+    assert operation.start_timestamp == expected_start
+    assert operation.end_timestamp == expected_end
+    assert operation.operation_id == "op1"
+
+
+def test_operation_from_json_dict_with_step_details_timestamp():
+    """Test Operation.from_json_dict converts StepDetails.NextAttemptTimestamp from milliseconds."""
+    next_attempt_ms = 1672581600000  # 2023-01-01 14:00:00 UTC
+
+    data = {
+        "Id": "op1",
+        "Type": "STEP",
+        "Status": "PENDING",
+        "StepDetails": {
+            "Attempt": 2,
+            "NextAttemptTimestamp": next_attempt_ms,
+            "Result": "step_result",
+        },
+    }
+
+    operation = Operation.from_json_dict(data)
+    expected_time = datetime.datetime(2023, 1, 1, 14, 0, 0, tzinfo=datetime.UTC)
+
+    assert operation.step_details.next_attempt_timestamp == expected_time
+    assert operation.step_details.attempt == 2
+    assert operation.step_details.result == "step_result"
+
+
+def test_operation_from_json_dict_with_wait_details_timestamp():
+    """Test Operation.from_json_dict converts WaitDetails.ScheduledEndTimestamp from milliseconds."""
+    scheduled_end_ms = 1672592400000  # 2023-01-01 17:00:00 UTC
+
+    data = {
+        "Id": "op1",
+        "Type": "WAIT",
+        "Status": "PENDING",
+        "WaitDetails": {"ScheduledEndTimestamp": scheduled_end_ms},
+    }
+
+    operation = Operation.from_json_dict(data)
+    expected_time = datetime.datetime(2023, 1, 1, 17, 0, 0, tzinfo=datetime.UTC)
+
+    assert operation.wait_details.scheduled_end_timestamp == expected_time
+
+
+def test_operation_from_json_dict_with_all_timestamps():
+    """Test Operation.from_json_dict with all timestamp fields present."""
+    start_ms = 1672574400000  # 2023-01-01 120:00:00 UTC
+    end_ms = 1672578000000  # 2023-01-01 13:00:00 UTC
+    next_attempt_ms = 1672581600000  # 2023-01-01 14:00:00 UTC
+    scheduled_end_ms = 1672585200000  # 2023-01-01 15:00:00 UTC
+
+    data = {
+        "Id": "op1",
+        "Type": "STEP",
+        "Status": "PENDING",
+        "StartTimestamp": start_ms,
+        "EndTimestamp": end_ms,
+        "StepDetails": {
+            "Attempt": 1,
+            "NextAttemptTimestamp": next_attempt_ms,
+            "Result": "step_result",
+        },
+        "WaitDetails": {"ScheduledEndTimestamp": scheduled_end_ms},
+    }
+
+    operation = Operation.from_json_dict(data)
+
+    # Verify all timestamps are converted correctly
+    assert operation.start_timestamp == datetime.datetime(
+        2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC
+    )
+    assert operation.end_timestamp == datetime.datetime(
+        2023, 1, 1, 13, 0, 0, tzinfo=datetime.UTC
+    )
+    assert operation.step_details.next_attempt_timestamp == datetime.datetime(
+        2023, 1, 1, 14, 0, 0, tzinfo=datetime.UTC
+    )
+    assert operation.wait_details.scheduled_end_timestamp == datetime.datetime(
+        2023, 1, 1, 15, 0, 0, tzinfo=datetime.UTC
+    )
+
+
+def test_operation_from_json_dict_with_none_timestamps():
+    """Test Operation.from_json_dict handles None timestamp values correctly."""
+    data = {
+        "Id": "op1",
+        "Type": "STEP",
+        "Status": "SUCCEEDED",
+        "StartTimestamp": None,
+        "EndTimestamp": None,
+        "StepDetails": {
+            "Attempt": 1,
+            "NextAttemptTimestamp": None,
+            "Result": "step_result",
+        },
+        "WaitDetails": {"ScheduledEndTimestamp": None},
+    }
+
+    operation = Operation.from_json_dict(data)
+
+    assert operation.start_timestamp is None
+    assert operation.end_timestamp is None
+    assert operation.step_details.next_attempt_timestamp is None
+    assert operation.wait_details.scheduled_end_timestamp is None
+
+
+def test_operation_json_roundtrip():
+    """Test Operation to_json_dict -> from_json_dict roundtrip preserves all data."""
+    start_time = datetime.datetime(2023, 1, 1, 10, 0, 0, tzinfo=datetime.UTC)
+    end_time = datetime.datetime(2023, 1, 1, 11, 0, 0, tzinfo=datetime.UTC)
+    next_attempt_time = datetime.datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
+    scheduled_end_time = datetime.datetime(2023, 1, 1, 13, 0, 0, tzinfo=datetime.UTC)
+
+    error = ErrorObject(
+        message="Test error",
+        type="TestError",
+        data="error_data",
+        stack_trace=["line1", "line2"],
+    )
+
+    step_details = StepDetails(
+        attempt=2,
+        next_attempt_timestamp=next_attempt_time,
+        result="step_result",
+        error=error,
+    )
+
+    wait_details = WaitDetails(scheduled_end_timestamp=scheduled_end_time)
+
+    callback_details = CallbackDetails(callback_id="cb123", result="callback_result")
+
+    execution_details = ExecutionDetails(input_payload="exec_payload")
+
+    original = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.PENDING,
+        parent_id="parent1",
+        name="test_step",
+        start_timestamp=start_time,
+        end_timestamp=end_time,
+        sub_type=OperationSubType.STEP,
+        execution_details=execution_details,
+        step_details=step_details,
+        wait_details=wait_details,
+        callback_details=callback_details,
+    )
+
+    # Convert to JSON dict and back
+    json_data = original.to_json_dict()
+    restored = Operation.from_json_dict(json_data)
+
+    # Verify all fields are preserved
+    assert restored.operation_id == original.operation_id
+    assert restored.operation_type == original.operation_type
+    assert restored.status == original.status
+    assert restored.parent_id == original.parent_id
+    assert restored.name == original.name
+    assert restored.start_timestamp == original.start_timestamp
+    assert restored.end_timestamp == original.end_timestamp
+    assert restored.sub_type == original.sub_type
+    assert (
+        restored.execution_details.input_payload
+        == original.execution_details.input_payload
+    )
+    assert restored.step_details.attempt == original.step_details.attempt
+    assert (
+        restored.step_details.next_attempt_timestamp
+        == original.step_details.next_attempt_timestamp
+    )
+    assert restored.step_details.result == original.step_details.result
+    assert restored.step_details.error.message == original.step_details.error.message
+    assert (
+        restored.wait_details.scheduled_end_timestamp
+        == original.wait_details.scheduled_end_timestamp
+    )
+    assert (
+        restored.callback_details.callback_id == original.callback_details.callback_id
+    )
+
+
+def test_operation_json_dict_preserves_non_timestamp_fields():
+    """Test that to_json_dict preserves all non-timestamp fields unchanged."""
+    context_details = ContextDetails(replay_children=True, result="context_result")
+
+    chained_invoke_details = ChainedInvokeDetails(result="invoke_result")
+
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.CONTEXT,
+        status=OperationStatus.SUCCEEDED,
+        parent_id="parent1",
+        name="test_context",
+        sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+        context_details=context_details,
+        chained_invoke_details=chained_invoke_details,
+    )
+
+    result = operation.to_json_dict()
+
+    # Verify non-timestamp fields are unchanged
+    assert result["Id"] == "op1"
+    assert result["Type"] == "CONTEXT"
+    assert result["Status"] == "SUCCEEDED"
+    assert result["ParentId"] == "parent1"
+    assert result["Name"] == "test_context"
+    assert result["SubType"] == "RunInChildContext"
+    assert result["ContextDetails"]["Result"] == "context_result"
+    assert result["ChainedInvokeDetails"]["Result"] == "invoke_result"
+
+
+# region TimestampConverter Tests
+def test_timestamp_converter_to_unix_millis_valid_datetime():
+    """Test converting valid datetime to Unix timestamp in milliseconds."""
+    # Test epoch
+    epoch = datetime.datetime(1970, 1, 1, tzinfo=UTC)
+    assert TimestampConverter.to_unix_millis(epoch) == 0
+
+    # Test specific datetime
+    dt = datetime.datetime(2024, 1, 1, 12, 30, 45, 123456, tzinfo=UTC)
+    expected_ms = int(dt.timestamp() * 1000)
+    assert TimestampConverter.to_unix_millis(dt) == expected_ms
+
+    # Test current time
+    now = datetime.datetime.now(UTC)
+    result = TimestampConverter.to_unix_millis(now)
+    assert isinstance(result, int)
+    assert result > 0
+
+
+def test_timestamp_converter_to_unix_millis_none():
+    """Test converting None to Unix timestamp returns None."""
+    assert TimestampConverter.to_unix_millis(None) is None
+
+
+def test_timestamp_converter_to_unix_millis_edge_cases():
+    """Test edge cases for datetime to Unix timestamp conversion."""
+    # Test year 2038 (Unix timestamp overflow boundary for 32-bit systems)
+    dt_2038 = datetime.datetime(2038, 1, 19, 3, 14, 7, tzinfo=UTC)
+    result = TimestampConverter.to_unix_millis(dt_2038)
+    assert isinstance(result, int)
+    assert result > 0
+
+    # Test far future date
+    far_future = datetime.datetime(2100, 12, 31, 23, 59, 59, tzinfo=UTC)
+    result = TimestampConverter.to_unix_millis(far_future)
+    assert isinstance(result, int)
+    assert result > 0
+
+    # Test microseconds precision (should be truncated in milliseconds)
+    dt_with_microseconds = datetime.datetime(2024, 1, 1, 0, 0, 0, 123456, tzinfo=UTC)
+    result = TimestampConverter.to_unix_millis(dt_with_microseconds)
+    # Verify milliseconds precision (microseconds should be truncated)
+    expected = int(dt_with_microseconds.timestamp() * 1000)
+    assert result == expected
+
+
+def test_timestamp_converter_from_unix_millis_valid_timestamp():
+    """Test converting valid Unix timestamp in milliseconds to datetime."""
+    # Test epoch
+    assert TimestampConverter.from_unix_millis(0) == datetime.datetime(
+        1970, 1, 1, tzinfo=UTC
+    )
+
+    # Test specific timestamp
+    ms = 1704110445123  # 2024-01-01 12:30:45.123 UTC
+    result = TimestampConverter.from_unix_millis(ms)
+    expected = datetime.datetime.fromtimestamp(ms / 1000, tz=UTC)
+    assert result == expected
+    assert result.tzinfo == UTC
+
+    # Test positive timestamp
+    ms = 1609459200000  # 2021-01-01 00:00:00 UTC
+    result = TimestampConverter.from_unix_millis(ms)
+    assert result == datetime.datetime(2021, 1, 1, tzinfo=UTC)
+
+
+def test_timestamp_converter_from_unix_millis_none():
+    """Test converting None timestamp returns None."""
+    assert TimestampConverter.from_unix_millis(None) is None
+
+
+def test_timestamp_converter_from_unix_millis_zero():
+    """Test converting zero timestamp returns epoch."""
+    result = TimestampConverter.from_unix_millis(0)
+    assert result == datetime.datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def test_timestamp_converter_from_unix_millis_negative():
+    """Test converting negative timestamp (before epoch)."""
+    # Test negative timestamp (before 1970)
+    ms = -86400000  # 1969-12-31 00:00:00 UTC
+    result = TimestampConverter.from_unix_millis(ms)
+    expected = datetime.datetime.fromtimestamp(ms / 1000, tz=UTC)
+    assert result == expected
+    assert result.year == 1969
+
+
+def test_timestamp_converter_from_unix_millis_large_timestamp():
+    """Test converting large timestamp values."""
+    # Test year 2038 boundary
+    ms = 2147483647000  # 2038-01-19 03:14:07 UTC
+    result = TimestampConverter.from_unix_millis(ms)
+    expected = datetime.datetime.fromtimestamp(ms / 1000, tz=UTC)
+    assert result == expected
+
+    # Test far future
+    ms = 4102444800000  # 2100-01-01 00:00:00 UTC
+    result = TimestampConverter.from_unix_millis(ms)
+    expected = datetime.datetime.fromtimestamp(ms / 1000, tz=UTC)
+    assert result == expected
+
+
+def test_timestamp_converter_roundtrip_conversion():
+    """Test roundtrip conversion: datetime -> millis -> datetime."""
+    original_datetimes = [
+        datetime.datetime(1970, 1, 1, tzinfo=UTC),  # Epoch
+        datetime.datetime(2024, 1, 1, 12, 30, 45, tzinfo=UTC),  # Specific date
+        datetime.datetime(
+            2024, 12, 31, 23, 59, 59, 999000, tzinfo=UTC
+        ),  # End of year with millis
+        datetime.datetime.now(UTC),  # Current time
+        datetime.datetime(2038, 1, 19, 3, 14, 7, tzinfo=UTC),  # 2038 boundary
+        datetime.datetime(1969, 12, 31, 23, 59, 59, tzinfo=UTC),  # Before epoch
+    ]
+
+    for original in original_datetimes:
+        # Convert to milliseconds and back
+        millis = TimestampConverter.to_unix_millis(original)
+        converted_back = TimestampConverter.from_unix_millis(millis)
+
+        # Should be equal within millisecond precision
+        # (microseconds may be lost due to integer conversion)
+        assert abs((converted_back - original).total_seconds()) < 0.001
+
+
+def test_timestamp_converter_roundtrip_with_none():
+    """Test roundtrip conversion with None values."""
+    # None -> None -> None
+    millis = TimestampConverter.to_unix_millis(None)
+    assert millis is None
+
+    converted_back = TimestampConverter.from_unix_millis(millis)
+    assert converted_back is None
+
+
+def test_timestamp_converter_precision_handling():
+    """Test precision handling in timestamp conversions."""
+    # Test that microseconds are properly handled in millisecond conversion
+    dt_with_microseconds = datetime.datetime(2024, 1, 1, 0, 0, 0, 123456, tzinfo=UTC)
+
+    # Convert to milliseconds (should truncate microseconds to nearest millisecond)
+    millis = TimestampConverter.to_unix_millis(dt_with_microseconds)
+
+    # Convert back
+    converted_back = TimestampConverter.from_unix_millis(millis)
+
+    # The difference should be less than 1 millisecond
+    time_diff = abs((converted_back - dt_with_microseconds).total_seconds())
+    assert time_diff < 0.001
+
+
+def test_timestamp_converter_timezone_handling():
+    """Test that converted datetimes always have UTC timezone."""
+    test_timestamps = [0, 1704110445123, -86400000, 2147483647000]
+
+    for ms in test_timestamps:
+        result = TimestampConverter.from_unix_millis(ms)
+        assert result.tzinfo == UTC
+
+
+def test_timestamp_converter_type_validation():
+    """Test that methods return correct types."""
+    # Test to_unix_millis return type
+    dt = datetime.datetime(2024, 1, 1, tzinfo=UTC)
+    result = TimestampConverter.to_unix_millis(dt)
+    assert isinstance(result, int)
+
+    result_none = TimestampConverter.to_unix_millis(None)
+    assert result_none is None
+
+    # Test from_unix_millis return type
+    ms = 1704110445123
+    result = TimestampConverter.from_unix_millis(ms)
+    assert isinstance(result, datetime.datetime)
+
+    result_none = TimestampConverter.from_unix_millis(None)
+    assert result_none is None
+
+
+def test_timestamp_converter_static_methods():
+    """Test that TimestampConverter methods are static and can be called without instance."""
+    # Should be able to call without creating instance
+    dt = datetime.datetime(2024, 1, 1, tzinfo=UTC)
+
+    # Call as static methods
+    millis = TimestampConverter.to_unix_millis(dt)
+    converted_back = TimestampConverter.from_unix_millis(millis)
+
+    assert isinstance(millis, int)
+    assert isinstance(converted_back, datetime.datetime)
+    assert converted_back.tzinfo == UTC
+
+
+def test_timestamp_converter_millisecond_boundaries():
+    """Test conversion at millisecond boundaries."""
+    # Test exact millisecond values
+    test_cases = [
+        (datetime.datetime(2024, 1, 1, 0, 0, 0, 0, tzinfo=UTC), 1704067200000),
+        (
+            datetime.datetime(2024, 1, 1, 0, 0, 0, 500000, tzinfo=UTC),
+            1704067200500,
+        ),  # 500ms
+        (
+            datetime.datetime(2024, 1, 1, 0, 0, 0, 999000, tzinfo=UTC),
+            1704067200999,
+        ),  # 999ms
+    ]
+
+    for dt, expected_ms in test_cases:
+        result_ms = TimestampConverter.to_unix_millis(dt)
+        assert result_ms == expected_ms
+
+        # Convert back and verify
+        result_dt = TimestampConverter.from_unix_millis(result_ms)
+        # Should be equal within millisecond precision
+        assert abs((result_dt - dt).total_seconds()) < 0.001
+
+
+# endregion

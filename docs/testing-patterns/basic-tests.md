@@ -685,9 +685,8 @@ A: Set environment variables in your test setup or use pytest fixtures to manage
 ## See also
 
 - [Complex workflows](complex-workflows.md) - Testing multi-step workflows
-- [Best practices](best-practices.md) - Testing recommendations
-- [Pytest integration](../advanced/pytest-integration.md) - Pytest fixtures and markers
-- [Custom assertions](../advanced/custom-assertions.md) - Advanced result inspection
+- [Best practices](../best-practices.md) - Testing recommendations
+- [Testing modes](../advanced/testing-modes.md) - Local and cloud test execution
 - [Steps](../core/steps.md) - Testing step operations
 - [Wait operations](../core/wait.md) - Testing wait operations
 - [Callbacks](../core/callbacks.md) - Testing callback operations
