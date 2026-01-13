@@ -3,12 +3,13 @@ from __future__ import annotations
 import copy
 import datetime
 import logging
+from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
-import boto3  # type: ignore
-from botocore.config import Config  # type: ignore
+import boto3
+from botocore.config import Config
 
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
@@ -17,7 +18,11 @@ from aws_durable_execution_sdk_python.exceptions import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import MutableMapping
+    from mypy_boto3_lambda import LambdaClient as Boto3LambdaClient
+    from mypy_boto3_lambda.type_defs import (
+        CheckpointDurableExecutionResponseTypeDef,
+        GetDurableExecutionStateResponseTypeDef,
+    )
 
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 
@@ -1031,9 +1036,9 @@ class DurableServiceClient(Protocol):
 class LambdaClient(DurableServiceClient):
     """Persist durable operations to the Lambda Durable Function APIs."""
 
-    _cached_boto_client: Any = None
+    _cached_boto_client: Boto3LambdaClient | None = None
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: Boto3LambdaClient) -> None:
         self.client = client
 
     @classmethod
@@ -1066,19 +1071,20 @@ class LambdaClient(DurableServiceClient):
         client_token: str | None,
     ) -> CheckpointOutput:
         try:
-            params = {
-                "DurableExecutionArn": durable_execution_arn,
-                "CheckpointToken": checkpoint_token,
-                "Updates": [o.to_dict() for o in updates],
-            }
+            optional_params: dict[str, str] = {}
             if client_token is not None:
-                params["ClientToken"] = client_token
+                optional_params["ClientToken"] = client_token
 
-            result: MutableMapping[str, Any] = self.client.checkpoint_durable_execution(
-                **params
+            result: CheckpointDurableExecutionResponseTypeDef = (
+                self.client.checkpoint_durable_execution(
+                    DurableExecutionArn=durable_execution_arn,
+                    CheckpointToken=checkpoint_token,
+                    Updates=cast(Any, [o.to_dict() for o in updates]),
+                    **optional_params,  # type: ignore[arg-type]
+                )
             )
 
-            return CheckpointOutput.from_dict(result)
+            return CheckpointOutput.from_dict(cast(MutableMapping[str, Any], result))
         except Exception as e:
             checkpoint_error = CheckpointError.from_exception(e)
             logger.exception(
@@ -1094,13 +1100,15 @@ class LambdaClient(DurableServiceClient):
         max_items: int = 1000,
     ) -> StateOutput:
         try:
-            result: MutableMapping[str, Any] = self.client.get_durable_execution_state(
-                DurableExecutionArn=durable_execution_arn,
-                CheckpointToken=checkpoint_token,
-                Marker=next_marker,
-                MaxItems=max_items,
+            result: GetDurableExecutionStateResponseTypeDef = (
+                self.client.get_durable_execution_state(
+                    DurableExecutionArn=durable_execution_arn,
+                    CheckpointToken=checkpoint_token,
+                    Marker=next_marker,
+                    MaxItems=max_items,
+                )
             )
-            return StateOutput.from_dict(result)
+            return StateOutput.from_dict(cast(MutableMapping[str, Any], result))
         except Exception as e:
             error = GetExecutionStateError.from_exception(e)
             logger.exception(

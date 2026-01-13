@@ -32,7 +32,7 @@ from aws_durable_execution_sdk_python.state import ExecutionState, ReplayStatus
 if TYPE_CHECKING:
     from collections.abc import Callable, MutableMapping
 
-    import boto3  # type: ignore
+    from mypy_boto3_lambda import LambdaClient as Boto3LambdaClient
 
     from aws_durable_execution_sdk_python.types import LambdaContext
 
@@ -237,7 +237,7 @@ class DurableExecutionInvocationOutput:
 def durable_execution(
     func: Callable[[Any, DurableContext], Any] | None = None,
     *,
-    boto3_client: boto3.client | None = None,
+    boto3_client: Boto3LambdaClient | None = None,
 ) -> Callable[[Any, LambdaContext], Any]:
     # Decorator called with parameters
     if func is None:
