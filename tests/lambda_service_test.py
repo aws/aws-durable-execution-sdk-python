@@ -47,9 +47,9 @@ from aws_durable_execution_sdk_python.lambda_service import (
 @pytest.fixture
 def reset_lambda_client_cache():
     """Reset the class-level boto3 client cache before and after each test."""
-    LambdaClient._cached_boto_client = None
+    LambdaClient._cached_boto_client = None  # noqa: SLF001
     yield
-    LambdaClient._cached_boto_client = None
+    LambdaClient._cached_boto_client = None  # noqa: SLF001
 
 
 # =============================================================================
@@ -2117,7 +2117,9 @@ def test_lambda_client_cache_is_class_level(
     LambdaClient.initialize_client()
 
     # Verify the boto3 client is cached at class level
-    assert LambdaClient._cached_boto_client is mock_client
+    assert LambdaClient._cached_boto_client is mock_client  # noqa: SLF001
+
+
 # Tests for Operation JSON Serialization Methods
 # =============================================================================
 
