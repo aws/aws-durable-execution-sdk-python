@@ -343,7 +343,7 @@ context.create_callback(name="payment_callback")
 context.create_callback(name="approval_callback")
 
 # Pattern: descriptive_wait for waits
-context.wait(seconds=30, name="payment_confirmation_wait")
+context.wait(Duration.from_seconds(30), name="payment_confirmation_wait")
 ```
 
 ### Name dynamic operations with context
@@ -494,7 +494,7 @@ Only use waits when you need to delay execution:
 @durable_execution
 def lambda_handler(event: dict, context: DurableContext) -> dict:
     job_id = context.step(start_job(event["data"]))
-    context.wait(seconds=30, name="job_processing_wait")  # Necessary
+    context.wait(Duration.from_seconds(30), name="job_processing_wait")  # Necessary
     result = context.step(check_job_status(job_id))
     return result
 ```
@@ -609,7 +609,7 @@ def lambda_handler(event: dict, context: DurableContext) -> dict:
 @durable_step
 def process_with_wait(step_context: StepContext, context: DurableContext) -> str:
     # DON'T: Can't use context inside its own step operation
-    context.wait(seconds=1)  # Error: using context inside step!
+    context.wait(Duration.from_seconds(1))  # Error: using context inside step!
     result = context.step(nested_step(), name="step2")  # Error: nested context.step!
     return result
 

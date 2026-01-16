@@ -55,6 +55,7 @@ from aws_durable_execution_sdk_python import (
     durable_execution,
     durable_step,
 )
+from aws_durable_execution_sdk_python.config import Duration
 
 @durable_step
 def validate_order(order_id: str) -> dict:
@@ -86,7 +87,7 @@ def process_order(event: dict, context: DurableContext) -> dict:
     payment = context.step(charge_payment(order_id, amount))
     
     # Step 3: Wait for payment confirmation (simulated)
-    context.wait(seconds=5)
+    context.wait(Duration.from_seconds(5))
     
     # Step 4: Fulfill the order
     fulfillment = context.step(fulfill_order(order_id))
