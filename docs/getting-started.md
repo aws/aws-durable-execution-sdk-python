@@ -72,7 +72,7 @@ def handler(event: dict, context: DurableContext) -> dict:
     data = context.step(fetch_data(event["id"]))
     
     # Step 2: Wait 30 seconds
-    context.wait(seconds=30)
+    context.wait(Duration.from_seconds(30))
     
     # Step 3: Process the data
     result = context.step(process_data(data))
@@ -85,7 +85,7 @@ def handler(event: dict, context: DurableContext) -> dict:
 1. Lambda invokes your function
 2. `fetch_data` executes and calls an external API
 3. Result is checkpointed to AWS
-4. `context.wait(seconds=30)` is reached
+4. `context.wait(Duration.from_seconds(30))` is reached
 5. Function returns, Lambda can recycle the environment
 
 **Second invocation (t=30s):**
@@ -93,7 +93,7 @@ def handler(event: dict, context: DurableContext) -> dict:
 1. Lambda invokes your function again
 2. Function code runs from the beginning
 3. `fetch_data` returns the checkpointed result instantly (no API call)
-4. `context.wait(seconds=30)` is already complete, execution continues
+4. `context.wait(Duration.from_seconds(30))` is already complete, execution continues
 5. `process_data` executes for the first time
 6. Result is checkpointed
 7. Function returns the final result

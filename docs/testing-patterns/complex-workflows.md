@@ -121,7 +121,7 @@ def handler(event: dict, context: DurableContext) -> str:
     
     if amount > 1000:
         context.step(lambda _: "Manager approval required", name="approval")
-        context.wait(seconds=10, name="approval_wait")
+        context.wait(Duration.from_seconds(10), name="approval_wait")
         result = context.step(lambda _: "High-value order processed", name="process_high")
     else:
         result = context.step(lambda _: "Standard order processed", name="process_standard")
@@ -514,7 +514,7 @@ For workflows with long waits, verify configuration without actually waiting:
 @durable_execution
 def handler(event: dict, context: DurableContext) -> str:
     context.step(lambda _: "Starting", name="start")
-    context.wait(seconds=3600, name="long_wait")  # 1 hour
+    context.wait(Duration.from_seconds(3600), name="long_wait")  # 1 hour
     context.step(lambda _: "Continuing", name="continue")
     return "Complete"
 ```
@@ -559,7 +559,7 @@ def handler(event: dict, context: DurableContext) -> int:
         if state >= 3:
             break
         
-        context.wait(seconds=1, name=f"wait_{attempt}")
+        context.wait(Duration.from_seconds(1), name=f"wait_{attempt}")
     
     return state
 ```
@@ -604,7 +604,7 @@ def handler(event: dict, context: DurableContext) -> dict:
         state = context.step(lambda _, s=state: s + 1, name=f"attempt_{attempt}")
         
         if state < target:
-            context.wait(seconds=1, name=f"wait_{attempt}")
+            context.wait(Duration.from_seconds(1), name=f"wait_{attempt}")
     
     return {"state": state, "attempts": attempt, "reached_target": state >= target}
 ```
