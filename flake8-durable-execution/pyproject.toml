@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flake8-durable-execution"
+version = "0.1.0"
+description = "Flake8 plugin for AWS Durable Execution SDK best practices"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+keywords = ["flake8", "linter", "durable-execution", "aws", "lambda"]
+authors = [{ name = "AWS" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: Flake8",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = ["flake8>=6.0.0"]
+
+[project.entry-points."flake8.extension"]
+DAR = "flake8_durable_execution:DurableExecutionChecker"
+
+[project.urls]
+Source = "https://github.com/aws/aws-durable-execution-sdk-python"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flake8_durable_execution"]
