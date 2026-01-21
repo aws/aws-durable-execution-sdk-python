@@ -453,9 +453,9 @@ def handler(event: dict, context: DurableContext) -> dict:
     return result
 ```
 
-### Parallel child contexts
+### Sequential child contexts
 
-Execute multiple child contexts in parallel:
+Execute multiple child contexts sequentially:
 
 ```python
 @durable_with_child_context
@@ -478,10 +478,10 @@ def process_region_c(ctx: DurableContext, data: dict) -> dict:
 
 @durable_execution
 def handler(event: dict, context: DurableContext) -> dict:
-    """Process data for multiple regions in parallel."""
+    """Process data for multiple regions sequentially."""
     data = event["data"]
     
-    # Execute child contexts in parallel
+    # Execute child contexts sequentially
     result_a = context.run_in_child_context(
         process_region_a(data),
         name="region_a"
@@ -502,6 +502,8 @@ def handler(event: dict, context: DurableContext) -> dict:
         "results": [result_a, result_b, result_c],
     }
 ```
+
+For parallel execution, use `context.parallel()` instead. See [Parallel operations](parallel.md) for details.
 
 [↑ Back to top](#table-of-contents)
 
@@ -557,7 +559,7 @@ A: If an operation within a child context raises an exception, the exception pro
 
 **Q: Can I create multiple child contexts in one function?**
 
-A: Yes, you can create as many child contexts as needed. They execute sequentially unless you use parallel patterns.
+A: Yes, you can create as many child contexts as needed. They execute sequentially by default. For parallel execution, use `context.parallel()` instead.
 
 **Q: Can I use callbacks in child contexts?**
 
