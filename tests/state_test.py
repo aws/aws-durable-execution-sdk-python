@@ -3265,3 +3265,36 @@ def test_state_replay_mode():
     assert execution_state.is_replaying() is True
     execution_state.track_replay(operation_id="op2")
     assert execution_state.is_replaying() is False
+
+
+def test_state_replay_mode_with_timed_out():
+    """Test that TIMED_OUT operations are treated as terminal states for replay tracking.
+
+    This test verifies that when an operation has TIMED_OUT status, it is correctly
+    recognized as a completed/terminal state, allowing the replay status to transition
+    from REPLAY to NEW once all completed operations have been visited.
+
+    Regression test for: https://github.com/aws/aws-durable-execution-sdk-python/issues/262
+    """
+    operation1 = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.TIMED_OUT,
+    )
+    operation2 = Operation(
+        operation_id="op2",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+    )
+    execution_state = ExecutionState(
+        durable_execution_arn="arn:aws:test",
+        initial_checkpoint_token="test_token",  # noqa: S106
+        operations={"op1": operation1, "op2": operation2},
+        service_client=Mock(),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    assert execution_state.is_replaying() is True
+    execution_state.track_replay(operation_id="op1")
+    assert execution_state.is_replaying() is True
+    execution_state.track_replay(operation_id="op2")
+    assert execution_state.is_replaying() is False

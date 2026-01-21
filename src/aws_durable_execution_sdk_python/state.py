@@ -314,6 +314,7 @@ class ExecutionState:
                         OperationStatus.FAILED,
                         OperationStatus.CANCELLED,
                         OperationStatus.STOPPED,
+                        OperationStatus.TIMED_OUT,
                     }
                 }
                 if completed_ops.issubset(self._visited_operations):
