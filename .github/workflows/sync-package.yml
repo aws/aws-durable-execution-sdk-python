@@ -36,21 +36,15 @@ jobs:
           role-to-assume: "${{ secrets.ACTIONS_SYNC_ROLE_NAME }}"
           role-session-name: gh-python
           aws-region: ${{ env.AWS_REGION }}
-      - name: Get tar gz name
-        id: tar_gz_name
-        run: |
-          TAR_GZ_NAME=$(ls *.tar.gz)
-          echo "tar_gz_name=$TAR_GZ_NAME" >> $GITHUB_OUTPUT
-        working-directory: dist
       - name: Copy tar gz build file to s3
         run: |
-          aws s3 cp ./dist/${{steps.tar_gz_name.outputs.tar_gz_name}} \
-            s3://${{ secrets.S3_BUCKET_NAME }}/
+          aws s3 cp ./dist/*.tar.gz \
+            s3://${{ secrets.S3_BUCKET_NAME }}/aws-durable-execution-sdk-python.tar.gz
       - name: commit tar gz to Gitfarm
         run: |
           aws lambda invoke \
             --function-name ${{ secrets.SYNC_LAMBDA_ARN }} \
-            --payload '{"gitFarmRepo":"${{ secrets.GITFARM_LAN_SDK_REPO }}","gitFarmBranch":"${{ secrets.GITFARM_LAN_SDK_BRANCH }}","gitFarmFilepath":"${{ steps.tar_gz_name.outputs.tar_gz_name }}","s3Bucket":"${{ secrets.S3_BUCKET_NAME }}","s3FilePath":"${{ steps.tar_gz_name.outputs.tar_gz_name }}", "gitHubRepo": "aws-durable-execution-sdk-python", "gitHubCommit":"${{ github.sha }}"}' \
+            --payload '{"gitFarmRepo":"${{ secrets.GITFARM_LAN_SDK_REPO }}","gitFarmBranch":"${{ secrets.GITFARM_LAN_SDK_BRANCH }}","gitFarmFilepath":"aws-durable-execution-sdk-python.tar.gz","s3Bucket":"${{ secrets.S3_BUCKET_NAME }}","s3FilePath":"aws-durable-execution-sdk-python.tar.gz", "gitHubRepo": "aws-durable-execution-sdk-python", "gitHubCommit":"${{ github.sha }}"}' \
             --cli-binary-format raw-in-base64-out \
             output.txt
       - name: Check for error in lambda invoke
@@ -59,21 +53,15 @@ jobs:
             cat output.txt
             exit 1
           fi
-      - name: Get whl name
-        id: whl_name
-        run: |
-          WHL_NAME=$(ls *.whl)
-          echo "whl_name=$WHL_NAME" >> $GITHUB_OUTPUT
-        working-directory: dist
       - name: Copy whl build file to s3
         run: |
-          aws s3 cp ./dist/${{steps.whl_name.outputs.whl_name}} \
-            s3://${{ secrets.S3_BUCKET_NAME }}/
+          aws s3 cp ./dist/*.whl \
+            s3://${{ secrets.S3_BUCKET_NAME }}/aws-durable-execution-sdk-python.whl
       - name: commit whl to Gitfarm
         run: |
           aws lambda invoke \
             --function-name ${{ secrets.SYNC_LAMBDA_ARN }} \
-            --payload '{"gitFarmRepo":"${{ secrets.GITFARM_LAN_SDK_REPO }}","gitFarmBranch":"${{ secrets.GITFARM_LAN_SDK_BRANCH }}","gitFarmFilepath":"${{ steps.whl_name.outputs.whl_name }}","s3Bucket":"${{ secrets.S3_BUCKET_NAME }}","s3FilePath":"${{ steps.whl_name.outputs.whl_name }}", "gitHubRepo": "aws-durable-execution-sdk-python", "gitHubCommit":"${{ github.sha }}"}' \
+            --payload '{"gitFarmRepo":"${{ secrets.GITFARM_LAN_SDK_REPO }}","gitFarmBranch":"${{ secrets.GITFARM_LAN_SDK_BRANCH }}","gitFarmFilepath":"aws-durable-execution-sdk-python.whl","s3Bucket":"${{ secrets.S3_BUCKET_NAME }}","s3FilePath":"aws-durable-execution-sdk-python.whl", "gitHubRepo": "aws-durable-execution-sdk-python", "gitHubCommit":"${{ github.sha }}"}' \
             --cli-binary-format raw-in-base64-out \
             output.txt
       - name: Check for error in lambda invoke
