@@ -2,7 +2,7 @@ name: Sync package
 
 on:
   push:
-    branches: [ "main", "ci/remove-sync-version" ]
+    branches: [ "main" ]
 env:
   AWS_REGION : "us-west-2"
 
