@@ -2551,3 +2551,146 @@ def test_durable_execution_invocation_input_json_dict_preserves_non_timestamp_fi
     assert result["DurableExecutionArn"] == "arn:test:execution"
     assert result["CheckpointToken"] == "token123"
     assert result["InitialExecutionState"]["NextMarker"] == "marker123"
+
+
+def test_event_parsing_with_unix_millis_timestamps():
+    """Test that event parsing converts Unix millis timestamps to datetime objects.
+
+    This reproduces the production bug where NextAttemptTimestamp was sent as
+    Unix milliseconds (integer) and caused TypeError when comparing with datetime.now().
+
+    Regression test for: TypeError: '<' not supported between instances of 'int' and 'datetime.datetime'
+
+    Tests all timestamp fields handled by from_json_dict:
+    - StartTimestamp
+    - EndTimestamp
+    - StepDetails.NextAttemptTimestamp
+    - WaitDetails.ScheduledEndTimestamp
+    """
+    # Real event structure from Lambda backend with Unix millis timestamps
+    event = {
+        "DurableExecutionArn": "arn:aws:lambda:us-east-1:123456789:function:test:$LATEST/durable-execution/e/o",
+        "CheckpointToken": "test-token",
+        "InitialExecutionState": {
+            "Operations": [
+                {
+                    "Id": "exec-op",
+                    "Type": "EXECUTION",
+                    "StartTimestamp": 1769481309631,  # Unix millis (int)
+                    "EndTimestamp": 1769481319631,  # Unix millis (int)
+                    "Status": "STARTED",
+                    "ExecutionDetails": {"InputPayload": "{}"},
+                },
+                {
+                    "Id": "step-with-retry",
+                    "Type": "STEP",
+                    "SubType": "WaitForCondition",
+                    "StartTimestamp": 1769481309631,  # Unix millis (int)
+                    "Status": "PENDING",
+                    "StepDetails": {
+                        "Attempt": 1,
+                        "NextAttemptTimestamp": 1769481369631,  # Unix millis (int) - THE BUG!
+                    },
+                },
+                {
+                    "Id": "wait-op",
+                    "Type": "WAIT",
+                    "StartTimestamp": 1769481309631,  # Unix millis (int)
+                    "Status": "PENDING",
+                    "WaitDetails": {
+                        "ScheduledEndTimestamp": 1769481399631  # Unix millis (int)
+                    },
+                },
+            ]
+        },
+    }
+
+    # Parse using from_json_dict (the fix)
+    invocation_input = DurableExecutionInvocationInput.from_json_dict(event)
+    operations = invocation_input.initial_execution_state.operations
+
+    # Verify EXECUTION operation timestamps
+    assert isinstance(operations[0].start_timestamp, datetime.datetime)
+    assert isinstance(operations[0].end_timestamp, datetime.datetime)
+    assert operations[0].start_timestamp.tzinfo == datetime.UTC
+    assert operations[0].end_timestamp.tzinfo == datetime.UTC
+
+    # Verify STEP operation with NextAttemptTimestamp (the critical one!)
+    assert operations[1].step_details is not None
+    next_attempt = operations[1].step_details.next_attempt_timestamp
+    assert isinstance(next_attempt, datetime.datetime)
+    assert next_attempt.tzinfo == datetime.UTC
+
+    # Verify WAIT operation with ScheduledEndTimestamp
+    assert operations[2].wait_details is not None
+    scheduled_end = operations[2].wait_details.scheduled_end_timestamp
+    assert isinstance(scheduled_end, datetime.datetime)
+    assert scheduled_end.tzinfo == datetime.UTC
+
+    # Verify timestamps can be compared with datetime.now() without TypeError
+    now = datetime.datetime.now(tz=datetime.UTC)
+    assert isinstance(next_attempt < now or next_attempt >= now, bool)
+    assert isinstance(scheduled_end < now or scheduled_end >= now, bool)
+
+
+def test_from_dict_leaves_timestamps_as_integers():
+    """Test that from_dict (the bug) leaves timestamps as integers.
+
+    This demonstrates the bug behavior for documentation purposes.
+    """
+    event = {
+        "DurableExecutionArn": "arn:test",
+        "CheckpointToken": "token",
+        "InitialExecutionState": {
+            "Operations": [
+                {
+                    "Id": "step-id",
+                    "Type": "STEP",
+                    "SubType": "WaitForCondition",
+                    "StartTimestamp": 1769481309631,
+                    "EndTimestamp": 1769481319631,
+                    "Status": "PENDING",
+                    "StepDetails": {
+                        "Attempt": 1,
+                        "NextAttemptTimestamp": 1769481369631,  # Unix millis (int)
+                    },
+                },
+                {
+                    "Id": "wait-id",
+                    "Type": "WAIT",
+                    "StartTimestamp": 1769481309631,
+                    "Status": "PENDING",
+                    "WaitDetails": {
+                        "ScheduledEndTimestamp": 1769481399631  # Unix millis (int)
+                    },
+                },
+            ]
+        },
+    }
+
+    # Using from_dict leaves timestamps as integers
+    invocation_input = DurableExecutionInvocationInput.from_dict(event)
+    operations = invocation_input.initial_execution_state.operations
+
+    # All timestamps remain as integers (the bug)
+    assert isinstance(operations[0].start_timestamp, int)
+    assert isinstance(operations[0].end_timestamp, int)
+    assert isinstance(operations[0].step_details.next_attempt_timestamp, int)
+    assert isinstance(operations[1].wait_details.scheduled_end_timestamp, int)
+
+    # These comparisons would cause TypeError
+    with pytest.raises(
+        TypeError,
+        match="'<' not supported between instances of 'int' and 'datetime.datetime'",
+    ):
+        _ = operations[0].step_details.next_attempt_timestamp < datetime.datetime.now(
+            tz=datetime.UTC
+        )
+
+    with pytest.raises(
+        TypeError,
+        match="'<' not supported between instances of 'int' and 'datetime.datetime'",
+    ):
+        _ = operations[1].wait_details.scheduled_end_timestamp < datetime.datetime.now(
+            tz=datetime.UTC
+        )
