@@ -260,7 +260,7 @@ def durable_execution(
                 logger.debug(
                     "durableExecutionArn: %s", event.get("DurableExecutionArn")
                 )
-                invocation_input = DurableExecutionInvocationInput.from_dict(event)
+                invocation_input = DurableExecutionInvocationInput.from_json_dict(event)
             except (KeyError, TypeError, AttributeError) as e:
                 msg = (
                     "Unexpected payload provided to start the durable execution. "
