@@ -58,8 +58,9 @@ class TimerScheduler:
         self, resubmit_callback: Callable[[ExecutableWithState], None]
     ) -> None:
         self.resubmit_callback = resubmit_callback
-        self._pending_resumes: list[tuple[float, ExecutableWithState]] = []
+        self._pending_resumes: list[tuple[float, int, ExecutableWithState]] = []
         self._lock = threading.Lock()
+        self._schedule_counter = 0
         self._shutdown = threading.Event()
         self._timer_thread = threading.Thread(target=self._timer_loop, daemon=True)
         self._timer_thread.start()
@@ -73,9 +74,18 @@ class TimerScheduler:
     def schedule_resume(
         self, exe_state: ExecutableWithState, resume_time: float
     ) -> None:
-        """Schedule a task to resume at the specified time."""
+        """Schedule a task to resume at the specified time.
+
+        Uses a counter as a tie-breaker to ensure FIFO ordering when multiple
+        tasks have the same resume_time, preventing TypeError from comparing
+        ExecutableWithState objects.
+        """
         with self._lock:
-            heapq.heappush(self._pending_resumes, (resume_time, exe_state))
+            heapq.heappush(
+                self._pending_resumes,
+                (resume_time, self._schedule_counter, exe_state),
+            )
+            self._schedule_counter += 1
 
     def shutdown(self) -> None:
         """Shutdown the timer thread and cancel all pending resumes."""
@@ -108,7 +118,7 @@ class TimerScheduler:
                         self._pending_resumes
                         and self._pending_resumes[0][0] <= current_time
                     ):
-                        _, exe_state = heapq.heappop(self._pending_resumes)
+                        _, _, exe_state = heapq.heappop(self._pending_resumes)
                         if exe_state.can_resume:
                             exe_state.reset_to_pending()
                             self.resubmit_callback(exe_state)
