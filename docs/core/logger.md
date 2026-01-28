@@ -14,6 +14,7 @@ The Durable Execution SDK automatically enriches your logs with execution contex
 - [Integration with Powertools for AWS Lambda (Python)](#integration-with-powertools-for-aws-lambda-python)
 - [Replay behavior and log deduplication](#replay-behavior-and-log-deduplication)
 - [Best practices](#best-practices)
+- [Enabling debug logging](#enabling-debug-logging)
 - [FAQ](#faq)
 - [Testing logger integration](#testing-logger-integration)
 - [See also](#see-also)
@@ -482,6 +483,79 @@ context.logger.info("User authenticated", extra={"user_id": user_id})
 # Avoid - don't log sensitive data
 context.logger.info("User authenticated", extra={"password": password})
 ```
+
+[↑ Back to top](#table-of-contents)
+
+## Enabling debug logging
+
+The SDK logs internally using Python's standard `logging` module. To see these logs, set `ApplicationLogLevel: DEBUG` in [Advanced logging controls](https://docs.aws.amazon.com/lambda/latest/dg/monitoring-cloudwatchlogs-advanced.html).
+
+Advanced logging controls filters logs before they reach CloudWatch. If you set DEBUG level in code but leave Advanced logging controls at INFO, your debug logs will be dropped. You must configure the level in Advanced logging controls - it auto-patches all loggers, so you don't need to configure log levels in code.
+
+```mermaid
+flowchart LR
+    A[Logger emits DEBUG] --> B{Advanced Logging Controls}
+    B -->|ApplicationLogLevel = DEBUG| C[CloudWatch ✓]
+    B -->|ApplicationLogLevel = INFO| D[Dropped ✗]
+```
+
+**Important:** DEBUG level applies to all libraries including botocore. Since the SDK uses boto3 internally, this will flood your logs with HTTP request/response details. Silence botocore in your code:
+
+```python
+import logging
+
+# Silence botocore/urllib3 noise
+logging.getLogger("botocore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+```
+
+Configure ALC via SAM/CloudFormation:
+
+```yaml
+# SAM template
+Resources:
+  MyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: DEBUG
+```
+
+Or in the Lambda console under Configuration → Monitoring and operations tools → Logging configuration.
+
+### Selective logging
+
+Python loggers are hierarchical. Silencing `aws_durable_execution_sdk_python` silences all SDK modules. To keep some modules at DEBUG while silencing others:
+
+```python
+import logging
+
+# Silence all SDK logs
+logging.getLogger("aws_durable_execution_sdk_python").setLevel(logging.WARNING)
+
+# Or silence specific modules only
+logging.getLogger("aws_durable_execution_sdk_python.state").setLevel(logging.WARNING)
+logging.getLogger("aws_durable_execution_sdk_python.concurrency").setLevel(logging.WARNING)
+```
+
+SDK logger namespaces:
+
+| Namespace | Description |
+|-----------|-------------|
+| `aws_durable_execution_sdk_python` | Root - silences all SDK logs |
+| `aws_durable_execution_sdk_python.state` | Checkpoint and replay state management |
+| `aws_durable_execution_sdk_python.execution` | Durable execution lifecycle |
+| `aws_durable_execution_sdk_python.context` | DurableContext operations |
+| `aws_durable_execution_sdk_python.lambda_service` | Lambda API calls |
+| `aws_durable_execution_sdk_python.serdes` | Serialization/deserialization |
+| `aws_durable_execution_sdk_python.concurrency` | Parallel and map execution |
+| `aws_durable_execution_sdk_python.operation.step` | Step operations |
+| `aws_durable_execution_sdk_python.operation.wait` | Wait operations |
+| `aws_durable_execution_sdk_python.operation.invoke` | Invoke operations |
+| `aws_durable_execution_sdk_python.operation.child` | Child context operations |
+| `aws_durable_execution_sdk_python.operation.parallel` | Parallel operations |
+| `aws_durable_execution_sdk_python.operation.map` | Map operations |
 
 [↑ Back to top](#table-of-contents)
 
