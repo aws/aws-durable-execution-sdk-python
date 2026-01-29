@@ -2,6 +2,8 @@
 
 # Main context - used in every durable function
 # Helper decorators - commonly used for step functions
+# Concurrency
+from aws_durable_execution_sdk_python.concurrency.models import BatchResult
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
     durable_step,
@@ -20,7 +22,7 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.execution import durable_execution
 
 # Essential context types - passed to user functions
-from aws_durable_execution_sdk_python.types import BatchResult, StepContext
+from aws_durable_execution_sdk_python.types import StepContext
 
 __all__ = [
     "BatchResult",
