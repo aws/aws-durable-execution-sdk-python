@@ -45,12 +45,12 @@ class CheckpointBatcherConfig:
     Attributes:
         max_batch_size_bytes: Maximum batch size in bytes (default: 750KB)
         max_batch_time_seconds: Maximum time to wait before flushing batch (default: 1.0 second)
-        max_batch_operations: Maximum number of operations per batch (default: unlimited)
+        max_batch_operations: Maximum number of operations per batch (default: 250)
     """
 
-    max_batch_size_bytes: int = 750 * 1024  # 750KB - private readonly MAX_PAYLOAD_SIZE
-    max_batch_time_seconds: float = 1.0  # 1 second default
-    max_batch_operations: int | float = float("inf")  # No operation limit by default
+    max_batch_size_bytes: int = 750 * 1024  # 750KB
+    max_batch_time_seconds: float = 1.0
+    max_batch_operations: int = 250
 
 
 @dataclass(frozen=True)
