@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Concatenate, Generic, ParamSpec, TypeVar
 
 from aws_durable_execution_sdk_python.config import (
@@ -72,6 +73,20 @@ Params = ParamSpec("Params")
 logger = logging.getLogger(__name__)
 
 PASS_THROUGH_SERDES: SerDes[Any] = PassThroughSerDes()
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    """Readonly metadata about the current durable execution context.
+
+    This class provides immutable access to execution-level metadata.
+
+    Attributes:
+        durable_execution_arn: The Amazon Resource Name (ARN) of the current
+            durable execution.
+    """
+
+    durable_execution_arn: str
 
 
 def durable_step(
@@ -218,11 +233,13 @@ class DurableContext(DurableContextProtocol):
     def __init__(
         self,
         state: ExecutionState,
+        execution_context: ExecutionContext,
         lambda_context: LambdaContext | None = None,
         parent_id: str | None = None,
         logger: Logger | None = None,
     ) -> None:
         self.state: ExecutionState = state
+        self.execution_context: ExecutionContext = execution_context
         self.lambda_context = lambda_context
         self._parent_id: str | None = parent_id
         self._step_counter: OrderedCounter = OrderedCounter()
@@ -245,6 +262,9 @@ class DurableContext(DurableContextProtocol):
     ):
         return DurableContext(
             state=state,
+            execution_context=ExecutionContext(
+                durable_execution_arn=state.durable_execution_arn
+            ),
             lambda_context=lambda_context,
             parent_id=None,
         )
@@ -254,6 +274,7 @@ class DurableContext(DurableContextProtocol):
         logger.debug("Creating child context for parent %s", parent_id)
         return DurableContext(
             state=self.state,
+            execution_context=self.execution_context,
             lambda_context=self.lambda_context,
             parent_id=parent_id,
             logger=self.logger.with_log_info(

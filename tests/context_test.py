@@ -16,7 +16,11 @@ from aws_durable_execution_sdk_python.config import (
     ParallelConfig,
     StepConfig,
 )
-from aws_durable_execution_sdk_python.context import Callback, DurableContext
+from aws_durable_execution_sdk_python.context import (
+    Callback,
+    DurableContext,
+    ExecutionContext,
+)
 from aws_durable_execution_sdk_python.exceptions import (
     CallbackError,
     SuspendExecution,
@@ -37,6 +41,24 @@ from aws_durable_execution_sdk_python.waits import (
 )
 from tests.serdes_test import CustomDictSerDes
 from tests.test_helpers import operation_id_sequence
+
+
+def create_test_context(
+    state: ExecutionState | None = None, parent_id: str | None = None
+) -> DurableContext:
+    """Helper to create DurableContext for tests with required execution_context."""
+    if state is None:
+        state = Mock(spec=ExecutionState)
+        state.durable_execution_arn = (
+            "arn:aws:durable:us-east-1:123456789012:execution/test"
+        )
+
+    execution_context = ExecutionContext(
+        durable_execution_arn=state.durable_execution_arn
+    )
+    return DurableContext(
+        state=state, execution_context=execution_context, parent_id=parent_id
+    )
 
 
 def test_durable_context():
@@ -250,7 +272,7 @@ def test_create_callback_basic(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     operation_ids = operation_id_sequence()
     expected_operation_id = next(operation_ids)
 
@@ -282,7 +304,7 @@ def test_create_callback_with_name_and_config(mock_executor_class):
     )
     config = CallbackConfig()
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     operation_ids = operation_id_sequence()
     [next(operation_ids) for _ in range(5)]  # Skip 5 IDs
     expected_operation_id = next(operation_ids)  # Get the 6th ID
@@ -315,7 +337,7 @@ def test_create_callback_with_parent_id(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state, parent_id="parent123")
+    context = create_test_context(state=mock_state, parent_id="parent123")
     operation_ids = operation_id_sequence("parent123")
     [next(operation_ids) for _ in range(2)]  # Skip 2 IDs
     expected_operation_id = next(operation_ids)  # Get the 3rd ID
@@ -345,7 +367,7 @@ def test_create_callback_increments_counter(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(10)]  # Set counter to 10 # noqa: SLF001
 
     callback1 = context.create_callback()
@@ -383,7 +405,7 @@ def test_step_basic(mock_executor_class):
         mock_callable._original_name  # noqa: SLF001
     )  # Ensure _original_name doesn't exist
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     operation_ids = operation_id_sequence()
     expected_operation_id = next(operation_ids)
 
@@ -418,7 +440,7 @@ def test_step_with_name_and_config(mock_executor_class):
     )  # Ensure Mock doesn't have _original_name
     config = StepConfig()
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
 
     result = context.step(mock_callable, config=config)
@@ -456,7 +478,7 @@ def test_step_with_parent_id(mock_executor_class):
         mock_callable._original_name  # noqa: SLF001
     )  # Ensure _original_name doesn't exist
 
-    context = DurableContext(state=mock_state, parent_id="parent123")
+    context = create_test_context(state=mock_state, parent_id="parent123")
     [context._create_step_id() for _ in range(2)]  # Set counter to 2 # noqa: SLF001
 
     context.step(mock_callable)
@@ -493,7 +515,7 @@ def test_step_increments_counter(mock_executor_class):
         mock_callable._original_name  # noqa: SLF001
     )  # Ensure _original_name doesn't exist
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(10)]  # Set counter to 10 # noqa: SLF001
 
     context.step(mock_callable)
@@ -529,7 +551,7 @@ def test_step_with_original_name(mock_executor_class):
     mock_callable = Mock()
     mock_callable._original_name = "original_function"  # noqa: SLF001
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     context.step(mock_callable, name="override_name")
 
@@ -564,7 +586,7 @@ def test_invoke_basic(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     operation_ids = operation_id_sequence()
     expected_operation_id = next(operation_ids)
 
@@ -596,7 +618,7 @@ def test_invoke_with_name_and_config(mock_executor_class):
     )
     config = InvokeConfig[str, str](timeout=Duration.from_seconds(30))
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
 
     result = context.invoke(
@@ -632,7 +654,7 @@ def test_invoke_with_parent_id(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state, parent_id="parent123")
+    context = create_test_context(state=mock_state, parent_id="parent123")
     [context._create_step_id() for _ in range(2)]  # Set counter to 2 # noqa: SLF001
 
     context.invoke("test_function", None)
@@ -664,7 +686,7 @@ def test_invoke_increments_counter(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(10)]  # Set counter to 10 # noqa: SLF001
 
     context.invoke("function1", "payload1")
@@ -697,7 +719,7 @@ def test_invoke_with_none_payload(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.invoke("test_function", None)
 
@@ -737,7 +759,7 @@ def test_invoke_with_custom_serdes(mock_executor_class):
         timeout=Duration.from_minutes(1),
     )
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.invoke(
         "test_function",
@@ -778,7 +800,7 @@ def test_wait_basic(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     operation_ids = operation_id_sequence()
     expected_operation_id = next(operation_ids)
 
@@ -804,7 +826,7 @@ def test_wait_with_name(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
 
     context.wait(Duration.from_minutes(1), name="test_wait")
@@ -833,7 +855,7 @@ def test_wait_with_parent_id(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state, parent_id="parent123")
+    context = create_test_context(state=mock_state, parent_id="parent123")
     [context._create_step_id() for _ in range(2)]  # Set counter to 2 # noqa: SLF001
 
     context.wait(Duration.from_seconds(45))
@@ -862,7 +884,7 @@ def test_wait_increments_counter(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(10)]  # Set counter to 10 # noqa: SLF001
 
     context.wait(Duration.from_seconds(15))
@@ -894,7 +916,7 @@ def test_wait_returns_none(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.wait(Duration.from_seconds(10))
 
@@ -913,7 +935,7 @@ def test_wait_with_time_less_than_one(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     with pytest.raises(ValidationError):
         context.wait(Duration.from_seconds(0))
@@ -936,7 +958,7 @@ def test_run_in_child_context_basic(mock_handler):
         mock_callable._original_name  # noqa: SLF001
     )  # Ensure _original_name doesn't exist
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     operation_ids = operation_id_sequence()
     expected_operation_id = next(operation_ids)
 
@@ -967,7 +989,7 @@ def test_run_in_child_context_with_name_and_config(mock_handler):
 
     config = ChildConfig()
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(3)]  # Set counter to 3 # noqa: SLF001
 
     result = context.run_in_child_context(mock_callable, config=config)
@@ -1001,7 +1023,7 @@ def test_run_in_child_context_with_parent_id(mock_executor_class):
         mock_callable._original_name  # noqa: SLF001
     )  # Ensure Mock doesn't have _original_name
 
-    context = DurableContext(state=mock_state, parent_id="parent456")
+    context = create_test_context(state=mock_state, parent_id="parent456")
     [context._create_step_id() for _ in range(1)]  # Set counter to 1 # noqa: SLF001
 
     context.run_in_child_context(mock_callable)
@@ -1037,7 +1059,7 @@ def test_run_in_child_context_creates_child_context(mock_executor_class):
     mock_callable = Mock(side_effect=capture_child_context)
     mock_executor_class.side_effect = lambda func, **kwargs: func()
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.run_in_child_context(mock_callable)
 
@@ -1062,7 +1084,7 @@ def test_run_in_child_context_increments_counter(mock_executor_class):
         mock_callable._original_name  # noqa: SLF001
     )  # Ensure _original_name doesn't exist
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
 
     context.run_in_child_context(mock_callable)
@@ -1097,7 +1119,7 @@ def test_run_in_child_context_resolves_name_from_callable(mock_executor_class):
     mock_callable = Mock()
     mock_callable._original_name = "original_function_name"  # noqa: SLF001
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     context.run_in_child_context(mock_callable)
 
@@ -1128,7 +1150,7 @@ def test_wait_for_callback_basic(mock_executor_class):
 
     with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
         mock_run_in_child.return_value = "callback_result"
-        context = DurableContext(state=mock_state)
+        context = create_test_context(state=mock_state)
 
         result = context.wait_for_callback(mock_submitter)
 
@@ -1158,7 +1180,7 @@ def test_wait_for_callback_with_name_and_config(mock_executor_class):
 
     with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
         mock_run_in_child.return_value = "configured_callback_result"
-        context = DurableContext(state=mock_state)
+        context = create_test_context(state=mock_state)
 
         result = context.wait_for_callback(mock_submitter, config=config)
 
@@ -1186,7 +1208,7 @@ def test_wait_for_callback_resolves_name_from_submitter(mock_executor_class):
 
     with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
         mock_run_in_child.return_value = "named_callback_result"
-        context = DurableContext(state=mock_state)
+        context = create_test_context(state=mock_state)
 
         context.wait_for_callback(mock_submitter)
 
@@ -1214,11 +1236,11 @@ def test_wait_for_callback_passes_child_context(mock_executor_class):
 
         def run_child_context(callable_func, name):
             # Execute the child context callable
-            child_context = DurableContext(state=mock_state, parent_id="test")
+            child_context = create_test_context(state=mock_state, parent_id="test")
             return callable_func(child_context)
 
         mock_run_in_child.side_effect = run_child_context
-        context = DurableContext(state=mock_state)
+        context = create_test_context(state=mock_state)
 
         result = context.wait_for_callback(mock_submitter)
 
@@ -1244,7 +1266,7 @@ def test_map_basic(mock_handler):
 
     inputs = [1, 2, 3]
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.map(inputs, test_function)
 
@@ -1273,7 +1295,7 @@ def test_map_with_name_and_config(mock_handler):
     inputs = ["a", "b", "c"]
     config = MapConfig()
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.map(inputs, test_function, name="custom_map", config=config)
 
@@ -1298,7 +1320,7 @@ def test_map_calls_handler_correctly(mock_handler):
 
     inputs = ["hello", "world"]
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.map(inputs, test_function)
 
@@ -1322,7 +1344,7 @@ def test_map_with_empty_inputs(mock_handler):
 
     with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
         mock_run_in_child.return_value = "empty_map_result"
-        context = DurableContext(state=mock_state)
+        context = create_test_context(state=mock_state)
 
         result = context.map(inputs, test_function)
 
@@ -1345,7 +1367,7 @@ def test_map_with_different_input_types(mock_handler):
 
     with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
         mock_run_in_child.return_value = "mixed_map_result"
-        context = DurableContext(state=mock_state)
+        context = create_test_context(state=mock_state)
 
         result = context.map(inputs, test_function)
 
@@ -1373,7 +1395,7 @@ def test_parallel_basic(mock_handler):
 
     callables = [task1, task2]
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.parallel(callables)
 
@@ -1403,7 +1425,7 @@ def test_parallel_with_name_and_config(mock_handler):
     callables = [task1, task2]
     config = ParallelConfig()
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.parallel(callables, name="custom_parallel", config=config)
 
@@ -1435,7 +1457,7 @@ def test_parallel_resolves_name_from_callable(mock_handler):
 
     callables = [task1, task2]
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     # Use _resolve_step_name to test name resolution
     resolved_name = context._resolve_step_name(None, mock_callable)  # noqa: SLF001
@@ -1466,7 +1488,7 @@ def test_parallel_calls_handler_correctly(mock_handler):
 
     callables = [task1, task2]
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.parallel(callables)
 
@@ -1487,7 +1509,7 @@ def test_parallel_with_empty_callables(mock_handler):
 
     with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
         mock_run_in_child.return_value = "empty_parallel_result"
-        context = DurableContext(state=mock_state)
+        context = create_test_context(state=mock_state)
 
         result = context.parallel(callables)
 
@@ -1510,7 +1532,7 @@ def test_parallel_with_single_callable(mock_handler):
 
     with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
         mock_run_in_child.return_value = "single_parallel_result"
-        context = DurableContext(state=mock_state)
+        context = create_test_context(state=mock_state)
 
         result = context.parallel(callables)
 
@@ -1536,7 +1558,7 @@ def test_parallel_with_many_callables(mock_handler):
 
     with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
         mock_run_in_child.return_value = "many_parallel_result"
-        context = DurableContext(state=mock_state)
+        context = create_test_context(state=mock_state)
 
         result = context.parallel(callables)
 
@@ -1562,7 +1584,7 @@ def test_map_calls_handler(mock_handler):
     inputs = ["a", "b", "c"]
     config = MapConfig()
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.map(inputs, test_function, config=config)
 
@@ -1588,7 +1610,7 @@ def test_parallel_calls_handler(mock_handler):
     callables = [task1, task2]
     config = ParallelConfig()
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.parallel(callables, config=config)
 
@@ -1603,7 +1625,7 @@ def test_wait_for_condition_validation_errors():
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     def dummy_wait_strategy(state, attempt):
         return None
@@ -1640,7 +1662,7 @@ def test_context_map_handler_call():
     state = Mock()
     state.durable_execution_arn = "test_arn"
 
-    context = DurableContext(state=state)
+    context = create_test_context(state=state)
 
     # Mock the handlers to track calls
     with patch(
@@ -1680,7 +1702,7 @@ def test_context_parallel_handler_call():
     state = Mock()
     state.durable_execution_arn = "test_arn"
 
-    context = DurableContext(state=state)
+    context = create_test_context(state=state)
 
     # Mock the handlers to track calls
     with patch(
@@ -1719,7 +1741,7 @@ def test_context_wait_for_condition_handler_call():
     state = Mock()
     state.durable_execution_arn = "test_arn"
 
-    context = DurableContext(state=state)
+    context = create_test_context(state=state)
 
     # Create config
     config = WaitForConditionConfig(
@@ -1820,7 +1842,7 @@ def test_invoke_with_explicit_tenant_id(mock_executor_class):
     )
 
     config = InvokeConfig(tenant_id="explicit-tenant")
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.invoke("test_function", "payload", config=config)
 
@@ -1842,7 +1864,7 @@ def test_invoke_without_tenant_id_defaults_to_none(mock_executor_class):
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
 
-    context = DurableContext(state=mock_state)
+    context = create_test_context(state=mock_state)
 
     result = context.invoke("test_function", "payload")
 
@@ -1851,3 +1873,89 @@ def test_invoke_without_tenant_id_defaults_to_none(mock_executor_class):
     call_args = mock_executor_class.call_args[1]
     assert isinstance(call_args["config"], InvokeConfig)
     assert call_args["config"].tenant_id is None
+
+
+# region ExecutionContext tests
+
+
+def test_execution_context_exists_on_durable_context():
+    """Test that DurableContext has execution_context attribute."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test-execution"
+    )
+
+    context = create_test_context(state=mock_state)
+
+    assert hasattr(context, "execution_context")
+    assert context.execution_context is not None
+
+
+def test_execution_context_has_correct_arn():
+    """Test that ExecutionContext contains the correct durable_execution_arn."""
+    expected_arn = "arn:aws:durable:us-west-2:987654321098:execution/my-execution"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = expected_arn
+
+    context = create_test_context(state=mock_state)
+
+    assert context.execution_context.durable_execution_arn == expected_arn
+
+
+def test_execution_context_is_immutable():
+    """Test that ExecutionContext is frozen and immutable."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    context = create_test_context(state=mock_state)
+
+    # Attempt to modify should raise FrozenInstanceError for frozen dataclass
+    with pytest.raises(AttributeError, match="cannot assign to field"):
+        context.execution_context.durable_execution_arn = "new-arn"
+
+
+def test_execution_context_propagates_to_child_context():
+    """Test that child contexts inherit the same execution_context."""
+    parent_arn = "arn:aws:durable:eu-west-1:111222333444:execution/parent-exec"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = parent_arn
+
+    parent_context = create_test_context(state=mock_state)
+    child_context = parent_context.create_child_context(parent_id="parent-op-123")
+
+    assert child_context.execution_context is not None
+    assert child_context.execution_context.durable_execution_arn == parent_arn
+    # Should be the same instance (not a copy)
+    assert child_context.execution_context is parent_context.execution_context
+
+
+def test_from_lambda_context_creates_execution_context():
+    """Test that from_lambda_context factory creates ExecutionContext."""
+    expected_arn = "arn:aws:durable:ap-south-1:555666777888:execution/lambda-exec"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = expected_arn
+    mock_lambda_context = Mock()
+
+    context = DurableContext.from_lambda_context(
+        state=mock_state, lambda_context=mock_lambda_context
+    )
+
+    assert context.execution_context is not None
+    assert context.execution_context.durable_execution_arn == expected_arn
+
+
+def test_execution_context_type():
+    """Test that execution_context is of type ExecutionContext."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    context = create_test_context(state=mock_state)
+
+    assert isinstance(context.execution_context, ExecutionContext)
+
+
+# endregion ExecutionContext tests

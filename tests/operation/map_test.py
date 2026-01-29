@@ -19,13 +19,32 @@ from aws_durable_execution_sdk_python.config import (
     ItemBatcher,
     MapConfig,
 )
-from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.context import DurableContext, ExecutionContext
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.operation import child  # PLC0415
 from aws_durable_execution_sdk_python.operation.map import MapExecutor, map_handler
 from aws_durable_execution_sdk_python.serdes import serialize
+from aws_durable_execution_sdk_python.state import ExecutionState
 from tests.serdes_test import CustomStrSerDes
+
+
+def create_test_context(
+    state: ExecutionState | None = None, parent_id: str | None = None
+) -> DurableContext:
+    """Helper to create DurableContext for tests with required execution_context."""
+    if state is None:
+        state = Mock(spec=ExecutionState)
+        state.durable_execution_arn = (
+            "arn:aws:durable:us-east-1:123456789012:execution/test"
+        )
+
+    execution_context = ExecutionContext(
+        durable_execution_arn=state.durable_execution_arn
+    )
+    return DurableContext(
+        state=state, execution_context=execution_context, parent_id=parent_id
+    )
 
 
 def test_map_executor_init():
@@ -808,7 +827,7 @@ def test_map_item_serialize(mock_serialize, item_serdes, batch_serdes):
         )
 
     with patch.object(DurableContext, "_create_step_id_for_logical_step", create_id):
-        context = DurableContext(state=mock_state)
+        context = create_test_context(state=mock_state)
         context.map(
             ["a", "b"],
             lambda ctx, item, idx, items: item,
@@ -870,7 +889,7 @@ def test_map_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
         )
 
     with patch.object(DurableContext, "_create_step_id_for_logical_step", create_id):
-        context = DurableContext(state=mock_state)
+        context = create_test_context(state=mock_state)
         context.map(
             ["a", "b"],
             lambda ctx, item, idx, items: item,
@@ -970,7 +989,7 @@ def test_map_handler_serializes_batch_result():
         with patch.object(
             DurableContext, "_create_step_id_for_logical_step", create_id
         ):
-            context = DurableContext(state=mock_state)
+            context = create_test_context(state=mock_state)
             result = context.map(["a", "b"], lambda ctx, item, idx, items: item)
 
         assert len(mock_serdes_serialize.call_args_list) == 3
@@ -1022,7 +1041,7 @@ def test_map_default_serdes_serializes_batch_result():
         with patch.object(
             DurableContext, "_create_step_id_for_logical_step", create_id
         ):
-            context = DurableContext(state=mock_state)
+            context = create_test_context(state=mock_state)
             result = context.map(["a", "b"], lambda ctx, item, idx, items: item)
 
         assert isinstance(result, BatchResult)
@@ -1078,7 +1097,7 @@ def test_map_custom_serdes_serializes_batch_result():
         with patch.object(
             DurableContext, "_create_step_id_for_logical_step", create_id
         ):
-            context = DurableContext(state=mock_state)
+            context = create_test_context(state=mock_state)
             result = context.map(
                 ["a", "b"],
                 lambda ctx, item, idx, items: item,
