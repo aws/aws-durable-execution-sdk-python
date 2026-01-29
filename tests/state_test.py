@@ -812,7 +812,7 @@ def test_checkpoint_batch_respects_default_max_items_limit():
 
     # Use default config (max_batch_operations=250)
     config = CheckpointBatcherConfig(
-        max_batch_size_bytes=10 * 1024 * 1024,  # 10MB - large enough to not trigger size limit
+        max_batch_size_bytes=10 * 1024 * 1024,
         max_batch_time_seconds=10.0,
     )
 
