@@ -114,6 +114,85 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
         completion_reason = CompletionReason(completion_reason_value)
         return cls(batch_items, completion_reason)
 
+    @staticmethod
+    def _get_completion_reason(
+        failure_count: int,
+        success_count: int,
+        completed_count: int,
+        total_count: int,
+        completion_config: CompletionConfig | None,
+    ) -> CompletionReason:
+        """
+        Determine completion reason based on completion counts.
+
+        Logic order:
+        1. Check failure tolerance FIRST (before checking if all completed)
+        2. Check if all completed
+        3. Check if minimum successful reached
+        4. Default to ALL_COMPLETED
+
+        Args:
+            failure_count: Number of failed items
+            success_count: Number of succeeded items
+            completed_count: Total completed (succeeded + failed)
+            total_count: Total number of items
+            completion_config: Optional completion configuration
+
+        Returns:
+            CompletionReason enum value
+        """
+        # STEP 1: Check tolerance first, before checking if all completed
+
+        # Handle fail-fast behavior (no completion config or empty completion config)
+        if completion_config is None:
+            if failure_count > 0:
+                return CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+        else:
+            # Check if completion config has any criteria set
+            has_any_completion_criteria = (
+                completion_config.min_successful is not None
+                or completion_config.tolerated_failure_count is not None
+                or completion_config.tolerated_failure_percentage is not None
+            )
+
+            if not has_any_completion_criteria:
+                # Empty completion config - fail fast on any failure
+                if failure_count > 0:
+                    return CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+            else:
+                # Check specific tolerance thresholds
+                if (
+                    completion_config.tolerated_failure_count is not None
+                    and failure_count > completion_config.tolerated_failure_count
+                ):
+                    return CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+                if (
+                    completion_config.tolerated_failure_percentage is not None
+                    and total_count > 0
+                ):
+                    failure_percentage = (failure_count / total_count) * 100
+                    if (
+                        failure_percentage
+                        > completion_config.tolerated_failure_percentage
+                    ):
+                        return CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+        # STEP 2: Check if all completed
+        if completed_count == total_count:
+            return CompletionReason.ALL_COMPLETED
+
+        # STEP 3: Check if minimum successful reached
+        if (
+            completion_config is not None
+            and completion_config.min_successful is not None
+            and success_count >= completion_config.min_successful
+        ):
+            return CompletionReason.MIN_SUCCESSFUL_REACHED
+
+        # STEP 4: Default
+        return CompletionReason.ALL_COMPLETED
+
     @classmethod
     def from_items(
         cls,
@@ -123,12 +202,8 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
         """
         Infer completion reason based on batch item statuses and completion config.
 
-        This follows the same logic as the TypeScript implementation:
-        - If all items completed: ALL_COMPLETED
-        - If minSuccessful threshold met and not all completed: MIN_SUCCESSFUL_REACHED
-        - Otherwise: FAILURE_TOLERANCE_EXCEEDED
+        This follows the same logic as the TypeScript implementation.
         """
-
         statuses = (item.status for item in items)
         counts = Counter(statuses)
         succeeded_count = counts.get(BatchItemStatus.SUCCEEDED, 0)
@@ -138,18 +213,14 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
         completed_count = succeeded_count + failed_count
         total_count = started_count + completed_count
 
-        # If all items completed (no started items), it's ALL_COMPLETED
-        if completed_count == total_count:
-            completion_reason = CompletionReason.ALL_COMPLETED
-        elif (  # If we have completion config and minSuccessful threshold is met
-            completion_config
-            and (min_successful := completion_config.min_successful) is not None
-            and succeeded_count >= min_successful
-        ):
-            completion_reason = CompletionReason.MIN_SUCCESSFUL_REACHED
-        else:
-            # Otherwise, assume failure tolerance was exceeded
-            completion_reason = CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+        # Determine completion reason using the same logic as JavaScript SDK
+        completion_reason = cls._get_completion_reason(
+            failure_count=failed_count,
+            success_count=succeeded_count,
+            completed_count=completed_count,
+            total_count=total_count,
+            completion_config=completion_config,
+        )
 
         return cls(items, completion_reason)
 
