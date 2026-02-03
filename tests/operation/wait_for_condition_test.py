@@ -596,7 +596,127 @@ def test_wait_for_condition_attempt_number_passed_to_strategy():
         context_logger=mock_logger,
     )
 
-    assert captured_attempt == 3
+    assert captured_attempt == 4
+
+
+def test_wait_for_condition_attempt_sequence_is_monotonic():
+    """Test that attempt numbers form a monotonically increasing sequence: 1, 2, 3, 4...
+
+    This test validates the fix for the attempt counting bug where:
+    - First execution (no checkpoint): attempt = 1
+    - After first retry (checkpoint.attempt = 1): attempt = 2
+    - After second retry (checkpoint.attempt = 2): attempt = 3
+    - After third retry (checkpoint.attempt = 3): attempt = 4
+
+    The current attempt should always be: checkpointed_attempts + 1
+    """
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "arn:aws:test"
+
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    op_id = OperationIdentifier("op1", None, "test_wait")
+
+    def check_func(state, context):
+        return state + 1
+
+    captured_attempts = []
+
+    def wait_strategy(state, attempt):
+        captured_attempts.append(attempt)
+        return WaitForConditionDecision.stop_polling()
+
+    config = WaitForConditionConfig(initial_state=5, wait_strategy=wait_strategy)
+
+    # Test 1: First execution (no checkpoint exists)
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+
+    wait_for_condition_handler(
+        state=mock_state,
+        operation_identifier=op_id,
+        check=check_func,
+        config=config,
+        context_logger=mock_logger,
+    )
+
+    assert captured_attempts[-1] == 1, "First execution should have attempt=1"
+
+    # Test 2: After first retry (checkpoint has attempt=1)
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.STARTED,
+        step_details=StepDetails(result=json.dumps(10), attempt=1),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    wait_for_condition_handler(
+        state=mock_state,
+        operation_identifier=op_id,
+        check=check_func,
+        config=config,
+        context_logger=mock_logger,
+    )
+
+    assert (
+        captured_attempts[-1] == 2
+    ), "After first retry (checkpoint.attempt=1), current attempt should be 2"
+
+    # Test 3: After second retry (checkpoint has attempt=2)
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.STARTED,
+        step_details=StepDetails(result=json.dumps(10), attempt=2),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    wait_for_condition_handler(
+        state=mock_state,
+        operation_identifier=op_id,
+        check=check_func,
+        config=config,
+        context_logger=mock_logger,
+    )
+
+    assert (
+        captured_attempts[-1] == 3
+    ), "After second retry (checkpoint.attempt=2), current attempt should be 3"
+
+    # Test 4: After third retry (checkpoint has attempt=3)
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.STARTED,
+        step_details=StepDetails(result=json.dumps(10), attempt=3),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    wait_for_condition_handler(
+        state=mock_state,
+        operation_identifier=op_id,
+        check=check_func,
+        config=config,
+        context_logger=mock_logger,
+    )
+
+    assert (
+        captured_attempts[-1] == 4
+    ), "After third retry (checkpoint.attempt=3), current attempt should be 4"
+
+    # Verify the complete sequence is monotonically increasing
+    assert captured_attempts == [
+        1,
+        2,
+        3,
+        4,
+    ], f"Expected [1, 2, 3, 4] but got {captured_attempts}"
 
 
 def test_wait_for_condition_state_passed_to_strategy():

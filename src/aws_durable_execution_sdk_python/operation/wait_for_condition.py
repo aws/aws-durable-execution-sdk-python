@@ -170,10 +170,11 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
         else:
             current_state = self.config.initial_state
 
-        # Get attempt number
+        # Get attempt number - current attempt is checkpointed attempts + 1
+        # The checkpoint stores completed attempts, so the current attempt being executed is one more
         attempt: int = 1
         if checkpointed_result.operation and checkpointed_result.operation.step_details:
-            attempt = checkpointed_result.operation.step_details.attempt
+            attempt = checkpointed_result.operation.step_details.attempt + 1
 
         try:
             # Execute the check function with the injected logger
