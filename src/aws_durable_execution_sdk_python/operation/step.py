@@ -202,9 +202,10 @@ class StepOperationExecutor(OperationExecutor[T]):
             ExecutionError: For fatal errors that should not be retried
             May raise other exceptions that will be handled by retry_handler
         """
-        attempt: int = 0
+        # Get current attempt - checkpointed attempts + 1
+        attempt: int = 1
         if checkpointed_result.operation and checkpointed_result.operation.step_details:
-            attempt = checkpointed_result.operation.step_details.attempt
+            attempt = checkpointed_result.operation.step_details.attempt + 1
 
         step_context: StepContext = StepContext(
             logger=self.context_logger.with_log_info(
