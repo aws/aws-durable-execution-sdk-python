@@ -72,7 +72,7 @@ class Logger(LoggerInterface):
             # Use 'operation_name' instead of 'name' as key because the stdlib LogRecord internally reserved 'name' parameter
             extra["operationName"] = info.name
         if info.attempt is not None:
-            extra["attempt"] = info.attempt + 1
+            extra["attempt"] = info.attempt
         if info.operation_id:
             extra["operationId"] = info.operation_id
         return cls(

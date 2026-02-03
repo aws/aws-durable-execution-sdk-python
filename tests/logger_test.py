@@ -177,7 +177,7 @@ def test_logger_from_log_info_full():
         "parentId": "parent123",
         "operationId": "op123",
         "operationName": "test_name",
-        "attempt": 6,
+        "attempt": 5,
     }
     assert logger._default_extra == expected_extra  # noqa: SLF001
     assert logger._logger is mock_logger  # noqa: SLF001
@@ -202,7 +202,7 @@ def test_logger_from_log_info_partial_fields():
     # Test with attempt but no parent_id or name
     log_info = LogInfo(EXECUTION_STATE, None, None, None, 5)
     logger = Logger.from_log_info(mock_logger, log_info)
-    expected_extra = {"executionArn": "arn:aws:test", "attempt": 6}
+    expected_extra = {"executionArn": "arn:aws:test", "attempt": 5}
     assert logger._default_extra == expected_extra  # noqa: SLF001
 
 
