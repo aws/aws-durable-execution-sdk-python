@@ -1,5 +1,8 @@
 """AWS Lambda Durable Executions Python SDK."""
 
+# Package metadata
+from aws_durable_execution_sdk_python.__about__ import __version__
+
 # Main context - used in every durable function
 # Helper decorators - commonly used for step functions
 # Concurrency
@@ -31,6 +34,7 @@ __all__ = [
     "InvocationError",
     "StepContext",
     "ValidationError",
+    "__version__",
     "durable_execution",
     "durable_step",
     "durable_wait_for_callback",
