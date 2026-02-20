@@ -77,19 +77,19 @@ def square(context: DurableContext, item: int, index: int, items: list[int]) -> 
     return item * item
 
 @durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[int]:
+def handler(event: dict, context: DurableContext) -> list[int]:
     """Process a list of items using map operations."""
     items = [1, 2, 3, 4, 5]
-    
+
     result = context.map(items, square)
-    return result
+    return result.get_results()  # Returns JSON-serializable list
 ```
 
 When this function runs:
 1. Each item is processed in parallel
 2. The `square` function is called for each item
 3. Each result is checkpointed independently
-4. The function returns a `BatchResult` with results `[1, 4, 9, 16, 25]`
+4. The function returns the results list `[1, 4, 9, 16, 25]` (JSON-serializable)
 
 If the function is interrupted after processing items 0-2, it resumes at item 3 without reprocessing the first three items.
 
@@ -165,10 +165,10 @@ def validate_email(
     }
 
 @durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[dict]:
+def handler(event: dict, context: DurableContext) -> list[dict]:
     emails = ["jane_doe@example.com", "john_doe@example.org", "invalid"]
     result = context.map(emails, validate_email)
-    return result
+    return result.get_results()  # Returns JSON-serializable list
 ```
 
 [↑ Back to top](#table-of-contents)
@@ -194,18 +194,23 @@ def process_item(context: DurableContext, item: int, index: int, items: list[int
     return {"item": item, "squared": item * item}
 
 @durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[dict]:
+def handler(event: dict, context: DurableContext) -> dict:
     items = list(range(100))
-    
+
     # Configure map operation
     config = MapConfig(
         max_concurrency=10,  # Process 10 items at a time
         item_batcher=ItemBatcher(max_items_per_batch=5),  # Batch 5 items together
         completion_config=CompletionConfig.all_successful(),  # Require all to succeed
     )
-    
+
     result = context.map(items, process_item, name="process_numbers", config=config)
-    return result
+    # Return JSON-serializable dict with summary and results
+    return {
+        "total": result.total_count,
+        "successful": result.success_count,
+        "results": result.get_results(),
+    }
 ```
 
 ### MapConfig parameters
@@ -244,14 +249,19 @@ def fetch_data(context: DurableContext, url: str, index: int, urls: list[str]) -
     return {"url": url, "data": "..."}
 
 @durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[dict]:
+def handler(event: dict, context: DurableContext) -> dict:
     urls = [f"https://example.com/api/{i}" for i in range(100)]
-    
+
     # Process only 5 URLs at a time
     config = MapConfig(max_concurrency=5)
-    
+
     result = context.map(urls, fetch_data, config=config)
-    return result
+    # Return JSON-serializable dict
+    return {
+        "total": result.total_count,
+        "successful": result.success_count,
+        "results": result.get_results(),
+    }
 ```
 
 ### Batching items
@@ -272,16 +282,21 @@ def process_batch(
     return [{"item": item, "squared": item * item} for item in batch.items]
 
 @durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[list[dict]]:
+def handler(event: dict, context: DurableContext) -> dict:
     items = list(range(100))
-    
+
     # Process items in batches of 10
     config = MapConfig(
         item_batcher=ItemBatcher(max_items_per_batch=10)
     )
-    
+
     result = context.map(items, process_batch, config=config)
-    return result
+    # Return JSON-serializable dict
+    return {
+        "total": result.total_count,
+        "successful": result.success_count,
+        "results": result.get_results(),
+    }
 ```
 
 ### Custom completion criteria
@@ -299,9 +314,9 @@ def process_item(context: DurableContext, item: int, index: int, items: list[int
     return {"item": item, "processed": True}
 
 @durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[dict]:
+def handler(event: dict, context: DurableContext) -> dict:
     items = list(range(20))
-    
+
     # Succeed if at least 15 items succeed, fail after 5 failures
     config = MapConfig(
         completion_config=CompletionConfig(
@@ -309,9 +324,15 @@ def handler(event: dict, context: DurableContext) -> BatchResult[dict]:
             tolerated_failure_count=5,
         )
     )
-    
+
     result = context.map(items, process_item, config=config)
-    return result
+    # Return JSON-serializable dict with counts
+    return {
+        "total": result.total_count,
+        "successful": result.success_count,
+        "failed": result.failure_count,
+        "results": result.get_results(),
+    }
 ```
 
 ### Using context operations in map functions
@@ -344,11 +365,11 @@ def process_user(
     return {"user_id": user_id, "notification_sent": notification["sent"]}
 
 @durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[dict]:
+def handler(event: dict, context: DurableContext) -> list[dict]:
     user_ids = ["user_1", "user_2", "user_3"]
-    
+
     result = context.map(user_ids, process_user)
-    return result
+    return result.get_results()  # Returns JSON-serializable list
 ```
 
 ### Filtering and transforming results
