@@ -28,8 +28,6 @@
 
 **Concurrency control** - Limiting how many items process simultaneously using `max_concurrency` in `MapConfig`.
 
-**Item batching** - Grouping multiple items together for processing as a single unit to optimize efficiency.
-
 **Completion criteria** - Rules that determine when a map operation succeeds or fails based on individual item results.
 
 [↑ Back to top](#table-of-contents)
@@ -42,7 +40,7 @@ Use map operations to:
 - Transform collections with automatic checkpointing
 - Process lists of items in parallel
 - Handle large datasets with resilience
-- Control concurrency and batching behavior
+- Control concurrency behavior
 - Define custom success/failure criteria
 
 Map operations use `context.map()` to process collections efficiently. Each item becomes an independent operation that executes in parallel with other items.
@@ -55,7 +53,6 @@ Map operations use `context.map()` to process collections efficiently. Each item
 - **Independent checkpointing** - Each item's result is saved separately
 - **Partial completion** - Completed items don't reprocess on replay
 - **Concurrency control** - Limit simultaneous processing with `max_concurrency`
-- **Batching support** - Group items for efficient processing
 - **Flexible completion** - Define custom success/failure criteria
 - **Result ordering** - Results maintain the same order as inputs
 
@@ -77,19 +74,20 @@ def square(context: DurableContext, item: int, index: int, items: list[int]) -> 
     return item * item
 
 @durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[int]:
+def handler(event: dict, context: DurableContext) -> dict:
     """Process a list of items using map operations."""
     items = [1, 2, 3, 4, 5]
-    
+
     result = context.map(items, square)
-    return result
+    # Convert to dict for JSON serialization (BatchResult is not JSON serializable)
+    return result.to_dict()
 ```
 
 When this function runs:
 1. Each item is processed in parallel
 2. The `square` function is called for each item
 3. Each result is checkpointed independently
-4. The function returns a `BatchResult` with results `[1, 4, 9, 16, 25]`
+4. The function returns a dict with results `[1, 4, 9, 16, 25]`
 
 If the function is interrupted after processing items 0-2, it resumes at item 3 without reprocessing the first three items.
 
@@ -102,7 +100,7 @@ If the function is interrupted after processing items 0-2, it resumes at item 3 
 ```python
 def map(
     inputs: Sequence[U],
-    func: Callable[[DurableContext, U | BatchedInput[Any, U], int, Sequence[U]], T],
+    func: Callable[[DurableContext, U, int, Sequence[U]], T],
     name: str | None = None,
     config: MapConfig | None = None,
 ) -> BatchResult[T]
@@ -113,7 +111,7 @@ def map(
 - `inputs` - A sequence of items to process (list, tuple, or any sequence type).
 - `func` - A callable that processes each item. See [Map function signature](#map-function-signature) for details.
 - `name` (optional) - A name for the map operation, useful for debugging and testing.
-- `config` (optional) - A `MapConfig` object to configure concurrency, batching, and completion criteria.
+- `config` (optional) - A `MapConfig` object to configure concurrency and completion criteria.
 
 **Returns:** A `BatchResult[T]` containing the results from processing all items.
 
@@ -128,7 +126,7 @@ The map function receives four parameters:
 ```python
 def process_item(
     context: DurableContext,
-    item: U | BatchedInput[Any, U],
+    item: U,
     index: int,
     items: Sequence[U]
 ) -> T:
@@ -140,7 +138,7 @@ def process_item(
 **Parameters:**
 
 - `context` - A `DurableContext` for the item's processing. Use this to call steps, waits, or other operations.
-- `item` - The current item being processed. Can be a `BatchedInput` if batching is configured.
+- `item` - The current item being processed.
 - `index` - The zero-based index of the item in the original collection.
 - `items` - The full collection of items being processed.
 
@@ -165,10 +163,10 @@ def validate_email(
     }
 
 @durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[dict]:
+def handler(event: dict, context: DurableContext) -> dict:
     emails = ["jane_doe@example.com", "john_doe@example.org", "invalid"]
     result = context.map(emails, validate_email)
-    return result
+    return result.to_dict()
 ```
 
 [↑ Back to top](#table-of-contents)
@@ -186,7 +184,6 @@ from aws_durable_execution_sdk_python import (
 from aws_durable_execution_sdk_python.config import (
     MapConfig,
     CompletionConfig,
-    ItemBatcher,
 )
 
 def process_item(context: DurableContext, item: int, index: int, items: list[int]) -> dict:
@@ -194,25 +191,22 @@ def process_item(context: DurableContext, item: int, index: int, items: list[int
     return {"item": item, "squared": item * item}
 
 @durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[dict]:
+def handler(event: dict, context: DurableContext) -> dict:
     items = list(range(100))
-    
+
     # Configure map operation
     config = MapConfig(
         max_concurrency=10,  # Process 10 items at a time
-        item_batcher=ItemBatcher(max_items_per_batch=5),  # Batch 5 items together
         completion_config=CompletionConfig.all_successful(),  # Require all to succeed
     )
-    
+
     result = context.map(items, process_item, name="process_numbers", config=config)
-    return result
+    return result.to_dict()
 ```
 
 ### MapConfig parameters
 
 **max_concurrency** - Maximum number of items to process concurrently. If `None`, all items process in parallel. Use this to control resource usage.
-
-**item_batcher** - Configuration for batching items together. Use `ItemBatcher(max_items_per_batch=N)` to group items.
 
 **completion_config** - Defines when the map operation succeeds or fails:
 - `CompletionConfig()` - Default, allows any number of failures
@@ -244,45 +238,14 @@ def fetch_data(context: DurableContext, url: str, index: int, urls: list[str]) -
     return {"url": url, "data": "..."}
 
 @durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[dict]:
+def handler(event: dict, context: DurableContext) -> dict:
     urls = [f"https://example.com/api/{i}" for i in range(100)]
-    
+
     # Process only 5 URLs at a time
     config = MapConfig(max_concurrency=5)
-    
+
     result = context.map(urls, fetch_data, config=config)
-    return result
-```
-
-### Batching items
-
-Group multiple items for efficient processing:
-
-```python
-from aws_durable_execution_sdk_python.config import MapConfig, ItemBatcher, BatchedInput
-
-def process_batch(
-    context: DurableContext,
-    batch: BatchedInput[None, int],
-    index: int,
-    items: list[int]
-) -> list[dict]:
-    """Process a batch of items together."""
-    # Process all items in the batch together
-    return [{"item": item, "squared": item * item} for item in batch.items]
-
-@durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[list[dict]]:
-    items = list(range(100))
-    
-    # Process items in batches of 10
-    config = MapConfig(
-        item_batcher=ItemBatcher(max_items_per_batch=10)
-    )
-    
-    result = context.map(items, process_batch, config=config)
-    return result
-```
+    return result.to_dict()```
 
 ### Custom completion criteria
 
@@ -299,9 +262,9 @@ def process_item(context: DurableContext, item: int, index: int, items: list[int
     return {"item": item, "processed": True}
 
 @durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[dict]:
+def handler(event: dict, context: DurableContext) -> dict:
     items = list(range(20))
-    
+
     # Succeed if at least 15 items succeed, fail after 5 failures
     config = MapConfig(
         completion_config=CompletionConfig(
@@ -309,9 +272,9 @@ def handler(event: dict, context: DurableContext) -> BatchResult[dict]:
             tolerated_failure_count=5,
         )
     )
-    
+
     result = context.map(items, process_item, config=config)
-    return result
+    return result.to_dict()
 ```
 
 ### Using context operations in map functions
@@ -344,11 +307,13 @@ def process_user(
     return {"user_id": user_id, "notification_sent": notification["sent"]}
 
 @durable_execution
-def handler(event: dict, context: DurableContext) -> BatchResult[dict]:
+def handler(event: dict, context: DurableContext) -> dict:
+    """Process multiple users using context operations within map functions."""
     user_ids = ["user_1", "user_2", "user_3"]
-    
+
     result = context.map(user_ids, process_user)
-    return result
+    # Convert to dict for JSON serialization (BatchResult is not JSON serializable)
+    return result.to_dict()
 ```
 
 ### Filtering and transforming results
@@ -391,8 +356,6 @@ def handler(event: dict, context: DurableContext) -> list[str]:
 
 **Control concurrency for external calls** - When calling external APIs, use `max_concurrency` to avoid rate limits.
 
-**Batch for efficiency** - For small, fast operations, use `item_batcher` to reduce overhead.
-
 **Define completion criteria** - Use `CompletionConfig` to specify when the operation should succeed or fail.
 
 **Keep map functions focused** - Each map function should process one item. Don't mix collection iteration with item processing.
@@ -401,7 +364,7 @@ def handler(event: dict, context: DurableContext) -> list[str]:
 
 **Handle errors gracefully** - Wrap error-prone code in try-except blocks or use completion criteria to tolerate failures.
 
-**Consider collection size** - For very large collections (10,000+ items), consider batching or processing in chunks.
+**Consider collection size** - For very large collections (10,000+ items), consider processing in chunks.
 
 **Monitor memory usage** - Large collections create many checkpoints. Monitor Lambda memory usage.
 
@@ -415,23 +378,15 @@ def handler(event: dict, context: DurableContext) -> list[str]:
 
 **Use max_concurrency wisely** - Too much concurrency can overwhelm external services or exhaust Lambda resources. Start conservative and increase as needed.
 
-**Batch small operations** - If each item processes quickly (< 100ms), batching reduces overhead:
-
-```python
-config = MapConfig(
-    item_batcher=ItemBatcher(max_items_per_batch=10)
-)
-```
-
 **Optimize map functions** - Keep map functions lightweight. Move heavy computation into steps within the map function.
 
 **Use appropriate completion criteria** - Fail fast with `tolerated_failure_count` to avoid processing remaining items when many fail.
 
 **Monitor checkpoint size** - Large result objects increase checkpoint size and Lambda memory usage. Return only necessary data.
 
-**Consider memory limits** - Processing thousands of items creates many checkpoints. Monitor Lambda memory and adjust batch size or concurrency.
+**Consider memory limits** - Processing thousands of items creates many checkpoints. Monitor Lambda memory and adjust concurrency.
 
-**Profile your workload** - Test with representative data to find optimal concurrency and batch settings.
+**Profile your workload** - Test with representative data to find optimal concurrency settings.
 
 [↑ Back to top](#table-of-contents)
 
@@ -443,7 +398,7 @@ A: Map operations process a collection of similar items using the same function.
 
 **Q: How many items can I process?**
 
-A: There's no hard limit, but consider Lambda's memory and timeout constraints. For very large collections (10,000+ items), use batching or process in chunks.
+A: There's no hard limit, but consider Lambda's memory and timeout constraints. For very large collections (10,000+ items), consider processing in chunks.
 
 **Q: Do items process in order?**
 
@@ -470,10 +425,6 @@ for item_result in batch_result.results:
 **Q: Can I nest map operations?**
 
 A: Yes, you can call `context.map()` inside a map function to process nested collections.
-
-**Q: How does batching work?**
-
-A: When you configure `item_batcher`, multiple items are grouped together and passed as a `BatchedInput` to your map function. Process all items in `batch.items`.
 
 **Q: What's the difference between serdes and item_serdes?**
 
