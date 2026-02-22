@@ -33,7 +33,6 @@ jobs:
       with:
         repository: aws/aws-durable-execution-sdk-python-testing
         ref: ${{ steps.parse.outputs.testing_ref }}
-        token: ${{ secrets.CROSS_REPO_PAT }}
         path: testing-sdk
 
     - name: Set up Python ${{ matrix.python-version }}
@@ -82,7 +81,6 @@ jobs:
       with:
         repository: aws/aws-durable-execution-sdk-python-testing
         ref: ${{ steps.parse.outputs.testing_ref }}
-        token: ${{ secrets.CROSS_REPO_PAT }}
         path: testing-sdk
 
     - name: Set up Python 3.13
