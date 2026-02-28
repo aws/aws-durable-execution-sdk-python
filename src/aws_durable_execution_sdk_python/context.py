@@ -42,7 +42,7 @@ from aws_durable_execution_sdk_python.serdes import (
     SerDes,
     deserialize,
 )
-from aws_durable_execution_sdk_python.state import ExecutionState  # noqa: TCH001
+from aws_durable_execution_sdk_python.state import ExecutionState  # noqa: TC001
 from aws_durable_execution_sdk_python.threading import OrderedCounter
 from aws_durable_execution_sdk_python.types import Callback as CallbackProtocol
 from aws_durable_execution_sdk_python.types import (

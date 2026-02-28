@@ -1079,12 +1079,12 @@ class LambdaClient(DurableServiceClient):
                 self.client.checkpoint_durable_execution(
                     DurableExecutionArn=durable_execution_arn,
                     CheckpointToken=checkpoint_token,
-                    Updates=cast(Any, [o.to_dict() for o in updates]),
+                    Updates=cast("Any", [o.to_dict() for o in updates]),
                     **optional_params,  # type: ignore[arg-type]
                 )
             )
 
-            return CheckpointOutput.from_dict(cast(MutableMapping[str, Any], result))
+            return CheckpointOutput.from_dict(cast("MutableMapping[str, Any]", result))
         except Exception as e:
             checkpoint_error = CheckpointError.from_exception(e)
             logger.exception(
@@ -1108,7 +1108,7 @@ class LambdaClient(DurableServiceClient):
                     MaxItems=max_items,
                 )
             )
-            return StateOutput.from_dict(cast(MutableMapping[str, Any], result))
+            return StateOutput.from_dict(cast("MutableMapping[str, Any]", result))
         except Exception as e:
             error = GetExecutionStateError.from_exception(e)
             logger.exception(

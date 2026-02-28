@@ -798,7 +798,7 @@ def test_envelope_type_preservation_after_roundtrip():
     result = _roundtrip_envelope(original)
 
     # Verify types are preserved
-    assert type(result["none"]) is type(None)
+    assert result["none"] is None
     assert type(result["bool"]) is bool
     assert type(result["int"]) is int
     assert type(result["float"]) is float

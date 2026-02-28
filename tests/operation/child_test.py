@@ -502,7 +502,7 @@ def test_child_handler_large_payload_with_summary_generator() -> None:
         return "summary"
 
     child_config: ChildConfig = ChildConfig[str](
-        summary_generator=cast(SummaryGenerator, my_summary)
+        summary_generator=cast("SummaryGenerator", my_summary)
     )
 
     actual_result = child_handler(
