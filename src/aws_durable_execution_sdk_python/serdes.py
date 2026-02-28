@@ -316,11 +316,7 @@ class TypeCodec(Codec):
     def decode(self, tag: TypeTag, value: Any) -> Any:
         match tag:
             case (
-                TypeTag.NONE
-                | TypeTag.STR
-                | TypeTag.BOOL
-                | TypeTag.INT
-                | TypeTag.FLOAT
+                TypeTag.NONE | TypeTag.STR | TypeTag.BOOL | TypeTag.INT | TypeTag.FLOAT
             ):
                 return self.primitive_codec.decode(tag, value)
             case TypeTag.BYTES:
