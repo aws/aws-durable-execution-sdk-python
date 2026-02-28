@@ -608,9 +608,9 @@ def test_checkpointed_result_is_timed_out_false_for_other_statuses():
             status=status,
         )
         result = CheckpointedResult.create_from_operation(operation)
-        assert (
-            result.is_timed_out() is False
-        ), f"is_timed_out should be False for status {status}"
+        assert result.is_timed_out() is False, (
+            f"is_timed_out should be False for status {status}"
+        )
 
 
 def test_fetch_paginated_operations_with_marker():
@@ -2535,9 +2535,9 @@ def test_create_checkpoint_is_sync_false_returns_immediately():
     elapsed_time = time.time() - start_time
 
     # Verify it returns immediately (should be < 10ms, we allow 50ms for safety)
-    assert (
-        elapsed_time < 0.05
-    ), f"Async checkpoint took {elapsed_time:.3f}s, expected < 0.05s"
+    assert elapsed_time < 0.05, (
+        f"Async checkpoint took {elapsed_time:.3f}s, expected < 0.05s"
+    )
 
     # Verify operation was enqueued
     assert state._checkpoint_queue.qsize() == 1
@@ -3115,9 +3115,9 @@ def test_create_checkpoint_multiple_sync_calls_all_block():
     # Verify all calls blocked for at least the delay time
     for i in range(num_callers):
         elapsed = end_times[i] - start_times[i]
-        assert (
-            elapsed >= 0.15
-        ), f"Caller {i} expected blocking for at least 0.15s, got {elapsed}s"
+        assert elapsed >= 0.15, (
+            f"Caller {i} expected blocking for at least 0.15s, got {elapsed}s"
+        )
 
 
 def test_create_checkpoint_sync_with_empty_checkpoint():

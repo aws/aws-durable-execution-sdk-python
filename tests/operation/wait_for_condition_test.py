@@ -662,9 +662,9 @@ def test_wait_for_condition_attempt_sequence_is_monotonic():
         context_logger=mock_logger,
     )
 
-    assert (
-        captured_attempts[-1] == 2
-    ), "After first retry (checkpoint.attempt=1), current attempt should be 2"
+    assert captured_attempts[-1] == 2, (
+        "After first retry (checkpoint.attempt=1), current attempt should be 2"
+    )
 
     # Test 3: After second retry (checkpoint has attempt=2)
     operation = Operation(
@@ -684,9 +684,9 @@ def test_wait_for_condition_attempt_sequence_is_monotonic():
         context_logger=mock_logger,
     )
 
-    assert (
-        captured_attempts[-1] == 3
-    ), "After second retry (checkpoint.attempt=2), current attempt should be 3"
+    assert captured_attempts[-1] == 3, (
+        "After second retry (checkpoint.attempt=2), current attempt should be 3"
+    )
 
     # Test 4: After third retry (checkpoint has attempt=3)
     operation = Operation(
@@ -706,9 +706,9 @@ def test_wait_for_condition_attempt_sequence_is_monotonic():
         context_logger=mock_logger,
     )
 
-    assert (
-        captured_attempts[-1] == 4
-    ), "After third retry (checkpoint.attempt=3), current attempt should be 4"
+    assert captured_attempts[-1] == 4, (
+        "After third retry (checkpoint.attempt=3), current attempt should be 4"
+    )
 
     # Verify the complete sequence is monotonically increasing
     assert captured_attempts == [

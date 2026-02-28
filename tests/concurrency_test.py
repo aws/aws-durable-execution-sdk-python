@@ -2833,9 +2833,9 @@ def test_executor_terminates_quickly_when_impossible_to_succeed():
     # With tolerated_failure_count=1, executor stops when failure_count > 1 (at 2 failures)
     # Executor terminates early rather than executing all 100 tasks
     assert executed_count["value"] < 100
-    assert (
-        result.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED
-    ), executed_count
+    assert result.completion_reason == CompletionReason.FAILURE_TOLERANCE_EXCEEDED, (
+        executed_count
+    )
     assert sum(1 for item in result.all if item.status == BatchItemStatus.FAILED) == 2
     assert (
         sum(1 for item in result.all if item.status == BatchItemStatus.SUCCEEDED) < 98
@@ -2965,9 +2965,9 @@ def test_executor_returns_with_incomplete_branches():
 
     # Slow branch may or may not have started (depends on thread scheduling)
     # but it definitely should not have completed
-    assert (
-        operation_tracker.slow_completed.call_count == 0
-    ), "Executor should return before slow branch completes"
+    assert operation_tracker.slow_completed.call_count == 0, (
+        "Executor should return before slow branch completes"
+    )
 
     # Result should show MIN_SUCCESSFUL_REACHED
     assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
@@ -3019,9 +3019,9 @@ def test_executor_returns_before_slow_branch_completes():
     result = executor.execute(execution_state, executor_context)
 
     # Executor should have returned before slow branch completed
-    assert (
-        not slow_branch_mock.completed.called
-    ), "Executor should return before slow branch completes"
+    assert not slow_branch_mock.completed.called, (
+        "Executor should return before slow branch completes"
+    )
 
     # Result should show MIN_SUCCESSFUL_REACHED
     assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
