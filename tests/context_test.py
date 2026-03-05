@@ -616,7 +616,7 @@ def test_invoke_with_name_and_config(mock_executor_class):
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
-    config = InvokeConfig[str, str](timeout=Duration.from_seconds(30))
+    config = InvokeConfig[str, str]()
 
     context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
@@ -756,7 +756,6 @@ def test_invoke_with_custom_serdes(mock_executor_class):
     config = InvokeConfig[dict, dict](
         serdes_payload=payload_serdes,
         serdes_result=result_serdes,
-        timeout=Duration.from_minutes(1),
     )
 
     context = create_test_context(state=mock_state)

@@ -166,7 +166,7 @@ class InvokeOperationExecutor(OperationExecutor[R]):
             ExecutionError: If suspend doesn't raise (should never happen)
         """
         msg: str = f"Invoke {self.operation_identifier.operation_id} started, suspending for completion"
-        suspend_with_optional_resume_delay(msg, self.config.timeout_seconds)
+        suspend_with_optional_resume_delay(msg, None)
         # This line should never be reached since suspend_with_optional_resume_delay always raises
         error_msg: str = "suspend_with_optional_resume_delay should have raised an exception, but did not."
         raise ExecutionError(error_msg) from None
