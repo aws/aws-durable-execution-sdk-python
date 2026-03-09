@@ -30,6 +30,7 @@ from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from aws_durable_execution_sdk_python.operation.child import child_handler
 
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -195,6 +196,11 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         logger.debug(
             "▶️ Executing concurrent operation, items: %d", len(self.executables)
         )
+
+        # Early return for empty executables
+        if not self.executables:
+            logger.debug("No items to execute, returning empty result")
+            return self._create_result()
 
         max_workers = self.max_concurrency or len(self.executables)
 
