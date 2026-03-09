@@ -1110,3 +1110,38 @@ def test_map_custom_serdes_serializes_batch_result():
         assert parent_call[1]["serdes"] is custom_serdes
         assert isinstance(parent_call[1]["value"], BatchResult)
         assert parent_call[1]["value"] is result
+
+
+def test_map_with_empty_list_should_exit_early():
+    """Test that map with empty list completes without crashing."""
+    items = []
+
+    def map_func(ctx, item, idx, items):
+        return f"processed_{item}"
+
+    mock_state = Mock()
+    mock_state.durable_execution_arn = "arn:test"
+
+    parent_checkpoint = Mock()
+    parent_checkpoint.is_succeeded.return_value = False
+    parent_checkpoint.is_failed.return_value = False
+    parent_checkpoint.is_existent.return_value = False
+
+    mock_state.get_checkpoint_result = Mock(return_value=parent_checkpoint)
+    mock_state.create_checkpoint = Mock()
+
+    context = create_test_context(state=mock_state)
+
+    # This should complete immediately without crashing
+    result = context.map(
+        items,
+        map_func,
+        name="EmptyMap",
+    )
+
+    # Should return empty BatchResult
+    assert isinstance(result, BatchResult)
+    assert len(result.all) == 0
+    assert result.total_count == 0
+    assert result.success_count == 0
+    assert result.failure_count == 0
