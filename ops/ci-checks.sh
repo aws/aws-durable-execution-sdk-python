@@ -13,3 +13,6 @@ echo SUCCESS: typings
 # static analysis
 hatch fmt
 echo SUCCESS: linting/fmt
+
+# commit message validation
+python ops/lintcommit.py
