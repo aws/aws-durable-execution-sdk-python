@@ -4,11 +4,10 @@
 #
 # To run tests:
 #
-#     python -m pytest ops/__tests__/test_lintcommit.py
+#     python -m pytest ops/tests/test_lintcommit.py
 
 from __future__ import annotations
 
-import os
 import re
 import sys
 
@@ -79,6 +78,9 @@ def validate_subject(subject_line: str) -> str | None:
     if subject.endswith("."):
         return "subject must not end with a period"
 
+    if subject != subject.lower():
+        return "subject must be lowercase"
+
     return None
 
 
@@ -110,26 +112,16 @@ def validate_message(message: str) -> tuple[str | None, list[str]]:
 
     warnings: list[str] = []
     # Check for blank line between subject and body
+    body_start: int = 2
     if len(lines) > 1 and lines[1].strip() != "":
         warnings.append("missing blank line between subject and body")
+        body_start = 1
 
-    if len(lines) > 2:
-        body: str = "\n".join(lines[2:])
+    if len(lines) > body_start:
+        body: str = "\n".join(lines[body_start:])
         warnings.extend(validate_body(body))
 
     return (error, warnings)
-
-
-def _format_error(title: str, reason: str) -> str:
-    valid_types: str = ", ".join(sorted(TYPES))
-    return f"""Invalid commit message: `{title}`
-
-* Problem: {reason}
-* Expected format: `type(scope): subject...`
-    * type: one of ({valid_types})
-    * scope: optional, lowercase, <{MAX_SCOPE_LENGTH} chars
-    * subject: must be <{MAX_SUBJECT_LENGTH} chars
-"""
 
 
 def run_local() -> None:
