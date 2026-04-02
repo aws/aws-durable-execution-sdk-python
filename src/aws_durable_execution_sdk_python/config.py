@@ -453,6 +453,55 @@ class StepFuture(Generic[T]):
         return self.future.result(timeout=timeout_seconds)
 
 
+# region Backoff
+
+
+class BackoffStrategy(StrEnum):
+    """
+    Backoff strategies determine how retry delay grows between attempts.
+
+    members:
+        :EXPONENTIAL: Delay grows exponentially: initial_delay * backoff_rate ^ (attempts - 1)
+        :LINEAR: Delay grows linearly: initial_delay * attempts_made
+        :FIXED: Delay stays constant: initial_delay
+    """
+
+    EXPONENTIAL = "EXPONENTIAL"
+    LINEAR = "LINEAR"
+    FIXED = "FIXED"
+
+    def calculate_base_delay(
+        self,
+        initial_delay_seconds: int,
+        backoff_rate: Numeric,
+        attempts_made: int,
+        max_delay_seconds: int,
+    ) -> float:
+        """Calculate base delay before jitter for the given attempt.
+
+        Args:
+            initial_delay_seconds: The initial delay in seconds.
+            backoff_rate: The rate at which delay grows (used by EXPONENTIAL).
+            attempts_made: Number of attempts already made (1-based).
+            max_delay_seconds: Maximum delay cap in seconds.
+
+        Returns:
+            The base delay in seconds, capped at max_delay_seconds.
+        """
+        match self:
+            case BackoffStrategy.FIXED:
+                base: float = float(initial_delay_seconds)
+            case BackoffStrategy.LINEAR:
+                base = float(initial_delay_seconds) * attempts_made
+            case _:  # default is EXPONENTIAL
+                base = initial_delay_seconds * (backoff_rate ** (attempts_made - 1))
+
+        return min(base, max_delay_seconds)
+
+
+# endregion Backoff
+
+
 # region Jitter
 
 
