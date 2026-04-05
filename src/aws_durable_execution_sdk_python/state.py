@@ -592,15 +592,21 @@ class ExecutionState:
             batch: list[QueuedOperation] = self._collect_checkpoint_batch()
 
             if batch:
-                # Extract OperationUpdates from QueuedOperations for API call
-                updates: list[OperationUpdate] = [
-                    q.operation_update for q in batch if q.operation_update is not None
-                ]
+                # Extract OperationUpdates, excluding empty checkpoints from API call
+                updates: list[OperationUpdate] = []
+                empty_count = 0
+
+                for q in batch:
+                    if q.operation_update is not None:
+                        updates.append(q.operation_update)
+                    else:
+                        empty_count += 1
 
                 logger.debug(
-                    "Processing checkpoint batch with %d operations (%d non-empty)",
-                    len(batch),
+                    "Sending %d OperationUpdates out of %d operations, excluding %d empty checkpoints",
                     len(updates),
+                    len(batch),
+                    empty_count,
                 )
 
                 try:
@@ -687,26 +693,43 @@ class ExecutionState:
         operation if queues are empty, then collects additional operations within the time
         window.
 
+        Empty checkpoints (operation_update=None) are coalesced: the first empty checkpoint
+        counts toward the batch operation limit, but subsequent empty checkpoints do not.
+        All empty checkpoints remain in the batch so their completion events are signaled.
+        This avoids unnecessary batches when many concurrent map/parallel branches resume
+        simultaneously and each queues an empty checkpoint.
+
         Returns:
             List of QueuedOperation objects ready for batch processing. Returns empty list
             if no operations are available.
         """
         batch: list[QueuedOperation] = []
+        has_empty_checkpoint = False
         total_size = 0
+        effective_operation_count = 0  # Operations that count toward batch limit
 
         # First, drain overflow queue (FIFO order preserved)
         try:
-            while len(batch) < self._batcher_config.max_batch_operations:
+            while effective_operation_count < self._batcher_config.max_batch_operations:
                 overflow_op = self._overflow_queue.get_nowait()
-                op_size = self._calculate_operation_size(overflow_op)
 
-                if total_size + op_size > self._batcher_config.max_batch_size_bytes:
-                    # Put back and stop
-                    self._overflow_queue.put(overflow_op)
-                    break
-
-                batch.append(overflow_op)
-                total_size += op_size
+                if overflow_op.operation_update is None:  # Empty checkpoint
+                    batch.append(overflow_op)
+                    if not has_empty_checkpoint:
+                        effective_operation_count += (
+                            1  # First empty counts toward limit
+                        )
+                        has_empty_checkpoint = True
+                    # Subsequent empties don't count toward limit
+                else:
+                    op_size = self._calculate_operation_size(overflow_op)
+                    if total_size + op_size > self._batcher_config.max_batch_size_bytes:
+                        # Put back and stop
+                        self._overflow_queue.put(overflow_op)
+                        break
+                    batch.append(overflow_op)
+                    total_size += op_size
+                    effective_operation_count += 1
         except queue.Empty:
             pass
 
@@ -720,7 +743,13 @@ class ExecutionState:
                     )  # Check stop signal every 100ms
                     self._checkpoint_queue.task_done()
                     batch.append(first_op)
-                    total_size += self._calculate_operation_size(first_op)
+
+                    if first_op.operation_update is None:
+                        has_empty_checkpoint = True
+                    else:
+                        total_size += self._calculate_operation_size(first_op)
+
+                    effective_operation_count = 1
                     break
                 except queue.Empty:
                     continue
@@ -735,7 +764,7 @@ class ExecutionState:
         # Collect additional operations within the time window
         while (
             time.time() < batch_deadline
-            and len(batch) < self._batcher_config.max_batch_operations
+            and effective_operation_count < self._batcher_config.max_batch_operations
             and not self._checkpointing_stopped.is_set()
         ):
             remaining_time = min(
@@ -749,26 +778,39 @@ class ExecutionState:
             try:
                 additional_op = self._checkpoint_queue.get(timeout=remaining_time)
                 self._checkpoint_queue.task_done()
-                op_size = self._calculate_operation_size(additional_op)
 
-                # Check if adding this operation would exceed size limit
-                if total_size + op_size > self._batcher_config.max_batch_size_bytes:
-                    # Put in overflow queue for next batch
-                    self._overflow_queue.put(additional_op)
-                    logger.debug(
-                        "Batch size limit reached, moving operation to overflow queue"
-                    )
-                    break
-
-                batch.append(additional_op)
-                total_size += op_size
+                if additional_op.operation_update is None:  # Empty checkpoint
+                    batch.append(additional_op)
+                    if not has_empty_checkpoint:
+                        effective_operation_count += (
+                            1  # First empty counts toward limit
+                        )
+                        has_empty_checkpoint = True
+                    # Subsequent empties don't count toward limit
+                else:
+                    op_size = self._calculate_operation_size(additional_op)
+                    # Check if adding this operation would exceed size limit
+                    if total_size + op_size > self._batcher_config.max_batch_size_bytes:
+                        # Put in overflow queue for next batch
+                        self._overflow_queue.put(additional_op)
+                        logger.debug(
+                            "Batch size limit reached, moving operation to overflow queue"
+                        )
+                        break
+                    batch.append(additional_op)
+                    total_size += op_size
+                    effective_operation_count += 1
 
             except queue.Empty:
                 break
 
+        empty_count = sum(1 for q in batch if q.operation_update is None)
         logger.debug(
-            "Collected batch of %d operations, total size: %d bytes",
+            "Collected batch of %d operations (%d effective, %d non-empty, %d empty), total size: %d bytes",
             len(batch),
+            effective_operation_count,
+            len(batch) - empty_count,
+            empty_count,
             total_size,
         )
         return batch
