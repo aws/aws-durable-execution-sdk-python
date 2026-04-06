@@ -3341,3 +3341,224 @@ def test_state_replay_mode_with_timed_out():
     assert execution_state.is_replaying() is True
     execution_state.track_replay(operation_id="op2")
     assert execution_state.is_replaying() is False
+
+
+# Tests for empty checkpoint coalescing (issue #325)
+
+
+def test_collect_checkpoint_batch_coalesces_many_empty_checkpoints():
+    """Test that many empty checkpoints are collected into a single batch.
+
+    With the coalescing optimization, 999 empty checkpoints should all be collected
+    in one batch (effective_operation_count=1), not split across 4 batches of 250.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+
+    config = CheckpointBatcherConfig(
+        max_batch_size_bytes=10 * 1024 * 1024,
+        max_batch_time_seconds=10.0,
+        max_batch_operations=250,
+    )
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        batcher_config=config,
+    )
+
+    # Enqueue 999 empty checkpoints (simulates high-concurrency map/parallel resume)
+    for _ in range(999):
+        state._checkpoint_queue.put(QueuedOperation(None, None))
+
+    # All 999 should be collected in a single batch
+    batch = state._collect_checkpoint_batch()
+
+    assert len(batch) == 999
+    assert all(q.operation_update is None for q in batch)
+    # Queue should now be empty
+    assert state._checkpoint_queue.empty()
+
+
+def test_collect_checkpoint_batch_empty_checkpoints_with_real_ops_respects_limit():
+    """Test that real operations still respect the max_batch_operations limit
+    even when many empty checkpoints are present in the same batch.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+
+    config = CheckpointBatcherConfig(
+        max_batch_size_bytes=10 * 1024 * 1024,
+        max_batch_time_seconds=10.0,
+        max_batch_operations=5,
+    )
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        batcher_config=config,
+    )
+
+    # Enqueue 3 empty checkpoints + 10 real operations
+    for _ in range(3):
+        state._checkpoint_queue.put(QueuedOperation(None, None))
+    for i in range(10):
+        op = OperationUpdate(
+            operation_id=f"op_{i}",
+            operation_type=OperationType.STEP,
+            action=OperationAction.START,
+        )
+        state._checkpoint_queue.put(QueuedOperation(op, None))
+
+    batch = state._collect_checkpoint_batch()
+
+    # Empty checkpoints count as 1 effective op, so 4 real ops fit in 5-op limit
+    empty_in_batch = sum(1 for q in batch if q.operation_update is None)
+    real_in_batch = sum(1 for q in batch if q.operation_update is not None)
+
+    assert empty_in_batch == 3  # All empty checkpoints coalesced
+    assert real_in_batch == 4  # 4 real ops (1 slot used by the first empty)
+
+
+def test_collect_checkpoint_batch_overflow_coalesces_empty_checkpoints():
+    """Test that empty checkpoints in the overflow queue are also coalesced."""
+    mock_lambda_client = Mock(spec=LambdaClient)
+
+    config = CheckpointBatcherConfig(
+        max_batch_size_bytes=10 * 1024 * 1024,
+        max_batch_time_seconds=10.0,
+        max_batch_operations=250,
+    )
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        batcher_config=config,
+    )
+
+    # Put 500 empty checkpoints directly into the overflow queue
+    for _ in range(500):
+        state._overflow_queue.put(QueuedOperation(None, None))
+
+    # All 500 should be collected in a single batch from overflow
+    batch = state._collect_checkpoint_batch()
+
+    assert len(batch) == 500
+    assert all(q.operation_update is None for q in batch)
+    assert state._overflow_queue.empty()
+
+
+def test_checkpoint_batches_forever_single_api_call_for_many_empty_checkpoints():
+    """Test that many empty checkpoints result in a single API call, not one per batch.
+
+    This is the core optimization: 999 empty checkpoints should produce exactly 1 API
+    call instead of ceil(999/250) = 4 API calls.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    mock_lambda_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    # Long time window to ensure all 999 pre-queued items are drained in one batch.
+    # The optimization is about the operation COUNT limit, not the time limit.
+    config = CheckpointBatcherConfig(
+        max_batch_size_bytes=10 * 1024 * 1024,
+        max_batch_time_seconds=5.0,
+        max_batch_operations=250,
+    )
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        batcher_config=config,
+    )
+
+    # Enqueue 999 empty checkpoints with completion events
+    completion_events = []
+    for _ in range(999):
+        event = CompletionEvent()
+        completion_events.append(event)
+        state._checkpoint_queue.put(QueuedOperation(None, event))
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    executor.submit(state.checkpoint_batches_forever)
+
+    try:
+        # Wait for all completion events to be signaled
+        for event in completion_events:
+            event.wait()
+
+        # All 999 empty checkpoints should have been batched into a single API call
+        # (before the fix, the 250-item limit would split them into 4 batches)
+        assert mock_lambda_client.checkpoint.call_count == 1
+        # The API call should have been made with an empty updates list
+        call_kwargs = mock_lambda_client.checkpoint.call_args
+        assert call_kwargs.kwargs["updates"] == []
+    finally:
+        state.stop_checkpointing()
+        executor.shutdown(wait=True)
+
+
+def test_collect_checkpoint_batch_first_empty_counts_toward_limit():
+    """Test that only the first empty checkpoint counts toward the batch operation limit.
+
+    With limit=2: an empty op (effective=1) + a real op (effective=2) exactly fills the
+    batch. The loop exits after the limit is hit; items after the limit stay in the queue.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+
+    config = CheckpointBatcherConfig(
+        max_batch_size_bytes=10 * 1024 * 1024,
+        max_batch_time_seconds=10.0,
+        max_batch_operations=2,
+    )
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        batcher_config=config,
+    )
+
+    # Queue: 1 empty (effective=1), op_1 (effective=2, hits limit),
+    # op_2 + trailing empties remain in queue for next batch.
+    op1 = OperationUpdate(
+        operation_id="op_1",
+        operation_type=OperationType.STEP,
+        action=OperationAction.START,
+    )
+    op2 = OperationUpdate(
+        operation_id="op_2",
+        operation_type=OperationType.STEP,
+        action=OperationAction.START,
+    )
+    state._checkpoint_queue.put(QueuedOperation(None, None))  # empty — effective=1
+    state._checkpoint_queue.put(
+        QueuedOperation(op1, None)
+    )  # real  — effective=2, limit hit
+    state._checkpoint_queue.put(QueuedOperation(op2, None))  # real  — stays in queue
+
+    for _ in range(50):
+        state._checkpoint_queue.put(QueuedOperation(None, None))  # trailing empties
+
+    batch = state._collect_checkpoint_batch()
+
+    real_in_batch = [q for q in batch if q.operation_update is not None]
+    empty_in_batch = [q for q in batch if q.operation_update is None]
+
+    # The batch contains exactly: 1 leading empty + op_1 (limit=2 effective ops)
+    assert len(real_in_batch) == 1
+    assert real_in_batch[0].operation_update.operation_id == "op_1"
+    assert (
+        len(empty_in_batch) == 1
+    )  # Only the leading empty; trailing deferred to next batch
+    # op_2 and trailing empties remain in the queue
+    assert state._checkpoint_queue.qsize() == 51
