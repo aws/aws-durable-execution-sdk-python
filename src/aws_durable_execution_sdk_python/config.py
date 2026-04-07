@@ -384,13 +384,9 @@ class InvokeConfig(Generic[P, R]):
     Configuration for invoke operations.
 
     This class configures how function invocations are executed, including
-    timeout behavior, serialization, and tenant isolation.
+    serialization and tenant isolation.
 
     Args:
-        timeout: Maximum duration to wait for the invoked function to complete.
-            Default is no timeout. Use this to prevent long-running invocations
-            from blocking execution indefinitely.
-
         serdes_payload: Custom serialization/deserialization for the payload
             sent to the invoked function. Defaults to DEFAULT_JSON_SERDES when
             not set.
@@ -404,15 +400,9 @@ class InvokeConfig(Generic[P, R]):
     """
 
     # retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
-    timeout: Duration = field(default_factory=Duration)
     serdes_payload: SerDes[P] | None = None
     serdes_result: SerDes[R] | None = None
     tenant_id: str | None = None
-
-    @property
-    def timeout_seconds(self) -> int:
-        """Get timeout in seconds."""
-        return self.timeout.to_seconds()
 
 
 @dataclass(frozen=True)
