@@ -30,6 +30,14 @@ There is a convenience script for the above that you can run from the root of th
 ops/ci-checks.sh
 ```
 
+This script also validates your commit messages against the [Conventional Commits](https://www.conventionalcommits.org/) format.
+Commit all your changes before you run the check. If your working directory is dirty the script will skip commit message validation with a warning. 
+
+You can also run the commit message check independently:
+```
+python ops/lintcommit.py
+```
+
 ## Coding Standards
 Consistency is important for maintainability. Please adhere to the house-style of the repo, unless there's a really
 good reason to break pattern.
