@@ -170,9 +170,14 @@ class CheckpointError(BotoClientError):
             and (
                 # is not InvalidParam => Execution
                 (error.get("Code", "") or "") != "InvalidParameterValueException"
-                # is not Invalid Token => Execution
-                or not (error.get("Message") or "").startswith(
-                    "Invalid Checkpoint Token"
+                or not (
+                    # is not Invalid Token => Execution
+                    (error.get("Message") or "").startswith("Invalid Checkpoint Token")
+                    or
+                    # is not Output Payload Too Large => Execution
+                    (error.get("Message") or "").startswith(
+                        "STEP output payload size must be less than or equal to"
+                    )
                 )
             )
         ):

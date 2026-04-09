@@ -70,6 +70,23 @@ def test_checkpoint_error_classification_invalid_token_invocation():
     assert not result.is_retriable()
 
 
+def test_checkpoint_error_classification_payload_size_exceeded_invocation():
+    """Test 4xx InvalidParameterValueException with STEP output payload size limit exceeded is invocation error."""
+    error_response = {
+        "Error": {
+            "Code": "InvalidParameterValueException",
+            "Message": "STEP output payload size must be less than or equal to 262144 bytes.",
+        },
+        "ResponseMetadata": {"HTTPStatusCode": 400},
+    }
+    client_error = ClientError(error_response, "Checkpoint")
+
+    result = CheckpointError.from_exception(client_error)
+
+    assert result.error_category == CheckpointErrorCategory.INVOCATION
+    assert not result.is_retriable()
+
+
 def test_checkpoint_error_classification_other_4xx_execution():
     """Test other 4xx errors are execution errors."""
     error_response = {
