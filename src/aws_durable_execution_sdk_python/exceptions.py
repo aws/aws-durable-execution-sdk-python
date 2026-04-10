@@ -160,14 +160,14 @@ class CheckpointError(BotoClientError):
         # 5xx, 429, and network errors are retriable (INVOCATION).
         status_code: int | None = (metadata and metadata.get("HTTPStatusCode")) or None
         if (
-                status_code
-                and BAD_REQUEST_ERROR <= status_code < SERVICE_ERROR
-                and status_code != TOO_MANY_REQUESTS_ERROR
-                and error
-                and not (
+            status_code
+            and BAD_REQUEST_ERROR <= status_code < SERVICE_ERROR
+            and status_code != TOO_MANY_REQUESTS_ERROR
+            and error
+            and not (
                 (error.get("Code") or "") == "InvalidParameterValueException"
                 and (error.get("Message") or "").startswith("Invalid Checkpoint Token")
-        )
+            )
         ):
             error_category = CheckpointErrorCategory.EXECUTION
         return CheckpointError(str(exception), error_category, error, metadata)
