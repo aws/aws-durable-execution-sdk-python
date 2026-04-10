@@ -98,7 +98,7 @@ The SDK provides several exception types for different failure scenarios.
 | `InvocationError` | Yes (by Lambda) | Lambda retries invocation | Transient infrastructure issues |
 | `CallbackError` | No | Returns FAILED status | Callback handling failures |
 | `StepInterruptedError` | Yes (automatic) | Retries on next invocation | Step interrupted before checkpoint |
-| `CheckpointError` | Depends | Retries if 4xx (except invalid token) | Failed to save execution state |
+| `CheckpointError` | Depends | Permanent on 4xx non-429 (except invalid checkpoint token); retries otherwise | Failed to save execution state |
 | `SerDesError` | No | Returns FAILED status | Serialization failures |
 
 ### Base exceptions

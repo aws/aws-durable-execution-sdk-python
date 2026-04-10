@@ -1066,8 +1066,9 @@ def test_durable_execution_checkpoint_error_in_background_thread():
     # Make the service client checkpoint call fail with CheckpointError
     mock_client.checkpoint.side_effect = failing_checkpoint
 
-    with pytest.raises(CheckpointError, match="Background checkpoint failed"):
-        test_handler(invocation_input, lambda_context)
+    response = test_handler(invocation_input, lambda_context)
+    assert response["Status"] == InvocationStatus.FAILED.value
+    assert response["Error"]["ErrorType"] == "CheckpointError"
 
 
 # endregion durable_execution
@@ -1120,16 +1121,13 @@ def test_durable_execution_checkpoint_execution_error_stops_background():
         "aws_durable_execution_sdk_python.state.ExecutionState.checkpoint_batches_forever",
         side_effect=slow_background,
     ):
-        with pytest.raises(CheckpointError, match="Checkpoint system failed"):
-            test_handler(invocation_input, lambda_context)
+        response = test_handler(invocation_input, lambda_context)
+        assert response["Status"] == InvocationStatus.FAILED.value
+        assert response["Error"]["ErrorType"] == "CheckpointError"
 
 
-def test_durable_execution_checkpoint_invocation_error_stops_background():
-    """Test that CheckpointError handler stops background checkpointing.
-
-    When user code raises CheckpointError, the handler should stop the background
-    thread before re-raising to terminate the Lambda.
-    """
+def test_durable_execution_checkpoint_invocation_error_retries():
+    """Test that CheckpointError with INVOCATION category re-raises to trigger Lambda retry."""
     mock_client = Mock(spec=DurableServiceClient)
 
     @durable_execution
@@ -1171,13 +1169,12 @@ def test_durable_execution_checkpoint_invocation_error_stops_background():
         "aws_durable_execution_sdk_python.state.ExecutionState.checkpoint_batches_forever",
         side_effect=slow_background,
     ):
-        response = test_handler(invocation_input, lambda_context)
-        assert response["Status"] == InvocationStatus.FAILED.value
-        assert response["Error"]["ErrorType"] == "CheckpointError"
+        with pytest.raises(CheckpointError, match="Checkpoint system failed"):
+            test_handler(invocation_input, lambda_context)
 
 
-def test_durable_execution_background_thread_execution_error_retries():
-    """Test that background thread Execution errors are retried (re-raised)."""
+def test_durable_execution_background_thread_execution_error_returns_failed():
+    """Test that background thread Execution errors return FAILED (permanent, no retry)."""
     mock_client = Mock(spec=DurableServiceClient)
 
     def failing_checkpoint(*args, **kwargs):
@@ -1215,12 +1212,13 @@ def test_durable_execution_background_thread_execution_error_retries():
 
     mock_client.checkpoint.side_effect = failing_checkpoint
 
-    with pytest.raises(CheckpointError, match="Background checkpoint failed"):
-        test_handler(invocation_input, lambda_context)
+    response = test_handler(invocation_input, lambda_context)
+    assert response["Status"] == InvocationStatus.FAILED.value
+    assert response["Error"]["ErrorType"] == "CheckpointError"
 
 
-def test_durable_execution_background_thread_invocation_error_returns_failed():
-    """Test that background thread Invocation errors return FAILED status."""
+def test_durable_execution_background_thread_invocation_error_retries():
+    """Test that background thread Invocation errors re-raise to trigger Lambda retry."""
     mock_client = Mock(spec=DurableServiceClient)
 
     def failing_checkpoint(*args, **kwargs):
@@ -1258,13 +1256,12 @@ def test_durable_execution_background_thread_invocation_error_returns_failed():
 
     mock_client.checkpoint.side_effect = failing_checkpoint
 
-    response = test_handler(invocation_input, lambda_context)
-    assert response["Status"] == InvocationStatus.FAILED.value
-    assert response["Error"]["ErrorType"] == "CheckpointError"
+    with pytest.raises(CheckpointError, match="Background checkpoint failed"):
+        test_handler(invocation_input, lambda_context)
 
 
-def test_durable_execution_final_success_checkpoint_execution_error_retries():
-    """Test that execution errors on final success checkpoint trigger retry."""
+def test_durable_execution_final_success_checkpoint_execution_error_returns_failed():
+    """Test that execution errors on final success checkpoint return FAILED (permanent, no retry)."""
     mock_client = Mock(spec=DurableServiceClient)
 
     def failing_final_checkpoint(*args, **kwargs):
@@ -1303,12 +1300,13 @@ def test_durable_execution_final_success_checkpoint_execution_error_retries():
 
     mock_client.checkpoint.side_effect = failing_final_checkpoint
 
-    with pytest.raises(CheckpointError, match="Final checkpoint failed"):
-        test_handler(invocation_input, lambda_context)
+    response = test_handler(invocation_input, lambda_context)
+    assert response["Status"] == InvocationStatus.FAILED.value
+    assert response["Error"]["ErrorType"] == "CheckpointError"
 
 
-def test_durable_execution_final_success_checkpoint_invocation_error_returns_failed():
-    """Test that invocation errors on final success checkpoint return FAILED."""
+def test_durable_execution_final_success_checkpoint_invocation_error_retries():
+    """Test that invocation errors on final success checkpoint re-raise to trigger Lambda retry."""
     mock_client = Mock(spec=DurableServiceClient)
 
     def failing_final_checkpoint(*args, **kwargs):
@@ -1348,14 +1346,12 @@ def test_durable_execution_final_success_checkpoint_invocation_error_returns_fai
 
     mock_client.checkpoint.side_effect = failing_final_checkpoint
 
-    response = test_handler(invocation_input, lambda_context)
-    assert response["Status"] == InvocationStatus.FAILED.value
-    assert response["Error"]["ErrorType"] == "CheckpointError"
-    assert response["Error"]["ErrorMessage"] == "Final checkpoint failed"
+    with pytest.raises(CheckpointError, match="Final checkpoint failed"):
+        test_handler(invocation_input, lambda_context)
 
 
-def test_durable_execution_final_failure_checkpoint_execution_error_retries():
-    """Test that execution errors on final failure checkpoint trigger retry."""
+def test_durable_execution_final_failure_checkpoint_execution_error_returns_failed():
+    """Test that execution errors on final failure checkpoint return FAILED (permanent, no retry)."""
     mock_client = Mock(spec=DurableServiceClient)
 
     def failing_final_checkpoint(*args, **kwargs):
@@ -1396,12 +1392,13 @@ def test_durable_execution_final_failure_checkpoint_execution_error_retries():
 
     mock_client.checkpoint.side_effect = failing_final_checkpoint
 
-    with pytest.raises(CheckpointError, match="Final checkpoint failed"):
-        test_handler(invocation_input, lambda_context)
+    response = test_handler(invocation_input, lambda_context)
+    assert response["Status"] == InvocationStatus.FAILED.value
+    assert response["Error"]["ErrorType"] == "CheckpointError"
 
 
-def test_durable_execution_final_failure_checkpoint_invocation_error_returns_failed():
-    """Test that invocation errors on final failure checkpoint return FAILED."""
+def test_durable_execution_final_failure_checkpoint_invocation_error_retries():
+    """Test that invocation errors on final failure checkpoint re-raise to trigger Lambda retry."""
     mock_client = Mock(spec=DurableServiceClient)
 
     def failing_final_checkpoint(*args, **kwargs):
@@ -1442,10 +1439,8 @@ def test_durable_execution_final_failure_checkpoint_invocation_error_returns_fai
 
     mock_client.checkpoint.side_effect = failing_final_checkpoint
 
-    response = test_handler(invocation_input, lambda_context)
-    assert response["Status"] == InvocationStatus.FAILED.value
-    assert response["Error"]["ErrorType"] == "CheckpointError"
-    assert response["Error"]["ErrorMessage"] == "Final checkpoint failed"
+    with pytest.raises(CheckpointError, match="Final checkpoint failed"):
+        test_handler(invocation_input, lambda_context)
 
 
 def test_durable_handler_background_thread_failure_on_succeed_checkpoint():
@@ -1809,8 +1804,9 @@ def test_durable_execution_logs_checkpoint_error_extras_from_background_thread()
     mock_client.checkpoint.side_effect = failing_checkpoint
 
     with patch("aws_durable_execution_sdk_python.execution.logger", mock_logger):
-        with pytest.raises(CheckpointError):
-            test_handler(invocation_input, lambda_context)
+        response = test_handler(invocation_input, lambda_context)
+        assert response["Status"] == InvocationStatus.FAILED.value
+        assert response["Error"]["ErrorType"] == "CheckpointError"
 
     mock_logger.exception.assert_called_once()
     call_args = mock_logger.exception.call_args
@@ -1922,8 +1918,9 @@ def test_durable_execution_logs_checkpoint_error_extras_from_user_code():
     lambda_context.tenant_id = None
 
     with patch("aws_durable_execution_sdk_python.execution.logger", mock_logger):
-        with pytest.raises(CheckpointError):
-            test_handler(invocation_input, lambda_context)
+        response = test_handler(invocation_input, lambda_context)
+        assert response["Status"] == InvocationStatus.FAILED.value
+        assert response["Error"]["ErrorType"] == "CheckpointError"
 
     mock_logger.exception.assert_called_once()
     call_args = mock_logger.exception.call_args
