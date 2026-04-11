@@ -67,6 +67,23 @@ def test_checkpoint_error_classification_invalid_token_invocation():
     result = CheckpointError.from_exception(client_error)
 
     assert result.error_category == CheckpointErrorCategory.INVOCATION
+    assert result.is_retriable()
+
+
+def test_checkpoint_error_classification_payload_size_exceeded_execution():
+    """Test 4xx InvalidParameterValueException with STEP output payload size limit exceeded is execution error."""
+    error_response = {
+        "Error": {
+            "Code": "InvalidParameterValueException",
+            "Message": "STEP output payload size must be less than or equal to 262144 bytes.",
+        },
+        "ResponseMetadata": {"HTTPStatusCode": 400},
+    }
+    client_error = ClientError(error_response, "Checkpoint")
+
+    result = CheckpointError.from_exception(client_error)
+
+    assert result.error_category == CheckpointErrorCategory.EXECUTION
     assert not result.is_retriable()
 
 
@@ -81,7 +98,7 @@ def test_checkpoint_error_classification_other_4xx_execution():
     result = CheckpointError.from_exception(client_error)
 
     assert result.error_category == CheckpointErrorCategory.EXECUTION
-    assert result.is_retriable()
+    assert not result.is_retriable()
 
 
 def test_checkpoint_error_classification_429_invocation():
@@ -95,7 +112,7 @@ def test_checkpoint_error_classification_429_invocation():
     result = CheckpointError.from_exception(client_error)
 
     assert result.error_category == CheckpointErrorCategory.INVOCATION
-    assert not result.is_retriable()
+    assert result.is_retriable()
 
 
 def test_checkpoint_error_classification_invalid_param_without_token_execution():
@@ -112,7 +129,7 @@ def test_checkpoint_error_classification_invalid_param_without_token_execution()
     result = CheckpointError.from_exception(client_error)
 
     assert result.error_category == CheckpointErrorCategory.EXECUTION
-    assert result.is_retriable()
+    assert not result.is_retriable()
 
 
 def test_checkpoint_error_classification_5xx_invocation():
@@ -126,7 +143,7 @@ def test_checkpoint_error_classification_5xx_invocation():
     result = CheckpointError.from_exception(client_error)
 
     assert result.error_category == CheckpointErrorCategory.INVOCATION
-    assert not result.is_retriable()
+    assert result.is_retriable()
 
 
 def test_checkpoint_error_classification_unknown_invocation():
@@ -136,7 +153,7 @@ def test_checkpoint_error_classification_unknown_invocation():
     result = CheckpointError.from_exception(unknown_error)
 
     assert result.error_category == CheckpointErrorCategory.INVOCATION
-    assert not result.is_retriable()
+    assert result.is_retriable()
 
 
 def test_validation_error():

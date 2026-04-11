@@ -155,32 +155,25 @@ class CheckpointError(BotoClientError):
         error: AwsErrorObj | None = base.error
         error_category: CheckpointErrorCategory = CheckpointErrorCategory.INVOCATION
 
-        # InvalidParameterValueException and error message starts with "Invalid Checkpoint Token" is an InvocationError
-        # all other 4xx errors are Execution Errors and should be retried
-        # all 5xx errors are Invocation Errors
+        # 4xx errors (except 429) are permanent failures (EXECUTION), unless it's an
+        # InvalidParameterValueException with "Invalid Checkpoint Token" which is retriable (INVOCATION).
+        # 5xx, 429, and network errors are retriable (INVOCATION).
         status_code: int | None = (metadata and metadata.get("HTTPStatusCode")) or None
         if (
             status_code
-            # if we are in 4xx range (except 429) and is not an InvalidParameterValueException with Invalid Checkpoint Token
-            # then it's an execution error
-            and status_code < SERVICE_ERROR
-            and status_code >= BAD_REQUEST_ERROR
+            and BAD_REQUEST_ERROR <= status_code < SERVICE_ERROR
             and status_code != TOO_MANY_REQUESTS_ERROR
             and error
-            and (
-                # is not InvalidParam => Execution
-                (error.get("Code", "") or "") != "InvalidParameterValueException"
-                # is not Invalid Token => Execution
-                or not (error.get("Message") or "").startswith(
-                    "Invalid Checkpoint Token"
-                )
+            and not (
+                (error.get("Code") or "") == "InvalidParameterValueException"
+                and (error.get("Message") or "").startswith("Invalid Checkpoint Token")
             )
         ):
             error_category = CheckpointErrorCategory.EXECUTION
         return CheckpointError(str(exception), error_category, error, metadata)
 
     def is_retriable(self):
-        return self.error_category == CheckpointErrorCategory.EXECUTION
+        return self.error_category == CheckpointErrorCategory.INVOCATION
 
 
 class ValidationError(DurableExecutionsError):
