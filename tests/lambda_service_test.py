@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from aws_durable_execution_sdk_python.__about__ import __version__
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     CheckpointError,
@@ -1940,6 +1941,7 @@ def test_lambda_client_initialize_client_default(
     config = call_args[1]["config"]
     assert config.connect_timeout == 5
     assert config.read_timeout == 50
+    assert config.user_agent_extra == f"@aws/durable-execution-sdk-python/{__version__}"
     assert isinstance(client, LambdaClient)
 
 
@@ -1963,6 +1965,7 @@ def test_lambda_client_initialize_client_with_endpoint(
     config = call_args[1]["config"]
     assert config.connect_timeout == 5
     assert config.read_timeout == 50
+    assert config.user_agent_extra == f"@aws/durable-execution-sdk-python/{__version__}"
     assert isinstance(client, LambdaClient)
 
 
@@ -2038,6 +2041,8 @@ def test_lambda_client_initialize_client_no_endpoint(
     call_args = mock_boto_client.call_args
     assert call_args[0] == ("lambda",)
     assert "config" in call_args[1]
+    config = call_args[1]["config"]
+    assert config.user_agent_extra == f"@aws/durable-execution-sdk-python/{__version__}"
     assert isinstance(client, LambdaClient)
 
 
