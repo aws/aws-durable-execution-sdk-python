@@ -7,7 +7,11 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from aws_durable_execution_sdk_python.config import Duration, JitterStrategy
+from aws_durable_execution_sdk_python.config import (
+    BackoffStrategy,
+    Duration,
+    JitterStrategy,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -49,6 +53,7 @@ class RetryStrategyConfig:
         default_factory=lambda: Duration.from_minutes(5)
     )  # 5 minutes
     backoff_rate: Numeric = 2.0
+    backoff_strategy: BackoffStrategy = field(default=BackoffStrategy.EXPONENTIAL)
     jitter_strategy: JitterStrategy = field(default=JitterStrategy.FULL)
     retryable_errors: list[str | re.Pattern] | None = None
     retryable_error_types: list[type[Exception]] | None = None
@@ -103,10 +108,12 @@ def create_retry_strategy(
         if not is_retryable_error_message and not is_retryable_error_type:
             return RetryDecision.no_retry()
 
-        # Calculate delay with exponential backoff
-        base_delay: float = min(
-            config.initial_delay_seconds * (config.backoff_rate ** (attempts_made - 1)),
-            config.max_delay_seconds,
+        # Calculate delay using configured backoff strategy
+        base_delay: float = config.backoff_strategy.calculate_base_delay(
+            initial_delay_seconds=config.initial_delay_seconds,
+            backoff_rate=config.backoff_rate,
+            attempts_made=attempts_made,
+            max_delay_seconds=config.max_delay_seconds,
         )
         # Apply jitter to get final delay
         delay_with_jitter: float = config.jitter_strategy.apply_jitter(base_delay)
@@ -170,5 +177,44 @@ class RetryPresets:
                 max_delay=Duration.from_minutes(1),
                 backoff_rate=1.5,
                 jitter_strategy=JitterStrategy.NONE,
+            )
+        )
+
+    @classmethod
+    def fixed_wait(cls) -> Callable[[Exception, int], RetryDecision]:
+        """Constant delay between retries with no backoff."""
+        return create_retry_strategy(
+            RetryStrategyConfig(
+                max_attempts=5,
+                initial_delay=Duration.from_seconds(5),
+                max_delay=Duration.from_minutes(5),
+                backoff_strategy=BackoffStrategy.FIXED,
+                jitter_strategy=JitterStrategy.NONE,
+            )
+        )
+
+    @classmethod
+    def linear_backoff(cls) -> Callable[[Exception, int], RetryDecision]:
+        """Linearly increasing delay between retries."""
+        return create_retry_strategy(
+            RetryStrategyConfig(
+                max_attempts=5,
+                initial_delay=Duration.from_seconds(5),
+                max_delay=Duration.from_minutes(5),
+                backoff_strategy=BackoffStrategy.LINEAR,
+                jitter_strategy=JitterStrategy.FULL,
+            )
+        )
+
+    @classmethod
+    def slow(cls) -> Callable[[Exception, int], RetryDecision]:
+        """Long delays for operations that need extended recovery time."""
+        return create_retry_strategy(
+            RetryStrategyConfig(
+                max_attempts=8,
+                initial_delay=Duration.from_seconds(30),
+                max_delay=Duration.from_minutes(10),
+                backoff_rate=2,
+                jitter_strategy=JitterStrategy.FULL,
             )
         )
