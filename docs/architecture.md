@@ -176,7 +176,6 @@ classDiagram
     }
 
     class InvokeConfig~P,R~ {
-        +int timeout_seconds
         +SerDes~P~ serdes_payload
         +SerDes~R~ serdes_result
     }
