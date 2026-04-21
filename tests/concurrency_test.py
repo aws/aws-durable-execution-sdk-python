@@ -25,15 +25,22 @@ from aws_durable_execution_sdk_python.concurrency.models import (
     ExecutableWithState,
     ExecutionCounters,
 )
-from aws_durable_execution_sdk_python.config import CompletionConfig, MapConfig
+from aws_durable_execution_sdk_python.config import (
+    CompletionConfig,
+    MapConfig,
+    NestingType,
+    ChildConfig,
+)
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     InvalidStateError,
     SuspendExecution,
     TimedSuspendExecution,
 )
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
+    OperationSubType,
 )
 from aws_durable_execution_sdk_python.operation.map import MapExecutor
 
@@ -853,36 +860,66 @@ def test_batch_result_failed_with_none_error():
     assert failed[0].error is not None
 
 
-def test_concurrent_executor_properties():
-    """Test ConcurrentExecutor basic properties."""
+def test_concurrent_executor_nesting_type_parameter():
+    """Test ConcurrentExecutor nesting_type parameter."""
 
     class TestExecutor(ConcurrentExecutor):
         def execute_item(self, child_context, executable):
             return f"result_{executable.index}"
 
-    executables = [Executable(0, lambda: "test"), Executable(1, lambda: "test2")]
-    completion_config = CompletionConfig(
-        min_successful=1,
-        tolerated_failure_count=None,
-        tolerated_failure_percentage=None,
-    )
-    executor = TestExecutor(
+    executables = [Executable(0, lambda: "test")]
+    completion_config = CompletionConfig(min_successful=1)
+
+    # Test with NESTED (default)
+    executor_nested = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
-        max_concurrency=2,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        nesting_type=NestingType.NESTED,
+    )
+    assert executor_nested.nesting_type is NestingType.NESTED
+
+    # Test with FLAT
+    executor_flat = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        nesting_type=NestingType.FLAT,
+    )
+    assert executor_flat.nesting_type is NestingType.FLAT
+
+
+def test_concurrent_executor_default_nesting_type():
+    """Test ConcurrentExecutor uses NESTED as default nesting_type."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [Executable(0, lambda: "test")]
+    completion_config = CompletionConfig(min_successful=1)
+
+    executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
+        executables=executables,
+        max_concurrency=1,
         completion_config=completion_config,
         sub_type_top="TOP",
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
     )
-
-    # Test basic properties
-    assert executor.executables == executables
-    assert executor.max_concurrency == 2
-    assert executor.completion_config == completion_config
-    assert executor.sub_type_top == "TOP"
-    assert executor.sub_type_iteration == "ITER"
-    assert executor.name_prefix == "test_"
+    assert executor.nesting_type is NestingType.NESTED
 
 
 def test_concurrent_executor_full_execution_path():
@@ -899,6 +936,7 @@ def test_concurrent_executor_full_execution_path():
         tolerated_failure_percentage=None,
     )
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=2,
         completion_config=completion_config,
@@ -960,6 +998,7 @@ def test_concurrent_executor_on_task_complete_timed_suspend():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -998,6 +1037,7 @@ def test_concurrent_executor_on_task_complete_suspend():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1033,6 +1073,7 @@ def test_concurrent_executor_on_task_complete_exception():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1082,6 +1123,7 @@ def test_concurrent_executor_create_result_with_early_exit():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=2,
         completion_config=completion_config,
@@ -1123,6 +1165,7 @@ def test_concurrent_executor_execute_item_in_child_context():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1173,6 +1216,7 @@ def test_concurrent_executor_create_result_failure_tolerance_exceeded():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1210,6 +1254,7 @@ def test_single_task_suspend_bubbles_up():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1256,6 +1301,7 @@ def test_multiple_tasks_one_suspends_execution_continues():
     completion_config = CompletionConfig.all_completed()
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=2,
         completion_config=completion_config,
@@ -1301,6 +1347,7 @@ def test_concurrent_executor_with_single_task_resubmit():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1374,6 +1421,7 @@ def test_concurrent_executor_with_timed_resubmit_while_other_task_running():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=2,
         completion_config=completion_config,
@@ -1438,6 +1486,7 @@ def test_concurrent_executor_should_execution_suspend_with_timeout():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1476,6 +1525,7 @@ def test_concurrent_executor_should_execution_suspend_indefinite():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1517,6 +1567,7 @@ def test_concurrent_executor_create_result_with_failed_status():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1577,6 +1628,7 @@ def test_concurrent_executor_mixed_suspend_states():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=2,
         completion_config=completion_config,
@@ -1618,6 +1670,7 @@ def test_concurrent_executor_multiple_timed_suspends():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=2,
         completion_config=completion_config,
@@ -1694,6 +1747,7 @@ def test_should_execution_suspend_earliest_timestamp_comparison():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=3,
         completion_config=completion_config,
@@ -1742,6 +1796,7 @@ def test_concurrent_executor_execute_with_failing_task():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1804,6 +1859,7 @@ def test_create_result_no_failed_executables():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1846,6 +1902,7 @@ def test_create_result_with_suspended_executable():
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1879,6 +1936,7 @@ def test_create_result_completed_branch():
     completion_config = CompletionConfig(min_successful=1)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1913,6 +1971,7 @@ def test_create_result_failed_branch():
     completion_config = CompletionConfig(min_successful=1)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1950,6 +2009,7 @@ def test_create_result_pending_branch():
     completion_config = CompletionConfig(min_successful=1)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -1987,6 +2047,7 @@ def test_create_result_running_branch():
     completion_config = CompletionConfig(min_successful=1)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -2024,6 +2085,7 @@ def test_create_result_suspended_branch():
     completion_config = CompletionConfig(min_successful=1)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -2060,6 +2122,7 @@ def test_create_result_suspended_with_timeout_branch():
     completion_config = CompletionConfig(min_successful=1)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -2104,6 +2167,7 @@ def test_create_result_mixed_statuses():
     completion_config = CompletionConfig(min_successful=1)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=6,
         completion_config=completion_config,
@@ -2190,6 +2254,7 @@ def test_create_result_multiple_completed():
     completion_config = CompletionConfig(min_successful=3)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=3,
         completion_config=completion_config,
@@ -2232,6 +2297,7 @@ def test_create_result_multiple_failed():
     completion_config = CompletionConfig(min_successful=1)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=3,
         completion_config=completion_config,
@@ -2275,6 +2341,7 @@ def test_create_result_multiple_started_states():
     completion_config = CompletionConfig(min_successful=1)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=4,
         completion_config=completion_config,
@@ -2322,6 +2389,7 @@ def test_create_result_empty_executables():
     completion_config = CompletionConfig(min_successful=0)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=1,
         completion_config=completion_config,
@@ -2474,8 +2542,12 @@ def test_operation_id_determinism_across_shuffles():
     # Track operation_id -> result associations
     captured_associations = []
 
-    def patched_child_handler(func, execution_state, operation_identifier, config):
+    def patched_child_handler(
+        func, execution_state, operation_identifier, config: ChildConfig
+    ):
         """Patched child handler that captures operation_id -> result mapping."""
+        assert config.is_virtual
+        assert config.sub_type == "TEST_ITER"
         result = func()  # Execute the function
         captured_associations.append((operation_identifier.operation_id, result))
         return result
@@ -2497,6 +2569,7 @@ def test_operation_id_determinism_across_shuffles():
         random.shuffle(executables)
 
         executor = TestExecutor(
+            operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
             executables=executables,
             max_concurrency=2,
             completion_config=completion_config,
@@ -2504,6 +2577,7 @@ def test_operation_id_determinism_across_shuffles():
             sub_type_iteration="TEST_ITER",
             name_prefix="test_",
             serdes=None,
+            nesting_type=NestingType.FLAT,
         )
 
         # Create executor context mock
@@ -2515,7 +2589,7 @@ def test_operation_id_determinism_across_shuffles():
 
         executor_context._create_step_id_for_logical_step = create_step_id  # noqa SLF001
 
-        def create_child_context(operation_id):
+        def create_child_context(operation_id, non_virtual_parent_id):
             child_ctx = Mock()
             child_ctx.state = execution_state
             return child_ctx
@@ -2551,6 +2625,7 @@ def test_concurrent_executor_replay_with_succeeded_operations():
     config = MapConfig()
 
     executor = MapExecutor.from_items(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         items=items,
         func=func1,
         config=config,
@@ -2609,6 +2684,7 @@ def test_concurrent_executor_replay_with_failed_operations():
     config = MapConfig()
 
     executor = MapExecutor.from_items(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         items=items,
         func=func1,
         config=config,
@@ -2648,6 +2724,7 @@ def test_concurrent_executor_replay_with_replay_children():
     config = MapConfig()
 
     executor = MapExecutor.from_items(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         items=items,
         func=func1,
         config=config,
@@ -2779,6 +2856,7 @@ def test_executor_does_not_deadlock_when_all_tasks_terminal_but_completion_confi
     )
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=2,
         completion_config=completion_config,
@@ -2820,7 +2898,12 @@ def test_executor_terminates_quickly_when_impossible_to_succeed():
         ),
     )
 
-    executor = MapExecutor.from_items(items=items, func=task_func, config=config)
+    executor = MapExecutor.from_items(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
+        items=items,
+        func=task_func,
+        config=config,
+    )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
@@ -2869,6 +2952,7 @@ def test_executor_exits_early_with_min_successful():
     completion_config = CompletionConfig(min_successful=1)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=2,
         completion_config=completion_config,
@@ -2884,7 +2968,7 @@ def test_executor_exits_early_with_min_successful():
     executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"  # noqa: SLF001
     executor_context._parent_id = "parent"  # noqa: SLF001
 
-    def create_child_context(op_id):
+    def create_child_context(op_id, non_virtual_parent_id):
         child = Mock()
         child.state = execution_state
         return child
@@ -2942,6 +3026,7 @@ def test_executor_returns_with_incomplete_branches():
     completion_config = CompletionConfig(min_successful=1)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=2,
         completion_config=completion_config,
@@ -2956,7 +3041,9 @@ def test_executor_returns_with_incomplete_branches():
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"  # noqa: SLF001
     executor_context._parent_id = "parent"  # noqa: SLF001
-    executor_context.create_child_context = lambda op_id: Mock(state=execution_state)
+    executor_context.create_child_context = lambda op_id, non_virtual_parent_id: Mock(
+        state=execution_state
+    )
 
     result = executor.execute(execution_state, executor_context)
 
@@ -3000,6 +3087,7 @@ def test_executor_returns_before_slow_branch_completes():
     completion_config = CompletionConfig(min_successful=1)
 
     executor = TestExecutor(
+        operation_identifier=OperationIdentifier("op-1", "parent-1", "name-1"),
         executables=executables,
         max_concurrency=2,
         completion_config=completion_config,
@@ -3014,7 +3102,9 @@ def test_executor_returns_before_slow_branch_completes():
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"  # noqa: SLF001
     executor_context._parent_id = "parent"  # noqa: SLF001
-    executor_context.create_child_context = lambda op_id: Mock(state=execution_state)
+    executor_context.create_child_context = lambda op_id, non_virtual_parent_id: Mock(
+        state=execution_state
+    )
 
     result = executor.execute(execution_state, executor_context)
 

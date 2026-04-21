@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 from aws_durable_execution_sdk_python.concurrency.executor import ConcurrentExecutor
 from aws_durable_execution_sdk_python.concurrency.models import Executable
-from aws_durable_execution_sdk_python.config import ParallelConfig
+from aws_durable_execution_sdk_python.config import ParallelConfig, NestingType
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 
 if TYPE_CHECKING:
@@ -29,6 +29,7 @@ R = TypeVar("R")
 class ParallelExecutor(ConcurrentExecutor[Callable, R]):
     def __init__(
         self,
+        operation_identifier: OperationIdentifier,
         executables: list[Executable[Callable]],
         max_concurrency: int | None,
         completion_config,
@@ -38,8 +39,10 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
         serdes: SerDes | None,
         summary_generator: SummaryGenerator | None = None,
         item_serdes: SerDes | None = None,
+        nesting_type: NestingType = NestingType.NESTED,
     ):
         super().__init__(
+            operation_identifier=operation_identifier,
             executables=executables,
             max_concurrency=max_concurrency,
             completion_config=completion_config,
@@ -49,11 +52,13 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
             serdes=serdes,
             summary_generator=summary_generator,
             item_serdes=item_serdes,
+            nesting_type=nesting_type,
         )
 
     @classmethod
     def from_callables(
         cls,
+        operation_identifier: OperationIdentifier,
         callables: Sequence[Callable],
         config: ParallelConfig,
     ) -> ParallelExecutor:
@@ -62,6 +67,7 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
             Executable(index=i, func=func) for i, func in enumerate(callables)
         ]
         return cls(
+            operation_identifier=operation_identifier,
             executables=executables,
             max_concurrency=config.max_concurrency,
             completion_config=config.completion_config,
@@ -71,6 +77,7 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
             serdes=config.serdes,
             summary_generator=config.summary_generator,
             item_serdes=config.item_serdes,
+            nesting_type=config.nesting_type,
         )
 
     def execute_item(self, child_context, executable: Executable[Callable]) -> R:  # noqa: PLR6301
@@ -95,6 +102,7 @@ def parallel_handler(
     # See TypeScript reference: aws-durable-execution-sdk-js/src/handlers/parallel-handler/parallel-handler.ts (~line 112)
 
     executor = ParallelExecutor.from_callables(
+        operation_identifier,
         callables,
         config or ParallelConfig(summary_generator=ParallelSummaryGenerator()),
     )

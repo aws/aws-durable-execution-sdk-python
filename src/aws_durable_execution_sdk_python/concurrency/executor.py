@@ -20,7 +20,10 @@ from aws_durable_execution_sdk_python.concurrency.models import (
     ExecutionCounters,
     SuspendResult,
 )
-from aws_durable_execution_sdk_python.config import ChildConfig
+from aws_durable_execution_sdk_python.config import (
+    ChildConfig,
+    NestingType,
+)
 from aws_durable_execution_sdk_python.exceptions import (
     OrphanedChildException,
     SuspendExecution,
@@ -134,6 +137,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
 
     def __init__(
         self,
+        operation_identifier: OperationIdentifier,
         executables: list[Executable[CallableType]],
         max_concurrency: int | None,
         completion_config: CompletionConfig,
@@ -143,6 +147,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         serdes: SerDes | None,
         item_serdes: SerDes | None = None,
         summary_generator: SummaryGenerator | None = None,
+        nesting_type: NestingType = NestingType.NESTED,
     ):
         """Initialize ConcurrentExecutor.
 
@@ -153,6 +158,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
                 handle large BatchResult payloads efficiently. Matches TypeScript behavior in
                 run-in-child-context-handler.ts.
         """
+        self.operation_identifier = operation_identifier
         self.executables = executables
         self.max_concurrency = max_concurrency
         self.completion_config = completion_config
@@ -160,6 +166,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         self.sub_type_iteration = sub_type_iteration
         self.name_prefix = name_prefix
         self.summary_generator = summary_generator
+        self.nesting_type = nesting_type
 
         # Event-driven state tracking for when the executor is done
         self._completion_event = threading.Event()
@@ -406,7 +413,14 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
             executable.index
         )
         name = f"{self.name_prefix}{executable.index}"
-        child_context = executor_context.create_child_context(operation_id)
+        non_virtual_parent_id = (
+            self.operation_identifier.operation_id
+            if self.nesting_type is NestingType.FLAT
+            else None
+        )
+        child_context = executor_context.create_child_context(
+            operation_id, non_virtual_parent_id
+        )
         operation_identifier = OperationIdentifier(
             operation_id,
             executor_context._parent_id,  # noqa: SLF001
@@ -424,6 +438,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
                 serdes=self.item_serdes or self.serdes,
                 sub_type=self.sub_type_iteration,
                 summary_generator=self.summary_generator,
+                is_virtual=self.nesting_type is NestingType.FLAT,
             ),
         )
         child_context.state.track_replay(operation_id=operation_id)

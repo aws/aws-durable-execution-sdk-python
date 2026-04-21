@@ -6,7 +6,6 @@ from unittest.mock import Mock
 from aws_durable_execution_sdk_python.config import (
     BatchedInput,
     CallbackConfig,
-    CheckpointMode,
     ChildConfig,
     CompletionConfig,
     Duration,
@@ -143,16 +142,6 @@ def test_step_config_with_values():
     assert config.retry_strategy is retry_strategy
     assert config.step_semantics == StepSemantics.AT_MOST_ONCE_PER_RETRY
     assert config.serdes is serdes
-
-
-def test_checkpoint_mode_enum():
-    """Test CheckpointMode enum."""
-    assert CheckpointMode.NO_CHECKPOINT.value == ("NO_CHECKPOINT",)
-    assert CheckpointMode.CHECKPOINT_AT_FINISH.value == ("CHECKPOINT_AT_FINISH",)
-    assert (
-        CheckpointMode.CHECKPOINT_AT_START_AND_FINISH.value
-        == "CHECKPOINT_AT_START_AND_FINISH"
-    )
 
 
 def test_child_config_defaults():

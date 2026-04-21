@@ -76,6 +76,18 @@ class TerminationMode(Enum):
     ABANDON = "ABANDON"
 
 
+class NestingType(Enum):
+    """
+    How child operations should inherit context from their parent.
+
+    - NESTED: Each child operation runs in its own isolated context
+    - FLAT: All child operations share the same parent context
+    """
+
+    NESTED = "NESTED"
+    FLAT = "FLAT"
+
+
 @dataclass(frozen=True)
 class CompletionConfig:
     """Configuration for determining when parallel/map operations complete.
@@ -187,6 +199,10 @@ class ParallelConfig:
             Used internally by map/parallel operations to handle large BatchResult payloads.
             Signature: (result: T) -> str
 
+        nesting_type: How child operations should inherit context from their parent.
+            - NESTED: Each branch runs in its own isolated context (default)
+            - FLAT: All branches share the same parent context
+
     Example:
         # Run at most 3 branches concurrently, succeed if any one succeeds
         config = ParallelConfig(
@@ -202,6 +218,7 @@ class ParallelConfig:
     serdes: SerDes | None = None
     item_serdes: SerDes | None = None
     summary_generator: SummaryGenerator | None = None
+    nesting_type: NestingType = NestingType.NESTED
 
 
 class StepSemantics(Enum):
@@ -216,12 +233,6 @@ class StepConfig:
     retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
     step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE_PER_RETRY
     serdes: SerDes | None = None
-
-
-class CheckpointMode(Enum):
-    NO_CHECKPOINT = ("NO_CHECKPOINT",)
-    CHECKPOINT_AT_FINISH = ("CHECKPOINT_AT_FINISH",)
-    CHECKPOINT_AT_START_AND_FINISH = "CHECKPOINT_AT_START_AND_FINISH"
 
 
 @dataclass(frozen=True)
@@ -259,21 +270,19 @@ class ChildConfig(Generic[T]):
 
             Used internally by map/parallel operations to handle large BatchResult payloads.
             Signature: (result: T) -> str
-    Note:
-        checkpoint_mode field is commented out as it's not currently implemented.
-        When implemented, it will control when checkpoints are created:
-        - CHECKPOINT_AT_START_AND_FINISH: Checkpoint at both start and completion (default)
-        - CHECKPOINT_AT_FINISH: Only checkpoint when operation completes
-        - NO_CHECKPOINT: No automatic checkpointing
+
+        is_virtual: Whether the child operation is virtual (doesn't represent a real operation).
+            Virtual contexts are used for concurrency operations and don't appear in
+            the final execution history. Default is False.
 
     See TypeScript reference: aws-durable-execution-sdk-js/src/types/index.ts
     """
 
-    # checkpoint_mode: CheckpointMode = CheckpointMode.CHECKPOINT_AT_START_AND_FINISH
     serdes: SerDes | None = None
     item_serdes: SerDes | None = None
     sub_type: OperationSubType | None = None
     summary_generator: SummaryGenerator | None = None
+    is_virtual: bool = False
 
 
 class ItemsPerBatchUnit(Enum):
@@ -361,6 +370,10 @@ class MapConfig:
             Used internally by map/parallel operations to handle large BatchResult payloads.
             Signature: (result: T) -> str
 
+        nesting_type: How child operations should inherit context from their parent.
+            - NESTED: Each item runs in its own isolated context (default)
+            - FLAT: All items share the same parent context
+
     Example:
         # Process 5 items at a time, batch by count, require all to succeed
         config = MapConfig(
@@ -376,6 +389,7 @@ class MapConfig:
     serdes: SerDes | None = None
     item_serdes: SerDes | None = None
     summary_generator: SummaryGenerator | None = None
+    nesting_type: NestingType = NestingType.NESTED
 
 
 @dataclass(frozen=True)
