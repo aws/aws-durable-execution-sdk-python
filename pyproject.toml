@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 keywords = []
-authors = [{ name = "yaythomas", email = "tgaigher@amazon.com" }]
+authors = [{ name = "AWS durable-execution-dev", email = "durable-execution-dev@amazon.com" }]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python",
