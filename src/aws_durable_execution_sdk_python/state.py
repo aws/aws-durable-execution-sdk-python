@@ -290,6 +290,33 @@ class ExecutionState:
         with self._operations_lock:
             self.operations.update({op.operation_id: op for op in all_operations})
 
+    def get_input_payload(self) -> str | None:
+        # It is possible that backend will not provide an execution operation
+        # for the initial page of results.
+        if not (operations := self.get_execution_operation()):
+            return None
+        if not (execution_details := operations.execution_details):
+            return None
+        return execution_details.input_payload
+
+    def get_execution_operation(self) -> Operation | None:
+        # invocation id is id of execution operation
+        invocation_id = self.durable_execution_arn.split("/")[-1]
+        candidate = self.operations.get(invocation_id)
+        if not candidate:
+            # Due to payload size limitations we may have an empty operations list.
+            # This will only happen when loading the initial page of results and is
+            # expected behaviour. We don't fail, but instead return None
+            # as the execution operation does not exist
+            msg: str = "No durable operations found in execution state."
+            logger.debug(msg)
+            return None
+        if candidate.operation_type is not OperationType.EXECUTION:
+            msg = f"The execution operation in execution state does not have EXECUTION type: {candidate.operation_type}"
+            raise DurableExecutionsError(msg)
+
+        return candidate
+
     def track_replay(self, operation_id: str) -> None:
         """Check if operation exists with completed status; if not, transition to NEW status.
 

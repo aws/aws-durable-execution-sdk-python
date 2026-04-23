@@ -774,51 +774,6 @@ def test_durable_execution_client_selection_default():
         mock_lambda_client.initialize_client.assert_called_once()
 
 
-def test_initial_execution_state_get_execution_operation_no_operations():
-    """Test get_execution_operation logs debug and returns None when no operations exist."""
-    state = InitialExecutionState(operations=[], next_marker="")
-
-    with patch("aws_durable_execution_sdk_python.execution.logger") as mock_logger:
-        result = state.get_execution_operation()
-
-        assert result is None
-        mock_logger.debug.assert_called_once_with(
-            "No durable operations found in initial execution state."
-        )
-
-
-def test_initial_execution_state_get_execution_operation_wrong_type():
-    """Test get_execution_operation raises error when first operation is not EXECUTION."""
-    operation = Operation(
-        operation_id="step1",
-        operation_type=OperationType.STEP,
-        status=OperationStatus.STARTED,
-    )
-
-    state = InitialExecutionState(operations=[operation], next_marker="")
-
-    with pytest.raises(
-        Exception,
-        match="First operation in initial execution state is not an execution operation",
-    ):
-        state.get_execution_operation()
-
-
-def test_initial_execution_state_get_input_payload_none():
-    """Test get_input_payload returns None when execution_details is None."""
-    operation = Operation(
-        operation_id="exec1",
-        operation_type=OperationType.EXECUTION,
-        status=OperationStatus.STARTED,
-        execution_details=None,
-    )
-
-    state = InitialExecutionState(operations=[operation], next_marker="")
-
-    result = state.get_input_payload()
-    assert result is None
-
-
 def test_durable_handler_empty_input_payload():
     """Test durable_handler handles empty input payload correctly."""
     mock_client = Mock(spec=DurableServiceClient)
@@ -916,7 +871,7 @@ def test_durable_handler_invalid_json_input_payload():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
