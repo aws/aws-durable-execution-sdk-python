@@ -50,7 +50,7 @@ jobs:
       run: |
         echo "Running Testing SDK tests against Language SDK PR changes..."
         echo "Using Language SDK from: $AWS_DURABLE_SDK_URL"
-        python -m pip install -e .
+        hatch run -- test:pip install -e ../language-sdk
         hatch fmt --check
         hatch run types:check
         hatch run test:cov
