@@ -18,6 +18,7 @@ from aws_durable_execution_sdk_python.config import (
     CompletionConfig,
     ItemBatcher,
     MapConfig,
+    NestingType,
 )
 from aws_durable_execution_sdk_python.context import DurableContext, ExecutionContext
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -53,6 +54,7 @@ def test_map_executor_init():
     items = ["item1"]
 
     executor = MapExecutor(
+        operation_identifier=OperationIdentifier("id-1", "parent-1", "name-1"),
         executables=executables,
         items=items,
         max_concurrency=2,
@@ -61,10 +63,12 @@ def test_map_executor_init():
         iteration_sub_type=OperationSubType.MAP_ITERATION,
         name_prefix="test-",
         serdes=None,
+        nesting_type=NestingType.FLAT,
     )
 
     assert executor.items == items
     assert executor.executables == executables
+    assert executor.nesting_type is NestingType.FLAT
 
 
 def test_map_executor_from_items():
@@ -74,14 +78,17 @@ def test_map_executor_from_items():
     def callable_func(ctx, item, idx, items):
         return item.upper()
 
-    config = MapConfig(max_concurrency=3)
+    config = MapConfig(max_concurrency=3, nesting_type=NestingType.FLAT)
 
-    executor = MapExecutor.from_items(items, callable_func, config)
+    executor = MapExecutor.from_items(
+        OperationIdentifier("id-1", "parent-1", "name-1"), items, callable_func, config
+    )
 
     assert len(executor.executables) == 3
     assert executor.items == items
     assert all(exe.func == callable_func for exe in executor.executables)
     assert [exe.index for exe in executor.executables] == [0, 1, 2]
+    assert executor.nesting_type is NestingType.FLAT
 
 
 def test_map_executor_from_items_default_config():
@@ -91,10 +98,16 @@ def test_map_executor_from_items_default_config():
     def callable_func(ctx, item, idx, items):
         return item
 
-    executor = MapExecutor.from_items(items, callable_func, MapConfig())
+    executor = MapExecutor.from_items(
+        OperationIdentifier("id-1", "parent-1", "name-1"),
+        items,
+        callable_func,
+        MapConfig(),
+    )
 
     assert len(executor.executables) == 1
     assert executor.items == items
+    assert executor.nesting_type is NestingType.NESTED
 
 
 @patch("aws_durable_execution_sdk_python.operation.map.logger")
@@ -105,7 +118,12 @@ def test_map_executor_execute_item(mock_logger):
     def callable_func(ctx, item, idx, items):
         return f"{item}_{idx}"
 
-    executor = MapExecutor.from_items(items, callable_func, MapConfig())
+    executor = MapExecutor.from_items(
+        OperationIdentifier("id-1", "parent-1", "name-1"),
+        items,
+        callable_func,
+        MapConfig(),
+    )
     executable = executor.executables[0]
 
     result = executor.execute_item(None, executable)
@@ -123,7 +141,12 @@ def test_map_executor_execute_item_with_context():
     def callable_func(ctx, item, idx, items):
         return item * 2 + idx
 
-    executor = MapExecutor.from_items(items, callable_func, MapConfig())
+    executor = MapExecutor.from_items(
+        OperationIdentifier("id-1", "parent-1", "name-1"),
+        items,
+        callable_func,
+        MapConfig(),
+    )
     executable = executor.executables[1]
 
     result = executor.execute_item("mock_context", executable)
@@ -210,7 +233,12 @@ def test_map_executor_execute_item_accesses_all_parameters():
         assert items_list == items
         return f"{item}_{idx}_{len(items_list)}"
 
-    executor = MapExecutor.from_items(items, callable_func, MapConfig())
+    executor = MapExecutor.from_items(
+        OperationIdentifier("id-1", "parent-1", "name-1"),
+        items,
+        callable_func,
+        MapConfig(),
+    )
     executable = executor.executables[2]
 
     result = executor.execute_item("test_context", executable)
@@ -225,7 +253,12 @@ def test_map_executor_from_items_empty_list():
     def callable_func(ctx, item, idx, items):
         return item
 
-    executor = MapExecutor.from_items(items, callable_func, MapConfig())
+    executor = MapExecutor.from_items(
+        OperationIdentifier("id-1", "parent-1", "name-1"),
+        items,
+        callable_func,
+        MapConfig(),
+    )
 
     assert len(executor.executables) == 0
     assert executor.items == []
@@ -238,7 +271,12 @@ def test_map_executor_from_items_single_item():
     def callable_func(ctx, item, idx, items):
         return f"processed_{item}"
 
-    executor = MapExecutor.from_items(items, callable_func, MapConfig())
+    executor = MapExecutor.from_items(
+        OperationIdentifier("id-1", "parent-1", "name-1"),
+        items,
+        callable_func,
+        MapConfig(),
+    )
 
     assert len(executor.executables) == 1
     assert executor.executables[0].index == 0
@@ -252,7 +290,12 @@ def test_map_executor_inheritance():
     def callable_func(ctx, item, idx, items):
         return item
 
-    executor = MapExecutor.from_items(items, callable_func, MapConfig())
+    executor = MapExecutor.from_items(
+        OperationIdentifier("id-1", "parent-1", "name-1"),
+        items,
+        callable_func,
+        MapConfig(),
+    )
 
     # Verify it has inherited attributes from ConcurrentExecutor
     assert hasattr(executor, "executables")
@@ -453,7 +496,9 @@ def test_map_executor_from_items_with_summary_generator():
 
     config = MapConfig(summary_generator=mock_summary_generator)
 
-    executor = MapExecutor.from_items(items, callable_func, config)
+    executor = MapExecutor.from_items(
+        OperationIdentifier("id-1", "parent-1", "name-1"), items, callable_func, config
+    )
 
     # Verify that the summary_generator is preserved in the executor
     assert executor.summary_generator is mock_summary_generator
@@ -505,6 +550,7 @@ def test_map_executor_init_with_summary_generator():
         return f"Summary: {result}"
 
     executor = MapExecutor(
+        operation_identifier=OperationIdentifier("id-1", "parent-1", "name-1"),
         executables=executables,
         items=items,
         max_concurrency=2,

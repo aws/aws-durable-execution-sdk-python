@@ -118,7 +118,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
             checkpointed_result.raise_callable_error()
 
         # Create START checkpoint if not exists
-        if not checkpointed_result.is_existent():
+        if not checkpointed_result.is_existent() and not self.config.is_virtual:
             start_operation: OperationUpdate = OperationUpdate.create_context_start(
                 identifier=self.operation_identifier,
                 sub_type=self.sub_type,
@@ -156,6 +156,14 @@ class ChildOperationExecutor(OperationExecutor[T]):
 
         try:
             raw_result: T = self.func()
+
+            if self.config.is_virtual:
+                logger.debug(
+                    "Virtual context: Exiting child context without creating another checkpoint. id: %s, name: %s",
+                    self.operation_identifier.operation_id,
+                    self.operation_identifier.name,
+                )
+                return raw_result
 
             # If in replay_children mode, return without checkpointing
             if checkpointed_result.is_replay_children():
@@ -270,8 +278,7 @@ def child_handler(
     Raises:
         May raise operation-specific errors during execution
     """
-    if not config:
-        config = ChildConfig()
-
-    executor = ChildOperationExecutor(func, state, operation_identifier, config)
+    executor = ChildOperationExecutor(
+        func, state, operation_identifier, config or ChildConfig()
+    )
     return executor.process()

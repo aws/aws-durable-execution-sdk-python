@@ -237,12 +237,14 @@ class DurableContext(DurableContextProtocol):
         lambda_context: LambdaContext | None = None,
         parent_id: str | None = None,
         logger: Logger | None = None,
+        non_virtual_parent_id: str | None = None,
     ) -> None:
         self.state: ExecutionState = state
         self.execution_context: ExecutionContext = execution_context
         self.lambda_context = lambda_context
         self._parent_id: str | None = parent_id
         self._step_counter: OrderedCounter = OrderedCounter()
+        self._non_virtual_parent_id = non_virtual_parent_id or parent_id
 
         log_info = LogInfo(
             execution_state=state,
@@ -269,7 +271,9 @@ class DurableContext(DurableContextProtocol):
             parent_id=None,
         )
 
-    def create_child_context(self, parent_id: str) -> DurableContext:
+    def create_child_context(
+        self, parent_id: str, non_virtual_parent_id=None
+    ) -> DurableContext:
         """Create a child context from the given parent."""
         logger.debug("Creating child context for parent %s", parent_id)
         return DurableContext(
@@ -283,6 +287,7 @@ class DurableContext(DurableContextProtocol):
                     parent_id=parent_id,
                 )
             ),
+            non_virtual_parent_id=non_virtual_parent_id,
         )
 
     # endregion factories
@@ -347,7 +352,9 @@ class DurableContext(DurableContextProtocol):
         executor: CallbackOperationExecutor = CallbackOperationExecutor(
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=operation_id, parent_id=self._parent_id, name=name
+                operation_id=operation_id,
+                parent_id=self._non_virtual_parent_id,
+                name=name,
             ),
             config=config,
         )
@@ -388,7 +395,7 @@ class DurableContext(DurableContextProtocol):
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
-                parent_id=self._parent_id,
+                parent_id=self._non_virtual_parent_id,
                 name=name,
             ),
             config=config,
@@ -409,7 +416,9 @@ class DurableContext(DurableContextProtocol):
 
         operation_id = self._create_step_id()
         operation_identifier = OperationIdentifier(
-            operation_id=operation_id, parent_id=self._parent_id, name=map_name
+            operation_id=operation_id,
+            parent_id=self._non_virtual_parent_id,
+            name=map_name,
         )
         map_context = self.create_child_context(parent_id=operation_id)
 
@@ -454,7 +463,7 @@ class DurableContext(DurableContextProtocol):
         operation_id = self._create_step_id()
         parallel_context = self.create_child_context(parent_id=operation_id)
         operation_identifier = OperationIdentifier(
-            operation_id=operation_id, parent_id=self._parent_id, name=name
+            operation_id=operation_id, parent_id=self._non_virtual_parent_id, name=name
         )
 
         def parallel_in_child_context() -> BatchResult[T]:
@@ -515,7 +524,9 @@ class DurableContext(DurableContextProtocol):
             func=callable_with_child_context,
             state=self.state,
             operation_identifier=OperationIdentifier(
-                operation_id=operation_id, parent_id=self._parent_id, name=step_name
+                operation_id=operation_id,
+                parent_id=self._non_virtual_parent_id,
+                name=step_name,
             ),
             config=config,
         )
@@ -539,7 +550,7 @@ class DurableContext(DurableContextProtocol):
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
-                parent_id=self._parent_id,
+                parent_id=self._non_virtual_parent_id,
                 name=step_name,
             ),
             context_logger=self.logger,
@@ -566,7 +577,7 @@ class DurableContext(DurableContextProtocol):
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
-                parent_id=self._parent_id,
+                parent_id=self._non_virtual_parent_id,
                 name=name,
             ),
         )
@@ -621,7 +632,7 @@ class DurableContext(DurableContextProtocol):
                 state=self.state,
                 operation_identifier=OperationIdentifier(
                     operation_id=operation_id,
-                    parent_id=self._parent_id,
+                    parent_id=self._non_virtual_parent_id,
                     name=name,
                 ),
                 context_logger=self.logger,
