@@ -8,8 +8,11 @@
 
 from __future__ import annotations
 
+import argparse
 import re
+import subprocess
 import sys
+from dataclasses import dataclass, field
 
 TYPES: set[str] = {
     "build",
@@ -124,75 +127,141 @@ def validate_message(message: str) -> tuple[str | None, list[str]]:
     return (error, warnings)
 
 
-def run_local() -> None:
-    """Validate local commit messages ahead of origin/main.
+@dataclass
+class CommitResult:
+    """Result of validating a single commit."""
 
-    If there are uncommitted changes, prints a warning and skips validation.
+    sha: str
+    subject: str
+    error: str | None = None
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LintResult:
+    """Result of linting a range of commits."""
+
+    commits: list[CommitResult] = field(default_factory=list)
+    skipped: bool = False
+    skip_reason: str = ""
+    empty: bool = False
+    git_error: str = ""
+
+    @property
+    def has_errors(self) -> bool:
+        return bool(self.git_error) or any(c.error for c in self.commits)
+
+
+def lint_range(git_range: str, *, skip_dirty_check: bool = False) -> LintResult:
+    """Validate commit messages in a git range (e.g. 'origin/main..HEAD').
+
+    Args:
+        git_range: A git revision range like 'origin/main..HEAD'.
+        skip_dirty_check: When True, skip the uncommitted changes check
+            (useful in CI where the worktree may be clean by definition).
+
+    Returns:
+        A LintResult with per-commit validation results.
     """
-    import subprocess
-
-    # Check for uncommitted changes
-    status: subprocess.CompletedProcess[str] = subprocess.run(
-        ["git", "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-    )
-    if status.stdout.strip():
-        print(
-            "WARNING: uncommitted changes detected, skipping commit message validation.\n"
-            "Commit your changes and re-run to validate."
+    if not skip_dirty_check:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
         )
-        return
+        if status.stdout.strip():
+            return LintResult(
+                skipped=True,
+                skip_reason=(
+                    "uncommitted changes detected, skipping commit message validation.\n"
+                    "Commit your changes and re-run to validate."
+                ),
+            )
 
-    # Get all commit messages ahead of origin/main
-    result: subprocess.CompletedProcess[str] = subprocess.run(
-        ["git", "log", "origin/main..HEAD", "--format=%H%n%B%n---END---"],
+    result = subprocess.run(
+        ["git", "log", "--no-merges", git_range, "-z", "--format=%H%n%B"],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        print(f"git log failed: {result.stderr}", file=sys.stderr)
-        sys.exit(1)
+        return LintResult(git_error=result.stderr.strip())
 
-    raw: str = result.stdout.strip()
-    if not raw:
-        print("No local commits ahead of origin/main")
-        return
+    if not result.stdout.strip():
+        return LintResult(empty=True)
 
-    blocks: list[str] = raw.split("---END---")
-    has_errors: bool = False
-
-    for block in blocks:
-        block = block.strip()
-        if not block:
+    commits: list[CommitResult] = []
+    for record in result.stdout.split("\0"):
+        if not record.strip():
             continue
-
-        lines: list[str] = block.splitlines()
-        sha: str = lines[0][:7]
-        message: str = "\n".join(lines[1:]).strip()
-
+        sha, _, message = record.partition("\n")
+        message = message.strip()
         if not message:
             continue
 
         error, warnings = validate_message(message)
-        subject: str = message.splitlines()[0]
+        subject = message.splitlines()[0]
+        commits.append(
+            CommitResult(
+                sha=sha[:7],
+                subject=subject,
+                error=error,
+                warnings=warnings,
+            )
+        )
 
-        if error:
-            print(f"FAIL {sha}: {subject}", file=sys.stderr)
-            print(f"  Error: {error}", file=sys.stderr)
-            has_errors = True
+    return LintResult(commits=commits)
+
+
+def write_output(lint_result: LintResult, git_range: str) -> None:
+    """Write lint results to stdout/stderr."""
+    if lint_result.skipped:
+        print(f"WARNING: {lint_result.skip_reason}")
+        return
+
+    if lint_result.git_error:
+        print(f"git log failed: {lint_result.git_error}", file=sys.stderr)
+        return
+
+    if lint_result.empty:
+        print(f"No commits in range {git_range}")
+        return
+
+    for commit in lint_result.commits:
+        if commit.error:
+            print(f"FAIL {commit.sha}: {commit.subject}", file=sys.stderr)
+            print(f"  Error: {commit.error}", file=sys.stderr)
         else:
-            print(f"PASS {sha}: {subject}")
+            print(f"PASS {commit.sha}: {commit.subject}")
 
-        for warning in warnings:
+        for warning in commit.warnings:
             print(f"  Warning: {warning}")
 
-    if has_errors:
+
+def run_range(git_range: str, *, skip_dirty_check: bool = False) -> None:
+    """Validate commit messages in a git range and exit on errors."""
+    lint_result = lint_range(git_range, skip_dirty_check=skip_dirty_check)
+    write_output(lint_result, git_range)
+    if lint_result.has_errors:
         sys.exit(1)
 
 
 def main() -> None:
-    run_local()
+    parser = argparse.ArgumentParser(
+        description="Lint commit messages for conventional commits compliance."
+    )
+    parser.add_argument(
+        "--range",
+        default=None,
+        dest="git_range",
+        help="Validate all commits in a git revision range (e.g. 'origin/main..HEAD'). "
+        "Skips the uncommitted-changes check (useful in CI).",
+    )
+    args = parser.parse_args()
+
+    if args.git_range is not None:
+        run_range(args.git_range, skip_dirty_check=True)
+    else:
+        run_range("origin/main..HEAD")
 
 
 if __name__ == "__main__":

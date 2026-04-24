@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 
-from ops.lintcommit import validate_message, validate_subject
+from __future__ import annotations
+
+from subprocess import CompletedProcess
+from unittest.mock import patch
+
+import pytest
+
+from ops.lintcommit import lint_range, validate_message, validate_subject
 
 
 # region validate_subject: valid subjects
@@ -151,3 +158,104 @@ def test_empty_message() -> None:
 def test_invalid_subject_in_message() -> None:
     error, _ = validate_message("invalid title")
     assert error == "missing colon (:) char"
+
+
+# region lint_range
+
+
+def _make_git_log_output(*messages: str) -> str:
+    """Build fake ``git log --no-merges -z --format=%H%n%B`` output.
+
+    Records are separated by null characters.
+    """
+    records: list[str] = []
+    for i, msg in enumerate(messages):
+        sha = f"abc{i:04d}" + "0" * 33  # 40-char fake SHA
+        records.append(f"{sha}\n{msg}\n")
+    return "\0".join(records)
+
+
+def _completed(
+    stdout: str = "", stderr: str = "", returncode: int = 0
+) -> CompletedProcess[str]:
+    """Shorthand for a ``subprocess.CompletedProcess``."""
+    return CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+@patch("subprocess.run")
+def test_lint_range_all_valid(mock_run) -> None:
+    log_output = _make_git_log_output(
+        "feat: add new feature",
+        "fix(sdk): resolve issue",
+    )
+    mock_run.return_value = _completed(stdout=log_output)
+
+    result = lint_range("origin/main..HEAD", skip_dirty_check=True)
+
+    assert not result.has_errors
+    assert len(result.commits) == 2
+    assert all(c.error is None for c in result.commits)
+
+
+@patch("subprocess.run")
+def test_lint_range_with_invalid_commit(mock_run) -> None:
+    log_output = _make_git_log_output(
+        "feat: add new feature",
+        "bad commit no colon",
+    )
+    mock_run.return_value = _completed(stdout=log_output)
+
+    result = lint_range("origin/main..HEAD", skip_dirty_check=True)
+
+    assert result.has_errors
+    assert result.commits[0].error is None
+    assert result.commits[1].error == "missing colon (:) char"
+
+
+@patch("subprocess.run")
+def test_lint_range_empty(mock_run) -> None:
+    mock_run.return_value = _completed(stdout="")
+
+    result = lint_range("origin/main..HEAD", skip_dirty_check=True)
+
+    assert result.empty
+    assert not result.has_errors
+
+
+@patch("subprocess.run")
+def test_lint_range_git_failure(mock_run) -> None:
+    mock_run.return_value = _completed(returncode=1, stderr="fatal: bad range")
+
+    result = lint_range("bad..range", skip_dirty_check=True)
+
+    assert result.has_errors
+    assert result.git_error == "fatal: bad range"
+
+
+@patch("subprocess.run")
+def test_lint_range_dirty_worktree_skips(mock_run) -> None:
+    """When skip_dirty_check=False and worktree is dirty, validation is skipped."""
+    mock_run.return_value = _completed(stdout=" M ops/lintcommit.py\n")
+
+    result = lint_range("origin/main..HEAD", skip_dirty_check=False)
+
+    assert result.skipped
+    assert "uncommitted changes" in result.skip_reason
+    # git log should never have been called (only git status)
+    mock_run.assert_called_once()
+
+
+@patch("subprocess.run")
+def test_lint_range_warnings_collected(mock_run) -> None:
+    log_output = _make_git_log_output(
+        "feat: add thing\n\n" + "x" * 80,
+    )
+    mock_run.return_value = _completed(stdout=log_output)
+
+    result = lint_range("origin/main..HEAD", skip_dirty_check=True)
+
+    assert not result.has_errors
+    assert len(result.commits) == 1
+    assert any("exceeds 72 chars" in w for w in result.commits[0].warnings)
