@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 
-from ops.lintcommit import validate_message, validate_subject
+from __future__ import annotations
+
+from unittest.mock import patch
+
+import pytest
+
+from ops.lintcommit import run_range, validate_message, validate_subject
 
 
 # region validate_subject: valid subjects
@@ -151,3 +157,117 @@ def test_empty_message() -> None:
 def test_invalid_subject_in_message() -> None:
     error, _ = validate_message("invalid title")
     assert error == "missing colon (:) char"
+
+
+# region run_range
+
+
+def _make_git_log_output(*messages: str) -> str:
+    """Build fake ``git log --format=%H%n%B%n---END---`` output."""
+    blocks: list[str] = []
+    for i, msg in enumerate(messages):
+        sha = f"abc{i:04d}" + "0" * 33  # 40-char fake SHA
+        blocks.append(f"{sha}\n{msg}\n---END---")
+    return "\n".join(blocks)
+
+
+def _completed(stdout: str = "", stderr: str = "", returncode: int = 0):
+    """Shorthand for a ``subprocess.CompletedProcess``."""
+    from subprocess import CompletedProcess
+
+    return CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+@patch("subprocess.run")
+def test_run_range_all_valid(mock_run, capsys) -> None:
+    log_output = _make_git_log_output(
+        "feat: add new feature",
+        "fix(sdk): resolve issue",
+    )
+    mock_run.return_value = _completed(stdout=log_output)
+
+    run_range("origin/main..HEAD", skip_dirty_check=True)
+
+    out = capsys.readouterr().out
+    assert "PASS" in out
+    assert out.count("PASS") == 2
+
+
+@patch("subprocess.run")
+def test_run_range_with_invalid_commit(mock_run, capsys) -> None:
+    log_output = _make_git_log_output(
+        "feat: add new feature",
+        "bad commit no colon",
+    )
+    mock_run.return_value = _completed(stdout=log_output)
+
+    with pytest.raises(SystemExit, match="1"):
+        run_range("origin/main..HEAD", skip_dirty_check=True)
+
+    captured = capsys.readouterr()
+    assert "PASS" in captured.out
+    assert "FAIL" in captured.err
+
+
+@patch("subprocess.run")
+def test_run_range_empty(mock_run, capsys) -> None:
+    mock_run.return_value = _completed(stdout="")
+
+    run_range("origin/main..HEAD", skip_dirty_check=True)
+
+    out = capsys.readouterr().out
+    assert "No commits in range" in out
+
+
+@patch("subprocess.run")
+def test_run_range_git_failure(mock_run) -> None:
+    mock_run.return_value = _completed(returncode=1, stderr="fatal: bad range")
+
+    with pytest.raises(SystemExit, match="1"):
+        run_range("bad..range", skip_dirty_check=True)
+
+
+@patch("subprocess.run")
+def test_run_range_dirty_worktree_skips(mock_run, capsys) -> None:
+    """When skip_dirty_check=False and worktree is dirty, validation is skipped."""
+    mock_run.return_value = _completed(stdout=" M ops/lintcommit.py\n")
+
+    run_range("origin/main..HEAD", skip_dirty_check=False)
+
+    out = capsys.readouterr().out
+    assert "uncommitted changes" in out
+    # git log should never have been called (only git status)
+    mock_run.assert_called_once()
+
+
+@patch("subprocess.run")
+def test_run_range_skips_merge_commits(mock_run, capsys) -> None:
+    log_output = _make_git_log_output(
+        "Merge branch 'main' into ci_linter",
+        "feat: add new feature",
+    )
+    mock_run.return_value = _completed(stdout=log_output)
+
+    run_range("origin/main..HEAD", skip_dirty_check=True)
+
+    out = capsys.readouterr().out
+    assert "SKIP" in out
+    assert "merge commit" in out
+    assert "PASS" in out
+    assert out.count("PASS") == 1
+
+
+@patch("subprocess.run")
+def test_run_range_warnings_printed(mock_run, capsys) -> None:
+    log_output = _make_git_log_output(
+        "feat: add thing\n\n" + "x" * 80,
+    )
+    mock_run.return_value = _completed(stdout=log_output)
+
+    run_range("origin/main..HEAD", skip_dirty_check=True)
+
+    out = capsys.readouterr().out
+    assert "PASS" in out
+    assert "exceeds 72 chars" in out
