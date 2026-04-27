@@ -1,0 +1,139 @@
+name: Deploy Python Examples
+
+on:
+  pull_request:
+    branches: [ "main", "development"]
+    paths:
+      - 'src/aws_durable_execution_sdk_python/**'
+      - 'examples/**'
+      - '.github/workflows/deploy-examples.yml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-west-2
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      examples: ${{ steps.get-examples.outputs.examples }}
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Get examples from catalog
+      id: get-examples
+      working-directory: ./examples
+      run: |
+        echo "examples=$(jq -c '.examples | map(select(.integration == true))' examples-catalog.json)" >> $GITHUB_OUTPUT
+
+  integration-test:
+    needs: setup
+    runs-on: ubuntu-latest
+    name: ${{ matrix.example.name }}
+    strategy:
+      matrix:
+        example: ${{ fromJson(needs.setup.outputs.examples) }}
+      fail-fast: false
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup SSH Agent
+      uses: webfactory/ssh-agent@dc588b651fe13675774614f8e6a936a468676387 # v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.SDK_KEY }}
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.13'
+
+    - name: Configure AWS credentials
+      if: github.event_name != 'workflow_dispatch' || github.actor != 'nektos/act'
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: "${{ secrets.ACTIONS_INTEGRATION_ROLE_NAME }}"
+        role-session-name: pythonTestingLibraryGitHubIntegrationTest
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Install Hatch
+      run: pip install hatch
+    - name: Build examples
+      run: hatch run examples:build
+
+    - name: Deploy Lambda function - ${{ matrix.example.name }}
+      id: deploy
+      env:
+        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        LAMBDA_ENDPOINT: ${{ secrets.LAMBDA_ENDPOINT_BETA }}
+        KMS_KEY_ARN: ${{ secrets.KMS_KEY_ARN }}
+      run: |
+        # Build function name
+        EXAMPLE_NAME_CLEAN=$(echo "${{ matrix.example.name }}" | sed 's/ //g')
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          FUNCTION_NAME="${EXAMPLE_NAME_CLEAN}-Python-PR-${{ github.event.number }}"
+        else
+          FUNCTION_NAME="${EXAMPLE_NAME_CLEAN}-Python"
+        fi
+        
+        # Clean up existing function if present to avoid conflicts
+        echo "Cleaning up existing function if present..."
+        aws lambda delete-function \
+          --function-name "$FUNCTION_NAME" \
+          --endpoint-url "$LAMBDA_ENDPOINT" \
+          --region "$AWS_REGION" 2>/dev/null || echo "No existing function to clean up"
+        
+        # Give AWS time to process the deletion
+        sleep 5
+        
+        echo "Deploying ${{ matrix.example.name }} as $FUNCTION_NAME"
+        hatch run examples:deploy "${{ matrix.example.name }}" --function-name "$FUNCTION_NAME"
+        
+        # $LATEST is also a qualified version
+        QUALIFIED_FUNCTION_NAME="${FUNCTION_NAME}:\$LATEST"
+        
+        # Store both names for later steps
+        echo "FUNCTION_NAME=$FUNCTION_NAME" >> $GITHUB_ENV
+        echo "QUALIFIED_FUNCTION_NAME=$QUALIFIED_FUNCTION_NAME" >> $GITHUB_ENV
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        echo "DEPLOYED_FUNCTION_NAME=$FUNCTION_NAME" >> $GITHUB_OUTPUT
+        echo "QUALIFIED_FUNCTION_NAME=$QUALIFIED_FUNCTION_NAME" >> $GITHUB_OUTPUT
+
+    - name: Run Integration Tests - ${{ matrix.example.name }}
+      env:
+        AWS_REGION: ${{ env.AWS_REGION }}
+        LAMBDA_ENDPOINT: ${{ secrets.LAMBDA_ENDPOINT_BETA }}
+        QUALIFIED_FUNCTION_NAME: ${{ env.QUALIFIED_FUNCTION_NAME }}
+        LAMBDA_FUNCTION_TEST_NAME: ${{ matrix.example.name }}
+      run: |
+        echo "Running integration tests for ${{ matrix.example.name }}"
+        echo "Function name: ${{ steps.deploy.outputs.DEPLOYED_FUNCTION_NAME }}"
+        echo "Qualified function name: ${QUALIFIED_FUNCTION_NAME}"
+        echo "AWS Region: ${AWS_REGION}"
+        echo "Lambda Endpoint: ${LAMBDA_ENDPOINT}"
+        
+        # Convert example name to test name: "Hello World" -> "test_hello_world"
+        TEST_NAME="test_$(echo "${{ matrix.example.name }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')"
+        echo "Test name: ${TEST_NAME}"
+        
+        # Run integration tests
+        hatch run test:examples-integration
+
+        # Wait for function to be ready
+        echo "Waiting for function to be active..."
+        aws lambda wait function-active --function-name "$QUALIFIED_FUNCTION_NAME" --endpoint-url "$LAMBDA_ENDPOINT" --region "$AWS_REGION"
+
+    # - name: Cleanup Lambda function
+    #   if: always()
+    #   env:
+    #     LAMBDA_ENDPOINT: ${{ secrets.LAMBDA_ENDPOINT_BETA }}
+    #   run: |
+    #     echo "Deleting function: $FUNCTION_NAME"
+    #     aws lambda delete-function \
+    #       --function-name "$FUNCTION_NAME" \
+    #       --endpoint-url "$LAMBDA_ENDPOINT" \
+    #       --region "${{ env.AWS_REGION }}" || echo "Function already deleted or doesn't exist"

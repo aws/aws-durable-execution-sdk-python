@@ -35,15 +35,41 @@ packages = ["src/aws_durable_execution_sdk_python"]
 path = "src/aws_durable_execution_sdk_python/__about__.py"
 
 [tool.hatch.envs.test]
-dependencies = ["coverage[toml]", "pytest", "pytest-cov"]
+dependencies = [
+  "coverage[toml]",
+  "pytest",
+  "pytest-cov",
+  "aws-durable-execution-sdk-python-testing>=1.0.0",
+]
 
 [tool.hatch.envs.test.scripts]
+examples = "pytest --runner-mode=local -m example examples/test/ -v"
+examples-integration = "pytest --runner-mode=cloud -m example examples/test/ -v {args}"
 cov = "pytest --cov-report=term-missing --cov-config=pyproject.toml --cov=src/aws_durable_execution_sdk_python --cov-fail-under=98"
 
 [tool.hatch.envs.types]
 extra-dependencies = ["mypy>=1.0.0", "pytest", "boto3-stubs[lambda]"]
+
 [tool.hatch.envs.types.scripts]
 check = "mypy --install-types --non-interactive {args:src/aws_durable_execution_sdk_python tests}"
+
+[tool.hatch.envs.examples]
+dependencies = [
+  "aws-durable-execution-sdk-python-testing>=1.0.0",
+]
+
+[tool.hatch.envs.examples.scripts]
+cli = "python examples/cli.py {args}"
+bootstrap = "python examples/cli.py bootstrap"
+generate-sam-template = "python examples/scripts/generate_sam_template.py"
+build = "python examples/cli.py build"
+deploy = "python examples/cli.py deploy {args}"
+invoke = "python examples/cli.py invoke {args}"
+get = "python examples/cli.py get {args}"
+history = "python examples/cli.py history {args}"
+policy = "python examples/cli.py policy {args}"
+list = "python examples/cli.py list"
+clean = "rm -rf examples/build examples/.aws-sam examples/*.zip"
 
 [tool.coverage.run]
 source_pkgs = ["aws_durable_execution_sdk_python"]
@@ -84,3 +110,25 @@ lines-after-imports = 2
   "SIM117",
   "TRY301",
 ]
+"examples/test/**" = [
+  "ARG001",
+  "ARG002",
+  "ARG005",
+  "S101",
+  "PLR2004",
+  "SIM117",
+  "TRY301",
+]
+
+[tool.pytest.ini_options]
+# Declare custom markers to avoid warnings with --strict-markers
+markers = [
+  # Used for test selection with -m example
+  "example: marks tests as example tests (deselect with '-m \"not example\"')",
+  # Used for configuration - passes handler and lambda_function_name to durable_runner fixture
+  "durable_execution: marks tests that use the durable_runner fixture (not used for test selection)",
+]
+# Default test discovery paths
+testpaths = ["tests", "examples/test"]
+# Default options for all test runs
+addopts = "-v --strict-markers"
