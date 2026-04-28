@@ -22,19 +22,6 @@ jobs:
       with:
         path: language-sdk
 
-    - name: Parse testing SDK branch from PR body
-      id: parse
-      run: python language-sdk/ops/parse_sdk_branch.py
-      env:
-        PR_BODY: ${{ github.event.pull_request.body }}
-
-    - name: Checkout Testing SDK
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      with:
-        repository: aws/aws-durable-execution-sdk-python-testing
-        ref: ${{ steps.parse.outputs.testing_ref }}
-        path: testing-sdk
-
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
@@ -43,13 +30,10 @@ jobs:
     - name: Install Hatch
       run: python -m pip install hatch==1.16.5
 
-    - name: Setup and run Testing SDK
-      working-directory: testing-sdk
-      env:
-        AWS_DURABLE_SDK_URL: file://${{ github.workspace }}/language-sdk
+    - name: Setup and run tests
+      working-directory: language-sdk
       run: |
-        echo "Running Testing SDK tests against Language SDK PR changes..."
-        echo "Using Language SDK from: $AWS_DURABLE_SDK_URL"
+        echo "Running SDK tests..."
         hatch run -- test:pip install -e ../language-sdk
         hatch fmt --check
         hatch run types:check
@@ -70,19 +54,6 @@ jobs:
       with:
         path: language-sdk
 
-    - name: Parse testing SDK branch from PR body
-      id: parse
-      run: python language-sdk/ops/parse_sdk_branch.py
-      env:
-        PR_BODY: ${{ github.event.pull_request.body }}
-
-    - name: Checkout Testing SDK
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      with:
-        repository: aws/aws-durable-execution-sdk-python-testing
-        ref: ${{ steps.parse.outputs.testing_ref }}
-        path: testing-sdk
-
     - name: Set up Python 3.13
       uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
@@ -95,17 +66,12 @@ jobs:
         role-session-name: languageSDKIntegrationTest
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Install Hatch and setup Testing SDK
-      working-directory: testing-sdk
-      env:
-        AWS_DURABLE_SDK_URL: file://${{ github.workspace }}/language-sdk
-      run: |
-        pip install hatch==1.16.5
-        python -m pip install -e .
+    - name: Install Hatch
+      run: python -m pip install hatch==1.16.5
 
     - name: Get integration examples
       id: get-examples
-      working-directory: testing-sdk/examples
+      working-directory: language-sdk/examples
       run: |
         echo "examples=$(jq -c '.examples | map(select(.integration == true)) | .[0:2]' examples-catalog.json)" >> $GITHUB_OUTPUT
 
@@ -116,12 +82,12 @@ jobs:
         rm /tmp/awscliv2.zip
         sudo /tmp/aws/install --update
         rm -rf /tmp/aws/
+
     - name: Deploy and test examples
-      working-directory: testing-sdk
+      working-directory: language-sdk
       env:
-        AWS_DURABLE_SDK_URL: file://${{ github.workspace }}/language-sdk
         AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        LAMBDA_ENDPOINT: ${{ secrets.LAMBDA_ENDPOINT }}
+        LAMBDA_ENDPOINT: "https://lambda.us-west-2.amazonaws.com"
         INVOKE_ACCOUNT_ID: ${{ secrets.INVOKE_ACCOUNT_ID }}
         KMS_KEY_ARN: ${{ secrets.KMS_KEY_ARN }}
       run: |

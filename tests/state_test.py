@@ -9,7 +9,7 @@ import threading
 import time
 import unittest.mock
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import Mock, call
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -3562,3 +3562,90 @@ def test_collect_checkpoint_batch_first_empty_counts_toward_limit():
     )  # Only the leading empty; trailing deferred to next batch
     # op_2 and trailing empties remain in the queue
     assert state._checkpoint_queue.qsize() == 51
+
+
+def test_execution_state_get_execution_operation_no_operations():
+    """Test get_execution_operation logs debug and returns None when no operations exist."""
+    mock_lambda_client = Mock(spec=LambdaClient)
+    config = CheckpointBatcherConfig(
+        max_batch_size_bytes=10 * 1024 * 1024,
+        max_batch_time_seconds=10.0,
+        max_batch_operations=2,
+    )
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        batcher_config=config,
+    )
+
+    with patch("aws_durable_execution_sdk_python.state.logger") as mock_logger:
+        result = state.get_execution_operation()
+
+        assert result is None
+        mock_logger.debug.assert_called_once_with(
+            "No durable operations found in execution state."
+        )
+
+
+def test_initial_execution_state_get_execution_operation_wrong_type():
+    """Test get_execution_operation raises error when first operation is not EXECUTION."""
+    operation = Operation(
+        operation_id="step1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.STARTED,
+    )
+
+    mock_lambda_client = Mock(spec=LambdaClient)
+    config = CheckpointBatcherConfig(
+        max_batch_size_bytes=10 * 1024 * 1024,
+        max_batch_time_seconds=10.0,
+        max_batch_operations=2,
+    )
+    state = ExecutionState(
+        durable_execution_arn="test_arn/step1",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={"step1": operation},
+        service_client=mock_lambda_client,
+        batcher_config=config,
+    )
+
+    with pytest.raises(
+        Exception,
+        match="The execution operation in execution state does not have EXECUTION type: OperationType.STEP",
+    ):
+        state.get_execution_operation()
+
+
+def test_initial_execution_state_get_input_payload_none():
+    """Test get_input_payload returns None when execution_details is None."""
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=None,
+    )
+
+    operation = Operation(
+        operation_id="step1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.STARTED,
+    )
+
+    mock_lambda_client = Mock(spec=LambdaClient)
+    config = CheckpointBatcherConfig(
+        max_batch_size_bytes=10 * 1024 * 1024,
+        max_batch_time_seconds=10.0,
+        max_batch_operations=2,
+    )
+    state = ExecutionState(
+        durable_execution_arn="test_arn/exec1",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={"step1": operation},
+        service_client=mock_lambda_client,
+        batcher_config=config,
+    )
+
+    result = state.get_input_payload()
+    assert result is None

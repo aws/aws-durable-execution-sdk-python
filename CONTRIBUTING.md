@@ -203,6 +203,47 @@ Mimic the package structure in the src/aws_durable_execution_sdk_python director
 Name your module so that src/mypackage/mymodule.py has a dedicated unit test file
 tests/mypackage/mymodule_test.py
 
+## Examples and Deployment
+
+The project includes a unified CLI tool for managing examples, deployment, and AWS account setup:
+
+### Bootstrap AWS Account
+```bash
+# Set up IAM role and KMS key for durable functions
+export AWS_ACCOUNT_ID=your-account-id
+hatch run examples:bootstrap
+```
+
+### Build and Deploy Examples
+```bash
+# Build all examples with dependencies
+hatch run examples:build
+
+# Generate SAM template for all examples
+hatch run examples:generate-sam-template
+
+# List available examples
+hatch run examples:list
+
+# Deploy specific example (when durable functions are available)
+hatch run examples:deploy "Hello World"
+```
+
+### Other CLI Commands
+```bash
+# Invoke deployed function
+hatch run examples:invoke function-name --payload '{}'
+
+# Get execution details
+hatch run examples:get execution-arn
+
+# Get execution history
+hatch run examples:history execution-arn
+
+# Clean build artifacts
+hatch run examples:clean
+```
+
 ## Coverage
 ```
 hatch run test:cov
