@@ -50,16 +50,16 @@ def build_examples():
 
         sdk_path = Path(aws_durable_execution_sdk_python_testing.__file__).parent
         logger.info("Copying SDK from %s", sdk_path)
-        shutil.copytree(sdk_path, build_dir / "aws_durable_execution_sdk_python_testing")
+        shutil.copytree(
+            sdk_path, build_dir / "aws_durable_execution_sdk_python_testing"
+        )
     except (ImportError, OSError):
         logger.exception("Failed to copy testing library")
         return False
 
     # Copy testing SDK source
     testing_src = (
-        Path(__file__).parent.parent
-        / "src"
-        / "aws_durable_execution_sdk_python"
+        Path(__file__).parent.parent / "src" / "aws_durable_execution_sdk_python"
     )
     logger.info("Copying SDK from %s", testing_src)
     shutil.copytree(testing_src, build_dir / "aws_durable_execution_sdk_python")
@@ -243,7 +243,9 @@ def get_aws_config():
     """Get AWS configuration from environment."""
     config = {
         "region": os.getenv("AWS_REGION", "us-west-2"),
-        "lambda_endpoint": os.getenv("LAMBDA_ENDPOINT", "https://lambda.us-west-2.amazonaws.com"),
+        "lambda_endpoint": os.getenv(
+            "LAMBDA_ENDPOINT", "https://lambda.us-west-2.amazonaws.com"
+        ),
         "account_id": os.getenv("AWS_ACCOUNT_ID"),
         "kms_key_arn": os.getenv("KMS_KEY_ARN"),
     }

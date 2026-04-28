@@ -30,10 +30,10 @@ jobs:
     - name: Install Hatch
       run: python -m pip install hatch==1.16.5
 
-    - name: Setup and run Testing SDK
+    - name: Setup and run tests
       working-directory: language-sdk
       run: |
-        echo "Running SDK tests against Language SDK PR changes..."
+        echo "Running SDK tests..."
         hatch run -- test:pip install -e ../language-sdk
         hatch fmt --check
         hatch run types:check
