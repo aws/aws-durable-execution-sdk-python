@@ -2,7 +2,7 @@
 
 import pytest
 from aws_durable_execution_sdk_python.execution import InvocationStatus
-from aws_durable_execution_sdk_python.lambda_service import OperationStatus
+from aws_durable_execution_sdk_python.lambda_service import OperationStatus, OperationType
 
 from src.parallel import parallel
 from test.conftest import deserialize_operation_payload
@@ -35,4 +35,5 @@ def test_parallel(durable_runner):
 
     # Verify all children succeeded
     for child in parallel_op.child_operations:
+        assert child.operation_type == OperationType.CONTEXT
         assert child.status is OperationStatus.SUCCEEDED

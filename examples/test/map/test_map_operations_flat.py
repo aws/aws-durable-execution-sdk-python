@@ -11,7 +11,7 @@ from test.conftest import deserialize_operation_payload
 @pytest.mark.example
 @pytest.mark.durable_execution(
     handler=map_operations_flat.handler,
-    lambda_function_name="map operations",
+    lambda_function_name="Map Operations Flat",
 )
 def test_map_operations_flat(durable_runner):
     """Test map_operations example using context.map()."""
