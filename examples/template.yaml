@@ -420,6 +420,24 @@
         }
       }
     },
+    "MapOperationsFlat": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "map_operations_flat.handler",
+        "Description": "Processing collections using map-like durable operations in FLAT mode",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
     "MapWithLargeScale": {
       "Type": "AWS::Serverless::Function",
       "Properties": {

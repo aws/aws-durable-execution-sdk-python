@@ -22,6 +22,12 @@ jobs:
       with:
         path: language-sdk
 
+    - name: Checkout the latest Testing SDK
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        repository: aws/aws-durable-execution-sdk-python-testing
+        path: testing-sdk
+
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
@@ -34,6 +40,7 @@ jobs:
       working-directory: language-sdk
       run: |
         echo "Running SDK tests..."
+        hatch run -- test:pip install -e ../testing-sdk
         hatch run -- test:pip install -e ../language-sdk
         hatch fmt --check
         hatch run types:check
@@ -53,6 +60,12 @@ jobs:
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       with:
         path: language-sdk
+
+    - name: Checkout the latest Testing SDK
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        repository: aws/aws-durable-execution-sdk-python-testing
+        path: testing-sdk
 
     - name: Set up Python 3.13
       uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -92,6 +105,7 @@ jobs:
         KMS_KEY_ARN: ${{ secrets.KMS_KEY_ARN }}
       run: |
         echo "Building examples..."
+        hatch run -- examples:pip install -e ../testing-sdk
         hatch run examples:build
 
         # Get first integration example for testing

@@ -222,6 +222,17 @@
       "path": "./src/parallel/parallel.py"
     },
     {
+      "name": "Parallel Operations",
+      "description": "Executing multiple durable operations in parallel",
+      "handler": "parallel.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/parallel/parallel.py"
+    },
+    {
       "name": "Map Operations",
       "description": "Processing collections using map-like durable operations",
       "handler": "map_operations.handler",
@@ -231,6 +242,17 @@
         "ExecutionTimeout": 300
       },
       "path": "./src/map/map_operations.py"
+    },
+    {
+      "name": "Map Operations Flat",
+      "description": "Processing collections using map-like durable operations in FLAT mode",
+      "handler": "map_operations_flat.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/map/map_operations_flat.py"
     },
     {
       "name": "Map Large Scale",
