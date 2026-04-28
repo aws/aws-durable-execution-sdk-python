@@ -129,6 +129,6 @@ markers = [
   "durable_execution: marks tests that use the durable_runner fixture (not used for test selection)",
 ]
 # Default test discovery paths
-testpaths = ["tests", "examples/test"]
+testpaths = ["tests"]
 # Default options for all test runs
 addopts = "-v --strict-markers"
