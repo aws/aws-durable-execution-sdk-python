@@ -66,6 +66,9 @@ jobs:
         role-session-name: languageSDKIntegrationTest
         aws-region: ${{ env.AWS_REGION }}
 
+    - name: Install Hatch
+      run: python -m pip install hatch==1.16.5
+
     - name: Get integration examples
       id: get-examples
       working-directory: language-sdk/examples
