@@ -2667,7 +2667,9 @@ def _make_invocation_input(mock_client, next_marker=""):
     return DurableExecutionInvocationInputWithClient(
         durable_execution_arn="arn:test:execution",
         checkpoint_token="token123",  # noqa: S106
-        initial_execution_state=InitialExecutionState(operations=[operation], next_marker=next_marker),
+        initial_execution_state=InitialExecutionState(
+            operations=[operation], next_marker=next_marker
+        ),
         service_client=mock_client,
     )
 
@@ -2729,7 +2731,9 @@ def test_durable_execution_non_retryable_background_thread_error_returns_failed(
         error={"Code": "KMSDisabledException", "Message": "KMS key disabled"},
         response_metadata={"HTTPStatusCode": 502},
     )
-    mock_client.checkpoint.side_effect = lambda *a, **kw: (_ for _ in ()).throw(non_retryable_error)
+    mock_client.checkpoint.side_effect = lambda *a, **kw: (_ for _ in ()).throw(
+        non_retryable_error
+    )
 
     @durable_execution
     def test_handler(event: Any, context: DurableContext) -> dict:
@@ -2757,7 +2761,7 @@ def test_durable_execution_non_retryable_initial_pagination_error_returns_failed
         message=f"{error_code} error",
         error_category=error_category,
         error={"Code": error_code, "Message": f"{error_code} error"},
-        response_metadata={"HTTPStatusCode": status_code},
+        response_metadata={"HTTPStatusCode": status_code},  # type: ignore[arg-type]
     )
     mock_client.get_execution_state.side_effect = non_retryable_error
 

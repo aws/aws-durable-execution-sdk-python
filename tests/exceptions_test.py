@@ -123,13 +123,15 @@ def test_checkpoint_error_classification_invalid_param_without_token_execution()
         "KMSNotFoundException",
     ],
 )
-def test_durable_api_error_non_retryable_customer_error_codes(error_cls, error_code: str):
+def test_durable_api_error_non_retryable_customer_error_codes(
+    error_cls, error_code: str
+):
     """Test that non-retryable customer error codes (HTTP 502) are classified as EXECUTION."""
     error_response = {
         "Error": {"Code": error_code, "Message": f"{error_code} error"},
         "ResponseMetadata": {"HTTPStatusCode": 502},
     }
-    client_error = ClientError(error_response, "Invoke")
+    client_error = ClientError(error_response, "Invoke")  # type: ignore[arg-type]
     result = error_cls.from_exception(client_error)
     assert result.error_category == DurableApiErrorCategory.EXECUTION
     assert not result.is_retryable()
@@ -443,13 +445,15 @@ def test_orphaned_child_exception_with_operation_id():
         ("ServiceException", 502, True),
     ],
 )
-def test_boto_client_error_is_retryable(error_code: str, status_code: int, expected_retryable: bool):
+def test_boto_client_error_is_retryable(
+    error_code: str, status_code: int, expected_retryable: bool
+):
     """Test BotoClientError.is_retryable() classification."""
     error_response = {
         "Error": {"Code": error_code, "Message": "test error"},
         "ResponseMetadata": {"HTTPStatusCode": status_code},
     }
-    client_error = ClientError(error_response, "Invoke")
+    client_error = ClientError(error_response, "Invoke")  # type: ignore[arg-type]
     result = BotoClientError.from_exception(client_error)
     assert result.is_retryable() == expected_retryable
 

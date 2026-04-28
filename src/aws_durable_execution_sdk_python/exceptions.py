@@ -146,9 +146,14 @@ class BotoClientError(InvocationError):
         response = getattr(exception, "response", {})
         response_metadata = response.get("ResponseMetadata")
         error = response.get("Error")
-        error_category = BotoClientError._classify_error_category(error, response_metadata)
+        error_category = BotoClientError._classify_error_category(
+            error, response_metadata
+        )
         return cls(
-            message=str(exception), error_category=error_category, error=error, response_metadata=response_metadata
+            message=str(exception),
+            error_category=error_category,
+            error=error,
+            response_metadata=response_metadata,
         )
 
     @staticmethod
@@ -171,7 +176,9 @@ class BotoClientError(InvocationError):
         if error_code and error_code in _NON_RETRYABLE_CUSTOMER_ERROR_CODES:
             return DurableApiErrorCategory.EXECUTION
 
-        status_code: int | None = (response_metadata and response_metadata.get("HTTPStatusCode")) or None
+        status_code: int | None = (
+            response_metadata and response_metadata.get("HTTPStatusCode")
+        ) or None
         if (
             status_code
             and BAD_REQUEST_ERROR <= status_code < SERVICE_ERROR
@@ -179,7 +186,9 @@ class BotoClientError(InvocationError):
             and error
             and not (
                 (error.get("Code") or "") == INVALID_PARAMETER_VALUE_EXCEPTION
-                and (error.get("Message") or "").startswith(INVALID_CHECKPOINT_TOKEN_PREFIX)
+                and (error.get("Message") or "").startswith(
+                    INVALID_CHECKPOINT_TOKEN_PREFIX
+                )
             )
         ):
             return DurableApiErrorCategory.EXECUTION
