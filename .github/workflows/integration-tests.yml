@@ -84,7 +84,7 @@ jobs:
       working-directory: language-sdk
       env:
         AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        LAMBDA_ENDPOINT: ${{ secrets.LAMBDA_ENDPOINT }}
+        LAMBDA_ENDPOINT: "https://lambda.us-west-2.amazonaws.com"
         INVOKE_ACCOUNT_ID: ${{ secrets.INVOKE_ACCOUNT_ID }}
         KMS_KEY_ARN: ${{ secrets.KMS_KEY_ARN }}
       run: |

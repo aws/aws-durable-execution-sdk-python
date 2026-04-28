@@ -64,7 +64,7 @@ jobs:
       id: deploy
       env:
         AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        LAMBDA_ENDPOINT: ${{ secrets.LAMBDA_ENDPOINT_BETA }}
+        LAMBDA_ENDPOINT: "https://lambda.us-west-2.amazonaws.com"
         KMS_KEY_ARN: ${{ secrets.KMS_KEY_ARN }}
       run: |
         # Build function name
@@ -101,7 +101,7 @@ jobs:
     - name: Run Integration Tests - ${{ matrix.example.name }}
       env:
         AWS_REGION: ${{ env.AWS_REGION }}
-        LAMBDA_ENDPOINT: ${{ secrets.LAMBDA_ENDPOINT_BETA }}
+        LAMBDA_ENDPOINT: "https://lambda.us-west-2.amazonaws.com"
         QUALIFIED_FUNCTION_NAME: ${{ env.QUALIFIED_FUNCTION_NAME }}
         LAMBDA_FUNCTION_TEST_NAME: ${{ matrix.example.name }}
       run: |
