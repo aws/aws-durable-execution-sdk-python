@@ -13,7 +13,7 @@ from test.conftest import deserialize_operation_payload
     handler=map_operations_flat.handler,
     lambda_function_name="map operations",
 )
-def test_map_operations(durable_runner):
+def test_map_operations_flat(durable_runner):
     """Test map_operations example using context.map()."""
     with durable_runner:
         result = durable_runner.run(input="test", timeout=10)
