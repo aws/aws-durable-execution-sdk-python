@@ -70,7 +70,7 @@ def test_checkpoint_error_classification_invalid_token_invocation():
     result = CheckpointError.from_exception(client_error)
 
     assert result.error_category == CheckpointErrorCategory.INVOCATION
-    assert result.is_retriable()
+    assert result.is_retryable()
 
 
 def test_checkpoint_error_classification_payload_size_exceeded_execution():
@@ -87,7 +87,7 @@ def test_checkpoint_error_classification_payload_size_exceeded_execution():
     result = CheckpointError.from_exception(client_error)
 
     assert result.error_category == CheckpointErrorCategory.EXECUTION
-    assert not result.is_retriable()
+    assert not result.is_retryable()
 
 
 def test_checkpoint_error_classification_invalid_param_without_token_execution():
@@ -104,7 +104,7 @@ def test_checkpoint_error_classification_invalid_param_without_token_execution()
     result = CheckpointError.from_exception(client_error)
 
     assert result.error_category == CheckpointErrorCategory.EXECUTION
-    assert not result.is_retriable()
+    assert not result.is_retryable()
 
 
 # =============================================================================
@@ -123,8 +123,8 @@ def test_checkpoint_error_classification_invalid_param_without_token_execution()
         "KMSNotFoundException",
     ],
 )
-def test_durable_api_error_non_retriable_customer_error_codes(error_cls, error_code: str):
-    """Test that non-retriable customer error codes (HTTP 502) are classified as EXECUTION."""
+def test_durable_api_error_non_retryable_customer_error_codes(error_cls, error_code: str):
+    """Test that non-retryable customer error codes (HTTP 502) are classified as EXECUTION."""
     error_response = {
         "Error": {"Code": error_code, "Message": f"{error_code} error"},
         "ResponseMetadata": {"HTTPStatusCode": 502},
@@ -132,12 +132,12 @@ def test_durable_api_error_non_retriable_customer_error_codes(error_cls, error_c
     client_error = ClientError(error_response, "Invoke")
     result = error_cls.from_exception(client_error)
     assert result.error_category == DurableApiErrorCategory.EXECUTION
-    assert not result.is_retriable()
+    assert not result.is_retryable()
 
 
 @pytest.mark.parametrize("error_cls", [CheckpointError, GetExecutionStateError])
-def test_durable_api_error_4xx_non_retriable(error_cls):
-    """Test 4xx errors are classified as EXECUTION (non-retriable)."""
+def test_durable_api_error_4xx_non_retryable(error_cls):
+    """Test 4xx errors are classified as EXECUTION (non-retryable)."""
     error_response = {
         "Error": {"Code": "ValidationException", "Message": "Invalid parameter"},
         "ResponseMetadata": {"HTTPStatusCode": 400},
@@ -145,12 +145,12 @@ def test_durable_api_error_4xx_non_retriable(error_cls):
     client_error = ClientError(error_response, "Invoke")
     result = error_cls.from_exception(client_error)
     assert result.error_category == DurableApiErrorCategory.EXECUTION
-    assert not result.is_retriable()
+    assert not result.is_retryable()
 
 
 @pytest.mark.parametrize("error_cls", [CheckpointError, GetExecutionStateError])
-def test_durable_api_error_429_retriable(error_cls):
-    """Test 429 errors are classified as INVOCATION (retriable)."""
+def test_durable_api_error_429_retryable(error_cls):
+    """Test 429 errors are classified as INVOCATION (retryable)."""
     error_response = {
         "Error": {"Code": "TooManyRequestsException", "Message": "Rate limit exceeded"},
         "ResponseMetadata": {"HTTPStatusCode": 429},
@@ -158,12 +158,12 @@ def test_durable_api_error_429_retriable(error_cls):
     client_error = ClientError(error_response, "Invoke")
     result = error_cls.from_exception(client_error)
     assert result.error_category == DurableApiErrorCategory.INVOCATION
-    assert result.is_retriable()
+    assert result.is_retryable()
 
 
 @pytest.mark.parametrize("error_cls", [CheckpointError, GetExecutionStateError])
-def test_durable_api_error_5xx_retriable(error_cls):
-    """Test 5xx errors are classified as INVOCATION (retriable)."""
+def test_durable_api_error_5xx_retryable(error_cls):
+    """Test 5xx errors are classified as INVOCATION (retryable)."""
     error_response = {
         "Error": {"Code": "InternalServerError", "Message": "Service unavailable"},
         "ResponseMetadata": {"HTTPStatusCode": 500},
@@ -171,12 +171,12 @@ def test_durable_api_error_5xx_retriable(error_cls):
     client_error = ClientError(error_response, "Invoke")
     result = error_cls.from_exception(client_error)
     assert result.error_category == DurableApiErrorCategory.INVOCATION
-    assert result.is_retriable()
+    assert result.is_retryable()
 
 
 @pytest.mark.parametrize("error_cls", [CheckpointError, GetExecutionStateError])
-def test_durable_api_error_retriable_502(error_cls):
-    """Test that 502 errors with unrecognized error codes are retriable."""
+def test_durable_api_error_retryable_502(error_cls):
+    """Test that 502 errors with unrecognized error codes are retryable."""
     error_response = {
         "Error": {
             "Code": "ServiceException",
@@ -187,15 +187,15 @@ def test_durable_api_error_retriable_502(error_cls):
     client_error = ClientError(error_response, "Invoke")
     result = error_cls.from_exception(client_error)
     assert result.error_category == DurableApiErrorCategory.INVOCATION
-    assert result.is_retriable()
+    assert result.is_retryable()
 
 
 @pytest.mark.parametrize("error_cls", [CheckpointError, GetExecutionStateError])
-def test_durable_api_error_unknown_retriable(error_cls):
-    """Test unknown errors (no HTTP response) are classified as INVOCATION (retriable)."""
+def test_durable_api_error_unknown_retryable(error_cls):
+    """Test unknown errors (no HTTP response) are classified as INVOCATION (retryable)."""
     result = error_cls.from_exception(Exception("Network timeout"))
     assert result.error_category == DurableApiErrorCategory.INVOCATION
-    assert result.is_retriable()
+    assert result.is_retryable()
 
 
 def test_validation_error():
@@ -436,28 +436,28 @@ def test_orphaned_child_exception_with_operation_id():
 
 
 @pytest.mark.parametrize(
-    ("error_code", "status_code", "expected_retriable"),
+    ("error_code", "status_code", "expected_retryable"),
     [
         ("KMSAccessDeniedException", 502, False),
         ("ServiceException", 500, True),
         ("ServiceException", 502, True),
     ],
 )
-def test_boto_client_error_is_retriable(error_code: str, status_code: int, expected_retriable: bool):
-    """Test BotoClientError.is_retriable() classification."""
+def test_boto_client_error_is_retryable(error_code: str, status_code: int, expected_retryable: bool):
+    """Test BotoClientError.is_retryable() classification."""
     error_response = {
         "Error": {"Code": error_code, "Message": "test error"},
         "ResponseMetadata": {"HTTPStatusCode": status_code},
     }
     client_error = ClientError(error_response, "Invoke")
     result = BotoClientError.from_exception(client_error)
-    assert result.is_retriable() == expected_retriable
+    assert result.is_retryable() == expected_retryable
 
 
-def test_boto_client_error_is_retriable_no_error():
-    """Test BotoClientError.is_retriable() returns True with no error info."""
+def test_boto_client_error_is_retryable_no_error():
+    """Test BotoClientError.is_retryable() returns True with no error info."""
     result = BotoClientError.from_exception(Exception("network error"))
-    assert result.is_retriable()
+    assert result.is_retryable()
 
 
 # =============================================================================
@@ -473,11 +473,11 @@ def test_durable_api_error_category_backward_compatible_alias():
 
 
 # =============================================================================
-# is_retriable() tests
+# is_retryable() tests
 # =============================================================================
 
 
-def test_invocation_error_is_retriable_default():
-    """Test InvocationError.is_retriable() returns True by default."""
+def test_invocation_error_is_retryable_default():
+    """Test InvocationError.is_retryable() returns True by default."""
     error = InvocationError("some error")
-    assert error.is_retriable()
+    assert error.is_retryable()

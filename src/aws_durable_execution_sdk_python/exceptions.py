@@ -16,12 +16,12 @@ SERVICE_ERROR: int = 500
 INVALID_PARAMETER_VALUE_EXCEPTION: str = "InvalidParameterValueException"
 INVALID_CHECKPOINT_TOKEN_PREFIX: str = "Invalid Checkpoint Token"
 
-# Non-retriable customer error codes that arrive as non-4xx (e.g. HTTP 502) from Lambda.
+# Non-retryable customer error codes that arrive as non-4xx (e.g. HTTP 502) from Lambda.
 # Unlike typical 5xx errors, these require customer intervention (e.g., fixing
 # a KMS key configuration) and will never succeed on retry.
-# Add new non-retriable error codes here — they are automatically classified
-# as EXECUTION (non-retriable) by _classify_error_category().
-_NON_RETRIABLE_CUSTOMER_ERROR_CODES: frozenset[str] = frozenset(
+# Add new non-retryable error codes here — they are automatically classified
+# as EXECUTION (non-retryable) by _classify_error_category().
+_NON_RETRYABLE_CUSTOMER_ERROR_CODES: frozenset[str] = frozenset(
     {
         "KMSAccessDeniedException",
         "KMSDisabledException",
@@ -93,8 +93,8 @@ class InvocationError(UnrecoverableError):
     ):
         super().__init__(message, termination_reason)
 
-    def is_retriable(self) -> bool:
-        """Whether this error is retriable. Returns True by default.
+    def is_retryable(self) -> bool:
+        """Whether this error is retryable. Returns True by default.
 
         Subclasses override to implement classification logic based on
         error codes and HTTP status codes.
@@ -123,9 +123,9 @@ class BotoClientError(InvocationError):
     """Error from a Lambda API call (e.g., CheckpointDurableExecution, GetDurableExecutionState).
 
     Extends InvocationError because the default behavior for API failures is to retry
-    the Lambda invocation. However, some errors are non-retriable (e.g., 4xx client errors,
+    the Lambda invocation. However, some errors are non-retryable (e.g., 4xx client errors,
     KMS key misconfiguration) and should fail the execution instead. The error_category field
-    and is_retriable() method distinguish these cases at runtime.
+    and is_retryable() method distinguish these cases at runtime.
     """
 
     def __init__(
@@ -156,10 +156,10 @@ class BotoClientError(InvocationError):
         error: AwsErrorObj | None,
         response_metadata: AwsErrorMetadata | None,
     ) -> DurableApiErrorCategory:
-        """Classify a Durable API error as retriable (INVOCATION) or non-retriable (EXECUTION).
+        """Classify a Durable API error as retryable (INVOCATION) or non-retryable (EXECUTION).
 
         Classification rules:
-        - Non-retriable customer error codes (e.g., KMS key issues) → EXECUTION
+        - Non-retryable customer error codes (e.g., KMS key issues) → EXECUTION
           These arrive as HTTP 502 but require customer intervention to fix.
         - 4xx errors → EXECUTION, except:
           - 429 (TooManyRequests) → INVOCATION (throttling is transient)
@@ -168,7 +168,7 @@ class BotoClientError(InvocationError):
         - 5xx, network errors → INVOCATION
         """
         error_code: str | None = (error and error.get("Code")) or None
-        if error_code and error_code in _NON_RETRIABLE_CUSTOMER_ERROR_CODES:
+        if error_code and error_code in _NON_RETRYABLE_CUSTOMER_ERROR_CODES:
             return DurableApiErrorCategory.EXECUTION
 
         status_code: int | None = (response_metadata and response_metadata.get("HTTPStatusCode")) or None
@@ -186,8 +186,8 @@ class BotoClientError(InvocationError):
 
         return DurableApiErrorCategory.INVOCATION
 
-    def is_retriable(self) -> bool:
-        """Whether this error is retriable based on error_category."""
+    def is_retryable(self) -> bool:
+        """Whether this error is retryable based on error_category."""
         return self.error_category == DurableApiErrorCategory.INVOCATION
 
     def build_logger_extras(self) -> dict:
