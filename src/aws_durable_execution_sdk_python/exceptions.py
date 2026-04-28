@@ -190,6 +190,9 @@ class BotoClientError(InvocationError):
         """Whether this error is retryable based on error_category."""
         return self.error_category == DurableApiErrorCategory.INVOCATION
 
+    # Backward-compatible alias
+    is_retriable = is_retryable
+
     def build_logger_extras(self) -> dict:
         extras: dict = {}
         # preserve PascalCase to be consistent with other langauges
