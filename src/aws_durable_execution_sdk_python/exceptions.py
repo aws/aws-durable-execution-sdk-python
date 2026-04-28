@@ -13,6 +13,22 @@ from typing import TYPE_CHECKING, Self, TypedDict
 BAD_REQUEST_ERROR: int = 400
 TOO_MANY_REQUESTS_ERROR: int = 429
 SERVICE_ERROR: int = 500
+INVALID_PARAMETER_VALUE_EXCEPTION: str = "InvalidParameterValueException"
+INVALID_CHECKPOINT_TOKEN_PREFIX: str = "Invalid Checkpoint Token"
+
+# Non-retriable customer error codes that arrive as non-4xx (e.g. HTTP 502) from Lambda.
+# Unlike typical 5xx errors, these require customer intervention (e.g., fixing
+# a KMS key configuration) and will never succeed on retry.
+# Add new non-retriable error codes here — they are automatically classified
+# as EXECUTION (non-retriable) by _classify_error_category().
+_NON_RETRIABLE_CUSTOMER_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "KMSAccessDeniedException",
+        "KMSDisabledException",
+        "KMSInvalidStateException",
+        "KMSNotFoundException",
+    }
+)
 
 if TYPE_CHECKING:
     import datetime
@@ -77,6 +93,14 @@ class InvocationError(UnrecoverableError):
     ):
         super().__init__(message, termination_reason)
 
+    def is_retriable(self) -> bool:
+        """Whether this error is retriable. Returns True by default.
+
+        Subclasses override to implement classification logic based on
+        error codes and HTTP status codes.
+        """
+        return True
+
 
 class CallbackError(ExecutionError):
     """Error in callback handling."""
@@ -86,10 +110,28 @@ class CallbackError(ExecutionError):
         self.callback_id = callback_id
 
 
+class DurableApiErrorCategory(Enum):
+    INVOCATION = "INVOCATION"
+    EXECUTION = "EXECUTION"
+
+
+# Backward-compatible alias
+CheckpointErrorCategory = DurableApiErrorCategory
+
+
 class BotoClientError(InvocationError):
+    """Error from a Lambda API call (e.g., CheckpointDurableExecution, GetDurableExecutionState).
+
+    Extends InvocationError because the default behavior for API failures is to retry
+    the Lambda invocation. However, some errors are non-retriable (e.g., 4xx client errors,
+    KMS key misconfiguration) and should fail the execution instead. The error_category field
+    and is_retriable() method distinguish these cases at runtime.
+    """
+
     def __init__(
         self,
         message: str,
+        error_category: DurableApiErrorCategory = DurableApiErrorCategory.INVOCATION,
         error: AwsErrorObj | None = None,
         response_metadata: AwsErrorMetadata | None = None,
         termination_reason=TerminationReason.INVOCATION_ERROR,
@@ -97,15 +139,56 @@ class BotoClientError(InvocationError):
         super().__init__(message=message, termination_reason=termination_reason)
         self.error: AwsErrorObj | None = error
         self.response_metadata: AwsErrorMetadata | None = response_metadata
+        self.error_category: DurableApiErrorCategory = error_category
 
     @classmethod
     def from_exception(cls, exception: Exception) -> Self:
         response = getattr(exception, "response", {})
         response_metadata = response.get("ResponseMetadata")
         error = response.get("Error")
+        error_category = BotoClientError._classify_error_category(error, response_metadata)
         return cls(
-            message=str(exception), error=error, response_metadata=response_metadata
+            message=str(exception), error_category=error_category, error=error, response_metadata=response_metadata
         )
+
+    @staticmethod
+    def _classify_error_category(
+        error: AwsErrorObj | None,
+        response_metadata: AwsErrorMetadata | None,
+    ) -> DurableApiErrorCategory:
+        """Classify a Durable API error as retriable (INVOCATION) or non-retriable (EXECUTION).
+
+        Classification rules:
+        - Non-retriable customer error codes (e.g., KMS key issues) → EXECUTION
+          These arrive as HTTP 502 but require customer intervention to fix.
+        - 4xx errors → EXECUTION, except:
+          - 429 (TooManyRequests) → INVOCATION (throttling is transient)
+          - InvalidParameterValueException with "Invalid Checkpoint Token" → INVOCATION
+            (stale token from a concurrent checkpoint; next invocation gets a fresh token)
+        - 5xx, network errors → INVOCATION
+        """
+        error_code: str | None = (error and error.get("Code")) or None
+        if error_code and error_code in _NON_RETRIABLE_CUSTOMER_ERROR_CODES:
+            return DurableApiErrorCategory.EXECUTION
+
+        status_code: int | None = (response_metadata and response_metadata.get("HTTPStatusCode")) or None
+        if (
+            status_code
+            and BAD_REQUEST_ERROR <= status_code < SERVICE_ERROR
+            and status_code != TOO_MANY_REQUESTS_ERROR
+            and error
+            and not (
+                (error.get("Code") or "") == INVALID_PARAMETER_VALUE_EXCEPTION
+                and (error.get("Message") or "").startswith(INVALID_CHECKPOINT_TOKEN_PREFIX)
+            )
+        ):
+            return DurableApiErrorCategory.EXECUTION
+
+        return DurableApiErrorCategory.INVOCATION
+
+    def is_retriable(self) -> bool:
+        """Whether this error is retriable based on error_category."""
+        return self.error_category == DurableApiErrorCategory.INVOCATION
 
     def build_logger_extras(self) -> dict:
         extras: dict = {}
@@ -125,55 +208,23 @@ class NonDeterministicExecutionError(ExecutionError):
         self.step_id = step_id
 
 
-class CheckpointErrorCategory(Enum):
-    INVOCATION = "INVOCATION"
-    EXECUTION = "EXECUTION"
-
-
 class CheckpointError(BotoClientError):
     """Failure to checkpoint. Will terminate the lambda."""
 
     def __init__(
         self,
         message: str,
-        error_category: CheckpointErrorCategory,
+        error_category: DurableApiErrorCategory = DurableApiErrorCategory.INVOCATION,
         error: AwsErrorObj | None = None,
         response_metadata: AwsErrorMetadata | None = None,
     ):
         super().__init__(
             message,
+            error_category,
             error,
             response_metadata,
             termination_reason=TerminationReason.CHECKPOINT_FAILED,
         )
-        self.error_category: CheckpointErrorCategory = error_category
-
-    @classmethod
-    def from_exception(cls, exception: Exception) -> CheckpointError:
-        base = BotoClientError.from_exception(exception)
-        metadata: AwsErrorMetadata | None = base.response_metadata
-        error: AwsErrorObj | None = base.error
-        error_category: CheckpointErrorCategory = CheckpointErrorCategory.INVOCATION
-
-        # 4xx errors (except 429) are permanent failures (EXECUTION), unless it's an
-        # InvalidParameterValueException with "Invalid Checkpoint Token" which is retriable (INVOCATION).
-        # 5xx, 429, and network errors are retriable (INVOCATION).
-        status_code: int | None = (metadata and metadata.get("HTTPStatusCode")) or None
-        if (
-            status_code
-            and BAD_REQUEST_ERROR <= status_code < SERVICE_ERROR
-            and status_code != TOO_MANY_REQUESTS_ERROR
-            and error
-            and not (
-                (error.get("Code") or "") == "InvalidParameterValueException"
-                and (error.get("Message") or "").startswith("Invalid Checkpoint Token")
-            )
-        ):
-            error_category = CheckpointErrorCategory.EXECUTION
-        return CheckpointError(str(exception), error_category, error, metadata)
-
-    def is_retriable(self):
-        return self.error_category == CheckpointErrorCategory.INVOCATION
 
 
 class ValidationError(DurableExecutionsError):
@@ -186,11 +237,13 @@ class GetExecutionStateError(BotoClientError):
     def __init__(
         self,
         message: str,
+        error_category: DurableApiErrorCategory = DurableApiErrorCategory.INVOCATION,
         error: AwsErrorObj | None = None,
         response_metadata: AwsErrorMetadata | None = None,
     ):
         super().__init__(
             message,
+            error_category,
             error,
             response_metadata,
             termination_reason=TerminationReason.INVOCATION_ERROR,

@@ -14,7 +14,9 @@ from aws_durable_execution_sdk_python.exceptions import (
     BotoClientError,
     CheckpointError,
     CheckpointErrorCategory,
+    DurableApiErrorCategory,
     ExecutionError,
+    GetExecutionStateError,
     InvocationError,
     SuspendExecution,
 )
@@ -1763,11 +1765,12 @@ def test_durable_execution_logs_checkpoint_error_extras_from_background_thread()
         assert response["Status"] == InvocationStatus.FAILED.value
         assert response["Error"]["ErrorType"] == "CheckpointError"
 
-    mock_logger.exception.assert_called_once()
-    call_args = mock_logger.exception.call_args
-    assert "Checkpoint processing failed" in call_args[0][0]
-    assert call_args[1]["extra"]["Error"] == error_obj
-    assert call_args[1]["extra"]["ResponseMetadata"] == metadata_obj
+    mock_logger.exception.assert_called()
+    # First call: "Checkpoint processing failed" with error extras
+    first_call = mock_logger.exception.call_args_list[0]
+    assert "Checkpoint processing failed" in first_call[0][0]
+    assert first_call[1]["extra"]["Error"] == error_obj
+    assert first_call[1]["extra"]["ResponseMetadata"] == metadata_obj
 
 
 def test_durable_execution_logs_boto_client_error_extras_from_background_thread():
@@ -2645,4 +2648,147 @@ def test_from_dict_leaves_timestamps_as_integers():
     ):
         _ = operations[1].wait_details.scheduled_end_timestamp < datetime.datetime.now(
             tz=datetime.UTC
+        )
+
+
+# =============================================================================
+# Non-retriable Durable API error handling tests
+# =============================================================================
+
+
+def _make_invocation_input(mock_client, next_marker=""):
+    """Helper to create a standard test invocation input."""
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+    return DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=InitialExecutionState(operations=[operation], next_marker=next_marker),
+        service_client=mock_client,
+    )
+
+
+def _make_lambda_context():
+    """Helper to create a standard mock Lambda context."""
+    ctx = Mock()
+    ctx.aws_request_id = "test-request"
+    ctx.client_context = None
+    ctx.identity = None
+    ctx._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
+    ctx.invoked_function_arn = None
+    ctx.tenant_id = None
+    return ctx
+
+
+def test_durable_execution_non_retriable_invocation_error_returns_failed():
+    """Test that non-retriable InvocationError returns FAILED instead of retrying."""
+    mock_client = Mock(spec=DurableServiceClient)
+    non_retriable_error = GetExecutionStateError(
+        message="KMS access denied",
+        error_category=DurableApiErrorCategory.EXECUTION,
+        error={"Code": "KMSAccessDeniedException", "Message": "KMS access denied"},
+        response_metadata={"HTTPStatusCode": 502},
+    )
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        raise non_retriable_error
+
+    result = test_handler(_make_invocation_input(mock_client), _make_lambda_context())
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert result["Error"]["ErrorType"] == "GetExecutionStateError"
+
+
+def test_durable_execution_retriable_invocation_error_raises():
+    """Test that retriable InvocationError raises to trigger Lambda retry."""
+    mock_client = Mock(spec=DurableServiceClient)
+    retriable_error = GetExecutionStateError(
+        message="Service error",
+        error={"Code": "ServiceException", "Message": "Internal error"},
+        response_metadata={"HTTPStatusCode": 500},
+    )
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        raise retriable_error
+
+    with pytest.raises(GetExecutionStateError, match="Service error"):
+        test_handler(_make_invocation_input(mock_client), _make_lambda_context())
+
+
+def test_durable_execution_non_retriable_background_thread_error_returns_failed():
+    """Test that non-retriable error from background thread returns FAILED."""
+    mock_client = Mock(spec=DurableServiceClient)
+    non_retriable_error = GetExecutionStateError(
+        message="KMS key disabled",
+        error_category=DurableApiErrorCategory.EXECUTION,
+        error={"Code": "KMSDisabledException", "Message": "KMS key disabled"},
+        response_metadata={"HTTPStatusCode": 502},
+    )
+    mock_client.checkpoint.side_effect = lambda *a, **kw: (_ for _ in ()).throw(non_retriable_error)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        context.step(lambda ctx: "step_result")
+        return {"result": "success"}
+
+    result = test_handler(_make_invocation_input(mock_client), _make_lambda_context())
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert result["Error"]["ErrorType"] == "GetExecutionStateError"
+
+
+@pytest.mark.parametrize(
+    ("error_code", "status_code", "error_category"),
+    [
+        ("KMSAccessDeniedException", 502, DurableApiErrorCategory.EXECUTION),
+        ("ValidationException", 400, DurableApiErrorCategory.EXECUTION),
+    ],
+)
+def test_durable_execution_non_retriable_initial_pagination_error_returns_failed(
+    error_code: str, status_code: int, error_category: DurableApiErrorCategory
+):
+    """Test that non-retriable errors during initial pagination return FAILED."""
+    mock_client = Mock(spec=DurableServiceClient)
+    non_retriable_error = GetExecutionStateError(
+        message=f"{error_code} error",
+        error_category=error_category,
+        error={"Code": error_code, "Message": f"{error_code} error"},
+        response_metadata={"HTTPStatusCode": status_code},
+    )
+    mock_client.get_execution_state.side_effect = non_retriable_error
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client, next_marker="next-page-marker"),
+        _make_lambda_context(),
+    )
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert result["Error"]["ErrorType"] == "GetExecutionStateError"
+
+
+def test_durable_execution_retriable_initial_pagination_error_raises():
+    """Test that retriable error during initial pagination raises to trigger Lambda retry."""
+    mock_client = Mock(spec=DurableServiceClient)
+    retriable_error = GetExecutionStateError(
+        message="Service error",
+        error={"Code": "ServiceException", "Message": "Internal error"},
+        response_metadata={"HTTPStatusCode": 500},
+    )
+    mock_client.get_execution_state.side_effect = retriable_error
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    with pytest.raises(GetExecutionStateError, match="Service error"):
+        test_handler(
+            _make_invocation_input(mock_client, next_marker="next-page-marker"),
+            _make_lambda_context(),
         )

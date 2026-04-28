@@ -7,12 +7,15 @@ import pytest
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 
 from aws_durable_execution_sdk_python.exceptions import (
+    BotoClientError,
     CallableRuntimeError,
     CallableRuntimeErrorSerializableDetails,
     CheckpointError,
     CheckpointErrorCategory,
+    DurableApiErrorCategory,
     DurableExecutionsError,
     ExecutionError,
+    GetExecutionStateError,
     InvocationError,
     OrderedLockError,
     OrphanedChildException,
@@ -87,34 +90,6 @@ def test_checkpoint_error_classification_payload_size_exceeded_execution():
     assert not result.is_retriable()
 
 
-def test_checkpoint_error_classification_other_4xx_execution():
-    """Test other 4xx errors are execution errors."""
-    error_response = {
-        "Error": {"Code": "ValidationException", "Message": "Invalid parameter value"},
-        "ResponseMetadata": {"HTTPStatusCode": 400},
-    }
-    client_error = ClientError(error_response, "Checkpoint")
-
-    result = CheckpointError.from_exception(client_error)
-
-    assert result.error_category == CheckpointErrorCategory.EXECUTION
-    assert not result.is_retriable()
-
-
-def test_checkpoint_error_classification_429_invocation():
-    """Test 429 errors are invocation errors (retryable)."""
-    error_response = {
-        "Error": {"Code": "TooManyRequestsException", "Message": "Rate limit exceeded"},
-        "ResponseMetadata": {"HTTPStatusCode": 429},
-    }
-    client_error = ClientError(error_response, "Checkpoint")
-
-    result = CheckpointError.from_exception(client_error)
-
-    assert result.error_category == CheckpointErrorCategory.INVOCATION
-    assert result.is_retriable()
-
-
 def test_checkpoint_error_classification_invalid_param_without_token_execution():
     """Test 4xx InvalidParameterValueException without Invalid Checkpoint Token is execution error."""
     error_response = {
@@ -132,27 +107,94 @@ def test_checkpoint_error_classification_invalid_param_without_token_execution()
     assert not result.is_retriable()
 
 
-def test_checkpoint_error_classification_5xx_invocation():
-    """Test 5xx errors are invocation errors."""
+# =============================================================================
+# Shared Durable API error classification tests (BotoClientError._classify_error_category)
+# These test the shared classification logic through each BotoClientError subclass.
+# =============================================================================
+
+
+@pytest.mark.parametrize("error_cls", [CheckpointError, GetExecutionStateError])
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "KMSAccessDeniedException",
+        "KMSDisabledException",
+        "KMSInvalidStateException",
+        "KMSNotFoundException",
+    ],
+)
+def test_durable_api_error_non_retriable_customer_error_codes(error_cls, error_code: str):
+    """Test that non-retriable customer error codes (HTTP 502) are classified as EXECUTION."""
+    error_response = {
+        "Error": {"Code": error_code, "Message": f"{error_code} error"},
+        "ResponseMetadata": {"HTTPStatusCode": 502},
+    }
+    client_error = ClientError(error_response, "Invoke")
+    result = error_cls.from_exception(client_error)
+    assert result.error_category == DurableApiErrorCategory.EXECUTION
+    assert not result.is_retriable()
+
+
+@pytest.mark.parametrize("error_cls", [CheckpointError, GetExecutionStateError])
+def test_durable_api_error_4xx_non_retriable(error_cls):
+    """Test 4xx errors are classified as EXECUTION (non-retriable)."""
+    error_response = {
+        "Error": {"Code": "ValidationException", "Message": "Invalid parameter"},
+        "ResponseMetadata": {"HTTPStatusCode": 400},
+    }
+    client_error = ClientError(error_response, "Invoke")
+    result = error_cls.from_exception(client_error)
+    assert result.error_category == DurableApiErrorCategory.EXECUTION
+    assert not result.is_retriable()
+
+
+@pytest.mark.parametrize("error_cls", [CheckpointError, GetExecutionStateError])
+def test_durable_api_error_429_retriable(error_cls):
+    """Test 429 errors are classified as INVOCATION (retriable)."""
+    error_response = {
+        "Error": {"Code": "TooManyRequestsException", "Message": "Rate limit exceeded"},
+        "ResponseMetadata": {"HTTPStatusCode": 429},
+    }
+    client_error = ClientError(error_response, "Invoke")
+    result = error_cls.from_exception(client_error)
+    assert result.error_category == DurableApiErrorCategory.INVOCATION
+    assert result.is_retriable()
+
+
+@pytest.mark.parametrize("error_cls", [CheckpointError, GetExecutionStateError])
+def test_durable_api_error_5xx_retriable(error_cls):
+    """Test 5xx errors are classified as INVOCATION (retriable)."""
     error_response = {
         "Error": {"Code": "InternalServerError", "Message": "Service unavailable"},
         "ResponseMetadata": {"HTTPStatusCode": 500},
     }
-    client_error = ClientError(error_response, "Checkpoint")
-
-    result = CheckpointError.from_exception(client_error)
-
-    assert result.error_category == CheckpointErrorCategory.INVOCATION
+    client_error = ClientError(error_response, "Invoke")
+    result = error_cls.from_exception(client_error)
+    assert result.error_category == DurableApiErrorCategory.INVOCATION
     assert result.is_retriable()
 
 
-def test_checkpoint_error_classification_unknown_invocation():
-    """Test unknown errors are invocation errors."""
-    unknown_error = Exception("Network timeout")
+@pytest.mark.parametrize("error_cls", [CheckpointError, GetExecutionStateError])
+def test_durable_api_error_retriable_502(error_cls):
+    """Test that 502 errors with unrecognized error codes are retriable."""
+    error_response = {
+        "Error": {
+            "Code": "ServiceException",
+            "Message": "Service encountered an internal error.",
+        },
+        "ResponseMetadata": {"HTTPStatusCode": 502},
+    }
+    client_error = ClientError(error_response, "Invoke")
+    result = error_cls.from_exception(client_error)
+    assert result.error_category == DurableApiErrorCategory.INVOCATION
+    assert result.is_retriable()
 
-    result = CheckpointError.from_exception(unknown_error)
 
-    assert result.error_category == CheckpointErrorCategory.INVOCATION
+@pytest.mark.parametrize("error_cls", [CheckpointError, GetExecutionStateError])
+def test_durable_api_error_unknown_retriable(error_cls):
+    """Test unknown errors (no HTTP response) are classified as INVOCATION (retriable)."""
+    result = error_cls.from_exception(Exception("Network timeout"))
+    assert result.error_category == DurableApiErrorCategory.INVOCATION
     assert result.is_retriable()
 
 
@@ -391,3 +433,51 @@ def test_orphaned_child_exception_with_operation_id():
     exception = OrphanedChildException("parent completed", operation_id="child_op_456")
     assert exception.operation_id == "child_op_456"
     assert str(exception) == "parent completed"
+
+
+@pytest.mark.parametrize(
+    ("error_code", "status_code", "expected_retriable"),
+    [
+        ("KMSAccessDeniedException", 502, False),
+        ("ServiceException", 500, True),
+        ("ServiceException", 502, True),
+    ],
+)
+def test_boto_client_error_is_retriable(error_code: str, status_code: int, expected_retriable: bool):
+    """Test BotoClientError.is_retriable() classification."""
+    error_response = {
+        "Error": {"Code": error_code, "Message": "test error"},
+        "ResponseMetadata": {"HTTPStatusCode": status_code},
+    }
+    client_error = ClientError(error_response, "Invoke")
+    result = BotoClientError.from_exception(client_error)
+    assert result.is_retriable() == expected_retriable
+
+
+def test_boto_client_error_is_retriable_no_error():
+    """Test BotoClientError.is_retriable() returns True with no error info."""
+    result = BotoClientError.from_exception(Exception("network error"))
+    assert result.is_retriable()
+
+
+# =============================================================================
+# DurableApiErrorCategory backward compatibility
+# =============================================================================
+
+
+def test_durable_api_error_category_backward_compatible_alias():
+    """Test CheckpointErrorCategory is a backward-compatible alias for DurableApiErrorCategory."""
+    assert CheckpointErrorCategory is DurableApiErrorCategory
+    assert CheckpointErrorCategory.INVOCATION is DurableApiErrorCategory.INVOCATION
+    assert CheckpointErrorCategory.EXECUTION is DurableApiErrorCategory.EXECUTION
+
+
+# =============================================================================
+# is_retriable() tests
+# =============================================================================
+
+
+def test_invocation_error_is_retriable_default():
+    """Test InvocationError.is_retriable() returns True by default."""
+    error = InvocationError("some error")
+    assert error.is_retriable()
