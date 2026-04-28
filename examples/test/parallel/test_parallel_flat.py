@@ -2,7 +2,10 @@
 
 import pytest
 from aws_durable_execution_sdk_python.execution import InvocationStatus
-from aws_durable_execution_sdk_python.lambda_service import OperationStatus, OperationType
+from aws_durable_execution_sdk_python.lambda_service import (
+    OperationStatus,
+    OperationType,
+)
 
 from src.parallel import parallel_flat
 from test.conftest import deserialize_operation_payload
