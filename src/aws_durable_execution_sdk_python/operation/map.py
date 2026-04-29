@@ -36,7 +36,6 @@ R = TypeVar("R")
 class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI059
     def __init__(
         self,
-        operation_identifier: OperationIdentifier,
         executables: list[Executable[Callable]],
         items: Sequence[T],
         max_concurrency: int | None,
@@ -50,7 +49,6 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI0
         nesting_type: NestingType = NestingType.NESTED,
     ):
         super().__init__(
-            operation_identifier=operation_identifier,
             executables=executables,
             max_concurrency=max_concurrency,
             completion_config=completion_config,
@@ -67,7 +65,6 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI0
     @classmethod
     def from_items(
         cls,
-        operation_identifier: OperationIdentifier,
         items: Sequence[T],
         func: Callable,
         config: MapConfig,
@@ -78,7 +75,6 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI0
         ]
 
         return cls(
-            operation_identifier=operation_identifier,
             executables=executables,
             items=items,
             max_concurrency=config.max_concurrency,
@@ -116,7 +112,6 @@ def map_handler(
     # See TypeScript reference: aws-durable-execution-sdk-js/src/handlers/map-handler/map-handler.ts (~line 79)
 
     executor: MapExecutor[T, R] = MapExecutor.from_items(
-        operation_identifier=operation_identifier,
         items=items,
         func=func,
         config=config or MapConfig(summary_generator=MapSummaryGenerator()),

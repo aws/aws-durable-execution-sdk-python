@@ -237,14 +237,21 @@ class DurableContext(DurableContextProtocol):
         lambda_context: LambdaContext | None = None,
         parent_id: str | None = None,
         logger: Logger | None = None,
-        non_virtual_parent_id: str | None = None,
+        step_id_prefix: str | None = None,
     ) -> None:
         self.state: ExecutionState = state
         self.execution_context: ExecutionContext = execution_context
         self.lambda_context = lambda_context
+        # operations inside this context use this id as their parent
         self._parent_id: str | None = parent_id
+        # child operations use this to generate deterministic step ids.
+        # differs from `parent_id` only for virtual contexts.
+        self._step_id_prefix: str | None = (
+            step_id_prefix if step_id_prefix is not None else parent_id
+        )
+        # cached at construction to make invariant even if parent/prefix mutates.
+        self._is_virtual: bool = self._parent_id != self._step_id_prefix
         self._step_counter: OrderedCounter = OrderedCounter()
-        self._non_virtual_parent_id = non_virtual_parent_id or parent_id
 
         log_info = LogInfo(
             execution_state=state,
@@ -255,6 +262,18 @@ class DurableContext(DurableContextProtocol):
             logger=logging.getLogger(),
             info=log_info,
         )
+
+    @property
+    def is_virtual(self) -> bool:
+        """True if this context does not checkpoint its own start and completion.
+
+        You create a virtual context by `create_child_context(..., is_virtual=True)`.
+        FLAT-mode `map`/`parallel` branches uses virtual contexts. Inner operations
+        use the grandfather as parent (enclosing non-virtual ancestor, skipping the branch level
+        in the hierarchy), while step ids are still prefixed with the branch's own
+        operation id so replay stays deterministic.
+        """
+        return self._is_virtual
 
     # region factories
     @staticmethod
@@ -272,22 +291,44 @@ class DurableContext(DurableContextProtocol):
         )
 
     def create_child_context(
-        self, parent_id: str, non_virtual_parent_id=None
+        self, operation_id: str, *, is_virtual: bool = False
     ) -> DurableContext:
-        """Create a child context from the given parent."""
-        logger.debug("Creating child context for parent %s", parent_id)
+        """Create a child context for the given operation.
+
+        Args:
+            operation_id: The operation id that owns the child context. Used as
+                the child's step-id prefix in all cases.
+            is_virtual: When `True`, create a virtual child whose inner
+                operations report to this context's own `_parent_id` (one
+                level up the hierarchy). When `False` (default), produce a
+                regular child whose inner operations report to
+                `operation_id`.
+
+        Returns:
+            A new `DurableContext` child for the current context.
+        """
+        # For a virtual child, propagate the current `_parent_id` so its
+        # inner operations refer to the grandparent rather than the parent.
+        # For a regular non-virtual child, the child's own `operation_id` is
+        # the parent id for its inner operations (standard nesting).
+        child_parent_id: str | None = self._parent_id if is_virtual else operation_id
+        logger.debug(
+            "Creating child context for operation %s (is_virtual=%s)",
+            operation_id,
+            is_virtual,
+        )
         return DurableContext(
             state=self.state,
             execution_context=self.execution_context,
             lambda_context=self.lambda_context,
-            parent_id=parent_id,
+            parent_id=child_parent_id,
+            step_id_prefix=operation_id,
             logger=self.logger.with_log_info(
                 LogInfo(
                     execution_state=self.state,
-                    parent_id=parent_id,
+                    parent_id=child_parent_id,
                 )
             ),
-            non_virtual_parent_id=non_virtual_parent_id,
         )
 
     # endregion factories
@@ -315,7 +356,8 @@ class DurableContext(DurableContextProtocol):
         This allows us to recover operation ids or even look
         forward without changing the internal state of this context.
         """
-        step_id = f"{self._parent_id}-{step}" if self._parent_id else str(step)
+        prefix: str | None = self._step_id_prefix
+        step_id: str = f"{prefix}-{step}" if prefix else str(step)
         return hashlib.blake2b(step_id.encode()).hexdigest()[:64]
 
     def _create_step_id(self) -> str:
@@ -353,7 +395,7 @@ class DurableContext(DurableContextProtocol):
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
-                parent_id=self._non_virtual_parent_id,
+                parent_id=self._parent_id,
                 name=name,
             ),
             config=config,
@@ -395,7 +437,7 @@ class DurableContext(DurableContextProtocol):
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
-                parent_id=self._non_virtual_parent_id,
+                parent_id=self._parent_id,
                 name=name,
             ),
             config=config,
@@ -417,10 +459,10 @@ class DurableContext(DurableContextProtocol):
         operation_id = self._create_step_id()
         operation_identifier = OperationIdentifier(
             operation_id=operation_id,
-            parent_id=self._non_virtual_parent_id,
+            parent_id=self._parent_id,
             name=map_name,
         )
-        map_context = self.create_child_context(parent_id=operation_id)
+        map_context = self.create_child_context(operation_id=operation_id)
 
         def map_in_child_context() -> BatchResult[R]:
             # map_context is a child_context of the context upon which `.map`
@@ -461,9 +503,9 @@ class DurableContext(DurableContextProtocol):
         """Execute multiple callables in parallel."""
         # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
         operation_id = self._create_step_id()
-        parallel_context = self.create_child_context(parent_id=operation_id)
+        parallel_context = self.create_child_context(operation_id=operation_id)
         operation_identifier = OperationIdentifier(
-            operation_id=operation_id, parent_id=self._non_virtual_parent_id, name=name
+            operation_id=operation_id, parent_id=self._parent_id, name=name
         )
 
         def parallel_in_child_context() -> BatchResult[T]:
@@ -517,15 +559,21 @@ class DurableContext(DurableContextProtocol):
         # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
         operation_id = self._create_step_id()
 
+        is_virtual: bool = config.is_virtual if config else False
+
         def callable_with_child_context():
-            return func(self.create_child_context(parent_id=operation_id))
+            return func(
+                self.create_child_context(
+                    operation_id=operation_id, is_virtual=is_virtual
+                )
+            )
 
         result: T = child_handler(
             func=callable_with_child_context,
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
-                parent_id=self._non_virtual_parent_id,
+                parent_id=self._parent_id,
                 name=step_name,
             ),
             config=config,
@@ -550,7 +598,7 @@ class DurableContext(DurableContextProtocol):
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
-                parent_id=self._non_virtual_parent_id,
+                parent_id=self._parent_id,
                 name=step_name,
             ),
             context_logger=self.logger,
@@ -577,7 +625,7 @@ class DurableContext(DurableContextProtocol):
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
-                parent_id=self._non_virtual_parent_id,
+                parent_id=self._parent_id,
                 name=name,
             ),
         )
@@ -632,7 +680,7 @@ class DurableContext(DurableContextProtocol):
                 state=self.state,
                 operation_identifier=OperationIdentifier(
                     operation_id=operation_id,
-                    parent_id=self._non_virtual_parent_id,
+                    parent_id=self._parent_id,
                     name=name,
                 ),
                 context_logger=self.logger,
