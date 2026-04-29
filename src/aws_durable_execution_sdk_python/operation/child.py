@@ -67,6 +67,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
         self.state = state
         self.operation_identifier = operation_identifier
         self.config = config
+        self.is_virtual: bool = config.is_virtual
         self.sub_type = config.sub_type or OperationSubType.RUN_IN_CHILD_CONTEXT
 
     def check_result_status(self) -> CheckResult[T]:
@@ -118,7 +119,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
             checkpointed_result.raise_callable_error()
 
         # Create START checkpoint if not exists
-        if not checkpointed_result.is_existent() and not self.config.is_virtual:
+        if not checkpointed_result.is_existent() and not self.is_virtual:
             start_operation: OperationUpdate = OperationUpdate.create_context_start(
                 identifier=self.operation_identifier,
                 sub_type=self.sub_type,
@@ -157,7 +158,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
         try:
             raw_result: T = self.func()
 
-            if self.config.is_virtual:
+            if self.is_virtual:
                 logger.debug(
                     "Virtual context: Exiting child context without creating another checkpoint. id: %s, name: %s",
                     self.operation_identifier.operation_id,
@@ -235,21 +236,23 @@ class ChildOperationExecutor(OperationExecutor[T]):
             raise
         except Exception as e:
             error_object = ErrorObject.from_exception(e)
-            fail_operation: OperationUpdate = OperationUpdate.create_context_fail(
-                identifier=self.operation_identifier,
-                error=error_object,
-                sub_type=self.sub_type,
-            )
-            # Checkpoint child context FAIL with blocking (is_sync=True, default).
-            # Must ensure the failure state is persisted before raising the exception.
-            # This guarantees the error is durable and child operations won't be re-executed on replay.
-            self.state.create_checkpoint(operation_update=fail_operation)
+            # Virtual deliberately does not write checkpoints, but exception still propagates below
+            if not self.is_virtual:
+                fail_operation: OperationUpdate = OperationUpdate.create_context_fail(
+                    identifier=self.operation_identifier,
+                    error=error_object,
+                    sub_type=self.sub_type,
+                )
+                # Checkpoint child context FAIL with blocking (is_sync=True, default).
+                # Must ensure the failure state is persisted before raising the exception.
+                # This guarantees the error is durable and child operations won't be re-executed on replay.
+                self.state.create_checkpoint(operation_update=fail_operation)
 
-            # InvocationError and its derivatives can be retried
-            # When we encounter an invocation error (in all of its forms), we bubble that
-            # error upwards (with the checkpoint in place) such that we reach the
-            # execution handler at the very top, which will then induce a retry from the
-            # dataplane.
+            # InvocationError and its derivatives can be retried.
+            # When we encounter an invocation error (in all of its forms), we
+            # bubble that error upwards (with the checkpoint in place for
+            # non-virtual) such that we reach the execution handler at the
+            # very top, which will then make the backend retry.
             if isinstance(e, InvocationError):
                 raise
             raise error_object.to_callable_runtime_error() from e
@@ -261,24 +264,28 @@ def child_handler(
     operation_identifier: OperationIdentifier,
     config: ChildConfig | None,
 ) -> T:
-    """Public API for child context operations - maintains existing signature.
+    """Run a function in a child context.
 
-    This function creates a ChildOperationExecutor and delegates to its process() method,
-    maintaining backward compatibility with existing code that calls child_handler.
+    Create a ChildOperationExecutor and delegates to its process() method.
 
     Args:
-        func: The child context function to execute
-        state: The execution state
-        operation_identifier: The operation identifier
-        config: The child configuration (optional)
+        func: The child context function to execute.
+        state: The execution state.
+        operation_identifier: The operation identifier for this child context.
+        config: The child configuration (optional). When `config.is_virtual`
+            is True, the child context does not checkpoint (START, SUCCEED, FAIL)
+                        for itself.
 
     Returns:
-        The result of executing the child context
+        The result of executing the child context.
 
     Raises:
-        May raise operation-specific errors during execution
+        May raise operation-specific errors during execution.
     """
     executor = ChildOperationExecutor(
-        func, state, operation_identifier, config or ChildConfig()
+        func,
+        state,
+        operation_identifier,
+        config or ChildConfig(),
     )
     return executor.process()

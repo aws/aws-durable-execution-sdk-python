@@ -54,7 +54,6 @@ def test_map_executor_init():
     items = ["item1"]
 
     executor = MapExecutor(
-        operation_identifier=OperationIdentifier("id-1", "parent-1", "name-1"),
         executables=executables,
         items=items,
         max_concurrency=2,
@@ -80,9 +79,7 @@ def test_map_executor_from_items():
 
     config = MapConfig(max_concurrency=3, nesting_type=NestingType.FLAT)
 
-    executor = MapExecutor.from_items(
-        OperationIdentifier("id-1", "parent-1", "name-1"), items, callable_func, config
-    )
+    executor = MapExecutor.from_items(items, callable_func, config)
 
     assert len(executor.executables) == 3
     assert executor.items == items
@@ -99,7 +96,6 @@ def test_map_executor_from_items_default_config():
         return item
 
     executor = MapExecutor.from_items(
-        OperationIdentifier("id-1", "parent-1", "name-1"),
         items,
         callable_func,
         MapConfig(),
@@ -119,7 +115,6 @@ def test_map_executor_execute_item(mock_logger):
         return f"{item}_{idx}"
 
     executor = MapExecutor.from_items(
-        OperationIdentifier("id-1", "parent-1", "name-1"),
         items,
         callable_func,
         MapConfig(),
@@ -142,7 +137,6 @@ def test_map_executor_execute_item_with_context():
         return item * 2 + idx
 
     executor = MapExecutor.from_items(
-        OperationIdentifier("id-1", "parent-1", "name-1"),
         items,
         callable_func,
         MapConfig(),
@@ -234,7 +228,6 @@ def test_map_executor_execute_item_accesses_all_parameters():
         return f"{item}_{idx}_{len(items_list)}"
 
     executor = MapExecutor.from_items(
-        OperationIdentifier("id-1", "parent-1", "name-1"),
         items,
         callable_func,
         MapConfig(),
@@ -254,7 +247,6 @@ def test_map_executor_from_items_empty_list():
         return item
 
     executor = MapExecutor.from_items(
-        OperationIdentifier("id-1", "parent-1", "name-1"),
         items,
         callable_func,
         MapConfig(),
@@ -272,7 +264,6 @@ def test_map_executor_from_items_single_item():
         return f"processed_{item}"
 
     executor = MapExecutor.from_items(
-        OperationIdentifier("id-1", "parent-1", "name-1"),
         items,
         callable_func,
         MapConfig(),
@@ -291,7 +282,6 @@ def test_map_executor_inheritance():
         return item
 
     executor = MapExecutor.from_items(
-        OperationIdentifier("id-1", "parent-1", "name-1"),
         items,
         callable_func,
         MapConfig(),
@@ -317,7 +307,7 @@ def test_map_handler_calls_executor_execute():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args: Mock()
+    executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
     with patch.object(
         MapExecutor, "execute", return_value=mock_batch_result
@@ -368,7 +358,7 @@ def test_map_handler_with_none_config_creates_default():
 
         executor_context = Mock()
         executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-        executor_context.create_child_context = lambda *args: Mock()
+        executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
         class MockExecutionState:
             def get_checkpoint_result(self, operation_id):
@@ -414,7 +404,7 @@ def test_map_handler_with_serdes():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args: Mock()
+    executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
     class MockExecutionState:
         def get_checkpoint_result(self, operation_id):
@@ -496,9 +486,7 @@ def test_map_executor_from_items_with_summary_generator():
 
     config = MapConfig(summary_generator=mock_summary_generator)
 
-    executor = MapExecutor.from_items(
-        OperationIdentifier("id-1", "parent-1", "name-1"), items, callable_func, config
-    )
+    executor = MapExecutor.from_items(items, callable_func, config)
 
     # Verify that the summary_generator is preserved in the executor
     assert executor.summary_generator is mock_summary_generator
@@ -550,7 +538,6 @@ def test_map_executor_init_with_summary_generator():
         return f"Summary: {result}"
 
     executor = MapExecutor(
-        operation_identifier=OperationIdentifier("id-1", "parent-1", "name-1"),
         executables=executables,
         items=items,
         max_concurrency=2,

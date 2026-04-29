@@ -137,7 +137,6 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
 
     def __init__(
         self,
-        operation_identifier: OperationIdentifier,
         executables: list[Executable[CallableType]],
         max_concurrency: int | None,
         completion_config: CompletionConfig,
@@ -158,7 +157,6 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
                 handle large BatchResult payloads efficiently. Matches TypeScript behavior in
                 run-in-child-context-handler.ts.
         """
-        self.operation_identifier = operation_identifier
         self.executables = executables
         self.max_concurrency = max_concurrency
         self.completion_config = completion_config
@@ -398,36 +396,36 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         """
         Execute a single item in a derived child context.
 
-        instead of relying on `executor_context.run_in_child_context`
-        we generate an operation_id for the child, and then call `child_handler`
-        directly. This avoids the hidden mutation of the context's internal counter.
-        we can do this because we explicitly control the generation of step_id and do it
-        using executable.index.
+        Instead of relying on `executor_context.run_in_child_context` we
+        generate an operation_id for the child, then call `child_handler`
+        directly. This avoids the hidden mutation of the context's
+        internal counter. We explicitly derive the child's operation_id
+        from `executable.index` so that the same input always produces
+        the same id regardless of the order branches actually run in.
 
-
-        invariant: `operation_id` for a given executable is deterministic,
-            and execution order invariant.
+        Invariant: `operation_id` for a given executable is deterministic
+        and execution-order invariant.
         """
 
-        operation_id = executor_context._create_step_id_for_logical_step(  # noqa: SLF001
+        operation_id: str = executor_context._create_step_id_for_logical_step(  # noqa: SLF001
             executable.index
         )
-        name = f"{self.name_prefix}{executable.index}"
-        non_virtual_parent_id = (
-            self.operation_identifier.operation_id
-            if self.nesting_type is NestingType.FLAT
-            else None
+        name: str = f"{self.name_prefix}{executable.index}"
+        is_virtual: bool = self.nesting_type is NestingType.FLAT
+
+        child_context: DurableContext = executor_context.create_child_context(
+            operation_id, is_virtual=is_virtual
         )
-        child_context = executor_context.create_child_context(
-            operation_id, non_virtual_parent_id
-        )
+        # For NESTED this is for branch's START/SUCCEED/FAIL checkpoints (not the children of the branch).
+        # For FLAT `child_handler` skips checkpoints, so not used.
+        # Construct it unconditionally to keep the call simple.
         operation_identifier = OperationIdentifier(
             operation_id,
             executor_context._parent_id,  # noqa: SLF001
             name,
         )
 
-        def run_in_child_handler():
+        def run_in_child_handler() -> ResultType:
             return self.execute_item(child_context, executable)
 
         result: ResultType = child_handler(
@@ -438,7 +436,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
                 serdes=self.item_serdes or self.serdes,
                 sub_type=self.sub_type_iteration,
                 summary_generator=self.summary_generator,
-                is_virtual=self.nesting_type is NestingType.FLAT,
+                is_virtual=is_virtual,
             ),
         )
         child_context.state.track_replay(operation_id=operation_id)

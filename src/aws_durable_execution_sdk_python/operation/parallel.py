@@ -29,7 +29,6 @@ R = TypeVar("R")
 class ParallelExecutor(ConcurrentExecutor[Callable, R]):
     def __init__(
         self,
-        operation_identifier: OperationIdentifier,
         executables: list[Executable[Callable]],
         max_concurrency: int | None,
         completion_config,
@@ -42,7 +41,6 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
         nesting_type: NestingType = NestingType.NESTED,
     ):
         super().__init__(
-            operation_identifier=operation_identifier,
             executables=executables,
             max_concurrency=max_concurrency,
             completion_config=completion_config,
@@ -58,7 +56,6 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
     @classmethod
     def from_callables(
         cls,
-        operation_identifier: OperationIdentifier,
         callables: Sequence[Callable],
         config: ParallelConfig,
     ) -> ParallelExecutor:
@@ -67,7 +64,6 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
             Executable(index=i, func=func) for i, func in enumerate(callables)
         ]
         return cls(
-            operation_identifier=operation_identifier,
             executables=executables,
             max_concurrency=config.max_concurrency,
             completion_config=config.completion_config,
@@ -102,7 +98,6 @@ def parallel_handler(
     # See TypeScript reference: aws-durable-execution-sdk-js/src/handlers/parallel-handler/parallel-handler.ts (~line 112)
 
     executor = ParallelExecutor.from_callables(
-        operation_identifier,
         callables,
         config or ParallelConfig(summary_generator=ParallelSummaryGenerator()),
     )

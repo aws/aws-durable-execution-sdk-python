@@ -77,15 +77,39 @@ class TerminationMode(Enum):
 
 
 class NestingType(Enum):
-    """
-    How child operations should inherit context from their parent.
+    """Control how child contexts are created for batch operations.
 
-    - NESTED: Each child operation runs in its own isolated context
-    - FLAT: All child operations share the same parent context
+    Applies to `map` and `parallel`. Each branch or iteration runs inside a
+    child context.
+
+        - NESTED: full checkpointed context
+        - FLAT: a virtual context that skips checkpoints for the branch/iteration.
+
     """
 
     NESTED = "NESTED"
+    """Create CONTEXT operations for each branch/iteration with full checkpointing.
+
+    Operations within each branch/iteration are wrapped in their own context.
+
+    - Observability: high — each branch/iteration appears as a separate
+      operation in execution history.
+    - Cost: higher — consumes more operations due to CONTEXT creation
+      overhead.
+    - Scale: lower maximum iterations due to operation limits.
+    """
+
     FLAT = "FLAT"
+    """Skip CONTEXT operations for branches/iterations using virtual contexts.
+
+    Operations execute directly without individual context wrapping.
+
+    - Observability: lower — branches/iterations don't appear as separate
+      operations in execution history.
+    - Cost: ~30% lower — reduces operation consumption by skipping CONTEXT
+      overhead.
+    - Scale: higher maximum iterations possible within operation limits.
+    """
 
 
 @dataclass(frozen=True)
@@ -271,9 +295,13 @@ class ChildConfig(Generic[T]):
             Used internally by map/parallel operations to handle large BatchResult payloads.
             Signature: (result: T) -> str
 
-        is_virtual: Whether the child operation is virtual (doesn't represent a real operation).
-            Virtual contexts are used for concurrency operations and don't appear in
-            the final execution history. Default is False.
+        is_virtual: When True, skip all checkpoints (START, SUCCEED,
+            FAIL) for this child context and propagate the caller's reporting
+            parent id through to operations created inside the child. The
+            branch is a logical scope for step-id prefixing but does not
+            appear in the execution history. Used internally by
+            NestingType.FLAT branches. Use this to group operations without
+            adding a CONTEXT entry to the execution history.
 
     See TypeScript reference: aws-durable-execution-sdk-js/src/types/index.ts
     """

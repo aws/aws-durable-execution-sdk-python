@@ -58,7 +58,6 @@ def test_parallel_executor_init():
     completion_config = CompletionConfig.all_successful()
 
     executor = ParallelExecutor(
-        operation_identifier=OperationIdentifier("test_op", "parent", "test_parallel"),
         executables=executables,
         max_concurrency=2,
         completion_config=completion_config,
@@ -90,9 +89,7 @@ def test_parallel_executor_from_callables():
     callables = [func1, func2]
     config = ParallelConfig(max_concurrency=3, nesting_type=NestingType.FLAT)
 
-    executor = ParallelExecutor.from_callables(
-        OperationIdentifier("test_op", "parent", "test_parallel"), callables, config
-    )
+    executor = ParallelExecutor.from_callables(callables, config)
 
     assert len(executor.executables) == 2
     assert executor.executables[0].index == 0
@@ -115,9 +112,7 @@ def test_parallel_executor_from_callables_default_config():
     callables = [func1]
     config = ParallelConfig()
 
-    executor = ParallelExecutor.from_callables(
-        OperationIdentifier("test_op", "parent", "test_parallel"), callables, config
-    )
+    executor = ParallelExecutor.from_callables(callables, config)
 
     assert len(executor.executables) == 1
     assert executor.max_concurrency is None
@@ -133,7 +128,6 @@ def test_parallel_executor_execute_item():
 
     executable = Executable(index=0, func=test_func)
     executor = ParallelExecutor(
-        operation_identifier=OperationIdentifier("test_op", "parent", "test_parallel"),
         executables=[executable],
         max_concurrency=None,
         completion_config=CompletionConfig.all_successful(),
@@ -158,7 +152,6 @@ def test_parallel_executor_execute_item_with_exception():
 
     executable = Executable(index=0, func=failing_func)
     executor = ParallelExecutor(
-        operation_identifier=OperationIdentifier("test_op", "parent", "test_parallel"),
         executables=[executable],
         max_concurrency=None,
         completion_config=CompletionConfig.all_successful(),
@@ -273,7 +266,7 @@ def test_parallel_handler_creates_executor_with_correct_config():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args: Mock()
+    executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
     with patch.object(ParallelExecutor, "from_callables") as mock_from_callables:
         mock_executor = Mock()
@@ -285,9 +278,7 @@ def test_parallel_handler_creates_executor_with_correct_config():
             callables, config, execution_state, executor_context, operation_identifier
         )
 
-        mock_from_callables.assert_called_once_with(
-            operation_identifier, callables, config
-        )
+        mock_from_callables.assert_called_once_with(callables, config)
         mock_executor.execute.assert_called_once_with(
             execution_state, executor_context=executor_context
         )
@@ -313,7 +304,7 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args: Mock()
+    executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
     with patch.object(ParallelExecutor, "from_callables") as mock_from_callables:
         mock_executor = Mock()
@@ -328,18 +319,16 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
         assert result == mock_batch_result
         # Verify that a default ParallelConfig was created
         args, _ = mock_from_callables.call_args
-        assert args[0] == operation_identifier
-        assert args[1] == callables
-        assert isinstance(args[2], ParallelConfig)
-        assert args[2].max_concurrency is None
-        assert args[2].completion_config == CompletionConfig.all_successful()
+        assert args[0] == callables
+        assert isinstance(args[1], ParallelConfig)
+        assert args[1].max_concurrency is None
+        assert args[1].completion_config == CompletionConfig.all_successful()
 
 
 def test_parallel_executor_inheritance():
     """Test that ParallelExecutor properly inherits from ConcurrentExecutor."""
     executables = [Executable(index=0, func=lambda x: x)]
     executor = ParallelExecutor(
-        operation_identifier=OperationIdentifier("test_op", "parent", "test_parallel"),
         executables=executables,
         max_concurrency=None,
         completion_config=CompletionConfig.all_successful(),
@@ -357,9 +346,7 @@ def test_parallel_executor_from_callables_empty_list():
     callables = []
     config = ParallelConfig()
 
-    executor = ParallelExecutor.from_callables(
-        OperationIdentifier("test_op", "parent", "test_parallel"), callables, config
-    )
+    executor = ParallelExecutor.from_callables(callables, config)
 
     assert len(executor.executables) == 0
     assert executor.max_concurrency is None
@@ -378,7 +365,6 @@ def test_parallel_executor_execute_item_return_type():
         return {"key": "value"}
 
     executor = ParallelExecutor(
-        operation_identifier=OperationIdentifier("test_op", "parent", "test_parallel"),
         executables=[],
         max_concurrency=None,
         completion_config=CompletionConfig.all_successful(),
@@ -417,7 +403,7 @@ def test_parallel_handler_with_serdes():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args: Mock()
+    executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
     result = parallel_handler(
         callables,
@@ -479,9 +465,7 @@ def test_parallel_executor_from_callables_with_summary_generator():
     callables = [func1]
     config = ParallelConfig(summary_generator=mock_summary_generator)
 
-    executor = ParallelExecutor.from_callables(
-        OperationIdentifier("test_op", "parent", "test_parallel"), callables, config
-    )
+    executor = ParallelExecutor.from_callables(callables, config)
 
     # Verify that the summary_generator is preserved in the executor
     assert executor.summary_generator is mock_summary_generator

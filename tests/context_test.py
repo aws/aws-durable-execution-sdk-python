@@ -1,5 +1,6 @@
 """Unit tests for context."""
 
+import hashlib
 import json
 import random
 from itertools import islice
@@ -1923,7 +1924,7 @@ def test_execution_context_propagates_to_child_context():
     mock_state.durable_execution_arn = parent_arn
 
     parent_context = create_test_context(state=mock_state)
-    child_context = parent_context.create_child_context(parent_id="parent-op-123")
+    child_context = parent_context.create_child_context("parent-op-123")
 
     assert child_context.execution_context is not None
     assert child_context.execution_context.durable_execution_arn == parent_arn
@@ -1959,3 +1960,203 @@ def test_execution_context_type():
 
 
 # endregion ExecutionContext tests
+
+# region Virtual-context identity tests
+
+
+def test_should_default_step_id_prefix_to_parent_id_when_not_specified():
+    """A non-virtual context holds parent_id and step_id_prefix equal."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    execution_context = ExecutionContext(
+        durable_execution_arn=mock_state.durable_execution_arn
+    )
+
+    ctx = DurableContext(
+        state=mock_state,
+        execution_context=execution_context,
+        parent_id="parent-op-1",
+    )
+
+    assert ctx._parent_id == "parent-op-1"  # noqa: SLF001
+    assert ctx._step_id_prefix == "parent-op-1"  # noqa: SLF001
+    assert ctx.is_virtual is False
+
+
+def test_should_mark_context_virtual_when_parent_id_differs_from_step_prefix():
+    """A virtual context holds parent_id and step_id_prefix with different values."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    execution_context = ExecutionContext(
+        durable_execution_arn=mock_state.durable_execution_arn
+    )
+
+    ctx = DurableContext(
+        state=mock_state,
+        execution_context=execution_context,
+        parent_id="grandparent-op",
+        step_id_prefix="branch-op",
+    )
+
+    assert ctx._parent_id == "grandparent-op"  # noqa: SLF001
+    assert ctx._step_id_prefix == "branch-op"  # noqa: SLF001
+    assert ctx.is_virtual is True
+
+
+def test_should_use_step_id_prefix_when_generating_step_ids():
+    """Step ids derive from the step_id_prefix, not parent_id.
+
+    For virtual contexts this is load-bearing: step ids must stay stable
+    across virtual/non-virtual construction so replay ids match.
+    """
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    execution_context = ExecutionContext(
+        durable_execution_arn=mock_state.durable_execution_arn
+    )
+
+    virtual = DurableContext(
+        state=mock_state,
+        execution_context=execution_context,
+        parent_id="grandparent-op",
+        step_id_prefix="branch-op",
+    )
+    expected_prefixed = hashlib.blake2b(b"branch-op-1").hexdigest()[:64]
+
+    assert virtual._create_step_id_for_logical_step(1) == expected_prefixed  # noqa: SLF001
+
+
+def test_should_use_parent_id_as_step_prefix_when_non_virtual():
+    """Non-virtual contexts prefix step ids with parent_id (default fallback).
+
+    For the non-virtual case `step_id_prefix` is not passed explicitly;
+    it defaults to `parent_id`. Replay stability for executions produced
+    before the virtual-context refactor depends on this fallback
+    matching the pre-refactor behaviour exactly.
+    """
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    execution_context = ExecutionContext(
+        durable_execution_arn=mock_state.durable_execution_arn
+    )
+
+    non_virtual = DurableContext(
+        state=mock_state,
+        execution_context=execution_context,
+        parent_id="parent-op",
+    )
+    expected = hashlib.blake2b(b"parent-op-1").hexdigest()[:64]
+
+    assert non_virtual._create_step_id_for_logical_step(1) == expected  # noqa: SLF001
+    assert non_virtual.is_virtual is False
+
+
+def test_should_create_non_virtual_child_when_is_virtual_false():
+    """create_child_context(op_id) returns a non-virtual child."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    parent = create_test_context(state=mock_state, parent_id="parent-op")
+
+    child = parent.create_child_context("child-op")
+
+    assert child._parent_id == "child-op"  # noqa: SLF001
+    assert child._step_id_prefix == "child-op"  # noqa: SLF001
+    assert child.is_virtual is False
+
+
+def test_should_create_virtual_child_that_propagates_grandparent_id():
+    """create_child_context(op_id, is_virtual=True) propagates the grandparent as parent_id."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    parent = create_test_context(state=mock_state, parent_id="grandparent-op")
+
+    child = parent.create_child_context("child-op", is_virtual=True)
+
+    assert child._parent_id == "grandparent-op"  # noqa: SLF001
+    assert child._step_id_prefix == "child-op"  # noqa: SLF001
+    assert child.is_virtual is True
+
+
+def test_should_create_virtual_child_with_none_parent_when_parent_is_root():
+    """Virtual child of a root context (parent_id=None) keeps parent_id=None.
+
+    Inner operations then report at the top level; step ids still prefix
+    on the child's own operation id.
+    """
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    root_parent = create_test_context(state=mock_state, parent_id=None)
+
+    child = root_parent.create_child_context("child-op", is_virtual=True)
+
+    assert child._parent_id is None  # noqa: SLF001
+    assert child._step_id_prefix == "child-op"  # noqa: SLF001
+    assert child.is_virtual is True
+
+    expected = hashlib.blake2b(b"child-op-1").hexdigest()[:64]
+    assert child._create_step_id_for_logical_step(1) == expected  # noqa: SLF001
+
+
+def test_should_propagate_outer_parent_id_when_virtual_is_nested_in_virtual():
+    """A virtual child of a virtual parent still reports to the outer non-virtual ancestor.
+
+    Nested concurrency is a real scenario: e.g. a FLAT `map` inside a
+    FLAT `parallel`. Each layer creates a virtual child. The inner
+    virtual child inherits `_parent_id` from its immediate (virtual)
+    parent, which in turn inherited it from its non-virtual
+    grandparent. The expected end result is that inner operations in
+    the doubly-nested virtual branch still stamp the outer
+    non-virtual ancestor's id — every virtual layer collapses out of
+    the observable hierarchy without accumulating.
+    """
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    # Non-virtual outer context (e.g. the top-level parallel operation's context).
+    outer = create_test_context(state=mock_state, parent_id="outer-parallel-op")
+
+    # First virtual layer: outer parallel is FLAT, so its branch is virtual.
+    outer_branch = outer.create_child_context("outer-branch-op", is_virtual=True)
+    assert outer_branch._parent_id == "outer-parallel-op"  # noqa: SLF001
+    assert outer_branch._step_id_prefix == "outer-branch-op"  # noqa: SLF001
+    assert outer_branch.is_virtual is True
+
+    # Second virtual layer: an inner FLAT map inside the outer branch,
+    # whose per-item branch is also virtual.
+    inner_branch = outer_branch.create_child_context("inner-branch-op", is_virtual=True)
+    # Inner branch's parent_id must be the outermost non-virtual
+    # ancestor's id, not the outer virtual branch's id — otherwise the
+    # inner operations would report to a logical layer that does not
+    # appear in the execution history, breaking the hierarchy.
+    assert inner_branch._parent_id == "outer-parallel-op"  # noqa: SLF001
+    assert inner_branch._step_id_prefix == "inner-branch-op"  # noqa: SLF001
+    assert inner_branch.is_virtual is True
+
+    # Step ids inside the inner branch still prefix on the inner branch's
+    # own operation id; they must not leak the outer ancestor into the
+    # step-id namespace.
+    expected = hashlib.blake2b(b"inner-branch-op-1").hexdigest()[:64]
+    assert inner_branch._create_step_id_for_logical_step(1) == expected  # noqa: SLF001
+
+
+# endregion Virtual-context identity tests
