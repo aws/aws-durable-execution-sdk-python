@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from aws_durable_execution_sdk_python.config import Duration
+from aws_durable_execution_sdk_python.config import BackoffStrategy, Duration
 from aws_durable_execution_sdk_python.retries import (
     JitterStrategy,
     RetryDecision,
@@ -571,6 +571,270 @@ def test_mixed_error_types_and_patterns():
     error = ValueError("some value error")
     decision = strategy(error, 1)
     assert decision.should_retry is True
+
+
+# endregion
+
+
+# region Backoff Strategy Tests
+
+
+def test_exponential_backoff_strategy():
+    """Test EXPONENTIAL backoff strategy calculates delay correctly."""
+    strategy: BackoffStrategy = BackoffStrategy.EXPONENTIAL
+    # initial=5, rate=2, attempt=3: 5 * 2^(3-1) = 5 * 4 = 20
+    result: float = strategy.calculate_base_delay(
+        initial_delay_seconds=5,
+        backoff_rate=2.0,
+        attempts_made=3,
+        max_delay_seconds=300,
+    )
+    assert result == 20.0
+
+
+def test_linear_backoff_strategy():
+    """Test LINEAR backoff strategy calculates delay correctly."""
+    strategy: BackoffStrategy = BackoffStrategy.LINEAR
+    # initial=5, attempt=1: 5 * 1 = 5
+    result_1: float = strategy.calculate_base_delay(
+        initial_delay_seconds=5,
+        backoff_rate=2.0,
+        attempts_made=1,
+        max_delay_seconds=300,
+    )
+    assert result_1 == 5.0
+
+    # initial=5, attempt=3: 5 * 3 = 15
+    result_3: float = strategy.calculate_base_delay(
+        initial_delay_seconds=5,
+        backoff_rate=2.0,
+        attempts_made=3,
+        max_delay_seconds=300,
+    )
+    assert result_3 == 15.0
+
+
+def test_fixed_backoff_strategy():
+    """Test FIXED backoff strategy returns constant delay."""
+    strategy: BackoffStrategy = BackoffStrategy.FIXED
+    # Always returns initial_delay regardless of attempt number
+    result_1: float = strategy.calculate_base_delay(
+        initial_delay_seconds=5,
+        backoff_rate=2.0,
+        attempts_made=1,
+        max_delay_seconds=300,
+    )
+    result_5: float = strategy.calculate_base_delay(
+        initial_delay_seconds=5,
+        backoff_rate=2.0,
+        attempts_made=5,
+        max_delay_seconds=300,
+    )
+    assert result_1 == 5.0
+    assert result_5 == 5.0
+
+
+def test_backoff_strategy_respects_max_delay():
+    """Test all backoff strategies cap delay at max_delay_seconds."""
+    max_delay: int = 10
+
+    # EXPONENTIAL: 5 * 2^4 = 80, capped to 10
+    exp_result: float = BackoffStrategy.EXPONENTIAL.calculate_base_delay(
+        initial_delay_seconds=5,
+        backoff_rate=2.0,
+        attempts_made=5,
+        max_delay_seconds=max_delay,
+    )
+    assert exp_result == max_delay
+
+    # LINEAR: 5 * 5 = 25, capped to 10
+    lin_result: float = BackoffStrategy.LINEAR.calculate_base_delay(
+        initial_delay_seconds=5,
+        backoff_rate=2.0,
+        attempts_made=5,
+        max_delay_seconds=max_delay,
+    )
+    assert lin_result == max_delay
+
+    # FIXED: 5, not capped (already under)
+    fix_result: float = BackoffStrategy.FIXED.calculate_base_delay(
+        initial_delay_seconds=5,
+        backoff_rate=2.0,
+        attempts_made=5,
+        max_delay_seconds=max_delay,
+    )
+    assert fix_result == 5.0
+
+
+def test_default_backoff_strategy_is_exponential():
+    """Test RetryStrategyConfig defaults to EXPONENTIAL backoff."""
+    config: RetryStrategyConfig = RetryStrategyConfig()
+    assert config.backoff_strategy == BackoffStrategy.EXPONENTIAL
+
+
+# endregion
+
+
+# region New Preset Tests
+
+
+def test_fixed_wait_preset():
+    """Test fixed_wait preset uses constant delay and allows retries within max attempts."""
+    strategy = RetryPresets.fixed_wait()
+    error: Exception = Exception("test error")
+
+    # Should retry within max attempts
+    decision = strategy(error, 1)
+    assert decision.should_retry is True
+
+    # Should not retry after max attempts
+    decision = strategy(error, 5)
+    assert decision.should_retry is False
+
+
+def test_fixed_wait_preset_constant_delay():
+    """Test fixed_wait preset returns constant delay across attempts."""
+    strategy = RetryPresets.fixed_wait()
+    error: Exception = Exception("test error")
+
+    # FIXED strategy + NONE jitter = constant delay of 5s for all attempts
+    decision_1 = strategy(error, 1)
+    decision_2 = strategy(error, 2)
+    decision_3 = strategy(error, 3)
+    assert decision_1.delay_seconds == 5
+    assert decision_2.delay_seconds == 5
+    assert decision_3.delay_seconds == 5
+
+
+def test_linear_backoff_preset():
+    """Test linear_backoff preset allows retries within max attempts."""
+    strategy = RetryPresets.linear_backoff()
+    error: Exception = Exception("test error")
+
+    # Should retry within max attempts
+    decision = strategy(error, 1)
+    assert decision.should_retry is True
+
+    # Should not retry after max attempts
+    decision = strategy(error, 5)
+    assert decision.should_retry is False
+
+
+@patch("random.random")
+def test_linear_backoff_preset_increasing_delay(mock_random):
+    """Test linear_backoff preset has linearly increasing delay."""
+    mock_random.return_value = 1.0  # Max jitter to get predictable values
+    strategy = RetryPresets.linear_backoff()
+    error: Exception = Exception("test error")
+
+    # LINEAR: initial_delay * attempts_made, with FULL jitter (random=1.0 means full delay)
+    # attempt 1: 5 * 1 = 5
+    decision_1 = strategy(error, 1)
+    assert decision_1.delay_seconds == 5
+
+    # attempt 2: 5 * 2 = 10
+    decision_2 = strategy(error, 2)
+    assert decision_2.delay_seconds == 10
+
+    # attempt 3: 5 * 3 = 15
+    decision_3 = strategy(error, 3)
+    assert decision_3.delay_seconds == 15
+
+
+def test_slow_preset():
+    """Test slow preset allows retries within max attempts."""
+    strategy = RetryPresets.slow()
+    error: Exception = Exception("test error")
+
+    # Should retry within max attempts
+    decision = strategy(error, 1)
+    assert decision.should_retry is True
+
+    # Should not retry after max attempts
+    decision = strategy(error, 8)
+    assert decision.should_retry is False
+
+
+@patch("random.random")
+def test_slow_preset_high_initial_delay(mock_random):
+    """Test slow preset starts with high initial delay."""
+    mock_random.return_value = 1.0  # Max jitter
+    strategy = RetryPresets.slow()
+    error: Exception = Exception("test error")
+
+    # Attempt 1: 30 * (2^0) = 30, full jitter with random=1.0 = 30
+    decision = strategy(error, 1)
+    assert decision.delay_seconds == 30
+
+
+# endregion
+
+
+# region Backoff Strategy Integration Tests
+
+
+@patch("random.random")
+def test_fixed_backoff_in_create_retry_strategy(mock_random):
+    """Test FIXED backoff works end-to-end through create_retry_strategy."""
+    mock_random.return_value = 0.5
+    config: RetryStrategyConfig = RetryStrategyConfig(
+        initial_delay=Duration.from_seconds(10),
+        backoff_strategy=BackoffStrategy.FIXED,
+        jitter_strategy=JitterStrategy.FULL,
+    )
+    strategy = create_retry_strategy(config)
+
+    error: Exception = Exception("test error")
+    # FIXED = 10, FULL jitter with 0.5 = 5
+    decision_1 = strategy(error, 1)
+    assert decision_1.delay_seconds == 5
+
+    # Same delay at attempt 2 (FIXED ignores attempt number)
+    decision_2 = strategy(error, 2)
+    assert decision_2.delay_seconds == 5
+
+
+@patch("random.random")
+def test_linear_backoff_in_create_retry_strategy(mock_random):
+    """Test LINEAR backoff works end-to-end through create_retry_strategy."""
+    mock_random.return_value = 1.0  # Full jitter = full delay
+    config: RetryStrategyConfig = RetryStrategyConfig(
+        max_attempts=5,
+        initial_delay=Duration.from_seconds(5),
+        backoff_strategy=BackoffStrategy.LINEAR,
+        jitter_strategy=JitterStrategy.FULL,
+    )
+    strategy = create_retry_strategy(config)
+
+    error: Exception = Exception("test error")
+    # LINEAR: 5 * 1 = 5, jitter(1.0) = 5
+    decision_1 = strategy(error, 1)
+    assert decision_1.delay_seconds == 5
+
+    # LINEAR: 5 * 2 = 10, jitter(1.0) = 10
+    decision_2 = strategy(error, 2)
+    assert decision_2.delay_seconds == 10
+
+    # LINEAR: 5 * 3 = 15, jitter(1.0) = 15
+    decision_3 = strategy(error, 3)
+    assert decision_3.delay_seconds == 15
+
+
+def test_linear_backoff_respects_max_delay():
+    """Test LINEAR backoff caps delay at max_delay."""
+    config: RetryStrategyConfig = RetryStrategyConfig(
+        max_attempts=5,
+        initial_delay=Duration.from_seconds(10),
+        max_delay=Duration.from_seconds(25),
+        backoff_strategy=BackoffStrategy.LINEAR,
+        jitter_strategy=JitterStrategy.NONE,
+    )
+    strategy = create_retry_strategy(config)
+
+    error: Exception = Exception("test error")
+    # LINEAR: 10 * 3 = 30, capped to 25
+    decision = strategy(error, 3)
+    assert decision.delay_seconds == 25
 
 
 # endregion
