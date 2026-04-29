@@ -16,6 +16,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     CallableRuntimeError,
     DurableExecutionsError,
+    GetExecutionStateError,
     OrphanedChildException,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -275,20 +276,38 @@ class ExecutionState:
             initial_operations: initial operations to be added to ExecutionState
             checkpoint_token: checkpoint token used to call Durable Functions API.
             next_marker: a marker indicates that there are paginated operations.
+
+        Raises:
+            GetExecutionStateError: If the API call fails. The error is logged
+                with structured extras before re-raising. Callers are responsible
+                for deciding whether to fail the execution or allow Lambda retry
+                based on is_retryable().
         """
         all_operations: list[Operation] = (
             initial_operations.copy() if initial_operations else []
         )
-        while next_marker:
-            output: StateOutput = self._service_client.get_execution_state(
-                durable_execution_arn=self.durable_execution_arn,
-                checkpoint_token=checkpoint_token,
-                next_marker=next_marker,
+        try:
+            while next_marker:
+                output: StateOutput = self._service_client.get_execution_state(
+                    durable_execution_arn=self.durable_execution_arn,
+                    checkpoint_token=checkpoint_token,
+                    next_marker=next_marker,
+                )
+                all_operations.extend(output.operations)
+                next_marker = output.next_marker
+        except GetExecutionStateError as e:
+            logger.exception(
+                "Durable API error during state fetch.",
+                extra=e.build_logger_extras(),
             )
-            all_operations.extend(output.operations)
-            next_marker = output.next_marker
-        with self._operations_lock:
-            self.operations.update({op.operation_id: op for op in all_operations})
+            raise
+        finally:
+            # Always store whatever operations we successfully fetched
+            if all_operations:
+                with self._operations_lock:
+                    self.operations.update(
+                        {op.operation_id: op for op in all_operations}
+                    )
 
     def get_input_payload(self) -> str | None:
         # It is possible that backend will not provide an execution operation
