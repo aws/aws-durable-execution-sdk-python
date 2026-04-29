@@ -139,9 +139,24 @@ echo "$(hatch env find)/bin/python"
 ```
 
 ### VS Code
+#### Interpreter
 If you're using VS Code, "Python: Select Interpreter" and use the hatch venv Python interpreter
 as found with the `hatch env find` command.
 
+Kiro and VS Code mangles the interpreter path if it contains spaces, which results in
+errors finding the interpreter. You can create a local .venv file symlink _without_ spaces
+in the path:
+
+```bash
+# create a symlink at: ./.venv/bin/python
+rm -rf .venv && ln -s "$(hatch env find)" .venv
+```
+
+When you "Select Interpreter", enter path `./.venv/bin/python`.
+
+You'll have to rerun this command whenever you recreate your hatch envs.
+
+#### Linting
 Hatch uses Ruff for static analysis.
 
 You might want to install the [Ruff extension for VS Code](https://github.com/astral-sh/ruff-vscode)
