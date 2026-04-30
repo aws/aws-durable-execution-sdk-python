@@ -260,11 +260,26 @@ def durable_execution(
             else ReplayStatus.NEW,
         )
 
-        execution_state.fetch_paginated_operations(
-            invocation_input.initial_execution_state.operations,
-            invocation_input.checkpoint_token,
-            invocation_input.initial_execution_state.next_marker,
-        )
+        try:
+            execution_state.fetch_paginated_operations(
+                invocation_input.initial_execution_state.operations,
+                invocation_input.checkpoint_token,
+                invocation_input.initial_execution_state.next_marker,
+            )
+        except BotoClientError as e:
+            # Non-retryable Durable API errors (e.g., customer configuration issues,
+            # 4xx client errors) will never succeed on retry — fail the execution immediately.
+            if not e.is_retryable():
+                logger.exception(
+                    "Non-retryable Durable API error during initial state fetch. Must fail execution "
+                    "without retry.",
+                    extra=e.build_logger_extras(),
+                )
+                return DurableExecutionInvocationOutput(
+                    status=InvocationStatus.FAILED,
+                    error=ErrorObject.from_exception(e),
+                ).to_dict()
+            raise
 
         raw_input_payload: str | None = execution_state.get_input_payload()
 
@@ -356,11 +371,20 @@ def durable_execution(
                         "Checkpoint processing failed",
                         extra=bg_error.source_exception.build_logger_extras(),
                     )
+                    # Non-retryable Durable API errors (e.g., customer configuration issues,
+                    # 4xx client errors) will never succeed on retry — fail the execution immediately.
+                    if not bg_error.source_exception.is_retryable():
+                        logger.exception(
+                            "Non-retryable Durable API error from background thread. Must fail execution "
+                            "without retry.",
+                            extra=bg_error.source_exception.build_logger_extras(),
+                        )
+                        return DurableExecutionInvocationOutput(
+                            status=InvocationStatus.FAILED,
+                            error=ErrorObject.from_exception(bg_error.source_exception),
+                        ).to_dict()
                 else:
                     logger.exception("Checkpoint processing failed")
-                # handle the original exception
-                if isinstance(bg_error.source_exception, CheckpointError):
-                    return handle_checkpoint_error(bg_error.source_exception).to_dict()
                 raise bg_error.source_exception from bg_error
 
             except SuspendExecution:
@@ -377,12 +401,23 @@ def durable_execution(
                     extra=e.build_logger_extras(),
                 )
                 return handle_checkpoint_error(e).to_dict()
-            except InvocationError:
+            except InvocationError as e:
+                # Non-retryable Durable API errors (e.g., customer configuration issues,
+                # 4xx client errors) will never succeed on retry — fail the execution immediately.
+                if not e.is_retryable():
+                    logger.exception(
+                        "Non-retryable Durable API error. Must fail execution without retry.",
+                        extra=e.build_logger_extras(),  # type: ignore[attr-defined]
+                    )
+                    return DurableExecutionInvocationOutput(
+                        status=InvocationStatus.FAILED,
+                        error=ErrorObject.from_exception(e),
+                    ).to_dict()
                 logger.exception("Invocation error. Must terminate.")
                 # Throw the error to trigger Lambda retry
                 raise
             except ExecutionError as e:
-                logger.exception("Execution error. Must terminate without retry.")
+                logger.exception("Execution error. Must fail execution without retry.")
                 return DurableExecutionInvocationOutput(
                     status=InvocationStatus.FAILED,
                     error=ErrorObject.from_exception(e),
@@ -428,7 +463,7 @@ def durable_execution(
 
 
 def handle_checkpoint_error(error: CheckpointError) -> DurableExecutionInvocationOutput:
-    if error.is_retriable():
+    if error.is_retryable():
         raise error from None  # Terminate Lambda immediately and have it be retried
     return DurableExecutionInvocationOutput(
         status=InvocationStatus.FAILED, error=ErrorObject.from_exception(error)

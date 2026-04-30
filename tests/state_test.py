@@ -16,6 +16,8 @@ import pytest
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     CallableRuntimeError,
+    DurableApiErrorCategory,
+    GetExecutionStateError,
     OrphanedChildException,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -722,6 +724,88 @@ def test_fetch_paginated_operations_with_marker():
         assert op_id in expected_operations
         expected_op = expected_operations[op_id]
         assert operation.operation_id == expected_op.operation_id
+
+
+def test_fetch_paginated_operations_stores_partial_results_on_error():
+    """Test that operations from successful pages are stored even when a later page fails."""
+    mock_lambda_client = Mock(spec=LambdaClient)
+
+    non_retryable_error = GetExecutionStateError(
+        message="KMS access denied",
+        error_category=DurableApiErrorCategory.EXECUTION,
+        error={"Code": "KMSAccessDeniedException", "Message": "KMS access denied"},
+        response_metadata={"HTTPStatusCode": 502},
+    )
+
+    def mock_get_execution_state(durable_execution_arn, checkpoint_token, next_marker):
+        if next_marker == "marker1":
+            return StateOutput(
+                operations=[
+                    Operation(
+                        operation_id="1",
+                        operation_type=OperationType.STEP,
+                        status=OperationStatus.STARTED,
+                    )
+                ],
+                next_marker="marker2",
+            )
+        raise non_retryable_error
+
+    mock_lambda_client.get_execution_state.side_effect = mock_get_execution_state
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+    )
+
+    with pytest.raises(GetExecutionStateError):
+        state.fetch_paginated_operations(
+            initial_operations=[
+                Operation(
+                    operation_id="0",
+                    operation_type=OperationType.STEP,
+                    status=OperationStatus.STARTED,
+                )
+            ],
+            checkpoint_token="test_token",  # noqa: S106
+            next_marker="marker1",
+        )
+
+    # Initial operation + page 1 should be stored despite page 2 failing
+    assert "0" in state.operations
+    assert "1" in state.operations
+    assert len(state.operations) == 2
+
+
+def test_fetch_paginated_operations_logs_error(caplog):
+    """Test that GetExecutionStateError is logged with structured extras."""
+    mock_lambda_client = Mock(spec=LambdaClient)
+
+    error = GetExecutionStateError(
+        message="Service error",
+        error_category=DurableApiErrorCategory.INVOCATION,
+        error={"Code": "ServiceException", "Message": "Service error"},
+        response_metadata={"HTTPStatusCode": 500},
+    )
+    mock_lambda_client.get_execution_state.side_effect = error
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+    )
+
+    with pytest.raises(GetExecutionStateError):
+        state.fetch_paginated_operations(
+            initial_operations=[],
+            checkpoint_token="test_token",  # noqa: S106
+            next_marker="marker1",
+        )
+
+    assert "Durable API error during state fetch." in caplog.text
 
 
 # ============================================================================
