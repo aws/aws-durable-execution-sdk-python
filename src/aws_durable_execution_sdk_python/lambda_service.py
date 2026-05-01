@@ -18,6 +18,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     GetExecutionStateError,
 )
 
+
 if TYPE_CHECKING:
     from mypy_boto3_lambda import LambdaClient as Boto3LambdaClient
     from mypy_boto3_lambda.type_defs import (
@@ -1060,7 +1061,7 @@ class LambdaClient(DurableServiceClient):
                 config=Config(
                     connect_timeout=5,
                     read_timeout=50,
-                    user_agent_extra=f"@aws/durable-execution-sdk-python/{__version__}",
+                    user_agent_extra=f"aws-durable-execution-sdk-python/{__version__}",
                 ),
             )
         return cls(client=cls._cached_boto_client)
