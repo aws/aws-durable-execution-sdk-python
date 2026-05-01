@@ -15,4 +15,4 @@ hatch fmt
 echo SUCCESS: linting/fmt
 
 # commit message validation
-python ops/lintcommit.py
+hatch run python .github/scripts/lintcommit.py

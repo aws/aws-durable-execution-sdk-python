@@ -3,13 +3,13 @@ name: Test Parser
 on:
   pull_request:
     paths:
-      - 'ops/parse_sdk_branch.py'
-      - 'ops/tests/**'
+      - '.github/scripts/parse_sdk_branch.py'
+      - '.github/scripts/tests/**'
   push:
     branches: [ main ]
     paths:
-      - 'ops/parse_sdk_branch.py'
-      - 'ops/tests/**'
+      - '.github/scripts/parse_sdk_branch.py'
+      - '.github/scripts/tests/**'
 
 permissions:
   contents: read
@@ -21,4 +21,4 @@ jobs:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
     
     - name: Run parser tests
-      run: python ops/tests/test_parse_sdk_branch.py
+      run: python .github/scripts/tests/test_parse_sdk_branch.py

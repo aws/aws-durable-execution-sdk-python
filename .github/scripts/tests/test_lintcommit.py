@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import pytest
 
-from ops.lintcommit import lint_range, validate_message, validate_subject
+from lintcommit import lint_range, validate_message, validate_subject
 
 
 # region validate_subject: valid subjects
@@ -237,7 +241,7 @@ def test_lint_range_git_failure(mock_run) -> None:
 @patch("subprocess.run")
 def test_lint_range_dirty_worktree_skips(mock_run) -> None:
     """When skip_dirty_check=False and worktree is dirty, validation is skipped."""
-    mock_run.return_value = _completed(stdout=" M ops/lintcommit.py\n")
+    mock_run.return_value = _completed(stdout=" M .github/scripts/lintcommit.py\n")
 
     result = lint_range("origin/main..HEAD", skip_dirty_check=False)
 

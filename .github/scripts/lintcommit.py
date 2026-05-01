@@ -4,7 +4,7 @@
 #
 # To run tests:
 #
-#     python -m pytest ops/tests/test_lintcommit.py
+#     python -m pytest .github/scripts/tests/test_lintcommit.py
 
 from __future__ import annotations
 
