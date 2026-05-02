@@ -24,7 +24,7 @@ jobs:
       with:
         python-version: "3.12"
     - name: Lint commit messages
-      run: python ops/lintcommit.py --range "origin/${{ github.event.pull_request.base.ref }}..${{ github.event.pull_request.head.sha }}"
+      run: python .github/scripts/lintcommit.py --range "origin/${{ github.event.pull_request.base.ref }}..${{ github.event.pull_request.head.sha }}"
 
   build:
     runs-on: ubuntu-latest

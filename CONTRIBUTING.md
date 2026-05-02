@@ -27,7 +27,7 @@ hatch fmt
 
 There is a convenience script for the above that you can run from the root of the repo as you prepare your PR:
 ```
-ops/ci-checks.sh
+.github/scripts/ci-checks.sh
 ```
 
 This script also validates your commit messages against the [Conventional Commits](https://www.conventionalcommits.org/) format.
@@ -35,7 +35,7 @@ Commit all your changes before you run the check. If your working directory is d
 
 You can also run the commit message check independently:
 ```
-python ops/lintcommit.py
+hatch run python .github/scripts/lintcommit.py
 ```
 
 ## Coding Standards
