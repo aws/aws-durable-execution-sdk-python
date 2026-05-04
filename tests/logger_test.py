@@ -4,6 +4,10 @@ import logging
 from collections.abc import Mapping
 from unittest.mock import Mock
 
+from aws_durable_execution_sdk_python.execution import (
+    DurableExecutionInvocationInput,
+    InitialExecutionState,
+)
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
@@ -79,9 +83,11 @@ class PowertoolsLoggerStub:
 
 
 EXECUTION_STATE = ExecutionState(
-    durable_execution_arn="arn:aws:test",
-    initial_checkpoint_token="test_token",  # noqa: S106
-    operations={},
+    invocation_input=DurableExecutionInvocationInput(
+        checkpoint_token="test_token",  # noqa: S106
+        durable_execution_arn="arn:aws:test",
+        initial_execution_state=InitialExecutionState([], ""),
+    ),
     service_client=Mock(),
 )
 
@@ -223,9 +229,11 @@ def test_logger_with_log_info():
     logger = Logger.from_log_info(mock_logger, original_info)
 
     execution_state_new = ExecutionState(
-        durable_execution_arn="arn:aws:new",
-        initial_checkpoint_token="test_token",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="arn:aws:new",
+            checkpoint_token="test_token",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=Mock(),
     )
     new_info = LogInfo(execution_state_new, "parent2", "op123", "new_name")
@@ -366,17 +374,23 @@ def test_logger_without_mocked_logger():
 
 
 def test_logger_replay_no_logging():
+    execution = Operation(
+        operation_id="test",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+    )
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
         status=OperationStatus.SUCCEEDED,
     )
     replay_execution_state = ExecutionState(
-        durable_execution_arn="arn:aws:test",
-        initial_checkpoint_token="test_token",  # noqa: S106
-        operations={"op1": operation},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="arn:aws:new/test",
+            checkpoint_token="test_token",  # noqa: S106
+            initial_execution_state=InitialExecutionState([execution, operation], ""),
+        ),
         service_client=Mock(),
-        replay_status=ReplayStatus.REPLAY,
     )
     log_info = LogInfo(replay_execution_state, "parent123", "test_name", 5)
     mock_logger = Mock()
@@ -399,11 +413,12 @@ def test_logger_replay_then_new_logging():
         status=OperationStatus.SUCCEEDED,
     )
     execution_state = ExecutionState(
-        durable_execution_arn="arn:aws:test",
-        initial_checkpoint_token="test_token",  # noqa: S106
-        operations={"op1": operation1, "op2": operation2},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="arn:aws:new",
+            checkpoint_token="test_token",  # noqa: S106
+            initial_execution_state=InitialExecutionState([operation1, operation2], ""),
+        ),
         service_client=Mock(),
-        replay_status=ReplayStatus.REPLAY,
     )
     log_info = LogInfo(execution_state, "parent123", "test_name", 5)
     mock_logger = Mock()

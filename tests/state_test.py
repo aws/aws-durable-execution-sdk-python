@@ -20,6 +20,10 @@ from aws_durable_execution_sdk_python.exceptions import (
     GetExecutionStateError,
     OrphanedChildException,
 )
+from aws_durable_execution_sdk_python.execution import (
+    DurableExecutionInvocationInput,
+    InitialExecutionState,
+)
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
@@ -36,6 +40,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationUpdate,
     StateOutput,
     StepDetails,
+    ExecutionDetails,
 )
 from aws_durable_execution_sdk_python.state import (
     CheckpointBatcherConfig,
@@ -386,9 +391,11 @@ def test_execution_state_creation():
     """Test ExecutionState creation."""
     mock_lambda_client = Mock(spec=LambdaClient)
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="test_token",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="test_token",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
     assert state.durable_execution_arn == "test_arn"
@@ -406,9 +413,11 @@ def test_get_checkpoint_result_success_with_result():
         step_details=step_details,
     )
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={"op1": operation},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([operation], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -427,9 +436,11 @@ def test_get_checkpoint_result_success_without_step_details():
         status=OperationStatus.SUCCEEDED,
     )
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={"op1": operation},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([operation], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -448,9 +459,11 @@ def test_get_checkpoint_result_operation_not_succeeded():
         status=OperationStatus.FAILED,
     )
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={"op1": operation},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([operation], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -464,9 +477,11 @@ def test_get_checkpoint_result_operation_not_found():
     """Test get_checkpoint_result with nonexistent operation."""
     mock_lambda_client = Mock(spec=LambdaClient)
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -481,9 +496,11 @@ def test_create_checkpoint():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -511,9 +528,11 @@ def test_create_checkpoint_with_none():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -535,9 +554,11 @@ def test_create_checkpoint_with_no_args():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -563,9 +584,11 @@ def test_get_checkpoint_result_started():
         status=OperationStatus.STARTED,
     )
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={"op1": operation},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([operation], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -656,22 +679,21 @@ def test_fetch_paginated_operations_with_marker():
     mock_lambda_client.get_execution_state.side_effect = mock_get_execution_state
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="test_token",  # noqa: S106
+            initial_execution_state=InitialExecutionState(
+                [
+                    Operation(
+                        operation_id="0",
+                        operation_type=OperationType.STEP,
+                        status=OperationStatus.STARTED,
+                    )
+                ],
+                "marker1",
+            ),
+        ),
         service_client=mock_lambda_client,
-    )
-
-    state.fetch_paginated_operations(
-        initial_operations=[
-            Operation(
-                operation_id="0",
-                operation_type=OperationType.STEP,
-                status=OperationStatus.STARTED,
-            )
-        ],
-        checkpoint_token="test_token",  # noqa: S106
-        next_marker="marker1",
     )
 
     assert mock_lambda_client.get_execution_state.call_count == 3
@@ -753,30 +775,29 @@ def test_fetch_paginated_operations_stores_partial_results_on_error():
 
     mock_lambda_client.get_execution_state.side_effect = mock_get_execution_state
 
-    state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
-        service_client=mock_lambda_client,
-    )
-
     with pytest.raises(GetExecutionStateError):
-        state.fetch_paginated_operations(
-            initial_operations=[
-                Operation(
-                    operation_id="0",
-                    operation_type=OperationType.STEP,
-                    status=OperationStatus.STARTED,
-                )
-            ],
-            checkpoint_token="test_token",  # noqa: S106
-            next_marker="marker1",
+        state = ExecutionState(
+            DurableExecutionInvocationInput(
+                durable_execution_arn="test_arn",
+                checkpoint_token="test_token",  # noqa: S106
+                initial_execution_state=InitialExecutionState(
+                    [
+                        Operation(
+                            operation_id="0",
+                            operation_type=OperationType.STEP,
+                            status=OperationStatus.STARTED,
+                        )
+                    ],
+                    "marker1",
+                ),
+            ),
+            service_client=mock_lambda_client,
         )
 
-    # Initial operation + page 1 should be stored despite page 2 failing
-    assert "0" in state.operations
-    assert "1" in state.operations
-    assert len(state.operations) == 2
+        # Initial operation + page 1 should be stored despite page 2 failing
+        assert "0" in state.operations
+        assert "1" in state.operations
+        assert len(state.operations) == 2
 
 
 def test_fetch_paginated_operations_logs_error(caplog):
@@ -791,21 +812,17 @@ def test_fetch_paginated_operations_logs_error(caplog):
     )
     mock_lambda_client.get_execution_state.side_effect = error
 
-    state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
-        service_client=mock_lambda_client,
-    )
-
     with pytest.raises(GetExecutionStateError):
-        state.fetch_paginated_operations(
-            initial_operations=[],
-            checkpoint_token="test_token",  # noqa: S106
-            next_marker="marker1",
+        state = ExecutionState(
+            DurableExecutionInvocationInput(
+                durable_execution_arn="test_arn",
+                checkpoint_token="test_token",  # noqa: S106
+                initial_execution_state=InitialExecutionState([], "marker1"),
+            ),
+            service_client=mock_lambda_client,
         )
 
-    assert "Durable API error during state fetch." in caplog.text
+        assert "Durable API error during state fetch." in caplog.text
 
 
 # ============================================================================
@@ -901,9 +918,11 @@ def test_checkpoint_batch_respects_default_max_items_limit():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -969,9 +988,11 @@ def test_collect_checkpoint_batch_respects_size_limit():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -1002,9 +1023,11 @@ def test_collect_checkpoint_batch_uses_overflow_queue():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1053,9 +1076,11 @@ def test_collect_checkpoint_batch_handles_empty_checkpoint():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1088,9 +1113,11 @@ def test_collect_checkpoint_batch_returns_empty_when_stopped():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1109,9 +1136,11 @@ def test_parent_child_relationship_building():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1150,9 +1179,11 @@ def test_descendant_cancellation_when_parent_completes():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1189,9 +1220,11 @@ def test_rejection_of_operations_from_completed_parents():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1238,9 +1271,11 @@ def test_nested_parallel_operations_deep_hierarchy():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1294,9 +1329,11 @@ def test_synchronous_checkpoint_blocks_until_complete():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1342,9 +1379,11 @@ def test_concurrent_access_to_operations_dictionary():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1411,9 +1450,11 @@ def test_stop_checkpointing_signals_background_thread():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1504,9 +1545,11 @@ def test_create_checkpoint_sync_with_parent_id():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1555,9 +1598,11 @@ def test_create_checkpoint_sync_rejects_orphaned_operation():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1619,9 +1664,11 @@ def test_mark_orphans_handles_cycles():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1649,9 +1696,11 @@ def test_checkpoint_batches_forever_exception_handling():
     mock_lambda_client.checkpoint.side_effect = RuntimeError("API error")
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1696,9 +1745,11 @@ def test_collect_checkpoint_batch_shutdown_path():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1725,9 +1776,11 @@ def test_collect_checkpoint_batch_shutdown_empty_queue():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1752,9 +1805,11 @@ def test_collect_checkpoint_batch_overflow_put_back():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -1797,9 +1852,11 @@ def test_create_checkpoint_sync_with_none_operation_update():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1829,9 +1886,11 @@ def test_checkpoint_batches_forever_exception_with_no_sync_operations():
     mock_lambda_client.checkpoint.side_effect = RuntimeError("API error")
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -1868,9 +1927,11 @@ def test_collect_checkpoint_batch_size_limit_during_time_window():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -1921,9 +1982,11 @@ def test_collect_checkpoint_batch_respects_max_operations_limit():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -1964,9 +2027,11 @@ def test_collect_checkpoint_batch_time_window_expires():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -2011,9 +2076,11 @@ def test_collect_checkpoint_batch_empty_overflow_queue_path():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2048,9 +2115,11 @@ def test_collect_checkpoint_batch_overflow_queue_hits_operation_limit():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -2087,9 +2156,11 @@ def test_collect_checkpoint_batch_overflow_queue_size_limit():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -2136,9 +2207,11 @@ def test_checkpoint_error_signals_completion_events_with_error():
     mock_lambda_client.checkpoint.side_effect = RuntimeError("Checkpoint API error")
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2192,9 +2265,11 @@ def test_synchronous_caller_receives_error_on_background_thread_failure():
     mock_lambda_client.checkpoint.side_effect = RuntimeError("Background thread error")
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2269,9 +2344,11 @@ def test_exception_propagates_through_threadpoolexecutor():
     mock_lambda_client.checkpoint.side_effect = RuntimeError("Checkpoint API failure")
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2302,9 +2379,11 @@ def test_multiple_sync_operations_all_remain_blocked_on_error():
     mock_lambda_client.checkpoint.side_effect = RuntimeError("Batch processing error")
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2353,9 +2432,11 @@ def test_async_operations_not_affected_by_error_handling():
     mock_lambda_client.checkpoint.side_effect = RuntimeError("API error")
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2390,9 +2471,11 @@ def test_mixed_sync_async_operations_only_sync_blocked_on_error():
     mock_lambda_client.checkpoint.side_effect = RuntimeError("Mixed batch error")
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2450,9 +2533,11 @@ def test_create_checkpoint_accepts_is_sync_parameter():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2484,9 +2569,11 @@ def test_create_checkpoint_default_is_sync_true():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2530,9 +2617,11 @@ def test_create_checkpoint_explicit_is_sync_true():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2571,9 +2660,11 @@ def test_create_checkpoint_is_sync_false_no_completion_event():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2601,9 +2692,11 @@ def test_create_checkpoint_is_sync_false_returns_immediately():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2639,9 +2732,11 @@ def test_create_checkpoint_with_none_defaults_to_sync():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2675,9 +2770,11 @@ def test_create_checkpoint_no_args_defaults_to_sync():
     mock_lambda_client = Mock(spec=LambdaClient)
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2714,9 +2811,11 @@ def test_collect_checkpoint_batch_overflow_queue_size_limit_final():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -2769,9 +2868,11 @@ def test_create_checkpoint_blocks_until_completion_default():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2840,9 +2941,11 @@ def test_create_checkpoint_blocks_until_completion_explicit_true():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2911,9 +3014,11 @@ def test_create_checkpoint_completion_event_created_and_signaled():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -2975,9 +3080,11 @@ def test_create_checkpoint_completion_event_not_signaled_on_failure():
     mock_lambda_client.checkpoint.side_effect = RuntimeError("Checkpoint failed")
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -3061,9 +3168,11 @@ def test_create_checkpoint_caller_remains_blocked_on_background_failure():
     mock_lambda_client.checkpoint.side_effect = RuntimeError("Background failure")
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -3143,9 +3252,11 @@ def test_create_checkpoint_multiple_sync_calls_all_block():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -3219,9 +3330,11 @@ def test_create_checkpoint_sync_with_empty_checkpoint():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
     )
 
@@ -3277,9 +3390,11 @@ def test_create_checkpoint_sync_success():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test-arn",
-        initial_checkpoint_token="initial-token",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test-arn",
+            checkpoint_token="initial-token",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_client,
     )
 
@@ -3311,9 +3426,11 @@ def test_create_checkpoint_sync_unwraps_background_thread_error():
     mock_client.checkpoint.side_effect = original_error
 
     state = ExecutionState(
-        durable_execution_arn="test-arn",
-        initial_checkpoint_token="initial-token",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test-arn",
+            checkpoint_token="initial-token",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_client,
     )
 
@@ -3344,9 +3461,11 @@ def test_create_checkpoint_sync_always_synchronous():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test-arn",
-        initial_checkpoint_token="initial-token",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test-arn",
+            checkpoint_token="initial-token",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_client,
     )
 
@@ -3381,11 +3500,12 @@ def test_state_replay_mode():
         status=OperationStatus.SUCCEEDED,
     )
     execution_state = ExecutionState(
-        durable_execution_arn="arn:aws:test",
-        initial_checkpoint_token="test_token",  # noqa: S106
-        operations={"op1": operation1, "op2": operation2},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="arn:aws:test",
+            checkpoint_token="test_token",  # noqa: S106
+            initial_execution_state=InitialExecutionState([operation1, operation2], ""),
+        ),
         service_client=Mock(),
-        replay_status=ReplayStatus.REPLAY,
     )
     assert execution_state.is_replaying() is True
     execution_state.track_replay(operation_id="op1")
@@ -3414,11 +3534,12 @@ def test_state_replay_mode_with_timed_out():
         status=OperationStatus.SUCCEEDED,
     )
     execution_state = ExecutionState(
-        durable_execution_arn="arn:aws:test",
-        initial_checkpoint_token="test_token",  # noqa: S106
-        operations={"op1": operation1, "op2": operation2},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="arn:aws:test",
+            checkpoint_token="test_token",  # noqa: S106
+            initial_execution_state=InitialExecutionState([operation1, operation2], ""),
+        ),
         service_client=Mock(),
-        replay_status=ReplayStatus.REPLAY,
     )
     assert execution_state.is_replaying() is True
     execution_state.track_replay(operation_id="op1")
@@ -3445,9 +3566,11 @@ def test_collect_checkpoint_batch_coalesces_many_empty_checkpoints():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -3478,9 +3601,11 @@ def test_collect_checkpoint_batch_empty_checkpoints_with_real_ops_respects_limit
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -3517,9 +3642,11 @@ def test_collect_checkpoint_batch_overflow_coalesces_empty_checkpoints():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -3557,9 +3684,11 @@ def test_checkpoint_batches_forever_single_api_call_for_many_empty_checkpoints()
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -3605,9 +3734,11 @@ def test_collect_checkpoint_batch_first_empty_counts_toward_limit():
     )
 
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -3657,9 +3788,11 @@ def test_execution_state_get_execution_operation_no_operations():
         max_batch_operations=2,
     )
     state = ExecutionState(
-        durable_execution_arn="test_arn",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn",
+            checkpoint_token="token123",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -3688,9 +3821,11 @@ def test_initial_execution_state_get_execution_operation_wrong_type():
         max_batch_operations=2,
     )
     state = ExecutionState(
-        durable_execution_arn="test_arn/step1",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={"step1": operation},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test_arn/step1",
+            checkpoint_token="test_token",  # noqa: S106
+            initial_execution_state=InitialExecutionState([operation], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
@@ -3711,10 +3846,35 @@ def test_initial_execution_state_get_input_payload_none():
         execution_details=None,
     )
 
+    mock_lambda_client = Mock(spec=LambdaClient)
+    config = CheckpointBatcherConfig(
+        max_batch_size_bytes=10 * 1024 * 1024,
+        max_batch_time_seconds=10.0,
+        max_batch_operations=2,
+    )
+    state = ExecutionState(
+        DurableExecutionInvocationInput(
+            durable_execution_arn="arn:aws:test/exec1",
+            checkpoint_token="test_token",  # noqa: S106
+            initial_execution_state=InitialExecutionState([operation], ""),
+        ),
+        service_client=mock_lambda_client,
+        batcher_config=config,
+    )
+
+    result = state.get_input_payload()
+    assert result is None
+
+
+def test_initial_execution_state_get_input_payload():
+    """Test get_input_payload returns None when execution_details is None."""
+    event = {"name": "world"}
+    event_str = json.dumps(event)
     operation = Operation(
-        operation_id="step1",
-        operation_type=OperationType.STEP,
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
         status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload=event_str),
     )
 
     mock_lambda_client = Mock(spec=LambdaClient)
@@ -3724,12 +3884,48 @@ def test_initial_execution_state_get_input_payload_none():
         max_batch_operations=2,
     )
     state = ExecutionState(
-        durable_execution_arn="test_arn/exec1",
-        initial_checkpoint_token="token123",  # noqa: S106
-        operations={"step1": operation},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="arn:aws:test/exec1",
+            checkpoint_token="test_token",  # noqa: S106
+            initial_execution_state=InitialExecutionState([operation], ""),
+        ),
         service_client=mock_lambda_client,
         batcher_config=config,
     )
 
     result = state.get_input_payload()
-    assert result is None
+    assert result == event_str
+
+    assert state.get_input_event() == event
+
+
+def test_initial_execution_state_get_input_invalid_payload():
+    """Test get_input_payload returns None when execution_details is None."""
+    operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="invalid"),
+    )
+
+    mock_lambda_client = Mock(spec=LambdaClient)
+    config = CheckpointBatcherConfig(
+        max_batch_size_bytes=10 * 1024 * 1024,
+        max_batch_time_seconds=10.0,
+        max_batch_operations=2,
+    )
+    state = ExecutionState(
+        DurableExecutionInvocationInput(
+            durable_execution_arn="arn:aws:test/exec1",
+            checkpoint_token="test_token",  # noqa: S106
+            initial_execution_state=InitialExecutionState([operation], ""),
+        ),
+        service_client=mock_lambda_client,
+        batcher_config=config,
+    )
+
+    result = state.get_input_payload()
+    assert result == "invalid"
+
+    with pytest.raises(json.JSONDecodeError):
+        state.get_input_event()

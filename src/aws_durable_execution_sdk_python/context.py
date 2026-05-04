@@ -42,7 +42,6 @@ from aws_durable_execution_sdk_python.serdes import (
     SerDes,
     deserialize,
 )
-from aws_durable_execution_sdk_python.state import ExecutionState  # noqa: TCH001
 from aws_durable_execution_sdk_python.threading import OrderedCounter
 from aws_durable_execution_sdk_python.types import Callback as CallbackProtocol
 from aws_durable_execution_sdk_python.types import (
@@ -58,6 +57,7 @@ from aws_durable_execution_sdk_python.types import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from aws_durable_execution_sdk_python.state import ExecutionState  # noqa: TCH001
     from aws_durable_execution_sdk_python.concurrency.models import BatchResult
     from aws_durable_execution_sdk_python.state import CheckpointedResult
     from aws_durable_execution_sdk_python.types import LambdaContext

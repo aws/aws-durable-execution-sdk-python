@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import functools
 import json
 import logging
@@ -25,7 +24,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
     OperationUpdate,
 )
-from aws_durable_execution_sdk_python.state import ExecutionState, ReplayStatus
+from aws_durable_execution_sdk_python.state import ExecutionState
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping
@@ -234,11 +233,11 @@ class DurableExecutionExecutor:
         context: LambdaContext,
     ):
         self.func = func
-        self.boto3_client = boto3_client
-        self.event = event
         self.context = context
         self.invocation_input = self._parse_invocation_input(event)
         self.service_client = self._parse_service_client(event, boto3_client)
+        self.durable_execution_arn = self.invocation_input.durable_execution_arn
+        logger.debug("durableExecutionArn: %s", self.durable_execution_arn)
 
     def _parse_invocation_input(self, event: Any) -> DurableExecutionInvocationInput:
         # event likely only to be DurableExecutionInvocationInputWithClient when directly injected by test framework
@@ -262,7 +261,6 @@ class DurableExecutionExecutor:
                 # add a redundant raise to make type checker happy
                 raise ExecutionError(msg)
 
-        logger.debug("durableExecutionArn: %s", invocation_input.durable_execution_arn)
         return invocation_input
 
     @staticmethod
@@ -275,20 +273,11 @@ class DurableExecutionExecutor:
             # Use custom client if provided, otherwise initialize from environment
             return LambdaClient.initialize_client()
 
-    def execute(self):
-        execution_state: ExecutionState = ExecutionState(
-            durable_execution_arn=self.invocation_input.durable_execution_arn,
-            initial_checkpoint_token=self.invocation_input.checkpoint_token,
-            operations={},
-            service_client=self.service_client,
-            replay_status=ReplayStatus.NEW,
-        )
-
+    def execute(self) -> MutableMapping[str, Any]:
         try:
-            execution_state.fetch_paginated_operations(
-                self.invocation_input.initial_execution_state.operations,
-                self.invocation_input.checkpoint_token,
-                self.invocation_input.initial_execution_state.next_marker,
+            execution_state: ExecutionState = ExecutionState(
+                invocation_input=self.invocation_input,
+                service_client=self.service_client,
             )
         except BotoClientError as e:
             # Non-retryable Durable API errors (e.g., customer configuration issues,
@@ -303,22 +292,12 @@ class DurableExecutionExecutor:
                 exception=e, retryable=e.is_retryable()
             )
 
-        execution_state.mark_replaying_if_prior_operations_exist()
-
-        raw_input_payload: str | None = execution_state.get_input_payload()
-
-        # Python RIC LambdaMarshaller just uses standard json deserialization for event
-        # https://github.com/aws/aws-lambda-python-runtime-interface-client/blob/main/awslambdaric/lambda_runtime_marshaller.py#L46
-        input_event: MutableMapping[str, Any] = {}
-        if raw_input_payload and raw_input_payload.strip():
-            try:
-                input_event = json.loads(raw_input_payload)
-            except json.JSONDecodeError as e:
-                logger.exception(
-                    "Failed to parse input payload as JSON: payload: %r",
-                    raw_input_payload,
-                )
-                self._handle_execution_output(exception=e, retryable=True)
+        try:
+            input_event: Any = execution_state.get_input_event()
+        except json.JSONDecodeError as e:
+            self._handle_execution_output(exception=e, retryable=True)
+            # add a redundant raise to make type checker happy
+            raise e
 
         durable_context: DurableContext = DurableContext.from_lambda_context(
             state=execution_state, lambda_context=self.context
@@ -329,110 +308,101 @@ class DurableExecutionExecutor:
             ThreadPoolExecutor(
                 max_workers=2, thread_name_prefix="dex-handler"
             ) as executor,
-            contextlib.closing(execution_state) as execution_state,
         ):
             # Thread 1: Run background checkpoint processing
-            executor.submit(execution_state.checkpoint_batches_forever)
+            with execution_state.start_checkpointing(executor):
+                # Thread 2: Execute user function
+                logger.debug("%s entering user-space...", self.durable_execution_arn)
+                user_future = executor.submit(self.func, input_event, durable_context)
 
-            # Thread 2: Execute user function
-            logger.debug(
-                "%s entering user-space...", self.invocation_input.durable_execution_arn
-            )
-            user_future = executor.submit(self.func, input_event, durable_context)
+                return self._handle_user_future_result(execution_state, user_future)
 
-            logger.debug(
-                "%s waiting for user code completion...",
-                self.invocation_input.durable_execution_arn,
-            )
+    def _handle_user_future_result(self, execution_state, user_future):
+        logger.debug(
+            "%s waiting for user code completion...", self.durable_execution_arn
+        )
 
-            try:
-                # Background checkpointing errors will propagate through CompletionEvent.wait() as BackgroundThreadError
-                result = user_future.result()
+        try:
+            # Background checkpointing errors will propagate through CompletionEvent.wait() as BackgroundThreadError
+            result = user_future.result()
 
-                # done with userland
-                logger.debug(
-                    "%s exiting user-space...",
-                    self.invocation_input.durable_execution_arn,
+            # done with userland
+            logger.debug("%s exiting user-space...", self.durable_execution_arn)
+            serialized_result = self._handle_large_result(execution_state, result)
+
+            return self._handle_execution_output(result=serialized_result)
+
+        except BackgroundThreadError as bg_error:
+            # Background checkpoint system failed - propagated through CompletionEvent
+            # Do not attempt to checkpoint anything, just terminate immediately
+            cause = bg_error.source_exception
+
+            if isinstance(cause, BotoClientError):
+                logger.exception(
+                    "Checkpoint processing failed",
+                    extra=cause.build_logger_extras(),
                 )
-                serialized_result = self._handle_large_result(execution_state, result)
-
-                return self._handle_execution_output(result=serialized_result)
-
-            except BackgroundThreadError as bg_error:
-                # Background checkpoint system failed - propagated through CompletionEvent
-                # Do not attempt to checkpoint anything, just terminate immediately
-                cause = bg_error.source_exception
-
-                if isinstance(cause, BotoClientError):
+                # Non-retryable Durable API errors (e.g., customer configuration issues,
+                # 4xx client errors) will never succeed on retry — fail the execution immediately.
+                if not cause.is_retryable():
                     logger.exception(
-                        "Checkpoint processing failed",
+                        "Non-retryable Durable API error from background thread. Must fail execution "
+                        "without retry.",
                         extra=cause.build_logger_extras(),
                     )
-                    # Non-retryable Durable API errors (e.g., customer configuration issues,
-                    # 4xx client errors) will never succeed on retry — fail the execution immediately.
-                    if not cause.is_retryable():
-                        logger.exception(
-                            "Non-retryable Durable API error from background thread. Must fail execution "
-                            "without retry.",
-                            extra=cause.build_logger_extras(),
-                        )
-                else:
-                    logger.exception("Checkpoint processing failed")
+            else:
+                logger.exception("Checkpoint processing failed")
 
-                retryable = (
-                    not isinstance(cause, BotoClientError) or cause.is_retryable()
-                )
-                return self._handle_execution_output(
-                    exception=cause, retryable=retryable
-                )
+            retryable = not isinstance(cause, BotoClientError) or cause.is_retryable()
+            return self._handle_execution_output(exception=cause, retryable=retryable)
 
-            except SuspendExecution:
-                # User code suspended - stop background checkpointing thread
-                logger.debug("Suspending execution...")
-                return self._handle_execution_output(status=InvocationStatus.PENDING)
+        except SuspendExecution:
+            # User code suspended - stop background checkpointing thread
+            logger.debug("Suspending execution...")
+            return self._handle_execution_output(status=InvocationStatus.PENDING)
 
-            except CheckpointError as e:
-                # Checkpoint system is broken - stop background thread and exit immediately
+        except CheckpointError as e:
+            # Checkpoint system is broken - stop background thread and exit immediately
+            logger.exception(
+                "Checkpoint system failed",
+                extra=e.build_logger_extras(),
+            )
+            # Terminate Lambda invocation immediately and have it be retried if retryable
+            return self._handle_execution_output(
+                exception=e, retryable=e.is_retryable()
+            )
+        except InvocationError as e:
+            if e.is_retryable():
+                logger.exception("Invocation error. Must terminate.")
+            else:
+                # Non-retryable Durable API errors (e.g., customer configuration issues,
+                # 4xx client errors) will never succeed on retry — fail the execution immediately.
                 logger.exception(
-                    "Checkpoint system failed",
-                    extra=e.build_logger_extras(),
+                    "Non-retryable Durable API error. Must fail execution without retry.",
+                    extra=e.build_logger_extras(),  # type: ignore[attr-defined]
                 )
+            return self._handle_execution_output(
+                exception=e, retryable=e.is_retryable()
+            )
+        except ExecutionError as e:
+            logger.exception("Execution error. Must fail execution without retry.")
+            return self._handle_execution_output(exception=e)
+        except Exception as e:
+            # all user-space errors go here
+            logger.exception("Execution failed")
+
+            try:
+                error = self._handle_large_error(execution_state, exception=e)
+            except CheckpointError as e:
                 # Terminate Lambda invocation immediately and have it be retried if retryable
                 return self._handle_execution_output(
                     exception=e, retryable=e.is_retryable()
                 )
-            except InvocationError as e:
-                if e.is_retryable():
-                    logger.exception("Invocation error. Must terminate.")
-                else:
-                    # Non-retryable Durable API errors (e.g., customer configuration issues,
-                    # 4xx client errors) will never succeed on retry — fail the execution immediately.
-                    logger.exception(
-                        "Non-retryable Durable API error. Must fail execution without retry.",
-                        extra=e.build_logger_extras(),  # type: ignore[attr-defined]
-                    )
-                return self._handle_execution_output(
-                    exception=e, retryable=e.is_retryable()
-                )
-            except ExecutionError as e:
-                logger.exception("Execution error. Must fail execution without retry.")
-                return self._handle_execution_output(exception=e)
-            except Exception as e:
-                # all user-space errors go here
-                logger.exception("Execution failed")
 
-                try:
-                    error = self._handle_large_error(execution_state, exception=e)
-                except CheckpointError as e:
-                    # Terminate Lambda invocation immediately and have it be retried if retryable
-                    return self._handle_execution_output(
-                        exception=e, retryable=e.is_retryable()
-                    )
-
-                # fail without an ErrorObject
-                return self._handle_execution_output(
-                    status=InvocationStatus.FAILED, error=error
-                )
+            # fail with user's error
+            return self._handle_execution_output(
+                status=InvocationStatus.FAILED, error=error
+            )
 
     @staticmethod
     def _handle_large_result(execution_state: ExecutionState, result: Any) -> str:

@@ -7,10 +7,12 @@ import logging
 import queue
 import threading
 import time
+from concurrent.futures import Executor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
@@ -29,12 +31,18 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     OperationUpdate,
     StateOutput,
+    CheckpointUpdatedExecutionState,
 )
 from aws_durable_execution_sdk_python.threading import CompletionEvent, OrderedLock
 
 if TYPE_CHECKING:
     import datetime
     from collections.abc import MutableMapping
+
+    from aws_durable_execution_sdk_python.execution import (
+        InitialExecutionState,
+        DurableExecutionInvocationInput,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -225,16 +233,13 @@ class ExecutionState:
 
     def __init__(
         self,
-        durable_execution_arn: str,
-        initial_checkpoint_token: str,
-        operations: MutableMapping[str, Operation],
+        invocation_input: DurableExecutionInvocationInput,
         service_client: DurableServiceClient,
         batcher_config: CheckpointBatcherConfig | None = None,
-        replay_status: ReplayStatus = ReplayStatus.NEW,
     ):
-        self.durable_execution_arn: str = durable_execution_arn
-        self._current_checkpoint_token: str = initial_checkpoint_token
-        self.operations: MutableMapping[str, Operation] = operations
+        self.durable_execution_arn: str = invocation_input.durable_execution_arn
+        self._current_checkpoint_token: str = invocation_input.checkpoint_token
+        self.operations: MutableMapping[str, Operation] = {}
         self._service_client: DurableServiceClient = service_client
         self._ordered_checkpoint_lock: OrderedLock = OrderedLock()
         self._operations_lock: Lock = Lock()
@@ -258,24 +263,25 @@ class ExecutionState:
 
         # Protects parent_to_children and parent_done
         self._parent_done_lock: Lock = Lock()
-        self._replay_status: ReplayStatus = replay_status
         self._replay_status_lock: Lock = Lock()
         self._visited_operations: set[str] = set()
 
+        # fetch initial operations
+        self.fetch_paginated_operations(invocation_input.initial_execution_state)
+        self._replay_status: ReplayStatus = (
+            ReplayStatus.REPLAY if len(self.operations) > 1 else ReplayStatus.NEW
+        )
+
     def fetch_paginated_operations(
         self,
-        initial_operations: list[Operation],
-        checkpoint_token: str,
-        next_marker: str | None,
+        execution_state: InitialExecutionState | CheckpointUpdatedExecutionState,
     ) -> None:
         """Add initial operations and fetch all paginated operations from the Durable Functions API. This method is thread_safe.
 
         The checkpoint_token is passed explicitly as a parameter rather than using the instance variable to ensure thread safety.
 
         Args:
-            initial_operations: initial operations to be added to ExecutionState
-            checkpoint_token: checkpoint token used to call Durable Functions API.
-            next_marker: a marker indicates that there are paginated operations.
+            execution_state: InitialExecutionState | CheckpointUpdatedExecutionState - the initial execution state or the execution state returned from checkpoint API
 
         Raises:
             GetExecutionStateError: If the API call fails. The error is logged
@@ -284,13 +290,14 @@ class ExecutionState:
                 based on is_retryable().
         """
         all_operations: list[Operation] = (
-            initial_operations.copy() if initial_operations else []
+            execution_state.operations.copy() if execution_state.operations else []
         )
+        next_marker = execution_state.next_marker
         try:
             while next_marker:
                 output: StateOutput = self._service_client.get_execution_state(
                     durable_execution_arn=self.durable_execution_arn,
-                    checkpoint_token=checkpoint_token,
+                    checkpoint_token=self._current_checkpoint_token,
                     next_marker=next_marker,
                 )
                 all_operations.extend(output.operations)
@@ -308,6 +315,23 @@ class ExecutionState:
                     self.operations.update(
                         {op.operation_id: op for op in all_operations}
                     )
+
+    def get_input_event(self) -> Any:
+        """Get the input event from the execution operation."""
+        # Python RIC LambdaMarshaller just uses standard json deserialization for event
+        # https://github.com/aws/aws-lambda-python-runtime-interface-client/blob/main/awslambdaric/lambda_runtime_marshaller.py#L46
+        raw_input_payload = self.get_input_payload()
+        if raw_input_payload and raw_input_payload.strip():
+            try:
+                return json.loads(raw_input_payload)
+            except json.JSONDecodeError:
+                logger.exception(
+                    "Failed to parse input payload as JSON: payload: %r",
+                    raw_input_payload,
+                )
+                raise
+
+        return {}
 
     def get_input_payload(self) -> str | None:
         # It is possible that backend will not provide an execution operation
@@ -378,18 +402,6 @@ class ExecutionState:
         """
         with self._replay_status_lock:
             return self._replay_status is ReplayStatus.REPLAY
-
-    def mark_replaying_if_prior_operations_exist(self) -> None:
-        """Mark execution state as replaying when non-execution operations exist."""
-        with self._operations_lock:
-            has_prior_operations: bool = any(
-                op.operation_type is not OperationType.EXECUTION
-                for op in self.operations.values()
-            )
-
-        if has_prior_operations:
-            with self._replay_status_lock:
-                self._replay_status = ReplayStatus.REPLAY
 
     def get_checkpoint_result(self, checkpoint_id: str) -> CheckpointedResult:
         """Get checkpoint result.
@@ -682,11 +694,7 @@ class ExecutionState:
                     current_checkpoint_token = output.checkpoint_token
 
                     # Fetch new operations from the API before unblocking sync waiters
-                    self.fetch_paginated_operations(
-                        output.new_execution_state.operations,
-                        output.checkpoint_token,
-                        output.new_execution_state.next_marker,
-                    )
+                    self.fetch_paginated_operations(output.new_execution_state)
 
                     # Signal completion for any synchronous operations
                     for queued_op in batch:
@@ -894,5 +902,12 @@ class ExecutionState:
         serialized = json.dumps(queued_op.operation_update.to_dict()).encode("utf-8")
         return len(serialized)
 
-    def close(self):
-        self.stop_checkpointing()
+    @contextmanager
+    def start_checkpointing(self, executor: Executor):
+        # start checkpointing
+        executor.submit(self.checkpoint_batches_forever)
+        try:
+            yield self
+        finally:
+            # stop checkpointing
+            self.stop_checkpointing()

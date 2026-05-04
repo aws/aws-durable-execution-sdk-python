@@ -33,7 +33,10 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-
+from aws_durable_execution_sdk_python.execution import (
+    DurableExecutionInvocationInput,
+    InitialExecutionState,
+)
 from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
@@ -63,9 +66,11 @@ def _make_state(
         max_batch_operations=max_ops,
     )
     return ExecutionState(
-        durable_execution_arn="test-arn",
-        initial_checkpoint_token="token-0",  # noqa: S106
-        operations={},
+        DurableExecutionInvocationInput(
+            durable_execution_arn="test-arn",
+            checkpoint_token="token-0",  # noqa: S106
+            initial_execution_state=InitialExecutionState([], ""),
+        ),
         service_client=mock_client,
         batcher_config=config,
     )
