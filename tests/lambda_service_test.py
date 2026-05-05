@@ -2047,6 +2047,45 @@ def test_lambda_client_initialize_client_no_endpoint(
     assert isinstance(client, LambdaClient)
 
 
+@patch("aws_durable_execution_sdk_python.lambda_service._IS_RUNTIME_BUNDLED", True)
+@patch.dict("os.environ", {}, clear=True)
+@patch("boto3.client")
+def test_lambda_client_user_agent_runtime_bundled(
+    mock_boto_client, reset_lambda_client_cache
+):
+    """Test user agent includes -bundled when SDK is installed in Lambda runtime path."""
+    mock_client = Mock()
+    mock_boto_client.return_value = mock_client
+
+    client = LambdaClient.initialize_client()
+
+    call_args = mock_boto_client.call_args
+    config = call_args[1]["config"]
+    assert (
+        config.user_agent_extra
+        == f"aws-durable-execution-sdk-python/{__version__}-bundled"
+    )
+    assert isinstance(client, LambdaClient)
+
+
+@patch("aws_durable_execution_sdk_python.lambda_service._IS_RUNTIME_BUNDLED", False)
+@patch.dict("os.environ", {}, clear=True)
+@patch("boto3.client")
+def test_lambda_client_user_agent_not_runtime_bundled(
+    mock_boto_client, reset_lambda_client_cache
+):
+    """Test user agent does not include -bundled when SDK is customer-installed."""
+    mock_client = Mock()
+    mock_boto_client.return_value = mock_client
+
+    client = LambdaClient.initialize_client()
+
+    call_args = mock_boto_client.call_args
+    config = call_args[1]["config"]
+    assert config.user_agent_extra == f"aws-durable-execution-sdk-python/{__version__}"
+    assert isinstance(client, LambdaClient)
+
+
 def test_lambda_client_checkpoint_with_non_none_client_token():
     """Test LambdaClient.checkpoint with non-None client_token."""
     mock_client = Mock()

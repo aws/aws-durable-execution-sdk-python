@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import datetime
 import logging
+import os
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
 ReplayChildren: TypeAlias = bool
 OperationPayload: TypeAlias = str
 TimeoutSeconds: TypeAlias = int
+
+_IS_RUNTIME_BUNDLED: bool = os.path.dirname(__file__).startswith("/var/lang")
 
 logger = logging.getLogger(__name__)
 
@@ -1061,7 +1064,7 @@ class LambdaClient(DurableServiceClient):
                 config=Config(
                     connect_timeout=5,
                     read_timeout=50,
-                    user_agent_extra=f"aws-durable-execution-sdk-python/{__version__}",
+                    user_agent_extra=f"aws-durable-execution-sdk-python/{__version__}{'-bundled' if _IS_RUNTIME_BUNDLED else ''}",
                 ),
             )
         return cls(client=cls._cached_boto_client)
