@@ -43,6 +43,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationStatus,
     OperationType,
     OperationUpdate,
+    StateOutput,
     StepDetails,
     WaitDetails,
 )
@@ -2684,6 +2685,36 @@ def _make_lambda_context():
     ctx.invoked_function_arn = None
     ctx.tenant_id = None
     return ctx
+
+
+def test_durable_execution_replays_when_paginated_state_has_prior_operations():
+    """Test paginated execution state starts in replay mode when prior operations exist."""
+    mock_client = Mock(spec=DurableServiceClient)
+    step_operation = Operation(
+        operation_id="step1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+    )
+    mock_client.get_execution_state.return_value = StateOutput(
+        operations=[step_operation],
+        next_marker=None,
+    )
+
+    invocation_input = _make_invocation_input(mock_client, next_marker="page2")
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"is_replaying": context.state.is_replaying()}
+
+    result = test_handler(invocation_input, _make_lambda_context())
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert json.loads(result["Result"]) == {"is_replaying": True}
+    mock_client.get_execution_state.assert_called_once_with(
+        durable_execution_arn="arn:test:execution",
+        checkpoint_token="token123",
+        next_marker="page2",
+    )
 
 
 def test_durable_execution_non_retryable_invocation_error_returns_failed():

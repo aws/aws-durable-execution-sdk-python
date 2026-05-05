@@ -379,6 +379,11 @@ class ExecutionState:
         with self._replay_status_lock:
             return self._replay_status is ReplayStatus.REPLAY
 
+    def mark_replaying(self) -> None:
+        """Mark execution state as replaying."""
+        with self._replay_status_lock:
+            self._replay_status = ReplayStatus.REPLAY
+
     def get_checkpoint_result(self, checkpoint_id: str) -> CheckpointedResult:
         """Get checkpoint result.
 

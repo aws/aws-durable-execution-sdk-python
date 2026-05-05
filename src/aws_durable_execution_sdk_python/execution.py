@@ -254,10 +254,7 @@ def durable_execution(
             initial_checkpoint_token=invocation_input.checkpoint_token,
             operations={},
             service_client=service_client,
-            # If there are operations other than the initial EXECUTION one, current state is in replay mode
-            replay_status=ReplayStatus.REPLAY
-            if len(invocation_input.initial_execution_state.operations) > 1
-            else ReplayStatus.NEW,
+            replay_status=ReplayStatus.NEW,
         )
 
         try:
@@ -280,6 +277,9 @@ def durable_execution(
                     error=ErrorObject.from_exception(e),
                 ).to_dict()
             raise
+
+        if len(execution_state.operations) > 1:
+            execution_state.mark_replaying()
 
         raw_input_payload: str | None = execution_state.get_input_payload()
 
