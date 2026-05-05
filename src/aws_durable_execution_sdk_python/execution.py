@@ -501,6 +501,7 @@ class DurableExecutionExecutor:
                 return self._handle_execution_output(
                     result=result,
                     error=ErrorObject.from_exception(exception),
+                    status=status,
                 )
 
         if error:
