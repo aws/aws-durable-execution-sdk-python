@@ -281,11 +281,7 @@ class DurableExecutionExecutor:
             initial_checkpoint_token=self.invocation_input.checkpoint_token,
             operations={},
             service_client=self.service_client,
-            # If there are operations other than the initial EXECUTION one, current state is in replay mode
-            # todo: replay status will be wrong if initial_execution_state contains only one operation and more in next pages
-            replay_status=ReplayStatus.REPLAY
-            if len(self.invocation_input.initial_execution_state.operations) > 1
-            else ReplayStatus.NEW,
+            replay_status=ReplayStatus.NEW,
         )
 
         try:
@@ -306,6 +302,8 @@ class DurableExecutionExecutor:
             return self._handle_execution_output(
                 exception=e, retryable=e.is_retryable()
             )
+
+        execution_state.mark_replaying_if_prior_operations_exist()
 
         raw_input_payload: str | None = execution_state.get_input_payload()
 
