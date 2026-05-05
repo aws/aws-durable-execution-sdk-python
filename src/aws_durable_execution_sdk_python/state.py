@@ -379,10 +379,17 @@ class ExecutionState:
         with self._replay_status_lock:
             return self._replay_status is ReplayStatus.REPLAY
 
-    def mark_replaying(self) -> None:
-        """Mark execution state as replaying."""
-        with self._replay_status_lock:
-            self._replay_status = ReplayStatus.REPLAY
+    def mark_replaying_if_prior_operations_exist(self) -> None:
+        """Mark execution state as replaying when non-execution operations exist."""
+        with self._operations_lock:
+            has_prior_operations: bool = any(
+                op.operation_type is not OperationType.EXECUTION
+                for op in self.operations.values()
+            )
+
+        if has_prior_operations:
+            with self._replay_status_lock:
+                self._replay_status = ReplayStatus.REPLAY
 
     def get_checkpoint_result(self, checkpoint_id: str) -> CheckpointedResult:
         """Get checkpoint result.

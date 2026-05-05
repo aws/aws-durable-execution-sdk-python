@@ -278,8 +278,7 @@ def durable_execution(
                 ).to_dict()
             raise
 
-        if len(execution_state.operations) > 1:
-            execution_state.mark_replaying()
+        execution_state.mark_replaying_if_prior_operations_exist()
 
         raw_input_payload: str | None = execution_state.get_input_payload()
 
