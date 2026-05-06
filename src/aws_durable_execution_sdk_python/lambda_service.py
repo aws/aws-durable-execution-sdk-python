@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import datetime
 import logging
-import os
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -34,9 +33,16 @@ ReplayChildren: TypeAlias = bool
 OperationPayload: TypeAlias = str
 TimeoutSeconds: TypeAlias = int
 
-_IS_RUNTIME_BUNDLED: bool = os.path.dirname(__file__).startswith("/var/lang")
-
 logger = logging.getLogger(__name__)
+
+
+def _is_in_var_dir(module_file: str = __file__) -> bool:
+    """Return True if this SDK is installed under /var/lang/.
+
+    Lambda bundled Python runtimes install packages at
+    /var/lang/lib/pythonX.Y/site-packages/.
+    """
+    return module_file.startswith("/var/lang/")
 
 
 # region model
@@ -1064,7 +1070,7 @@ class LambdaClient(DurableServiceClient):
                 config=Config(
                     connect_timeout=5,
                     read_timeout=50,
-                    user_agent_extra=f"aws-durable-execution-sdk-python/{__version__}{'-bundled' if _IS_RUNTIME_BUNDLED else ''}",
+                    user_agent_extra=f"aws-durable-execution-sdk-python/{__version__}{'-bundled' if _is_in_var_dir() else ''}",
                 ),
             )
         return cls(client=cls._cached_boto_client)
