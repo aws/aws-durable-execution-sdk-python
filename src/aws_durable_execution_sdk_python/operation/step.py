@@ -152,8 +152,8 @@ class StepOperationExecutor(OperationExecutor[T]):
         ):
             return CheckResult.create_is_ready_to_execute(checkpointed_result)
 
-        # Create START checkpoint if not exists
-        if not checkpointed_result.is_existent():
+        # Create START checkpoint if nonexistent or READY
+        if not checkpointed_result.is_existent() or checkpointed_result.is_ready():
             start_operation: OperationUpdate = OperationUpdate.create_step_start(
                 identifier=self.operation_identifier,
             )

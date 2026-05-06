@@ -175,6 +175,13 @@ class CheckpointedResult:
             return False
         return op.status is OperationStatus.PENDING
 
+    def is_ready(self) -> bool:
+        """Return True if the checkpointed operation is READY."""
+        op = self.operation
+        if not op:
+            return False
+        return op.status is OperationStatus.READY
+
     def is_timed_out(self) -> bool:
         """Return True if the checkpointed operation is TIMED_OUT."""
         op = self.operation
