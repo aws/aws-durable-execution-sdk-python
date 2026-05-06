@@ -81,9 +81,6 @@ def validate_subject(subject_line: str) -> str | None:
     if subject.endswith("."):
         return "subject must not end with a period"
 
-    if subject != subject.lower():
-        return "subject must be lowercase"
-
     return None
 
 

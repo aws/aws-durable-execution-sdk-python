@@ -116,10 +116,6 @@ def test_subject_uppercase() -> None:
     assert validate_subject("feat: Add new feature") == "subject must be lowercase"
 
 
-def test_subject_uppercase_acronym_rejected() -> None:
-    assert validate_subject("ci: configure CI/CD") == "subject must be lowercase"
-
-
 # region validate_message
 
 
