@@ -65,7 +65,7 @@ class CallbackOperationExecutor(OperationExecutor[str]):
         self.operation_identifier = operation_identifier
         self.config = config
 
-    def check_result_status(self) -> CheckResult[str]:
+    def check_result_status(self, is_replay: bool) -> CheckResult[str]:
         """Check operation status and create START checkpoint if needed.
 
         Called twice by process() when creating synchronous checkpoints: once before
@@ -97,7 +97,9 @@ class CallbackOperationExecutor(OperationExecutor[str]):
                 msg = f"Missing callback details for operation: {self.operation_identifier.operation_id}"
                 raise CallbackError(msg)
 
-            return CheckResult.create_is_ready_to_execute(checkpointed_result)
+            return CheckResult.create_is_ready_to_execute_for_replay(
+                checkpointed_result
+            )
 
         # Create START checkpoint
         callback_options: CallbackOptions = (
@@ -122,7 +124,7 @@ class CallbackOperationExecutor(OperationExecutor[str]):
         # Signal to process() to check status again for immediate response
         return CheckResult.create_started()
 
-    def execute(self, checkpointed_result: CheckpointedResult) -> str:
+    def execute(self, checkpointed_result: CheckpointedResult, is_replay: bool) -> str:
         """Execute callback operation by extracting the callback_id.
 
         Callbacks don't execute logic - they just extract and return the callback_id
@@ -130,6 +132,7 @@ class CallbackOperationExecutor(OperationExecutor[str]):
 
         Args:
             checkpointed_result: The checkpoint data containing callback_details
+            is_replay: Whether this is a replay execution (unused)
 
         Returns:
             The callback_id from the checkpoint

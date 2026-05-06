@@ -46,7 +46,7 @@ class WaitOperationExecutor(OperationExecutor[None]):
         self.state = state
         self.operation_identifier = operation_identifier
 
-    def check_result_status(self) -> CheckResult[None]:
+    def check_result_status(self, is_replay: bool) -> CheckResult[None]:
         """Check operation status and create START checkpoint if needed.
 
         Called twice by process() when creating synchronous checkpoints: once before
@@ -69,6 +69,9 @@ class WaitOperationExecutor(OperationExecutor[None]):
                 self.operation_identifier.operation_id,
                 self.operation_identifier.name,
             )
+            if not is_replay:
+                # completed during waiting
+                self.state.on_operation_update(checkpointed_result.operation)
             return CheckResult.create_completed(None)
 
         # Create START checkpoint if not exists
@@ -93,16 +96,17 @@ class WaitOperationExecutor(OperationExecutor[None]):
             return CheckResult.create_started()
 
         # Ready to suspend (checkpoint exists)
-        return CheckResult.create_is_ready_to_execute(checkpointed_result)
+        return CheckResult.create_is_ready_to_execute_for_replay(checkpointed_result)
 
-    def execute(self, _checkpointed_result: CheckpointedResult) -> None:
+    def execute(self, checkpointed_result: CheckpointedResult, is_replay: bool) -> None:
         """Execute wait by suspending.
 
         Wait operations 'execute' by suspending execution until the timer completes.
         This method never returns normally - it always suspends.
 
         Args:
-            _checkpointed_result: The checkpoint data (unused for wait)
+            checkpointed_result: The checkpoint data (unused for wait)
+            is_replay: Whether this is a replay execution (unused for wait)
 
         Raises:
             SuspendExecution: Always suspends to wait for timer completion

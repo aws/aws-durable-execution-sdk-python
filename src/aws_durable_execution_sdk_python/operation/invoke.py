@@ -71,7 +71,7 @@ class InvokeOperationExecutor(OperationExecutor[R]):
         self.payload = payload
         self.config = config
 
-    def check_result_status(self) -> CheckResult[R]:
+    def check_result_status(self, is_replay: bool) -> CheckResult[R]:
         """Check operation status and create START checkpoint if needed.
 
         Called twice by process() when creating synchronous checkpoints: once before
@@ -90,6 +90,9 @@ class InvokeOperationExecutor(OperationExecutor[R]):
 
         # Terminal success - deserialize and return
         if checkpointed_result.is_succeeded():
+            if not is_replay:
+                # completed during waiting
+                self.state.on_operation_update(checkpointed_result.operation)
             if checkpointed_result.result is None:
                 return CheckResult.create_completed(None)  # type: ignore
 
@@ -107,6 +110,9 @@ class InvokeOperationExecutor(OperationExecutor[R]):
             or checkpointed_result.is_timed_out()
             or checkpointed_result.is_stopped()
         ):
+            if not is_replay:
+                # completed during waiting
+                self.state.on_operation_update(checkpointed_result.operation)
             checkpointed_result.raise_callable_error()
 
         # Still running - ready to suspend
@@ -115,7 +121,9 @@ class InvokeOperationExecutor(OperationExecutor[R]):
                 "⏳ Invoke %s still in progress, will suspend",
                 self.operation_identifier.name or self.function_name,
             )
-            return CheckResult.create_is_ready_to_execute(checkpointed_result)
+            return CheckResult.create_is_ready_to_execute_for_replay(
+                checkpointed_result
+            )
 
         # Create START checkpoint if not exists
         if not checkpointed_result.is_existent():
@@ -147,9 +155,9 @@ class InvokeOperationExecutor(OperationExecutor[R]):
             return CheckResult.create_started()
 
         # Ready to suspend (checkpoint exists but not in a terminal or started state)
-        return CheckResult.create_is_ready_to_execute(checkpointed_result)
+        return CheckResult.create_is_ready_to_execute_for_replay(checkpointed_result)
 
-    def execute(self, _checkpointed_result: CheckpointedResult) -> R:
+    def execute(self, checkpointed_result: CheckpointedResult, is_replay: bool) -> R:
         """Execute invoke operation by suspending to wait for async completion.
 
         The invoke operation doesn't execute synchronously - it suspends and
@@ -157,6 +165,7 @@ class InvokeOperationExecutor(OperationExecutor[R]):
 
         Args:
             checkpointed_result: The checkpoint data (unused, but required by interface)
+            is_replay: Whether this is a replay execution
 
         Returns:
             Never returns - always suspends

@@ -432,6 +432,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
             run_in_child_handler,
             child_context.state,
             operation_identifier=operation_identifier,
+            is_replay=executor_context.is_replaying,
             config=ChildConfig(
                 serdes=self.item_serdes or self.serdes,
                 sub_type=self.sub_type_iteration,

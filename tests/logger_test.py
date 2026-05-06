@@ -13,6 +13,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
 )
 from aws_durable_execution_sdk_python.logger import Logger, LoggerInterface, LogInfo
+from aws_durable_execution_sdk_python.plugin import PluginExecutor
 from aws_durable_execution_sdk_python.state import ExecutionState, ReplayStatus
 
 
@@ -85,6 +86,7 @@ EXECUTION_STATE = ExecutionState(
     initial_checkpoint_token="test_token",  # noqa: S106
     operations={},
     service_client=Mock(),
+    plugin_executor=PluginExecutor(plugins=None),
 )
 EXECUTION_CONTEXT = ExecutionContext("arn:aws:test")
 DURABLE_CONTEXT = DurableContext(
@@ -228,6 +230,7 @@ def test_logger_with_log_info():
         initial_checkpoint_token="test_token",  # noqa: S106
         operations={},
         service_client=Mock(),
+        plugin_executor=PluginExecutor([]),
     )
     durable_context = DurableContext(execution_state_new, EXECUTION_CONTEXT)
     logger = Logger.from_log_info(mock_logger, original_info, durable_context)
@@ -380,6 +383,7 @@ def test_logger_replay_no_logging():
         operations={"op1": operation},
         service_client=Mock(),
         replay_status=ReplayStatus.REPLAY,
+        plugin_executor=PluginExecutor([]),
     )
     durable_context = Mock(DurableContext)
     durable_context.is_replaying = True
@@ -408,6 +412,7 @@ def test_logger_replay_then_new_logging():
         operations={"op1": operation1, "op2": operation2},
         service_client=Mock(),
         replay_status=ReplayStatus.REPLAY,
+        plugin_executor=PluginExecutor([]),
     )
     durable_context = Mock(DurableContext)
     durable_context.is_replaying = True

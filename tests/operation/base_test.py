@@ -65,6 +65,20 @@ def test_check_result_create_is_ready_to_execute():
     assert result.has_checkpointed_result is False
     assert result.checkpointed_result is checkpoint
     assert result.deserialized_result is None
+    assert result.is_replay is False
+
+
+def test_check_result_create_is_ready_to_execute():
+    """Test CheckResult.create_is_ready_to_execute factory method."""
+    checkpoint = create_mock_checkpoint(OperationStatus.STARTED)
+
+    result = CheckResult.create_is_ready_to_execute(checkpoint)
+
+    assert result.is_ready_to_execute is True
+    assert result.has_checkpointed_result is False
+    assert result.checkpointed_result is checkpoint
+    assert result.deserialized_result is None
+    assert result.is_replay is True
 
 
 def test_check_result_create_started():

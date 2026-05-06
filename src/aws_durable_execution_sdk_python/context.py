@@ -173,12 +173,14 @@ class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
         callback_id: str,
         operation_id: str,
         state: ExecutionState,
+        is_replay: bool,
         serdes: SerDes[T] | None = None,
     ):
         self.callback_id: str = callback_id
         self.operation_id: str = operation_id
         self.state: ExecutionState = state
         self.serdes: SerDes[T] | None = serdes
+        self.is_replay: bool = is_replay
 
     def result(self) -> T | None:
         """Return the result of the future. Will block until result is available.
@@ -210,9 +212,15 @@ class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
                 if checkpointed_result.error and checkpointed_result.error.message
                 else "Callback failed"
             )
+            if not self.is_replay:
+                # completed during waiting
+                self.state.on_operation_update(checkpointed_result.operation)
             raise CallbackError(message=msg, callback_id=self.callback_id)
 
         if checkpointed_result.is_succeeded():
+            if not self.is_replay:
+                # completed during waiting
+                self.state.on_operation_update(checkpointed_result.operation)
             if checkpointed_result.result is None:
                 return None  # type: ignore
 
@@ -408,7 +416,7 @@ class DurableContext(DurableContextProtocol):
             config (CallbackConfig): Configuration for the callback.
 
         Return:
-            Callback future. Use result() on this future to wait for the callback resuilt.
+            Callback future. Use result() on this future to wait for the callback result.
         """
         if not config:
             config = CallbackConfig()
@@ -423,7 +431,7 @@ class DurableContext(DurableContextProtocol):
             config=config,
         )
         self._track_replay()
-        callback_id: str = executor.process()
+        callback_id: str = executor.process(self.is_replaying)
         result: Callback = Callback(
             callback_id=callback_id,
             operation_id=operation_id,
@@ -465,7 +473,7 @@ class DurableContext(DurableContextProtocol):
             config=config,
         )
         self._track_replay()
-        result: R = executor.process()
+        result: R = executor.process(self.is_replaying)
         return result
 
     def map(
@@ -505,6 +513,7 @@ class DurableContext(DurableContextProtocol):
             func=map_in_child_context,
             state=self.state,
             operation_identifier=operation_identifier,
+            is_replay=self.is_replaying,
             config=ChildConfig(
                 sub_type=OperationSubType.MAP,
                 serdes=getattr(config, "serdes", None),
@@ -548,6 +557,7 @@ class DurableContext(DurableContextProtocol):
             func=parallel_in_child_context,
             state=self.state,
             operation_identifier=operation_identifier,
+            is_replay=self.is_replaying,
             config=ChildConfig(
                 sub_type=OperationSubType.PARALLEL,
                 serdes=getattr(config, "serdes", None),
@@ -599,6 +609,7 @@ class DurableContext(DurableContextProtocol):
                 parent_id=self._parent_id,
                 name=step_name,
             ),
+            is_replay=self.is_replaying,
             config=config,
         )
         return result
@@ -626,7 +637,7 @@ class DurableContext(DurableContextProtocol):
             context_logger=self.logger,
         )
         self._track_replay()
-        result: T = executor.process()
+        result: T = executor.process(self.is_replaying)
         return result
 
     def wait(self, duration: Duration, name: str | None = None) -> None:
@@ -652,7 +663,7 @@ class DurableContext(DurableContextProtocol):
             ),
         )
         self._track_replay()
-        executor.process()
+        executor.process(self.is_replaying)
 
     def wait_for_callback(
         self,
@@ -709,7 +720,7 @@ class DurableContext(DurableContextProtocol):
             )
         )
         self._track_replay()
-        result: T = executor.process()
+        result: T = executor.process(self.is_replaying)
         return result
 
 

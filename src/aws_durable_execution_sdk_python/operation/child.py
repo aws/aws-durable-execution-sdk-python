@@ -15,6 +15,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationSubType,
     OperationUpdate,
+    OperationType,
 )
 from aws_durable_execution_sdk_python.operation.base import (
     CheckResult,
@@ -70,7 +71,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
         self.is_virtual: bool = config.is_virtual
         self.sub_type = config.sub_type or OperationSubType.RUN_IN_CHILD_CONTEXT
 
-    def check_result_status(self) -> CheckResult[T]:
+    def check_result_status(self, is_replay) -> CheckResult[T]:
         """Check operation status and create START checkpoint if needed.
 
         Called twice by process() when creating synchronous checkpoints: once before
@@ -112,7 +113,9 @@ class ChildOperationExecutor(OperationExecutor[T]):
             checkpointed_result.is_succeeded()
             and checkpointed_result.is_replay_children()
         ):
-            return CheckResult.create_is_ready_to_execute(checkpointed_result)
+            return CheckResult.create_is_ready_to_execute_for_replay(
+                checkpointed_result
+            )
 
         # Terminal failure
         if checkpointed_result.is_failed():
@@ -132,14 +135,19 @@ class ChildOperationExecutor(OperationExecutor[T]):
                 operation_update=start_operation, is_sync=False
             )
 
-        # Ready to execute (checkpoint exists or was just created)
+        # Ready to execute
+        if checkpointed_result.is_existent():
+            return CheckResult.create_is_ready_to_execute_for_replay(
+                checkpointed_result
+            )
         return CheckResult.create_is_ready_to_execute(checkpointed_result)
 
-    def execute(self, checkpointed_result: CheckpointedResult) -> T:
+    def execute(self, checkpointed_result: CheckpointedResult, is_replay: bool) -> T:
         """Execute child context function with error handling and large payload support.
 
         Args:
             checkpointed_result: The checkpoint data containing operation state
+            is_replay: Whether this is a replay execution (unused)
 
         Returns:
             The result of executing the child context function
@@ -149,12 +157,16 @@ class ChildOperationExecutor(OperationExecutor[T]):
             InvocationError: Re-raised after checkpointing FAIL
             CallableRuntimeError: Raised for other exceptions after checkpointing FAIL
         """
+
         logger.debug(
             "▶️ Executing child context for id: %s, name: %s",
             self.operation_identifier.operation_id,
             self.operation_identifier.name,
         )
 
+        start_info = self.state.on_user_function_start(
+            self.operation_identifier, OperationType.CONTEXT, self.sub_type, is_replay
+        )
         try:
             raw_result: T = self.func()
 
@@ -223,6 +235,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
             # Must ensure the child context result is persisted before returning to the parent.
             # This guarantees the result is durable and child operations won't be re-executed on replay
             # (unless replay_children=True for large payloads).
+            self.state.on_user_function_end(start_info)
             self.state.create_checkpoint(operation_update=success_operation)
 
             logger.debug(
@@ -246,6 +259,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
                 # Checkpoint child context FAIL with blocking (is_sync=True, default).
                 # Must ensure the failure state is persisted before raising the exception.
                 # This guarantees the error is durable and child operations won't be re-executed on replay.
+                self.state.on_user_function_end(start_info, error_object)
                 self.state.create_checkpoint(operation_update=fail_operation)
 
             # InvocationError and its derivatives can be retried.
@@ -262,6 +276,7 @@ def child_handler(
     func: Callable[[], T],
     state: ExecutionState,
     operation_identifier: OperationIdentifier,
+    is_replay: bool,
     config: ChildConfig | None,
 ) -> T:
     """Run a function in a child context.
@@ -272,6 +287,7 @@ def child_handler(
         func: The child context function to execute.
         state: The execution state.
         operation_identifier: The operation identifier for this child context.
+        is_replay: Whether this is replaying this operation.
         config: The child configuration (optional). When `config.is_virtual`
             is True, the child context does not checkpoint (START, SUCCEED, FAIL)
                         for itself.
@@ -288,4 +304,4 @@ def child_handler(
         operation_identifier,
         config or ChildConfig(),
     )
-    return executor.process()
+    return executor.process(is_replay)

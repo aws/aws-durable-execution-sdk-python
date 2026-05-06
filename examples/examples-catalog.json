@@ -580,6 +580,28 @@
           "ApplicationLogLevel": "DEBUG",
           "LogFormat": "JSON"
         }
-      }
+    },
+    {
+      "name": "Plugin",
+      "description": "Test plugin",
+      "handler": "execution_with_plugin.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/plugin/execution_with_plugin.py"
+    },
+    {
+      "name": "Otel Plugin",
+      "description": "Test Otel plugin",
+      "handler": "execution_with_otel.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/plugin/execution_with_otel.py"
+    }
   ]
 }

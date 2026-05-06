@@ -35,6 +35,7 @@ class CheckResult(Generic[T]):
 
     is_ready_to_execute: bool
     has_checkpointed_result: bool
+    is_preexistent: bool
     checkpointed_result: CheckpointedResult | None = None
     deserialized_result: T | None = None
 
@@ -42,7 +43,7 @@ class CheckResult(Generic[T]):
     def create_is_ready_to_execute(
         cls, checkpoint: CheckpointedResult
     ) -> CheckResult[T]:
-        """Create a CheckResult indicating the operation is ready to execute.
+        """Create a CheckResult indicating the operation is ready to execute for the first time
 
         Args:
             checkpoint: The checkpoint data to pass to execute()
@@ -54,6 +55,26 @@ class CheckResult(Generic[T]):
             is_ready_to_execute=True,
             has_checkpointed_result=False,
             checkpointed_result=checkpoint,
+            is_preexistent=False,
+        )
+
+    @classmethod
+    def create_is_ready_to_execute_for_replay(
+        cls, checkpoint: CheckpointedResult
+    ) -> CheckResult[T]:
+        """Create a CheckResult indicating the operation is ready to execute for the first time
+
+        Args:
+            checkpoint: The checkpoint data to pass to execute()
+
+        Returns:
+            CheckResult with is_ready_to_execute=True
+        """
+        return cls(
+            is_ready_to_execute=True,
+            has_checkpointed_result=False,
+            checkpointed_result=checkpoint,
+            is_preexistent=True,
         )
 
     @classmethod
@@ -66,7 +87,11 @@ class CheckResult(Generic[T]):
         Returns:
             CheckResult indicating process() should check status again
         """
-        return cls(is_ready_to_execute=False, has_checkpointed_result=False)
+        return cls(
+            is_ready_to_execute=False,
+            has_checkpointed_result=False,
+            is_preexistent=False,
+        )
 
     @classmethod
     def create_completed(cls, result: T) -> CheckResult[T]:
@@ -82,6 +107,7 @@ class CheckResult(Generic[T]):
             is_ready_to_execute=False,
             has_checkpointed_result=True,
             deserialized_result=result,
+            is_preexistent=True,
         )
 
 
@@ -104,7 +130,7 @@ class OperationExecutor(ABC, Generic[T]):
     """
 
     @abstractmethod
-    def check_result_status(self) -> CheckResult[T]:
+    def check_result_status(self, is_replay: bool) -> CheckResult[T]:
         """Check operation status and create START checkpoint if needed.
 
         Called twice by process() when creating synchronous checkpoints: once before
@@ -130,7 +156,7 @@ class OperationExecutor(ABC, Generic[T]):
         ...  # pragma: no cover
 
     @abstractmethod
-    def execute(self, checkpointed_result: CheckpointedResult) -> T:
+    def execute(self, checkpointed_result: CheckpointedResult, is_replay: bool) -> T:
         """Execute operation logic with checkpoint data.
 
         This method is called when the operation is ready to execute its core logic.
@@ -138,6 +164,7 @@ class OperationExecutor(ABC, Generic[T]):
 
         Args:
             checkpointed_result: The checkpoint data containing operation state
+            is_replay: Whether this is a replay execution
 
         Returns:
             The result of executing the operation
@@ -147,7 +174,7 @@ class OperationExecutor(ABC, Generic[T]):
         """
         ...  # pragma: no cover
 
-    def process(self) -> T:
+    def process(self, is_replay: bool) -> T:
         """Process operation with checkpoint response handling.
 
         Orchestrates the double-check pattern:
@@ -165,11 +192,11 @@ class OperationExecutor(ABC, Generic[T]):
             May raise operation-specific errors from check_result_status() or execute()
         """
         # Check 1: Entry (handles replay and existing checkpoints)
-        result = self.check_result_status()
+        result = self.check_result_status(is_replay)
 
         # If checkpoint was created, verify checkpoint response for immediate status change
         if not result.is_ready_to_execute and not result.has_checkpointed_result:
-            result = self.check_result_status()
+            result = self.check_result_status(is_replay)
 
         # Return terminal result if available (can be None for operations that return None)
         if result.has_checkpointed_result:
@@ -180,7 +207,7 @@ class OperationExecutor(ABC, Generic[T]):
             if result.checkpointed_result is None:
                 msg = "CheckResult is marked ready to execute but checkpointed result is not set."
                 raise InvalidStateError(msg)
-            return self.execute(result.checkpointed_result)
+            return self.execute(result.checkpointed_result, result.is_preexistent)
 
         # Invalid state - neither terminal nor ready to execute
         msg = "Invalid CheckResult state: neither terminal nor ready to execute"

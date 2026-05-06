@@ -11,6 +11,8 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationUpdate,
+    OperationSubType,
+    OperationType,
 )
 from aws_durable_execution_sdk_python.logger import LogInfo
 from aws_durable_execution_sdk_python.operation.base import (
@@ -74,7 +76,7 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
         self.operation_identifier = operation_identifier
         self.context_logger = context_logger
 
-    def check_result_status(self) -> CheckResult[T]:
+    def check_result_status(self, is_replay: bool) -> CheckResult[T]:
         """Check operation status and create START checkpoint if needed.
 
         Called twice by process() when creating synchronous checkpoints: once before
@@ -135,13 +137,18 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
             # Proceed directly to execute with current checkpoint data
 
         # Ready to execute check function
+        if checkpointed_result.is_existent():
+            return CheckResult.create_is_ready_to_execute_for_replay(
+                checkpointed_result
+            )
         return CheckResult.create_is_ready_to_execute(checkpointed_result)
 
-    def execute(self, checkpointed_result: CheckpointedResult) -> T:
+    def execute(self, checkpointed_result: CheckpointedResult, is_replay: bool) -> T:
         """Execute check function and handle decision.
 
         Args:
             checkpointed_result: The checkpoint data
+            is_replay: Whether this is a replay execution
 
         Returns:
             The final state when condition is met
@@ -176,6 +183,13 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
         if checkpointed_result.operation and checkpointed_result.operation.step_details:
             attempt = checkpointed_result.operation.step_details.attempt + 1
 
+        start_info = self.state.on_user_function_start(
+            self.operation_identifier,
+            OperationType.STEP,
+            OperationSubType.WAIT_FOR_CONDITION,
+            is_replay,
+            attempt,
+        )
         try:
             # Execute the check function with the injected logger
             check_context = WaitForConditionCheckContext(
@@ -217,6 +231,7 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
                 # Checkpoint SUCCEED operation with blocking (is_sync=True, default).
                 # Must ensure the final state is persisted before returning to the caller.
                 # This guarantees the condition result is durable and won't be re-evaluated on replay.
+                self.state.on_user_function_end(start_info)
                 self.state.create_checkpoint(operation_update=success_operation)
 
                 logger.debug(
@@ -250,6 +265,7 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
             # Checkpoint RETRY operation with blocking (is_sync=True, default).
             # Must ensure the current state and next attempt timestamp are persisted before suspending.
             # This guarantees the polling state is durable and will resume correctly on the next invocation.
+            self.state.on_user_function_end(start_info)
             self.state.create_checkpoint(operation_update=retry_operation)
 
             suspend_with_optional_resume_delay(
@@ -273,6 +289,7 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
             # Checkpoint FAIL operation with blocking (is_sync=True, default).
             # Must ensure the failure state is persisted before raising the exception.
             # This guarantees the error is durable and the condition won't be re-evaluated on replay.
+            self.state.on_user_function_end(start_info, ErrorObject.from_exception(e))
             self.state.create_checkpoint(operation_update=fail_operation)
             raise
 

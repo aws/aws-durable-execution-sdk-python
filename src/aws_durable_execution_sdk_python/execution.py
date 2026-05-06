@@ -6,7 +6,6 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from aws_durable_execution_sdk_python.context import DurableContext
@@ -26,6 +25,12 @@ from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
     OperationType,
     OperationUpdate,
+    InvocationStatus,
+    DurableExecutionInvocationOutput,
+)
+from aws_durable_execution_sdk_python.plugin import (
+    DurableExecutionPlugin,
+    PluginExecutor,
 )
 from aws_durable_execution_sdk_python.state import ExecutionState, ReplayStatus
 
@@ -149,62 +154,6 @@ class DurableExecutionInvocationInputWithClient(DurableExecutionInvocationInput)
         )
 
 
-class InvocationStatus(Enum):
-    SUCCEEDED = "SUCCEEDED"
-    FAILED = "FAILED"
-    PENDING = "PENDING"
-
-
-@dataclass(frozen=True)
-class DurableExecutionInvocationOutput:
-    """Representation the DurableExecutionInvocationOutput. This is what the Durable lambda handler returns.
-
-    If the execution has been already completed via an update to the EXECUTION operation via CheckpointDurableExecution,
-    payload must be empty for SUCCEEDED/FAILED status.
-    """
-
-    status: InvocationStatus
-    result: str | None = None
-    error: ErrorObject | None = None
-
-    @classmethod
-    def from_dict(
-        cls, data: MutableMapping[str, Any]
-    ) -> DurableExecutionInvocationOutput:
-        """Create an instance from a dictionary.
-
-        Args:
-            data: Dictionary with camelCase keys matching the original structure
-
-        Returns:
-            A DurableExecutionInvocationOutput instance
-        """
-        status = InvocationStatus(data.get("Status"))
-        error = ErrorObject.from_dict(data["Error"]) if data.get("Error") else None
-        return cls(status=status, result=data.get("Result"), error=error)
-
-    def to_dict(self) -> MutableMapping[str, Any]:
-        """Convert to a dictionary with the original field names.
-
-        Returns:
-            Dictionary with the original camelCase keys
-        """
-        result: MutableMapping[str, Any] = {"Status": self.status.value}
-
-        if self.result is not None:
-            # large payloads return "", because checkpointed already
-            result["Result"] = self.result
-        if self.error:
-            result["Error"] = self.error.to_dict()
-
-        return result
-
-    @classmethod
-    def create_succeeded(cls, result: str) -> DurableExecutionInvocationOutput:
-        """Create a succeeded invocation output."""
-        return cls(status=InvocationStatus.SUCCEEDED, result=result)
-
-
 # endregion Invocation models
 
 
@@ -212,14 +161,29 @@ def durable_execution(
     func: Callable[[Any, DurableContext], Any] | None = None,
     *,
     boto3_client: Boto3LambdaClient | None = None,
+    plugins: list[DurableExecutionPlugin] | None = None,
 ) -> Callable[[Any, LambdaContext], Any]:
+    """
+    Decorator to create a durable execution handler.
+
+    Args:
+        func: The user function to decorate
+        boto3_client: Optional boto3 Lambda client to use
+        plugins: Optional list of plugins to use (EXPERIMENTAL: This
+            parameter may change or be removed.)
+    """
     # Decorator called with parameters
     if func is None:
         logger.debug("Decorator called with parameters")
-        return functools.partial(durable_execution, boto3_client=boto3_client)
+        return functools.partial(
+            durable_execution, boto3_client=boto3_client, plugins=plugins
+        )
 
     logger.debug("Starting durable execution handler...")
 
+    plugin_executor = PluginExecutor(plugins)
+
+    @plugin_executor.handle_durable_output
     def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
         invocation_input: DurableExecutionInvocationInput
         service_client: DurableServiceClient
@@ -255,6 +219,7 @@ def durable_execution(
             operations={},
             service_client=service_client,
             replay_status=ReplayStatus.NEW,
+            plugin_executor=plugin_executor,
         )
 
         try:
@@ -313,7 +278,10 @@ def durable_execution(
             logger.debug(
                 "%s entering user-space...", invocation_input.durable_execution_arn
             )
-            user_future = executor.submit(func, input_event, durable_context)
+            user_future = executor.submit(
+                wrap_durable_function(plugin_executor, func, durable_context),
+                input_event,
+            )
 
             logger.debug(
                 "%s waiting for user code completion...",
@@ -459,6 +427,24 @@ def durable_execution(
                 return result
 
     return wrapper
+
+
+def wrap_durable_function(
+    plugin_executor: PluginExecutor,
+    user_durable_func: Callable[[Any, DurableContext], Any] | None,
+    durable_context: DurableContext,
+):
+    plugin_executor.on_invocation_start(
+        durable_context.state.durable_execution_arn,
+        durable_context.state.is_replaying(),
+        durable_context.state.get_execution_operation().start_timestamp,
+        durable_context.lambda_context,
+    )
+
+    def wrapped(input_event: Any) -> Any:
+        return user_durable_func(input_event, durable_context)
+
+    return wrapped
 
 
 def handle_checkpoint_error(error: CheckpointError) -> DurableExecutionInvocationOutput:

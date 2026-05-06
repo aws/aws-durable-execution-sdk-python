@@ -23,7 +23,6 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.execution import (
     DurableExecutionInvocationInput,
     DurableExecutionInvocationInputWithClient,
-    DurableExecutionInvocationOutput,
     InitialExecutionState,
     InvocationStatus,
     durable_execution,
@@ -46,7 +45,9 @@ from aws_durable_execution_sdk_python.lambda_service import (
     StateOutput,
     StepDetails,
     WaitDetails,
+    DurableExecutionInvocationOutput,
 )
+from aws_durable_execution_sdk_python.plugin import DurableExecutionPlugin
 
 LARGE_RESULT = "large_success" * 1024 * 1024
 
@@ -2828,3 +2829,295 @@ def test_durable_execution_retryable_initial_pagination_error_raises():
             _make_invocation_input(mock_client, next_marker="next-page-marker"),
             _make_lambda_context(),
         )
+
+
+# region Plugin Integration Tests
+
+
+class _RecordingPlugin(DurableExecutionPlugin):
+    """Plugin that records all hook calls for assertion."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def on_execution_start(self, info):
+        self.calls.append("execution_start")
+
+    def on_execution_end(self, info):
+        self.calls.append(f"execution_end:{info.status.value}")
+
+    def on_invocation_start(self, info):
+        self.calls.append("invocation_start")
+
+    def on_invocation_end(self, info):
+        self.calls.append(f"invocation_end:{info.status.value}")
+
+    def on_operation_start(self, info):
+        self.calls.append(f"operation_start:{info.operation_id}")
+
+    def on_operation_end(self, info):
+        self.calls.append(f"operation_end:{info.operation_id}")
+
+    def on_user_function_start(self, info):
+        self.calls.append(f"attempt_start:{info.operation_id}")
+
+    def on_user_function_end(self, info):
+        self.calls.append(f"attempt_end:{info.operation_id}")
+
+
+class _FailingPlugin(DurableExecutionPlugin):
+    """Plugin that raises on every hook call."""
+
+    def on_execution_start(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_execution_end(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_invocation_start(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_invocation_end(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_operation_start(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_operation_end(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_user_function_start(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_user_function_end(self, info):
+        raise RuntimeError("plugin boom")
+
+
+def test_durable_execution_with_plugins_success():
+    """Test that plugins receive invocation start/end and execution end on success."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    # ExecutionStartInfo dispatches to on_invocation_start in the match block
+    assert "invocation_start" in plugin.calls
+    assert "invocation_end:SUCCEEDED" in plugin.calls
+    assert "execution_end:SUCCEEDED" in plugin.calls
+
+
+def test_durable_execution_with_plugins_failure():
+    """Test that plugins receive invocation end and execution end on user error."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "user error"
+        raise ValueError(msg)
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert "invocation_start" in plugin.calls
+    assert "invocation_end:FAILED" in plugin.calls
+    assert "execution_end:FAILED" in plugin.calls
+
+
+def test_durable_execution_with_plugins_pending():
+    """Test that plugins receive invocation end with PENDING status on suspend."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        raise SuspendExecution("test")
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.PENDING.value
+    assert "invocation_start" in plugin.calls
+    assert "invocation_end:PENDING" in plugin.calls
+    # Execution end should NOT be fired for PENDING
+    execution_end_calls = [c for c in plugin.calls if c.startswith("execution_end")]
+    assert len(execution_end_calls) == 0
+
+
+def test_durable_execution_with_plugins_retryable_error():
+    """Test that plugins receive invocation end with RETRY status on retryable error."""
+    mock_client = Mock(spec=DurableServiceClient)
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "Retriable error"
+        raise InvocationError(msg)
+
+    with pytest.raises(InvocationError):
+        test_handler(
+            _make_invocation_input(mock_client),
+            _make_lambda_context(),
+        )
+
+    assert "invocation_start" in plugin.calls
+    assert "invocation_end:RETRY" in plugin.calls
+
+
+def test_durable_execution_with_multiple_plugins():
+    """Test that multiple plugins all receive callbacks."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    plugin1 = _RecordingPlugin()
+    plugin2 = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin1, plugin2])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert "invocation_start" in plugin1.calls
+    assert "invocation_start" in plugin2.calls
+    assert "invocation_end:SUCCEEDED" in plugin1.calls
+    assert "invocation_end:SUCCEEDED" in plugin2.calls
+
+
+def test_durable_execution_with_failing_plugin_does_not_break_execution():
+    """Test that a failing plugin does not prevent the handler from completing."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    failing_plugin = _FailingPlugin()
+    recording_plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[failing_plugin, recording_plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    # Execution should still succeed despite the failing plugin
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    # The recording plugin should still have been called
+    assert "invocation_start" in recording_plugin.calls
+    assert "invocation_end:SUCCEEDED" in recording_plugin.calls
+
+
+def test_durable_execution_with_no_plugins():
+    """Test that passing no plugins (None) works correctly."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    @durable_execution(plugins=None)
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+
+
+def test_durable_execution_with_empty_plugins_list():
+    """Test that passing an empty plugins list works correctly."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    @durable_execution(plugins=[])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+
+
+def test_durable_execution_decorator_with_plugins_and_boto3_client():
+    """Test that plugins parameter works alongside boto3_client parameter."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    plugin = _RecordingPlugin()
+
+    # When using DurableExecutionInvocationInputWithClient, boto3_client is ignored
+    # but we verify the decorator accepts both parameters
+    @durable_execution(boto3_client=None, plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert "invocation_start" in plugin.calls
+
+
+# endregion Plugin Integration Tests
