@@ -68,7 +68,7 @@ def test_step_handler_already_succeeded():
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step1", None, "test_step"),
+        OperationIdentifier("step1", OperationSubType.STEP, None, "test_step"),
         None,
         mock_logger,
     )
@@ -97,7 +97,7 @@ def test_step_handler_already_succeeded_none_result():
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step2", None, "test_step"),
+        OperationIdentifier("step2", OperationSubType.STEP, None, "test_step"),
         None,
         mock_logger,
     )
@@ -129,7 +129,7 @@ def test_step_handler_already_failed():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step3", None, "test_step"),
+            OperationIdentifier("step3", OperationSubType.STEP, None, "test_step"),
             None,
             mock_logger,
         )
@@ -158,7 +158,7 @@ def test_step_handler_started_at_most_once():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step4", None, "test_step"),
+            OperationIdentifier("step4", OperationSubType.STEP, None, "test_step"),
             config,
             mock_logger,
         )
@@ -182,12 +182,13 @@ def test_step_handler_started_at_least_once():
 
     config = StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY)
     mock_callable = Mock(return_value="success_result")
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
 
     step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step5", None, "test_step"),
+        OperationIdentifier("step5", OperationSubType.STEP, None, "test_step"),
         config,
         mock_logger,
     )
@@ -202,13 +203,14 @@ def test_step_handler_success_at_least_once():
 
     config = StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY)
     mock_callable = Mock(return_value="success_result")
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step6", None, "test_step"),
+        OperationIdentifier("step6", OperationSubType.STEP, None, "test_step"),
         config,
         mock_logger,
     )
@@ -253,13 +255,14 @@ def test_step_handler_success_at_most_once():
 
     config = StepConfig(step_semantics=StepSemantics.AT_MOST_ONCE_PER_RETRY)
     mock_callable = Mock(return_value="success_result")
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step7", None, "test_step"),
+        OperationIdentifier("step7", OperationSubType.STEP, None, "test_step"),
         config,
         mock_logger,
     )
@@ -294,6 +297,7 @@ def test_step_handler_non_retriable_execution_error():
     mock_state.durable_execution_arn = "test_arn"
 
     mock_callable = Mock(side_effect=ExecutionError("Do Not Retry"))
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
@@ -301,7 +305,7 @@ def test_step_handler_non_retriable_execution_error():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step8", None, "test_step"),
+            OperationIdentifier("step8", OperationSubType.STEP, None, "test_step"),
             None,
             mock_logger,
         )
@@ -319,6 +323,7 @@ def test_step_handler_retry_success():
     )
     config = StepConfig(retry_strategy=mock_retry_strategy)
     mock_callable = Mock(side_effect=RuntimeError("Test error"))
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
@@ -326,7 +331,7 @@ def test_step_handler_retry_success():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step9", None, "test_step"),
+            OperationIdentifier("step9", OperationSubType.STEP, None, "test_step"),
             config,
             mock_logger,
         )
@@ -362,6 +367,7 @@ def test_step_handler_retry_exhausted():
     )
     config = StepConfig(retry_strategy=mock_retry_strategy)
     mock_callable = Mock(side_effect=RuntimeError("Test error"))
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
@@ -369,7 +375,7 @@ def test_step_handler_retry_exhausted():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step10", None, "test_step"),
+            OperationIdentifier("step10", OperationSubType.STEP, None, "test_step"),
             config,
             mock_logger,
         )
@@ -406,6 +412,7 @@ def test_step_handler_retry_interrupted_error():
     config = StepConfig(retry_strategy=mock_retry_strategy)
     interrupted_error = StepInterruptedError("Step interrupted")
     mock_callable = Mock(side_effect=interrupted_error)
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
@@ -413,7 +420,7 @@ def test_step_handler_retry_interrupted_error():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step11", None, "test_step"),
+            OperationIdentifier("step11", OperationSubType.STEP, None, "test_step"),
             config,
             mock_logger,
         )
@@ -451,7 +458,7 @@ def test_step_handler_retry_with_existing_attempts():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step12", None, "test_step"),
+            OperationIdentifier("step12", OperationSubType.STEP, None, "test_step"),
             config,
             mock_logger,
         )
@@ -487,7 +494,7 @@ def test_step_handler_pending_without_existing_attempts():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step12", None, "test_step"),
+            OperationIdentifier("step12", OperationSubType.STEP, None, "test_step"),
             config,
             mock_logger,
         )
@@ -519,6 +526,7 @@ def test_step_handler_retry_handler_no_exception(mock_retry_handler):
     mock_retry_handler.return_value = None
 
     mock_callable = Mock(side_effect=RuntimeError("Test error"))
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
@@ -529,7 +537,7 @@ def test_step_handler_retry_handler_no_exception(mock_retry_handler):
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step13", None, "test_step"),
+            OperationIdentifier("step13", OperationSubType.STEP, None, "test_step"),
             None,
             mock_logger,
         )
@@ -548,13 +556,14 @@ def test_step_handler_custom_serdes_success():
     )
     complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
     mock_callable = Mock(return_value=complex_result)
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
     step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step6", None, "test_step"),
+        OperationIdentifier("step6", OperationSubType.STEP, None, "test_step"),
         config,
         mock_logger,
     )
@@ -588,7 +597,7 @@ def test_step_handler_custom_serdes_already_succeeded():
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step1", None, "test_step"),
+        OperationIdentifier("step1", OperationSubType.STEP, None, "test_step"),
         StepConfig(serdes=CustomDictSerDes()),
         mock_logger,
     )
@@ -618,13 +627,16 @@ def test_step_immediate_response_get_checkpoint_called_twice():
 
     config = StepConfig(step_semantics=StepSemantics.AT_MOST_ONCE_PER_RETRY)
     mock_callable = Mock(return_value="success_result")
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step_immediate_1", None, "test_step"),
+        OperationIdentifier(
+            "step_immediate_1", OperationSubType.STEP, None, "test_step"
+        ),
         config,
         mock_logger,
     )
@@ -652,13 +664,16 @@ def test_step_immediate_response_create_checkpoint_sync_at_most_once():
 
     config = StepConfig(step_semantics=StepSemantics.AT_MOST_ONCE_PER_RETRY)
     mock_callable = Mock(return_value="success_result")
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
     step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step_immediate_2", None, "test_step"),
+        OperationIdentifier(
+            "step_immediate_2", OperationSubType.STEP, None, "test_step"
+        ),
         config,
         mock_logger,
     )
@@ -679,13 +694,16 @@ def test_step_immediate_response_create_checkpoint_async_at_least_once():
 
     config = StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY)
     mock_callable = Mock(return_value="success_result")
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
     step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step_immediate_3", None, "test_step"),
+        OperationIdentifier(
+            "step_immediate_3", OperationSubType.STEP, None, "test_step"
+        ),
         config,
         mock_logger,
     )
@@ -718,13 +736,16 @@ def test_step_immediate_response_immediate_success():
 
     config = StepConfig(step_semantics=StepSemantics.AT_MOST_ONCE_PER_RETRY)
     mock_callable = Mock(return_value="immediate_success_result")
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step_immediate_4", None, "test_step"),
+        OperationIdentifier(
+            "step_immediate_4", OperationSubType.STEP, None, "test_step"
+        ),
         config,
         mock_logger,
     )
@@ -756,6 +777,7 @@ def test_step_immediate_response_immediate_failure():
     config = StepConfig(step_semantics=StepSemantics.AT_MOST_ONCE_PER_RETRY)
     # Make the step function raise an error
     mock_callable = Mock(side_effect=RuntimeError("Step execution error"))
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
@@ -773,7 +795,9 @@ def test_step_immediate_response_immediate_failure():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step_immediate_5", None, "test_step"),
+            OperationIdentifier(
+                "step_immediate_5", OperationSubType.STEP, None, "test_step"
+            ),
             config,
             mock_logger,
         )
@@ -802,13 +826,16 @@ def test_step_immediate_response_no_immediate_response():
 
     config = StepConfig(step_semantics=StepSemantics.AT_MOST_ONCE_PER_RETRY)
     mock_callable = Mock(return_value="normal_execution_result")
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step_immediate_6", None, "test_step"),
+        OperationIdentifier(
+            "step_immediate_6", OperationSubType.STEP, None, "test_step"
+        ),
         config,
         mock_logger,
     )
@@ -842,7 +869,9 @@ def test_step_immediate_response_already_completed():
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step_immediate_7", None, "test_step"),
+        OperationIdentifier(
+            "step_immediate_7", OperationSubType.STEP, None, "test_step"
+        ),
         config,
         mock_logger,
     )
@@ -875,6 +904,7 @@ def test_step_executes_function_when_second_check_returns_started():
     mock_state.get_checkpoint_result.side_effect = [not_found, started]
 
     mock_step_function = Mock(return_value="result")
+    mock_state.wrap_user_function.return_value = mock_step_function
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
@@ -882,7 +912,9 @@ def test_step_executes_function_when_second_check_returns_started():
         func=mock_step_function,
         config=StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY),
         state=mock_state,
-        operation_identifier=OperationIdentifier("step-1", None, "test_step"),
+        operation_identifier=OperationIdentifier(
+            "step-1", OperationSubType.STEP, None, "test_step"
+        ),
         context_logger=mock_logger,
     )
     result = executor.process()
@@ -922,13 +954,14 @@ def test_step_creates_start_checkpoint_when_status_is_ready():
 
     config = StepConfig(step_semantics=StepSemantics.AT_MOST_ONCE_PER_RETRY)
     mock_callable = Mock(return_value="ready_step_result")
+    mock_state.wrap_user_function.return_value = mock_callable
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step_ready_1", None, "test_step"),
+        OperationIdentifier("step_ready_1", OperationSubType.STEP, None, "test_step"),
         config,
         mock_logger,
     )

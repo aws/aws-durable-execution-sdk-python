@@ -602,6 +602,17 @@
         "ExecutionTimeout": 300
       },
       "path": "./src/parallel/parallel_with_named_branches.py"
+    },
+    {
+      "name": "Plugin",
+      "description": "Test plugin",
+      "handler": "execution_with_plugin.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/plugin/execution_with_plugin.py"
     }
   ]
 }

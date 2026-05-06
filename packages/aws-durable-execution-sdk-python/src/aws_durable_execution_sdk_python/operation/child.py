@@ -154,9 +154,15 @@ class ChildOperationExecutor(OperationExecutor[T]):
             self.operation_identifier.operation_id,
             self.operation_identifier.name,
         )
-
         try:
-            raw_result: T = self.func()
+            # todo: fix attempt (checkpointed_result.is_existent is always True)
+            wrapped_user_func = self.state.wrap_user_function(
+                self.func,
+                self.operation_identifier,
+                checkpointed_result.is_replay_children(),
+                attempt=None if checkpointed_result.is_existent() else 1,
+            )
+            raw_result: T = wrapped_user_func()
 
             if self.is_virtual:
                 logger.debug(

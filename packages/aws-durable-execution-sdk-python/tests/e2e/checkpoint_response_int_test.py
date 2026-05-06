@@ -28,7 +28,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 
 if TYPE_CHECKING:
-    from aws_durable_execution_sdk_python.types import StepContext
+    from aws_durable_execution_sdk_python.types import StepContext, LambdaContext
 
 
 def create_mock_checkpoint_with_operations():
@@ -101,7 +101,7 @@ def test_end_to_end_step_operation_with_double_check():
         mock_client.checkpoint = mock_checkpoint
 
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -164,7 +164,7 @@ def test_end_to_end_multiple_operations_execute_sequentially():
         mock_client.checkpoint = mock_checkpoint
 
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -220,7 +220,7 @@ def test_end_to_end_wait_operation_with_double_check():
         mock_client.checkpoint = mock_checkpoint
 
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -279,7 +279,7 @@ def test_end_to_end_checkpoint_synchronization_with_operations_list():
         mock_client.checkpoint = mock_checkpoint
 
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -388,7 +388,7 @@ def test_callback_deferred_error_handling_to_result():
         mock_client.checkpoint = mock_checkpoint
 
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -440,7 +440,7 @@ def test_end_to_end_invoke_operation_with_double_check():
         mock_client.checkpoint = mock_checkpoint
 
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -499,7 +499,7 @@ def test_end_to_end_child_context_with_async_checkpoint():
         mock_client.checkpoint = mock_checkpoint
 
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -598,7 +598,7 @@ def test_end_to_end_child_context_replay_children_mode():
         mock_client.checkpoint = mock_checkpoint
 
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -665,7 +665,7 @@ def test_end_to_end_child_context_error_handling():
         mock_client.checkpoint = mock_checkpoint
 
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -730,7 +730,7 @@ def test_end_to_end_child_context_invocation_error_reraised():
         mock_client.checkpoint = mock_checkpoint
 
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [

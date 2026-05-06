@@ -1,0 +1,9 @@
+#!/bin/sh
+
+if hatch fmt --check; then
+    echo "Hatch fmt check passed!"
+else
+    hatch fmt
+    echo "Error: hatch fmt modified your files. Please re-stage and commit again."
+    exit 1
+fi

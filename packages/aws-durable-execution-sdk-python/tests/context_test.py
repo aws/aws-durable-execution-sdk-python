@@ -36,6 +36,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
     OperationStatus,
     OperationType,
+    OperationSubType,
 )
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 from aws_durable_execution_sdk_python.waits import (
@@ -288,7 +289,9 @@ def test_create_callback_basic(mock_executor_class):
 
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_operation_id, None, None),
+        operation_identifier=OperationIdentifier(
+            expected_operation_id, OperationSubType.CALLBACK, None, None
+        ),
         config=CallbackConfig(),
     )
     mock_executor.process.assert_called_once()
@@ -320,7 +323,9 @@ def test_create_callback_with_name_and_config(mock_executor_class):
 
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_operation_id, None, None),
+        operation_identifier=OperationIdentifier(
+            expected_operation_id, OperationSubType.CALLBACK, None, None
+        ),
         config=config,
     )
     mock_executor.process.assert_called_once()
@@ -352,7 +357,9 @@ def test_create_callback_with_parent_id(mock_executor_class):
 
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_operation_id, "parent123"),
+        operation_identifier=OperationIdentifier(
+            expected_operation_id, OperationSubType.CALLBACK, "parent123"
+        ),
         config=CallbackConfig(),
     )
 
@@ -417,7 +424,9 @@ def test_step_basic(mock_executor_class):
     assert result == "step_result"
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_operation_id, None, None),
+        operation_identifier=OperationIdentifier(
+            expected_operation_id, OperationSubType.STEP, None, None
+        ),
         config=ANY,  # StepConfig() is created in context.step()
         func=mock_callable,
         context_logger=ANY,
@@ -456,7 +465,9 @@ def test_step_with_name_and_config(mock_executor_class):
     assert result == "configured_result"
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_id, None, None),
+        operation_identifier=OperationIdentifier(
+            expected_id, OperationSubType.STEP, None, None
+        ),
         config=config,
         func=mock_callable,
         context_logger=ANY,
@@ -493,7 +504,9 @@ def test_step_with_parent_id(mock_executor_class):
 
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_id, "parent123"),
+        operation_identifier=OperationIdentifier(
+            expected_id, OperationSubType.STEP, "parent123"
+        ),
         config=ANY,
         func=mock_callable,
         context_logger=ANY,
@@ -533,10 +546,10 @@ def test_step_increments_counter(mock_executor_class):
     assert context._step_counter.get_current() == 12  # noqa: SLF001
     assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id1, None, None)
+    ] == OperationIdentifier(expected_id1, OperationSubType.STEP, None, None)
     assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id2, None, None)
+    ] == OperationIdentifier(expected_id2, OperationSubType.STEP, None, None)
 
 
 @patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
@@ -564,7 +577,9 @@ def test_step_with_original_name(mock_executor_class):
 
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_id, None, "override_name"),
+        operation_identifier=OperationIdentifier(
+            expected_id, OperationSubType.STEP, None, "override_name"
+        ),
         config=ANY,
         func=mock_callable,
         context_logger=ANY,
@@ -599,7 +614,9 @@ def test_invoke_basic(mock_executor_class):
 
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_operation_id, None, None),
+        operation_identifier=OperationIdentifier(
+            expected_operation_id, OperationSubType.CHAINED_INVOKE, None, None
+        ),
         function_name="test_function",
         payload="test_payload",
         config=ANY,  # InvokeConfig() is created in context.invoke()
@@ -636,7 +653,9 @@ def test_invoke_with_name_and_config(mock_executor_class):
     assert result == "configured_result"
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_id, None, "named_invoke"),
+        operation_identifier=OperationIdentifier(
+            expected_id, OperationSubType.CHAINED_INVOKE, None, "named_invoke"
+        ),
         function_name="test_function",
         payload={"key": "value"},
         config=config,
@@ -668,7 +687,9 @@ def test_invoke_with_parent_id(mock_executor_class):
 
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_id, "parent123", None),
+        operation_identifier=OperationIdentifier(
+            expected_id, OperationSubType.CHAINED_INVOKE, "parent123", None
+        ),
         function_name="test_function",
         payload=None,
         config=ANY,
@@ -703,10 +724,10 @@ def test_invoke_increments_counter(mock_executor_class):
     assert context._step_counter.get_current() == 12  # noqa: SLF001
     assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id1, None, None)
+    ] == OperationIdentifier(expected_id1, OperationSubType.CHAINED_INVOKE, None, None)
     assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id2, None, None)
+    ] == OperationIdentifier(expected_id2, OperationSubType.CHAINED_INVOKE, None, None)
 
 
 @patch("aws_durable_execution_sdk_python.context.InvokeOperationExecutor")
@@ -733,7 +754,9 @@ def test_invoke_with_none_payload(mock_executor_class):
 
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_id, None, None),
+        operation_identifier=OperationIdentifier(
+            expected_id, OperationSubType.CHAINED_INVOKE, None, None
+        ),
         function_name="test_function",
         payload=None,
         config=ANY,
@@ -778,7 +801,7 @@ def test_invoke_with_custom_serdes(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_id, None, "custom_serdes_invoke"
+            expected_id, OperationSubType.CHAINED_INVOKE, None, "custom_serdes_invoke"
         ),
         function_name="test_function",
         payload={"original": "data"},
@@ -811,7 +834,9 @@ def test_wait_basic(mock_executor_class):
 
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_operation_id, None, None),
+        operation_identifier=OperationIdentifier(
+            expected_operation_id, OperationSubType.WAIT, None, None
+        ),
         seconds=30,
     )
     mock_executor.process.assert_called_once()
@@ -840,7 +865,9 @@ def test_wait_with_name(mock_executor_class):
 
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_id, None, "test_wait"),
+        operation_identifier=OperationIdentifier(
+            expected_id, OperationSubType.WAIT, None, "test_wait"
+        ),
         seconds=60,
     )
     mock_executor.process.assert_called_once()
@@ -869,7 +896,9 @@ def test_wait_with_parent_id(mock_executor_class):
 
     mock_executor_class.assert_called_once_with(
         state=mock_state,
-        operation_identifier=OperationIdentifier(expected_id, "parent123"),
+        operation_identifier=OperationIdentifier(
+            expected_id, OperationSubType.WAIT, "parent123"
+        ),
         seconds=45,
     )
     mock_executor.process.assert_called_once()
@@ -901,10 +930,10 @@ def test_wait_increments_counter(mock_executor_class):
     assert context._step_counter.get_current() == 12  # noqa: SLF001
     assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id1, None, None)
+    ] == OperationIdentifier(expected_id1, OperationSubType.WAIT, None, None)
     assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id2, None, None)
+    ] == OperationIdentifier(expected_id2, OperationSubType.WAIT, None, None)
 
 
 @patch("aws_durable_execution_sdk_python.context.WaitOperationExecutor")
@@ -974,7 +1003,7 @@ def test_run_in_child_context_basic(mock_handler):
     call_args = mock_handler.call_args
     assert call_args[1]["state"] is mock_state
     assert call_args[1]["operation_identifier"] == OperationIdentifier(
-        expected_operation_id, None, None
+        expected_operation_id, OperationSubType.RUN_IN_CHILD_CONTEXT, None, None
     )
     assert call_args[1]["config"] is None
 
@@ -1004,7 +1033,7 @@ def test_run_in_child_context_with_name_and_config(mock_handler):
     assert result == "configured_child_result"
     call_args = mock_handler.call_args
     assert call_args[1]["operation_identifier"] == OperationIdentifier(
-        expected_id, None, "original_function"
+        expected_id, OperationSubType.RUN_IN_CHILD_CONTEXT, None, "original_function"
     )
     assert call_args[1]["config"] is config
 
@@ -1037,7 +1066,7 @@ def test_run_in_child_context_with_parent_id(mock_executor_class):
 
     call_args = mock_executor_class.call_args
     assert call_args[1]["operation_identifier"] == OperationIdentifier(
-        expected_id, "parent456", None
+        expected_id, OperationSubType.RUN_IN_CHILD_CONTEXT, "parent456", None
     )
 
 
@@ -1101,10 +1130,14 @@ def test_run_in_child_context_increments_counter(mock_executor_class):
     assert context._step_counter.get_current() == 7  # noqa: SLF001
     assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id1, None, None)
+    ] == OperationIdentifier(
+        expected_id1, OperationSubType.RUN_IN_CHILD_CONTEXT, None, None
+    )
     assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id2, None, None)
+    ] == OperationIdentifier(
+        expected_id2, OperationSubType.RUN_IN_CHILD_CONTEXT, None, None
+    )
 
 
 @patch("aws_durable_execution_sdk_python.context.child_handler")
@@ -1343,6 +1376,8 @@ def test_map_with_empty_inputs(mock_handler):
     def test_function(context, item, index, items):
         return item
 
+    mock_state.wrap_user_function = lambda func, *args, **kwargs: func
+
     inputs = []
 
     with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
@@ -1362,6 +1397,7 @@ def test_map_with_different_input_types(mock_handler):
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
+    mock_state.wrap_user_function = lambda func, *args, **kwargs: func
 
     def test_function(context, item, index, items):
         return str(item)
@@ -1507,6 +1543,7 @@ def test_parallel_with_empty_callables(mock_handler):
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
+    mock_state.wrap_user_function = lambda func, *args, **kwargs: func
 
     callables = []
 
@@ -1527,6 +1564,7 @@ def test_parallel_with_single_callable(mock_handler):
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
+    mock_state.wrap_user_function = lambda func, *args, **kwargs: func
 
     def single_task(context):
         return "single_result"
@@ -1550,6 +1588,7 @@ def test_parallel_with_many_callables(mock_handler):
     mock_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
+    mock_state.wrap_user_function = lambda func, *args, **kwargs: func
 
     def create_task(i):
         def task(context):
@@ -1664,6 +1703,7 @@ def test_context_map_handler_call():
     # Create mock state and context
     state = Mock()
     state.durable_execution_arn = "test_arn"
+    state.wrap_user_function = lambda func, *args, **kwargs: func
 
     context = create_test_context(state=state)
 
@@ -1704,6 +1744,7 @@ def test_context_parallel_handler_call():
     # Create mock state and context
     state = Mock()
     state.durable_execution_arn = "test_arn"
+    state.wrap_user_function = lambda func, *args, **kwargs: func
 
     context = create_test_context(state=state)
 

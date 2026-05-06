@@ -19,6 +19,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationStatus,
     OperationType,
     StepDetails,
+    OperationSubType,
 )
 from aws_durable_execution_sdk_python.logger import Logger, LogInfo
 from aws_durable_execution_sdk_python.operation.wait_for_condition import (
@@ -59,10 +60,14 @@ def test_wait_for_condition_first_execution_condition_met():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     def wait_strategy(state, attempt):
         return WaitForConditionDecision.stop_polling()
@@ -92,10 +97,14 @@ def test_wait_for_condition_first_execution_condition_not_met():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     def wait_strategy(state, attempt):
         return WaitForConditionDecision.continue_waiting(Duration.from_seconds(30))
@@ -128,10 +137,14 @@ def test_wait_for_condition_already_succeeded():
     mock_state.get_checkpoint_result.return_value = mock_result
 
     mock_logger = Mock(spec=Logger)
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -164,10 +177,14 @@ def test_wait_for_condition_already_succeeded_none_result():
     mock_state.get_checkpoint_result.return_value = mock_result
 
     mock_logger = Mock(spec=Logger)
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -201,10 +218,14 @@ def test_wait_for_condition_already_failed():
     mock_state.get_checkpoint_result.return_value = mock_result
 
     mock_logger = Mock(spec=Logger)
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -237,10 +258,14 @@ def test_wait_for_condition_retry_with_state():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -275,10 +300,14 @@ def test_wait_for_condition_retry_without_state():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -312,10 +341,14 @@ def test_wait_for_condition_retry_invalid_json_state():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -344,11 +377,15 @@ def test_wait_for_condition_check_function_exception():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         msg = "Test error"
         raise ValueError(msg)
+
+    mock_state.wrap_user_function.return_value = check_func
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -378,7 +415,9 @@ def test_wait_for_condition_check_context():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     captured_context = None
 
@@ -386,6 +425,8 @@ def test_wait_for_condition_check_context():
         nonlocal captured_context
         captured_context = context
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -415,10 +456,14 @@ def test_wait_for_condition_delay_seconds_none():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     def wait_strategy(state, attempt):
         return WaitForConditionDecision(should_continue=True, delay=Duration())
@@ -455,10 +500,14 @@ def test_wait_for_condition_no_operation_in_checkpoint():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -504,10 +553,14 @@ def test_wait_for_condition_operation_no_step_details():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -536,10 +589,14 @@ def test_wait_for_condition_custom_delay_seconds():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     def wait_strategy(state, attempt):
         return WaitForConditionDecision(
@@ -574,10 +631,14 @@ def test_wait_for_condition_attempt_number_passed_to_strategy():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     captured_attempt = None
 
@@ -616,10 +677,14 @@ def test_wait_for_condition_attempt_sequence_is_monotonic():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     captured_attempts = []
 
@@ -730,10 +795,14 @@ def test_wait_for_condition_state_passed_to_strategy():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state * 2
+
+    mock_state.wrap_user_function.return_value = check_func
 
     captured_state = None
 
@@ -766,10 +835,14 @@ def test_wait_for_condition_logger_with_log_info():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -801,10 +874,14 @@ def test_wait_for_condition_zero_delay_seconds():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     def wait_strategy(state, attempt):
         return WaitForConditionDecision(
@@ -833,11 +910,15 @@ def test_wait_for_condition_custom_serdes_first_execution_condition_met():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
     complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
 
     def check_func(state, context):
         return complex_result
+
+    mock_state.wrap_user_function.return_value = check_func
 
     def wait_strategy(state, attempt):
         return WaitForConditionDecision.stop_polling()
@@ -877,7 +958,9 @@ def test_wait_for_condition_custom_serdes_already_succeeded():
     mock_state.get_checkpoint_result.return_value = mock_result
 
     mock_logger = Mock(spec=Logger)
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
@@ -919,7 +1002,9 @@ def test_wait_for_condition_pending():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         msg = "Should not be called"
@@ -960,7 +1045,9 @@ def test_wait_for_condition_pending_without_next_attempt():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         msg = "Should not be called"
@@ -999,10 +1086,14 @@ def test_wait_for_condition_checkpoint_called_once_with_is_sync_false():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -1040,7 +1131,9 @@ def test_wait_for_condition_immediate_success_without_executing_check():
     mock_state.get_checkpoint_result.return_value = mock_result
 
     mock_logger = Mock(spec=Logger)
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     # Check function should NOT be called
     def check_func(state, context):
@@ -1082,7 +1175,9 @@ def test_wait_for_condition_immediate_failure_without_executing_check():
     mock_state.get_checkpoint_result.return_value = mock_result
 
     mock_logger = Mock(spec=Logger)
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     # Check function should NOT be called
     def check_func(state, context):
@@ -1129,7 +1224,9 @@ def test_wait_for_condition_pending_suspends_without_executing_check():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     # Check function should NOT be called
     def check_func(state, context):
@@ -1168,7 +1265,9 @@ def test_wait_for_condition_no_checkpoint_executes_check_function():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     check_called = False
 
@@ -1176,6 +1275,8 @@ def test_wait_for_condition_no_checkpoint_executes_check_function():
         nonlocal check_called
         check_called = True
         return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
 
     config = WaitForConditionConfig(
         initial_state=5,
@@ -1212,7 +1313,9 @@ def test_wait_for_condition_already_completed_no_checkpoint_created():
     mock_state.get_checkpoint_result.return_value = mock_result
 
     mock_logger = Mock(spec=Logger)
-    op_id = OperationIdentifier("op1", None, "test_wait")
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
 
     def check_func(state, context):
         return state + 1
@@ -1255,6 +1358,7 @@ def test_wait_for_condition_executes_check_when_checkpoint_not_terminal():
     mock_check_function = Mock(return_value="final_state")
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
+    mock_state.wrap_user_function.return_value = mock_check_function
 
     def mock_wait_strategy(state, attempt):
         return WaitForConditionDecision(
@@ -1268,7 +1372,9 @@ def test_wait_for_condition_executes_check_when_checkpoint_not_terminal():
             wait_strategy=mock_wait_strategy,
         ),
         state=mock_state,
-        operation_identifier=OperationIdentifier("wfc-1", None, "test_wfc"),
+        operation_identifier=OperationIdentifier(
+            "wfc-1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wfc"
+        ),
         context_logger=mock_logger,
     )
     result = executor.process()
@@ -1296,6 +1402,7 @@ def test_wait_for_condition_executes_check_when_checkpoint_not_terminal_duplicat
     )
 
     mock_check_function = Mock(return_value="final_state")
+    mock_state.wrap_user_function.return_value = mock_check_function
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
@@ -1309,7 +1416,9 @@ def test_wait_for_condition_executes_check_when_checkpoint_not_terminal_duplicat
             wait_strategy=mock_wait_strategy,
         ),
         state=mock_state,
-        operation_identifier=OperationIdentifier("wfc-1", None, "test_wfc"),
+        operation_identifier=OperationIdentifier(
+            "wfc-1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wfc"
+        ),
         context_logger=mock_logger,
     )
     result = executor.process()

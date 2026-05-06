@@ -58,9 +58,15 @@ def test_child_handler_not_started(
     mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(return_value="fresh_result")
+    mock_state.wrap_user_function.return_value = mock_callable
 
     result = child_handler(
-        mock_callable, mock_state, OperationIdentifier("op1", None, "test_name"), config
+        mock_callable,
+        mock_state,
+        OperationIdentifier(
+            "op1", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
+        config,
     )
 
     assert result == "fresh_result"
@@ -114,7 +120,12 @@ def test_child_handler_already_succeeded():
     mock_callable = Mock()
 
     result = child_handler(
-        mock_callable, mock_state, OperationIdentifier("op2", None, "test_name"), None
+        mock_callable,
+        mock_state,
+        OperationIdentifier(
+            "op2", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
+        None,
     )
 
     assert result == "cached_result"
@@ -138,7 +149,12 @@ def test_child_handler_already_succeeded_none_result():
     mock_callable = Mock()
 
     result = child_handler(
-        mock_callable, mock_state, OperationIdentifier("op3", None, "test_name"), None
+        mock_callable,
+        mock_state,
+        OperationIdentifier(
+            "op3", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
+        None,
     )
 
     assert result is None
@@ -167,7 +183,9 @@ def test_child_handler_already_failed():
         child_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("op4", None, "test_name"),
+            OperationIdentifier(
+                "op4", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            ),
             None,
         )
 
@@ -207,9 +225,15 @@ def test_child_handler_already_started(
     mock_result.is_replay_children.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(return_value="started_result")
+    mock_state.wrap_user_function.return_value = mock_callable
 
     result = child_handler(
-        mock_callable, mock_state, OperationIdentifier("op5", None, "test_name"), config
+        mock_callable,
+        mock_state,
+        OperationIdentifier(
+            "op5", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
+        config,
     )
 
     assert result == "started_result"
@@ -261,12 +285,15 @@ def test_child_handler_callable_exception(
     mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(side_effect=ValueError("Test error"))
+    mock_state.wrap_user_function.return_value = mock_callable
 
     with pytest.raises(CallableRuntimeError):
         child_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("op6", None, "test_name"),
+            OperationIdentifier(
+                "op6", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            ),
             config,
         )
 
@@ -315,12 +342,15 @@ def test_child_handler_error_wrapped():
     mock_state.get_checkpoint_result.return_value = mock_result
     test_error = RuntimeError("Test error")
     mock_callable = Mock(side_effect=test_error)
+    mock_state.wrap_user_function.return_value = mock_callable
 
     with pytest.raises(CallableRuntimeError):
         child_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("op7", None, "test_name"),
+            OperationIdentifier(
+                "op7", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            ),
             None,
         )
 
@@ -347,12 +377,15 @@ def test_child_handler_invocation_error_reraised():
     mock_state.get_checkpoint_result.return_value = mock_result
     test_error = InvocationError("Invocation failed")
     mock_callable = Mock(side_effect=test_error)
+    mock_state.wrap_user_function.return_value = mock_callable
 
     with pytest.raises(InvocationError, match="Invocation failed"):
         child_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("op7b", None, "test_name"),
+            OperationIdentifier(
+                "op7b", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            ),
             None,
         )
 
@@ -376,10 +409,16 @@ def test_child_handler_with_config():
     mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(return_value="config_result")
+    mock_state.wrap_user_function.return_value = mock_callable
     config = ChildConfig()
 
     result = child_handler(
-        mock_callable, mock_state, OperationIdentifier("op8", None, "test_name"), config
+        mock_callable,
+        mock_state,
+        OperationIdentifier(
+            "op8", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
+        config,
     )
 
     assert result == "config_result"
@@ -401,9 +440,15 @@ def test_child_handler_default_serialization():
     mock_state.get_checkpoint_result.return_value = mock_result
     complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
     mock_callable = Mock(return_value=complex_result)
+    mock_state.wrap_user_function.return_value = mock_callable
 
     result = child_handler(
-        mock_callable, mock_state, OperationIdentifier("op9", None, "test_name"), None
+        mock_callable,
+        mock_state,
+        OperationIdentifier(
+            "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
+        None,
     )
 
     assert result == complex_result
@@ -430,12 +475,15 @@ def test_child_handler_custom_serdes_not_start() -> None:
     mock_state.get_checkpoint_result.return_value = mock_result
     complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
     mock_callable = Mock(return_value=complex_result)
+    mock_state.wrap_user_function.return_value = mock_callable
     child_config: ChildConfig = ChildConfig(serdes=CustomDictSerDes())
 
     child_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("op9", None, "test_name"),
+        OperationIdentifier(
+            "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
         child_config,
     )
 
@@ -464,7 +512,9 @@ def test_child_handler_custom_serdes_already_succeeded() -> None:
     actual_result = child_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("op9", None, "test_name"),
+        OperationIdentifier(
+            "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
         child_config,
     )
 
@@ -497,6 +547,7 @@ def test_child_handler_large_payload_with_summary_generator() -> None:
     mock_state.get_checkpoint_result.return_value = mock_result
     large_result = "large" * 256 * 1024
     mock_callable = Mock(return_value=large_result)
+    mock_state.wrap_user_function.return_value = mock_callable
 
     def my_summary(result: str) -> str:
         return "summary"
@@ -508,7 +559,9 @@ def test_child_handler_large_payload_with_summary_generator() -> None:
     actual_result = child_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("op9", None, "test_name"),
+        OperationIdentifier(
+            "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
         child_config,
     )
 
@@ -542,12 +595,15 @@ def test_child_handler_large_payload_without_summary_generator() -> None:
     mock_state.get_checkpoint_result.return_value = mock_result
     large_result = "large" * 256 * 1024
     mock_callable = Mock(return_value=large_result)
+    mock_state.wrap_user_function.return_value = mock_callable
     child_config: ChildConfig = ChildConfig()
 
     actual_result = child_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("op9", None, "test_name"),
+        OperationIdentifier(
+            "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
         child_config,
     )
 
@@ -581,12 +637,15 @@ def test_child_handler_replay_children_mode() -> None:
     mock_state.get_checkpoint_result.return_value = mock_result
     complex_result = {"key": "value", "number": 42, "list": [1, 2, 3]}
     mock_callable = Mock(return_value=complex_result)
+    mock_state.wrap_user_function.return_value = mock_callable
     child_config: ChildConfig = ChildConfig()
 
     actual_result = child_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("op9", None, "test_name"),
+        OperationIdentifier(
+            "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
         child_config,
     )
 
@@ -619,6 +678,7 @@ def test_small_payload_with_summary_generator():
     # Small payload (< 256KB)
     small_result = "small_payload"
     mock_callable = Mock(return_value=small_result)
+    mock_state.wrap_user_function.return_value = mock_callable
 
     def my_summary(result: str) -> str:
         return "summary_of_small_payload"
@@ -628,7 +688,9 @@ def test_small_payload_with_summary_generator():
     actual_result = child_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("op1", None, "test_name"),
+        OperationIdentifier(
+            "op1", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
         child_config,
     )
 
@@ -666,13 +728,16 @@ def test_small_payload_without_summary_generator():
     # Small payload (< 256KB); no summary_generator provided
     small_result = "small_payload"
     mock_callable = Mock(return_value=small_result)
+    mock_state.wrap_user_function.return_value = mock_callable
 
     child_config: ChildConfig[str] = ChildConfig[str]()
 
     actual_result = child_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("op1", None, "test_name"),
+        OperationIdentifier(
+            "op1", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
         child_config,
     )
 
@@ -704,13 +769,16 @@ def test_child_handler_is_virtual_no_start():
     mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(return_value="no_checkpoint_result")
+    mock_state.wrap_user_function.return_value = mock_callable
 
     config = ChildConfig(is_virtual=True)
 
     result = child_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("op1", None, "test_name"),
+        OperationIdentifier(
+            "op1", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
         config,
     )
 
@@ -742,13 +810,16 @@ def test_child_handler_is_virtual_no_succeed():
     mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(return_value="no_checkpoint_result")
+    mock_state.wrap_user_function.return_value = mock_callable
 
     config = ChildConfig(is_virtual=True)
 
     result = child_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("op2", None, "test_name"),
+        OperationIdentifier(
+            "op2", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
         config,
     )
 
@@ -772,13 +843,16 @@ def test_child_handler_not_is_virtual_finish_mode():
     mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(return_value="checkpoint_result")
+    mock_state.wrap_user_function.return_value = mock_callable
 
     config = ChildConfig(is_virtual=False)
 
     result = child_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("op3", None, "test_name"),
+        OperationIdentifier(
+            "op3", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
         config,
     )
 
@@ -821,6 +895,7 @@ def test_child_handler_is_virtual_with_exception():
     mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(side_effect=ValueError("Test error"))
+    mock_state.wrap_user_function.return_value = mock_callable
 
     config = ChildConfig(is_virtual=True)
 
@@ -828,7 +903,9 @@ def test_child_handler_is_virtual_with_exception():
         child_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("op4", None, "test_name"),
+            OperationIdentifier(
+                "op4", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            ),
             config,
         )
 
@@ -850,6 +927,7 @@ def test_child_handler_not_is_virtual_with_exception():
     mock_result.is_existent.return_value = False
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock(side_effect=ValueError("Test error"))
+    mock_state.wrap_user_function.return_value = mock_callable
 
     config = ChildConfig(is_virtual=False)
 
@@ -857,7 +935,9 @@ def test_child_handler_not_is_virtual_with_exception():
         child_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("op5", None, "test_name"),
+            OperationIdentifier(
+                "op5", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            ),
             config,
         )
 
@@ -892,6 +972,7 @@ def test_child_handler_is_virtual_comparison():
         mock_result.is_existent.return_value = False
         mock_state.get_checkpoint_result.return_value = mock_result
         mock_callable = Mock(return_value="test_result")
+        mock_state.wrap_user_function.return_value = mock_callable
         return mock_state, mock_callable
 
     # is_virtual=False: 2 checkpoints
@@ -901,7 +982,9 @@ def test_child_handler_is_virtual_comparison():
     result1 = child_handler(
         mock_callable1,
         mock_state1,
-        OperationIdentifier("op1", None, "test_name"),
+        OperationIdentifier(
+            "op1", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
         config1,
     )
 
@@ -915,7 +998,9 @@ def test_child_handler_is_virtual_comparison():
     result2 = child_handler(
         mock_callable2,
         mock_state2,
-        OperationIdentifier("op2", None, "test_name"),
+        OperationIdentifier(
+            "op2", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
         config2,
     )
 

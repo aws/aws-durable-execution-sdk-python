@@ -135,7 +135,7 @@ def test_step_different_ways_to_pass_args():
 
         # Create test event
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -221,7 +221,7 @@ def test_step_with_logger():
 
         # Create test event
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -262,7 +262,7 @@ def test_step_with_logger():
             123,
             "str",
             extra={
-                "executionArn": "test-arn",
+                "executionArn": "test-arn/execution-1",
                 "operationName": "mystep",
                 "attempt": 1,
                 "operationId": operation_id,
@@ -308,7 +308,7 @@ def test_wait_inside_run_in_childcontext():
 
         # Create test event
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -409,7 +409,7 @@ def test_step_checkpoint_failure_propagates_error():
 
         # Create test event
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -463,7 +463,7 @@ def test_wait_not_caught_by_exception():
 
         # Create test event
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [
@@ -560,7 +560,7 @@ def test_durable_wait_for_callback_decorator():
         mock_client.checkpoint = mock_checkpoint
 
         event = {
-            "DurableExecutionArn": "test-arn",
+            "DurableExecutionArn": "test-arn/execution-1",
             "CheckpointToken": "test-token",
             "InitialExecutionState": {
                 "Operations": [

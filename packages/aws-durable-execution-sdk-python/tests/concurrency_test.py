@@ -1134,7 +1134,9 @@ def test_concurrent_executor_create_result_with_early_exit():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     result = executor.execute(execution_state, executor_context)
 
@@ -1172,7 +1174,9 @@ def test_concurrent_executor_execute_item_in_child_context():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     result = executor._execute_item_in_child_context(  # noqa: SLF001
         executor_context, executables[0]
@@ -1262,7 +1266,9 @@ def test_single_task_suspend_bubbles_up():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     # Should raise TimedSuspendExecution since no other tasks running
     with pytest.raises(TimedSuspendExecution):
@@ -1308,7 +1314,9 @@ def test_multiple_tasks_one_suspends_execution_continues():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     # Should raise TimedSuspendExecution after Task B completes
     with pytest.raises(TimedSuspendExecution):
@@ -1353,7 +1361,9 @@ def test_concurrent_executor_with_single_task_resubmit():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     # Should raise TimedSuspendExecution since single task suspends
     with pytest.raises(TimedSuspendExecution):
@@ -1426,7 +1436,9 @@ def test_concurrent_executor_with_timed_resubmit_while_other_task_running():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     # Should complete successfully after B resubmits and both tasks finish
     result = executor.execute(execution_state, executor_context)
@@ -1569,7 +1581,9 @@ def test_concurrent_executor_create_result_with_failed_status():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     result = executor.execute(execution_state, executor_context)
 
@@ -1794,7 +1808,9 @@ def test_concurrent_executor_execute_with_failing_task():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     result = executor.execute(execution_state, executor_context)
 
@@ -1898,7 +1914,9 @@ def test_create_result_with_suspended_executable():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     # Should raise SuspendExecution since single task suspends
     with pytest.raises(SuspendExecution):
@@ -2838,7 +2856,9 @@ def test_executor_does_not_deadlock_when_all_tasks_terminal_but_completion_confi
     execution_state.create_checkpoint = Mock()
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     # Should return (not hang) and batch should reflect one FAILED and one SUCCEEDED
     result = executor.execute(execution_state, executor_context)
@@ -2876,7 +2896,9 @@ def test_executor_terminates_quickly_when_impossible_to_succeed():
     execution_state.create_checkpoint = Mock()
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     result = executor.execute(execution_state, executor_context)
 
@@ -2937,6 +2959,7 @@ def test_executor_exits_early_with_min_successful():
     def create_child_context(op_id, *, is_virtual=False):
         child = Mock()
         child.state = execution_state
+        child.state.wrap_user_function = lambda func, *args, **kwargs: func
         return child
 
     executor_context.create_child_context = create_child_context
@@ -3003,6 +3026,7 @@ def test_executor_returns_with_incomplete_branches():
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
+    execution_state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"  # noqa: SLF001
     executor_context._parent_id = "parent"  # noqa: SLF001
@@ -3379,6 +3403,7 @@ def test_flat_mode_stamps_grandparent_as_inner_op_parent_id():
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
+    execution_state.wrap_user_function = lambda func, *args, **kwargs: func
 
     # Mock out the checkpoint so the real child_handler reports "not
     # existent" (non-existent checkpoint -> normal execution path).
@@ -3434,6 +3459,7 @@ def test_nested_mode_stamps_branch_op_as_inner_op_parent_id():
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
+    execution_state.wrap_user_function = lambda func, *args, **kwargs: func
 
     mock_checkpoint = Mock()
     mock_checkpoint.is_succeeded.return_value = False

@@ -23,7 +23,6 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.execution import (
     DurableExecutionInvocationInput,
     DurableExecutionInvocationInputWithClient,
-    DurableExecutionInvocationOutput,
     InitialExecutionState,
     InvocationStatus,
     durable_execution,
@@ -46,7 +45,9 @@ from aws_durable_execution_sdk_python.lambda_service import (
     StateOutput,
     StepDetails,
     WaitDetails,
+    DurableExecutionInvocationOutput,
 )
+from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
 
 LARGE_RESULT = "large_success" * 1024 * 1024
 
@@ -56,7 +57,7 @@ LARGE_RESULT = "large_success" * 1024 * 1024
 def test_durable_execution_invocation_input_from_dict():
     """Test that DurableExecutionInvocationInput.from_dict works correctly"""
     input_dict = {
-        "DurableExecutionArn": "9692ca80-399d-4f52-8d0a-41acc9cd0492",
+        "DurableExecutionArn": "9692ca80-399d-4f52-8d0a-41acc9cd0492/9692ca80-399d-4f52-8d0a-41acc9cd0492",
         "CheckpointToken": "9692ca80-399d-4f52-8d0a-41acc9cd0492",
         "InitialExecutionState": {
             "Operations": [
@@ -76,7 +77,10 @@ def test_durable_execution_invocation_input_from_dict():
 
     result = DurableExecutionInvocationInput.from_dict(input_dict)
 
-    assert result.durable_execution_arn == "9692ca80-399d-4f52-8d0a-41acc9cd0492"
+    assert (
+        result.durable_execution_arn
+        == "9692ca80-399d-4f52-8d0a-41acc9cd0492/9692ca80-399d-4f52-8d0a-41acc9cd0492"
+    )
     assert result.checkpoint_token == "9692ca80-399d-4f52-8d0a-41acc9cd0492"  # noqa: S105
     assert isinstance(result.initial_execution_state, InitialExecutionState)
     assert len(result.initial_execution_state.operations) == 1
@@ -167,14 +171,14 @@ def test_durable_execution_invocation_input_to_dict():
     )
 
     invocation_input = DurableExecutionInvocationInput(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
     )
 
     result = invocation_input.to_dict()
     expected = {
-        "DurableExecutionArn": "arn:test:execution",
+        "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
         "InitialExecutionState": initial_state.to_dict(),
     }
@@ -186,14 +190,14 @@ def test_durable_execution_invocation_input_to_dict_not_local():
     initial_state = InitialExecutionState(operations=[], next_marker="")
 
     invocation_input = DurableExecutionInvocationInput(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
     )
 
     result = invocation_input.to_dict()
     expected = {
-        "DurableExecutionArn": "arn:test:execution",
+        "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
         "InitialExecutionState": initial_state.to_dict(),
     }
@@ -207,7 +211,7 @@ def test_durable_execution_invocation_input_with_client_inheritance():
     initial_state = InitialExecutionState(operations=[], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -216,7 +220,7 @@ def test_durable_execution_invocation_input_with_client_inheritance():
     # Should inherit to_dict from parent class
     result = invocation_input.to_dict()
     expected = {
-        "DurableExecutionArn": "arn:test:execution",
+        "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
         "InitialExecutionState": initial_state.to_dict(),
     }
@@ -231,7 +235,7 @@ def test_durable_execution_invocation_input_with_client_from_parent():
     initial_state = InitialExecutionState(operations=[], next_marker="")
 
     parent_input = DurableExecutionInvocationInput(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
     )
@@ -360,7 +364,7 @@ def test_durable_execution_client_selection_env_normal_result():
 
         # Create regular event with LocalRunner=False
         event = {
-            "DurableExecutionArn": "arn:test:execution",
+            "DurableExecutionArn": "arn:test:execution/exec1",
             "CheckpointToken": "token123",
             "InitialExecutionState": {
                 "Operations": [
@@ -412,7 +416,7 @@ def test_durable_execution_client_selection_env_large_result():
 
         # Create regular event with LocalRunner=False
         event = {
-            "DurableExecutionArn": "arn:test:execution",
+            "DurableExecutionArn": "arn:test:execution/exec1",
             "CheckpointToken": "token123",
             "InitialExecutionState": {
                 "Operations": [
@@ -469,7 +473,7 @@ def test_durable_execution_with_injected_client_success_normal_result():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -516,7 +520,7 @@ def test_durable_execution_with_injected_client_success_large_result():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -571,7 +575,7 @@ def test_durable_execution_with_injected_client_failure():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -617,7 +621,7 @@ def test_durable_execution_with_large_error_payload():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -664,7 +668,7 @@ def test_durable_execution_fatal_error_handling():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -702,7 +706,7 @@ def test_durable_execution_execution_error_handling():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -748,7 +752,7 @@ def test_durable_execution_client_selection_default():
 
         # Create regular event dict instead of DurableExecutionInvocationInputWithClient
         event = {
-            "DurableExecutionArn": "arn:test:execution",
+            "DurableExecutionArn": "arn:test:execution/exec1",
             "CheckpointToken": "token123",
             "InitialExecutionState": {
                 "Operations": [
@@ -796,7 +800,7 @@ def test_durable_handler_empty_input_payload():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -835,7 +839,7 @@ def test_durable_handler_whitespace_input_payload():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -917,7 +921,7 @@ def test_durable_handler_background_thread_failure():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -957,7 +961,7 @@ def test_durable_execution_suspend_execution():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1007,7 +1011,7 @@ def test_durable_execution_checkpoint_error_in_background_thread():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1056,7 +1060,7 @@ def test_durable_execution_checkpoint_execution_error_stops_background():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1104,7 +1108,7 @@ def test_durable_execution_checkpoint_invocation_error_retries():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1154,7 +1158,7 @@ def test_durable_execution_background_thread_execution_error_returns_failed():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1198,7 +1202,7 @@ def test_durable_execution_background_thread_invocation_error_retries():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1242,7 +1246,7 @@ def test_durable_execution_final_success_checkpoint_execution_error_returns_fail
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1288,7 +1292,7 @@ def test_durable_execution_final_success_checkpoint_invocation_error_retries():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1334,7 +1338,7 @@ def test_durable_execution_final_failure_checkpoint_execution_error_returns_fail
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1381,7 +1385,7 @@ def test_durable_execution_final_failure_checkpoint_invocation_error_retries():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1447,7 +1451,7 @@ def test_durable_handler_background_thread_failure_on_succeed_checkpoint():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1537,7 +1541,7 @@ def test_durable_handler_background_thread_failure_on_start_checkpoint():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1620,7 +1624,7 @@ def test_durable_handler_background_thread_failure_on_large_result_checkpoint():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1690,7 +1694,7 @@ def test_durable_handler_background_thread_failure_on_error_checkpoint():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1745,7 +1749,7 @@ def test_durable_execution_logs_checkpoint_error_extras_from_background_thread()
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1805,7 +1809,7 @@ def test_durable_execution_logs_boto_client_error_extras_from_background_thread(
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1862,7 +1866,7 @@ def test_durable_execution_logs_checkpoint_error_extras_from_user_code():
     initial_state = InitialExecutionState(operations=[operation], next_marker="")
 
     invocation_input = DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
         service_client=mock_client,
@@ -1907,7 +1911,7 @@ def test_durable_execution_with_boto3_client_parameter():
         return {"result": "success"}
 
     event = {
-        "DurableExecutionArn": "arn:test:execution",
+        "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
         "InitialExecutionState": {
             "Operations": [
@@ -2204,14 +2208,14 @@ def test_durable_execution_invocation_input_to_json_dict_minimal():
     )
 
     invocation_input = DurableExecutionInvocationInput(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
     )
 
     result = invocation_input.to_json_dict()
     expected = {
-        "DurableExecutionArn": "arn:test:execution",
+        "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
         "InitialExecutionState": initial_state.to_json_dict(),
     }
@@ -2238,7 +2242,7 @@ def test_durable_execution_invocation_input_to_json_dict_with_timestamps():
     )
 
     invocation_input = DurableExecutionInvocationInput(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
     )
@@ -2252,7 +2256,7 @@ def test_durable_execution_invocation_input_to_json_dict_with_timestamps():
 
     assert operation_result["StartTimestamp"] == expected_start_ms
     assert operation_result["EndTimestamp"] == expected_end_ms
-    assert result["DurableExecutionArn"] == "arn:test:execution"
+    assert result["DurableExecutionArn"] == "arn:test:execution/exec1"
     assert result["CheckpointToken"] == "token123"
 
 
@@ -2261,14 +2265,14 @@ def test_durable_execution_invocation_input_to_json_dict_empty_operations():
     initial_state = InitialExecutionState(operations=[], next_marker="")
 
     invocation_input = DurableExecutionInvocationInput(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
     )
 
     result = invocation_input.to_json_dict()
     expected = {
-        "DurableExecutionArn": "arn:test:execution",
+        "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
         "InitialExecutionState": {"Operations": [], "NextMarker": ""},
     }
@@ -2279,7 +2283,7 @@ def test_durable_execution_invocation_input_to_json_dict_empty_operations():
 def test_durable_execution_invocation_input_from_json_dict_minimal():
     """Test DurableExecutionInvocationInput.from_json_dict with minimal data."""
     data = {
-        "DurableExecutionArn": "arn:test:execution",
+        "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
         "InitialExecutionState": {
             "Operations": [
@@ -2295,7 +2299,7 @@ def test_durable_execution_invocation_input_from_json_dict_minimal():
 
     result = DurableExecutionInvocationInput.from_json_dict(data)
 
-    assert result.durable_execution_arn == "arn:test:execution"
+    assert result.durable_execution_arn == "arn:test:execution/exec1"
     assert result.checkpoint_token == "token123"  # noqa: S105
     assert isinstance(result.initial_execution_state, InitialExecutionState)
     assert len(result.initial_execution_state.operations) == 1
@@ -2309,7 +2313,7 @@ def test_durable_execution_invocation_input_from_json_dict_with_timestamps():
     end_ms = 1672578000000  # 2023-01-01 13:00:00 UTC
 
     data = {
-        "DurableExecutionArn": "arn:test:execution",
+        "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
         "InitialExecutionState": {
             "Operations": [
@@ -2340,13 +2344,13 @@ def test_durable_execution_invocation_input_from_json_dict_with_timestamps():
 def test_durable_execution_invocation_input_from_json_dict_empty_initial_state():
     """Test DurableExecutionInvocationInput.from_json_dict handles missing InitialExecutionState."""
     data = {
-        "DurableExecutionArn": "arn:test:execution",
+        "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
     }
 
     result = DurableExecutionInvocationInput.from_json_dict(data)
 
-    assert result.durable_execution_arn == "arn:test:execution"
+    assert result.durable_execution_arn == "arn:test:execution/exec1"
     assert result.checkpoint_token == "token123"  # noqa: S105
     assert isinstance(result.initial_execution_state, InitialExecutionState)
     assert len(result.initial_execution_state.operations) == 0
@@ -2486,7 +2490,7 @@ def test_durable_execution_invocation_input_json_dict_preserves_non_timestamp_fi
     )
 
     invocation_input = DurableExecutionInvocationInput(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=initial_state,
     )
@@ -2504,7 +2508,7 @@ def test_durable_execution_invocation_input_json_dict_preserves_non_timestamp_fi
     assert operation_result["CallbackDetails"]["CallbackId"] == "cb123"
     assert operation_result["CallbackDetails"]["Result"] == "callback_result"
 
-    assert result["DurableExecutionArn"] == "arn:test:execution"
+    assert result["DurableExecutionArn"] == "arn:test:execution/exec1"
     assert result["CheckpointToken"] == "token123"
     assert result["InitialExecutionState"]["NextMarker"] == "marker123"
 
@@ -2666,7 +2670,7 @@ def _make_invocation_input(mock_client, next_marker=""):
         execution_details=ExecutionDetails(input_payload="{}"),
     )
     return DurableExecutionInvocationInputWithClient(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=InitialExecutionState(
             operations=[operation], next_marker=next_marker
@@ -2711,7 +2715,7 @@ def test_durable_execution_replays_when_paginated_state_has_prior_operations():
     assert result["Status"] == InvocationStatus.SUCCEEDED.value
     assert json.loads(result["Result"]) == {"is_replaying": True}
     mock_client.get_execution_state.assert_called_once_with(
-        durable_execution_arn="arn:test:execution",
+        durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",
         next_marker="page2",
     )
@@ -2827,3 +2831,293 @@ def test_durable_execution_retryable_initial_pagination_error_raises():
             _make_invocation_input(mock_client, next_marker="next-page-marker"),
             _make_lambda_context(),
         )
+
+
+# region Plugin Integration Tests
+
+
+class _RecordingPlugin(DurableInstrumentationPlugin):
+    """Plugin that records all hook calls for assertion."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def on_execution_start(self, info):
+        self.calls.append("execution_start")
+
+    def on_execution_end(self, info):
+        self.calls.append(f"execution_end:{info.status.value}")
+
+    def on_invocation_start(self, info):
+        self.calls.append("invocation_start")
+
+    def on_invocation_end(self, info):
+        self.calls.append(f"invocation_end:{info.status.value}")
+
+    def on_operation_start(self, info):
+        self.calls.append(f"operation_start:{info.operation_id}")
+
+    def on_operation_end(self, info):
+        self.calls.append(f"operation_end:{info.operation_id}")
+
+    def on_operation_attempt_start(self, info):
+        self.calls.append(f"attempt_start:{info.operation_id}")
+
+    def on_operation_attempt_end(self, info):
+        self.calls.append(f"attempt_end:{info.operation_id}")
+
+
+class _FailingPlugin(DurableInstrumentationPlugin):
+    """Plugin that raises on every hook call."""
+
+    def on_execution_start(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_execution_end(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_invocation_start(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_invocation_end(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_operation_start(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_operation_end(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_operation_attempt_start(self, info):
+        raise RuntimeError("plugin boom")
+
+    def on_operation_attempt_end(self, info):
+        raise RuntimeError("plugin boom")
+
+
+def test_durable_execution_with_plugins_success():
+    """Test that plugins receive invocation start/end and execution end on success."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    # ExecutionStartInfo dispatches to on_invocation_start in the match block
+    assert "invocation_start" in plugin.calls
+    assert "invocation_end:SUCCEEDED" in plugin.calls
+
+
+def test_durable_execution_with_plugins_failure():
+    """Test that plugins receive invocation end and execution end on user error."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "user error"
+        raise ValueError(msg)
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert "invocation_start" in plugin.calls
+    assert "invocation_end:FAILED" in plugin.calls
+
+
+def test_durable_execution_with_plugins_pending():
+    """Test that plugins receive invocation end with PENDING status on suspend."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        raise SuspendExecution("test")
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.PENDING.value
+    assert "invocation_start" in plugin.calls
+    assert "invocation_end:PENDING" in plugin.calls
+    # Execution end should NOT be fired for PENDING
+    execution_end_calls = [c for c in plugin.calls if c.startswith("execution_end")]
+    assert len(execution_end_calls) == 0
+
+
+def test_durable_execution_with_plugins_retryable_error():
+    """Test that plugins receive invocation end with RETRY status on retryable error."""
+    mock_client = Mock(spec=DurableServiceClient)
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "Retriable error"
+        raise InvocationError(msg)
+
+    with pytest.raises(InvocationError):
+        test_handler(
+            _make_invocation_input(mock_client),
+            _make_lambda_context(),
+        )
+
+    assert "invocation_start" in plugin.calls
+    assert "invocation_end:RETRY" in plugin.calls
+
+
+def test_durable_execution_with_multiple_plugins():
+    """Test that multiple plugins all receive callbacks."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    plugin1 = _RecordingPlugin()
+    plugin2 = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin1, plugin2])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert "invocation_start" in plugin1.calls
+    assert "invocation_start" in plugin2.calls
+    assert "invocation_end:SUCCEEDED" in plugin1.calls
+    assert "invocation_end:SUCCEEDED" in plugin2.calls
+
+
+def test_durable_execution_with_failing_plugin_does_not_break_execution():
+    """Test that a failing plugin does not prevent the handler from completing."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    failing_plugin = _FailingPlugin()
+    recording_plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[failing_plugin, recording_plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    # Execution should still succeed despite the failing plugin
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    # The recording plugin should still have been called
+    assert "invocation_start" in recording_plugin.calls
+    assert "invocation_end:SUCCEEDED" in recording_plugin.calls
+
+
+def test_durable_execution_with_no_plugins():
+    """Test that passing no plugins (None) works correctly."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    @durable_execution(plugins=None)
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+
+
+def test_durable_execution_with_empty_plugins_list():
+    """Test that passing an empty plugins list works correctly."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    @durable_execution(plugins=[])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+
+
+def test_durable_execution_decorator_with_plugins_and_boto3_client():
+    """Test that plugins parameter works alongside boto3_client parameter."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    plugin = _RecordingPlugin()
+
+    # When using DurableExecutionInvocationInputWithClient, boto3_client is ignored
+    # but we verify the decorator accepts both parameters
+    @durable_execution(boto3_client=None, plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert "invocation_start" in plugin.calls
+
+
+# endregion Plugin Integration Tests

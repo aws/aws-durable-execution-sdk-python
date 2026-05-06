@@ -30,7 +30,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     TimedSuspendExecution,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
-from aws_durable_execution_sdk_python.lambda_service import ErrorObject
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject, OperationType
 from aws_durable_execution_sdk_python.operation.child import child_handler
 
 
@@ -428,9 +428,10 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         # For FLAT `child_handler` skips checkpoints, so not used.
         # Construct it unconditionally to keep the call simple.
         operation_identifier = OperationIdentifier(
-            operation_id,
-            executor_context._parent_id,  # noqa: SLF001
-            name,
+            operation_id=operation_id,
+            sub_type=self.sub_type_iteration,
+            parent_id=executor_context._parent_id,  # noqa: SLF001
+            name=name,
         )
 
         def run_in_child_handler() -> ResultType:

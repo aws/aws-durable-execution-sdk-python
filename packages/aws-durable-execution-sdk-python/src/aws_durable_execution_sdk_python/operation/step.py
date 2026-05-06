@@ -13,16 +13,19 @@ from aws_durable_execution_sdk_python.exceptions import (
     ExecutionError,
     InvalidStateError,
     StepInterruptedError,
+    SuspendExecution,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationUpdate,
+    OperationType,
 )
 from aws_durable_execution_sdk_python.logger import Logger, LogInfo
 from aws_durable_execution_sdk_python.operation.base import (
     CheckResult,
     OperationExecutor,
 )
+from aws_durable_execution_sdk_python.plugin import UserFunctionStartInfo
 from aws_durable_execution_sdk_python.retries import RetryDecision, RetryPresets
 from aws_durable_execution_sdk_python.serdes import deserialize, serialize
 from aws_durable_execution_sdk_python.suspend import (
@@ -219,7 +222,14 @@ class StepOperationExecutor(OperationExecutor[T]):
 
         try:
             # This is the actual code provided by the caller to execute durably inside the step
-            raw_result: T = self.func(step_context)
+            wrapped_user_func = self.state.wrap_user_function(
+                self.func,
+                self.operation_identifier,
+                False,
+                attempt,
+            )
+            raw_result: T = wrapped_user_func(step_context)
+
             serialized_result: str = serialize(
                 serdes=self.config.serdes,
                 value=raw_result,

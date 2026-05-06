@@ -23,7 +23,10 @@ from aws_durable_execution_sdk_python.exceptions import (
     ValidationError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
-from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+from aws_durable_execution_sdk_python.lambda_service import (
+    OperationSubType,
+    OperationType,
+)
 from aws_durable_execution_sdk_python.logger import Logger, LogInfo
 from aws_durable_execution_sdk_python.operation.callback import (
     CallbackOperationExecutor,
@@ -443,6 +446,7 @@ class DurableContext(DurableContextProtocol):
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
+                sub_type=OperationSubType.CALLBACK,
                 parent_id=self._parent_id,
                 name=name,
             ),
@@ -485,6 +489,7 @@ class DurableContext(DurableContextProtocol):
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
+                sub_type=OperationSubType.CHAINED_INVOKE,
                 parent_id=self._parent_id,
                 name=name,
             ),
@@ -507,6 +512,7 @@ class DurableContext(DurableContextProtocol):
         operation_id = self._create_step_id()
         operation_identifier = OperationIdentifier(
             operation_id=operation_id,
+            sub_type=OperationSubType.MAP,
             parent_id=self._parent_id,
             name=map_name,
         )
@@ -553,7 +559,10 @@ class DurableContext(DurableContextProtocol):
         operation_id = self._create_step_id()
         parallel_context = self.create_child_context(operation_id=operation_id)
         operation_identifier = OperationIdentifier(
-            operation_id=operation_id, parent_id=self._parent_id, name=name
+            operation_id=operation_id,
+            sub_type=OperationSubType.PARALLEL,
+            parent_id=self._parent_id,
+            name=name,
         )
 
         def parallel_in_child_context() -> BatchResult[T]:
@@ -606,6 +615,11 @@ class DurableContext(DurableContextProtocol):
         step_name: str | None = self._resolve_step_name(name, func)
         # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
         operation_id = self._create_step_id()
+        sub_type = (
+            config.sub_type
+            if config and config.sub_type
+            else OperationSubType.RUN_IN_CHILD_CONTEXT
+        )
 
         is_virtual: bool = config.is_virtual if config else False
 
@@ -621,6 +635,7 @@ class DurableContext(DurableContextProtocol):
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
+                sub_type=sub_type,
                 parent_id=self._parent_id,
                 name=step_name,
             ),
@@ -646,6 +661,7 @@ class DurableContext(DurableContextProtocol):
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
+                sub_type=OperationSubType.STEP,
                 parent_id=self._parent_id,
                 name=step_name,
             ),
@@ -673,6 +689,7 @@ class DurableContext(DurableContextProtocol):
             state=self.state,
             operation_identifier=OperationIdentifier(
                 operation_id=operation_id,
+                sub_type=OperationSubType.WAIT,
                 parent_id=self._parent_id,
                 name=name,
             ),
@@ -728,6 +745,7 @@ class DurableContext(DurableContextProtocol):
                 state=self.state,
                 operation_identifier=OperationIdentifier(
                     operation_id=operation_id,
+                    sub_type=OperationSubType.WAIT_FOR_CONDITION,
                     parent_id=self._parent_id,
                     name=name,
                 ),

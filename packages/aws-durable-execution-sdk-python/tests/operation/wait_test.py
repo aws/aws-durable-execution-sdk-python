@@ -40,7 +40,7 @@ def test_wait_handler_already_completed():
     wait_handler(
         seconds=10,
         state=mock_state,
-        operation_identifier=OperationIdentifier("wait1", None),
+        operation_identifier=OperationIdentifier("wait1", OperationSubType.WAIT, None),
     )
 
     mock_state.get_checkpoint_result.assert_called_once_with("wait1")
@@ -67,7 +67,9 @@ def test_wait_handler_not_completed():
         wait_handler(
             seconds=30,
             state=mock_state,
-            operation_identifier=OperationIdentifier("wait2", None),
+            operation_identifier=OperationIdentifier(
+                "wait2", OperationSubType.WAIT, None
+            ),
         )
 
     # Should be called twice: once before checkpoint, once after to check for immediate response
@@ -105,7 +107,9 @@ def test_wait_handler_with_none_name():
     with pytest.raises(SuspendExecution, match="Wait for 5 seconds"):
         wait_handler(
             state=mock_state,
-            operation_identifier=OperationIdentifier("wait3", None),
+            operation_identifier=OperationIdentifier(
+                "wait3", OperationSubType.WAIT, None
+            ),
             seconds=5,
         )
 
@@ -136,7 +140,9 @@ def test_wait_handler_with_existent():
     with pytest.raises(SuspendExecution, match="Wait for 5 seconds"):
         wait_handler(
             state=mock_state,
-            operation_identifier=OperationIdentifier("wait4", None),
+            operation_identifier=OperationIdentifier(
+                "wait4", OperationSubType.WAIT, None
+            ),
             seconds=5,
         )
 
@@ -173,7 +179,9 @@ def test_wait_status_evaluation_after_checkpoint():
     executor = WaitOperationExecutor(
         seconds=30,
         state=mock_state,
-        operation_identifier=OperationIdentifier("wait_eval", None, "test_wait"),
+        operation_identifier=OperationIdentifier(
+            "wait_eval", OperationSubType.WAIT, None, "test_wait"
+        ),
     )
 
     # Act
@@ -223,7 +231,7 @@ def test_wait_immediate_success_handling():
         seconds=5,
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "wait_immediate", None, "immediate_wait"
+            "wait_immediate", OperationSubType.WAIT, None, "immediate_wait"
         ),
     )
 
@@ -264,7 +272,9 @@ def test_wait_no_immediate_response_suspends():
     executor = WaitOperationExecutor(
         seconds=60,
         state=mock_state,
-        operation_identifier=OperationIdentifier("wait_suspend", None),
+        operation_identifier=OperationIdentifier(
+            "wait_suspend", OperationSubType.WAIT, None
+        ),
     )
 
     # Act & Assert - verify suspend occurs
@@ -299,7 +309,9 @@ def test_wait_already_completed_no_checkpoint():
     executor = WaitOperationExecutor(
         seconds=10,
         state=mock_state,
-        operation_identifier=OperationIdentifier("wait_replay", None, "completed_wait"),
+        operation_identifier=OperationIdentifier(
+            "wait_replay", OperationSubType.WAIT, None, "completed_wait"
+        ),
     )
 
     # Act
@@ -338,7 +350,9 @@ def test_wait_with_various_durations():
         executor = WaitOperationExecutor(
             seconds=seconds,
             state=mock_state,
-            operation_identifier=OperationIdentifier(f"wait_duration_{seconds}", None),
+            operation_identifier=OperationIdentifier(
+                f"wait_duration_{seconds}", OperationSubType.WAIT, None
+            ),
         )
 
         # Act
@@ -376,7 +390,9 @@ def test_wait_suspends_when_second_check_returns_started():
     executor = WaitOperationExecutor(
         seconds=5,
         state=mock_state,
-        operation_identifier=OperationIdentifier("wait-1", None, "test_wait"),
+        operation_identifier=OperationIdentifier(
+            "wait-1", OperationSubType.WAIT, None, "test_wait"
+        ),
     )
 
     with pytest.raises(SuspendExecution):
@@ -408,7 +424,9 @@ def test_wait_suspends_when_second_check_returns_started_duplicate():
     executor = WaitOperationExecutor(
         seconds=5,
         state=mock_state,
-        operation_identifier=OperationIdentifier("wait-1", None, "test_wait"),
+        operation_identifier=OperationIdentifier(
+            "wait-1", OperationSubType.WAIT, None, "test_wait"
+        ),
     )
 
     with pytest.raises(SuspendExecution):

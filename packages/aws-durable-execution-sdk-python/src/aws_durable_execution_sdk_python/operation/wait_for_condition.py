@@ -11,6 +11,8 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationUpdate,
+    OperationType,
+    OperationSubType,
 )
 from aws_durable_execution_sdk_python.logger import LogInfo
 from aws_durable_execution_sdk_python.operation.base import (
@@ -188,7 +190,13 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
                 )
             )
 
-            new_state = self.check(current_state, check_context)
+            wrapped_user_func = self.state.wrap_user_function(
+                self.check,
+                self.operation_identifier,
+                False,
+                attempt,
+            )
+            new_state = wrapped_user_func(current_state, check_context)
 
             # Check if condition is met with the wait strategy
             decision: WaitForConditionDecision = self.config.wait_strategy(

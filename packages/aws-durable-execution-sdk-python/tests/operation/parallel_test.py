@@ -193,7 +193,9 @@ def test_parallel_handler():
             return mock_result
 
     execution_state = MockExecutionState()
-    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+    operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+    )
 
     # Mock the run_in_child_context function
     def mock_run_in_child_context(callable_func, name, child_config):
@@ -231,7 +233,9 @@ def test_parallel_handler_with_none_config():
             return mock_result
 
     execution_state = MockExecutionState()
-    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+    operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+    )
 
     def mock_run_in_child_context(callable_func, name, child_config):
         return callable_func("mock-context")
@@ -269,7 +273,9 @@ def test_parallel_handler_creates_executor_with_correct_config():
             return mock_result
 
     execution_state = MockExecutionState()
-    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+    operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+    )
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
@@ -307,7 +313,9 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
             return mock_result
 
     execution_state = MockExecutionState()
-    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+    operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+    )
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
@@ -406,11 +414,15 @@ def test_parallel_handler_with_serdes():
             return mock_result
 
     execution_state = MockExecutionState()
-    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+    operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+    )
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     result = parallel_handler(
         callables,
@@ -442,7 +454,9 @@ def test_parallel_handler_with_summary_generator():
             return mock_result
 
     execution_state = MockExecutionState()
-    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+    operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+    )
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = Mock(return_value="1")  # noqa SLF001
@@ -496,7 +510,9 @@ def test_parallel_handler_default_summary_generator():
             return mock_result
 
     execution_state = MockExecutionState()
-    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+    operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+    )
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = Mock(side_effect=["1", "2"])  # noqa SLF001
@@ -540,7 +556,9 @@ def test_parallel_handler_with_explicit_none_summary_generator():
             return mock_result
 
     execution_state = MockExecutionState()
-    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+    operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+    )
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = Mock(  # noqa: SLF001
@@ -586,7 +604,9 @@ def test_parallel_handler_replay_mechanism():
 
     execution_state = MockExecutionState()
     config = ParallelConfig()
-    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+    operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+    )
 
     # Mock parallel context
     parallel_context = Mock()
@@ -643,7 +663,9 @@ def test_parallel_handler_replay_with_replay_children():
 
     execution_state = MockExecutionState()
     config = ParallelConfig()
-    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+    operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+    )
 
     # Mock parallel context
     parallel_context = Mock()
@@ -714,7 +736,9 @@ def test_parallel_handler_first_execution_then_replay():
 
     callables = [task1, task2]
     config = ParallelConfig()
-    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+    operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+    )
 
     # Track whether we're in first or second execution
     execution_count = 0
@@ -810,6 +834,7 @@ def test_parallel_item_serialize(mock_serialize, item_serdes, batch_serdes):
     mock_state.durable_execution_arn = "arn:test"
     mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
     mock_state.create_checkpoint = Mock()
+    mock_state.wrap_user_function = lambda func, *args, **kwargs: func
 
     context_map = {}
 
@@ -871,6 +896,7 @@ def test_parallel_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
     mock_state.durable_execution_arn = "arn:test"
     mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
     mock_state.create_checkpoint = Mock()
+    mock_state.wrap_user_function = lambda func, *args, **kwargs: func
 
     context_map = {}
 
@@ -927,8 +953,12 @@ def test_parallel_result_serialization_roundtrip():
     parallel_context._create_step_id_for_logical_step = Mock(  # noqa SLF001
         side_effect=["1", "2", "3"]
     )
-    parallel_context.create_child_context = Mock(return_value=Mock())
-    operation_identifier = OperationIdentifier("test_op", "parent", "test_parallel")
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    parallel_context.create_child_context = Mock(return_value=child_context)
+    operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+    )
 
     # Execute parallel
     result = parallel_handler(
@@ -986,6 +1016,7 @@ def test_parallel_handler_serializes_batch_result():
             mock_state.durable_execution_arn = "arn:test"
             mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
             mock_state.create_checkpoint = Mock()
+            mock_state.wrap_user_function = lambda func, *args, **kwargs: func
 
             context_map = {}
 
@@ -1044,6 +1075,7 @@ def test_parallel_default_serdes_serializes_batch_result():
             mock_state.durable_execution_arn = "arn:test"
             mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
             mock_state.create_checkpoint = Mock()
+            mock_state.wrap_user_function = lambda func, *args, **kwargs: func
 
             context_map = {}
 
@@ -1109,6 +1141,7 @@ def test_parallel_custom_serdes_serializes_batch_result():
             mock_state.durable_execution_arn = "arn:test"
             mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
             mock_state.create_checkpoint = Mock()
+            mock_state.wrap_user_function = lambda func, *args, **kwargs: func
 
             context_map = {}
 
