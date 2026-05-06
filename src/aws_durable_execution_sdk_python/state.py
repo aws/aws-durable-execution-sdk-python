@@ -30,6 +30,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationUpdate,
     StateOutput,
 )
+from aws_durable_execution_sdk_python.plugin import PluginExecutor
 from aws_durable_execution_sdk_python.threading import CompletionEvent, OrderedLock
 
 if TYPE_CHECKING:
@@ -236,6 +237,7 @@ class ExecutionState:
         initial_checkpoint_token: str,
         operations: MutableMapping[str, Operation],
         service_client: DurableServiceClient,
+        plugin_executor: PluginExecutor,
         batcher_config: CheckpointBatcherConfig | None = None,
         replay_status: ReplayStatus = ReplayStatus.NEW,
     ):
@@ -243,6 +245,7 @@ class ExecutionState:
         self._current_checkpoint_token: str = initial_checkpoint_token
         self.operations: MutableMapping[str, Operation] = operations
         self._service_client: DurableServiceClient = service_client
+        self._plugin_executor: PluginExecutor = plugin_executor
         self._ordered_checkpoint_lock: OrderedLock = OrderedLock()
         self._operations_lock: Lock = Lock()
 
@@ -274,7 +277,7 @@ class ExecutionState:
         initial_operations: list[Operation],
         checkpoint_token: str,
         next_marker: str | None,
-    ) -> None:
+    ) -> list[Operation]:
         """Add initial operations and fetch all paginated operations from the Durable Functions API. This method is thread_safe.
 
         The checkpoint_token is passed explicitly as a parameter rather than using the instance variable to ensure thread safety.
@@ -283,6 +286,8 @@ class ExecutionState:
             initial_operations: initial operations to be added to ExecutionState
             checkpoint_token: checkpoint token used to call Durable Functions API.
             next_marker: a marker indicates that there are paginated operations.
+        Returns:
+            List of all operations fetched from the Durable Functions API
 
         Raises:
             GetExecutionStateError: If the API call fails. The error is logged
@@ -315,6 +320,7 @@ class ExecutionState:
                     self.operations.update(
                         {op.operation_id: op for op in all_operations}
                     )
+        return all_operations
 
     def get_input_payload(self) -> str | None:
         # It is possible that backend will not provide an execution operation
@@ -689,11 +695,19 @@ class ExecutionState:
                     current_checkpoint_token = output.checkpoint_token
 
                     # Fetch new operations from the API before unblocking sync waiters
-                    self.fetch_paginated_operations(
+                    updated_operations = self.fetch_paginated_operations(
                         output.new_execution_state.operations,
                         output.checkpoint_token,
                         output.new_execution_state.next_marker,
                     )
+
+                    for update in updates:
+                        with self._operations_lock:
+                            op = self.operations.get(update.operation_id)
+                        self._plugin_executor.on_operation_action(op, update)
+
+                    for operation in updated_operations:
+                        self._plugin_executor.on_operation_update(operation)
 
                     # Signal completion for any synchronous operations
                     for queued_op in batch:

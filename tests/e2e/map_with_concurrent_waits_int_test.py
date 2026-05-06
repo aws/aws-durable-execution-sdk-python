@@ -42,6 +42,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationUpdate,
     OperationType,
 )
+from aws_durable_execution_sdk_python.plugin import PluginExecutor
 from aws_durable_execution_sdk_python.state import (
     CheckpointBatcherConfig,
     ExecutionState,
@@ -68,6 +69,7 @@ def _make_state(
         operations={},
         service_client=mock_client,
         batcher_config=config,
+        plugin_executor=PluginExecutor([]),
     )
 
 
