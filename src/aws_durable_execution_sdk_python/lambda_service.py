@@ -36,6 +36,15 @@ TimeoutSeconds: TypeAlias = int
 logger = logging.getLogger(__name__)
 
 
+def _is_in_var_dir(module_file: str = __file__) -> bool:
+    """Return True if this SDK is installed under /var/lang/.
+
+    Lambda bundled Python runtimes install packages at
+    /var/lang/lib/pythonX.Y/site-packages/.
+    """
+    return module_file.startswith("/var/lang/")
+
+
 # region model
 class OperationAction(Enum):
     START = "START"
@@ -1061,7 +1070,7 @@ class LambdaClient(DurableServiceClient):
                 config=Config(
                     connect_timeout=5,
                     read_timeout=50,
-                    user_agent_extra=f"aws-durable-execution-sdk-python/{__version__}",
+                    user_agent_extra=f"aws-durable-execution-sdk-python/{__version__}{'-bundled' if _is_in_var_dir() else ''}",
                 ),
             )
         return cls(client=cls._cached_boto_client)
