@@ -20,8 +20,8 @@ from aws_durable_execution_sdk_python.concurrency.models import (
 )
 from aws_durable_execution_sdk_python.config import (
     CompletionConfig,
-    ParallelConfig,
     NestingType,
+    ParallelConfig,
 )
 from aws_durable_execution_sdk_python.context import DurableContext, ExecutionContext
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -1118,3 +1118,123 @@ def test_parallel_custom_serdes_serializes_batch_result():
         assert parent_call[1]["serdes"] is custom_serdes
         assert isinstance(parent_call[1]["value"], BatchResult)
         assert parent_call[1]["value"] is result
+
+
+# region ParallelBranch and branch naming tests
+
+
+def test_parallel_branch_is_callable():
+    """ParallelBranch instances are callable."""
+    from aws_durable_execution_sdk_python.config import ParallelBranch
+
+    branch = ParallelBranch(func=lambda x: x * 2, name="double")
+    assert callable(branch)
+
+
+def test_parallel_branch_delegates_to_func():
+    """Calling ParallelBranch delegates to the wrapped func."""
+    from aws_durable_execution_sdk_python.config import ParallelBranch
+
+    branch = ParallelBranch(func=lambda x, y: x + y, name="add")
+    assert branch(3, 4) == 7
+
+
+def test_parallel_branch_passes_kwargs():
+    """ParallelBranch passes keyword arguments to func."""
+    from aws_durable_execution_sdk_python.config import ParallelBranch
+
+    branch = ParallelBranch(func=lambda ctx, flag=False: flag, name="test")
+    assert branch("ctx", flag=True) is True
+
+
+def test_parallel_branch_frozen():
+    """ParallelBranch is immutable (frozen dataclass)."""
+    from aws_durable_execution_sdk_python.config import ParallelBranch
+
+    branch = ParallelBranch(func=lambda: None, name="test")
+    with pytest.raises(AttributeError):
+        branch.name = "changed"  # type: ignore[misc]
+
+
+def test_parallel_executor_get_iteration_name_default():
+    """Plain callables use default 'parallel-branch-{index}' naming."""
+    callables = [lambda ctx: "a", lambda ctx: "b", lambda ctx: "c"]
+    config = ParallelConfig()
+
+    executor = ParallelExecutor.from_callables(callables, config)
+
+    assert executor.get_iteration_name(0) == "parallel-branch-0"
+    assert executor.get_iteration_name(1) == "parallel-branch-1"
+    assert executor.get_iteration_name(2) == "parallel-branch-2"
+
+
+def test_parallel_executor_get_iteration_name_with_named_branches():
+    """ParallelBranch with name uses the custom name."""
+    from aws_durable_execution_sdk_python.config import ParallelBranch
+
+    branches = [
+        ParallelBranch(func=lambda ctx: "user", name="fetch-user-data"),
+        ParallelBranch(func=lambda ctx: "orders", name="fetch-order-history"),
+    ]
+    config = ParallelConfig()
+
+    executor = ParallelExecutor.from_callables(branches, config)
+
+    assert executor.get_iteration_name(0) == "fetch-user-data"
+    assert executor.get_iteration_name(1) == "fetch-order-history"
+
+
+def test_parallel_executor_get_iteration_name_mixed():
+    """Mix of ParallelBranch (with/without name) and plain callables."""
+    from aws_durable_execution_sdk_python.config import ParallelBranch
+
+    branches = [
+        ParallelBranch(func=lambda ctx: "a", name="named-branch"),
+        lambda ctx: "b",
+        ParallelBranch(func=lambda ctx: "c"),
+    ]
+    config = ParallelConfig()
+
+    executor = ParallelExecutor.from_callables(branches, config)
+
+    assert executor.get_iteration_name(0) == "named-branch"
+    assert executor.get_iteration_name(1) == "parallel-branch-1"
+    assert executor.get_iteration_name(2) == "parallel-branch-2"
+
+
+def test_parallel_executor_get_iteration_name_none_name():
+    """ParallelBranch with name=None falls back to default naming."""
+    from aws_durable_execution_sdk_python.config import ParallelBranch
+
+    branches = [
+        ParallelBranch(func=lambda ctx: "x", name=None),
+    ]
+    config = ParallelConfig()
+
+    executor = ParallelExecutor.from_callables(branches, config)
+
+    assert executor.get_iteration_name(0) == "parallel-branch-0"
+
+
+def test_parallel_branch_execute_item():
+    """ParallelBranch works correctly in execute_item."""
+    from aws_durable_execution_sdk_python.config import ParallelBranch
+
+    branch = ParallelBranch(func=lambda ctx: f"result-{ctx}", name="my-branch")
+    executable = Executable(index=0, func=branch)
+
+    executor = ParallelExecutor(
+        executables=[executable],
+        max_concurrency=None,
+        completion_config=CompletionConfig.all_successful(),
+        top_level_sub_type=OperationSubType.PARALLEL,
+        iteration_sub_type=OperationSubType.PARALLEL_BRANCH,
+        name_prefix="parallel-branch-",
+        serdes=None,
+    )
+
+    result = executor.execute_item("test-ctx", executable)
+    assert result == "result-test-ctx"
+
+
+# endregion

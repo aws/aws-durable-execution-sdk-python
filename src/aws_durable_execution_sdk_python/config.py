@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 from aws_durable_execution_sdk_python.exceptions import ValidationError
 
+
 P = TypeVar("P")  # Payload type
 R = TypeVar("R")  # Result type
 T = TypeVar("T")
@@ -245,6 +246,41 @@ class ParallelConfig:
     nesting_type: NestingType = NestingType.NESTED
 
 
+@dataclass(frozen=True)
+class ParallelBranch(Generic[T]):
+    """A named branch for parallel execution.
+
+    Use this to provide custom names for parallel branches, improving
+    observability in execution history.
+
+    Type Parameters:
+        T: The return type of the branch function.
+
+    Args:
+        func: The callable to execute in this branch. Receives a DurableContext.
+        name: Optional custom name for this branch. When provided, replaces
+            the default "parallel-branch-{index}" naming in execution history.
+            This affects observability but not replay determinism.
+
+    Example:
+        context.parallel(
+            functions=[
+                ParallelBranch(func=lambda ctx: fetch_user(ctx), name="fetch-user-data"),
+                ParallelBranch(func=lambda ctx: fetch_orders(ctx), name="fetch-order-history"),
+            ],
+            name="load-data",
+            config=ParallelConfig(max_concurrency=2),
+        )
+    """
+
+    func: Callable
+    name: str | None = None
+
+    def __call__(self, *args, **kwargs):
+        """Delegate to the wrapped function, making ParallelBranch itself callable."""
+        return self.func(*args, **kwargs)
+
+
 class StepSemantics(Enum):
     AT_MOST_ONCE_PER_RETRY = "AT_MOST_ONCE_PER_RETRY"
     AT_LEAST_ONCE_PER_RETRY = "AT_LEAST_ONCE_PER_RETRY"
@@ -354,11 +390,14 @@ class ItemBatcher(Generic[T]):
 
 
 @dataclass(frozen=True)
-class MapConfig:
+class MapConfig(Generic[T]):
     """Configuration options for map operations over collections.
 
     This class configures how map operations process collections of items,
     including concurrency, batching, completion criteria, and serialization.
+
+    Type Parameters:
+        T: The type of items being processed in the map operation.
 
     Args:
         max_concurrency: Maximum number of items to process concurrently.
@@ -402,12 +441,24 @@ class MapConfig:
             - NESTED: Each item runs in its own isolated context (default)
             - FLAT: All items share the same parent context
 
+        item_namer: Optional callable to generate custom names for each map iteration.
+            When provided, replaces the default "map-item-{index}" naming scheme.
+            Receives the item and its index, and returns a string name for that iteration.
+            This affects observability (execution history names) but not replay determinism.
+            If None, uses the default naming: "map-item-{index}".
+
     Example:
         # Process 5 items at a time, batch by count, require all to succeed
         config = MapConfig(
             max_concurrency=5,
             item_batcher=ItemBatcher(max_items_per_batch=10),
             completion_config=CompletionConfig.all_successful()
+        )
+
+        # With custom iteration names
+        config = MapConfig(
+            max_concurrency=5,
+            item_namer=lambda item, index: f"process-order-{item.id}"
         )
     """
 
@@ -418,6 +469,7 @@ class MapConfig:
     item_serdes: SerDes | None = None
     summary_generator: SummaryGenerator | None = None
     nesting_type: NestingType = NestingType.NESTED
+    item_namer: Callable[[T, int], str] | None = None
 
 
 @dataclass(frozen=True)

@@ -194,6 +194,14 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         """Execute a single executable in a child context and return the result."""
         raise NotImplementedError
 
+    def get_iteration_name(self, index: int) -> str:
+        """Get the display name for an iteration/branch at the given index.
+
+        Subclasses can override this to provide custom naming (e.g., from item_namer
+        or branch names). The default returns "{name_prefix}{index}".
+        """
+        return f"{self.name_prefix}{index}"
+
     def execute(
         self, execution_state: ExecutionState, executor_context: DurableContext
     ) -> BatchResult[ResultType]:
@@ -410,7 +418,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         operation_id: str = executor_context._create_step_id_for_logical_step(  # noqa: SLF001
             executable.index
         )
-        name: str = f"{self.name_prefix}{executable.index}"
+        name: str = self.get_iteration_name(executable.index)
         is_virtual: bool = self.nesting_type is NestingType.FLAT
 
         child_context: DurableContext = executor_context.create_child_context(
