@@ -12,6 +12,7 @@ from aws_durable_execution_sdk_python.config import (
     Duration,
     InvokeConfig,
     MapConfig,
+    ParallelBranch,
     ParallelConfig,
     StepConfig,
     WaitForCallbackConfig,
@@ -54,6 +55,7 @@ from aws_durable_execution_sdk_python.types import (
     WaitForCallbackContext,
     WaitForConditionCheckContext,
 )
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -496,7 +498,7 @@ class DurableContext(DurableContextProtocol):
 
     def parallel(
         self,
-        functions: Sequence[Callable[[DurableContext], T]],
+        functions: Sequence[Callable[[DurableContext], T] | ParallelBranch[T]],
         name: str | None = None,
         config: ParallelConfig | None = None,
     ) -> BatchResult[T]:

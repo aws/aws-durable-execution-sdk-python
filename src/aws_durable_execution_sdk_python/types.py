@@ -6,6 +6,7 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
         ChildConfig,
         Duration,
         MapConfig,
+        ParallelBranch,
         ParallelConfig,
         StepConfig,
     )
@@ -124,7 +126,7 @@ class DurableContext(Protocol):
     @abstractmethod
     def parallel(
         self,
-        functions: Sequence[Callable[[DurableContext], T]],
+        functions: Sequence[Callable[[DurableContext], T] | ParallelBranch[T]],
         name: str | None = None,
         config: ParallelConfig | None = None,
     ) -> BatchResult[T]:

@@ -32,3 +32,5 @@ dist/
 
 /examples/build/*
 /examples/*.zip
+
+.env

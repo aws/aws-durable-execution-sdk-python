@@ -9,8 +9,13 @@ from typing import TYPE_CHECKING, TypeVar
 
 from aws_durable_execution_sdk_python.concurrency.executor import ConcurrentExecutor
 from aws_durable_execution_sdk_python.concurrency.models import Executable
-from aws_durable_execution_sdk_python.config import ParallelConfig, NestingType
+from aws_durable_execution_sdk_python.config import (
+    NestingType,
+    ParallelBranch,
+    ParallelConfig,
+)
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+
 
 if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.concurrency.models import BatchResult
@@ -56,13 +61,19 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
     @classmethod
     def from_callables(
         cls,
-        callables: Sequence[Callable],
+        callables: Sequence[Callable | ParallelBranch],
         config: ParallelConfig,
     ) -> ParallelExecutor:
-        """Create ParallelExecutor from a sequence of callables."""
+        """Create ParallelExecutor from a sequence of callables or ParallelBranch instances.
+
+        Since ParallelBranch is callable, it is stored directly as the func in
+        each Executable. The get_iteration_name method inspects the func to
+        extract the branch name when available.
+        """
         executables: list[Executable[Callable]] = [
             Executable(index=i, func=func) for i, func in enumerate(callables)
         ]
+
         return cls(
             executables=executables,
             max_concurrency=config.max_concurrency,
@@ -76,6 +87,13 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
             nesting_type=config.nesting_type,
         )
 
+    def get_iteration_name(self, index: int) -> str:
+        """Return custom branch name if the callable is a ParallelBranch with a name."""
+        func = self.executables[index].func
+        if isinstance(func, ParallelBranch) and func.name is not None:
+            return func.name
+        return super().get_iteration_name(index)
+
     def execute_item(self, child_context, executable: Executable[Callable]) -> R:  # noqa: PLR6301
         logger.debug("🔀 Processing parallel branch: %s", executable.index)
         result: R = executable.func(child_context)
@@ -84,7 +102,7 @@ class ParallelExecutor(ConcurrentExecutor[Callable, R]):
 
 
 def parallel_handler(
-    callables: Sequence[Callable],
+    callables: Sequence[Callable | ParallelBranch],
     config: ParallelConfig | None,
     execution_state: ExecutionState,
     parallel_context: DurableContext,

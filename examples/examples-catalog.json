@@ -580,6 +580,28 @@
           "ApplicationLogLevel": "DEBUG",
           "LogFormat": "JSON"
         }
-      }
+      },
+    {
+      "name": "Map with Item Namer",
+      "description": "Map operation with custom item_namer for iteration naming",
+      "handler": "map_with_item_namer.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/map/map_with_item_namer.py"
+    },
+    {
+      "name": "Parallel with Named Branches",
+      "description": "Parallel operation with named branches using ParallelBranch",
+      "handler": "parallel_with_named_branches.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/parallel/parallel_with_named_branches.py"
+    }
   ]
 }
