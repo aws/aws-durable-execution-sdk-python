@@ -941,6 +941,42 @@
           "ExecutionTimeout": 300
         }
       }
+    },
+    "MapWithItemNamer": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "map_with_item_namer.handler",
+        "Description": "Map operation with custom item_namer for iteration naming",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "ParallelWithNamedBranches": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "parallel_with_named_branches.handler",
+        "Description": "Parallel operation with named branches using ParallelBranch",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
     }
   }
 }
