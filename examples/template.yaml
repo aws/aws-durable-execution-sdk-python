@@ -959,6 +959,24 @@
           "ExecutionTimeout": 300
         }
       }
+    },
+    "ExecutionWithOtel": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "execution_with_otel.handler",
+        "Description": "Test Otel plugin",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
     }
   }
 }

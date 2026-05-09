@@ -21,7 +21,13 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
-dependencies = ["boto3>=1.42.1"]
+dependencies = [
+  "boto3>=1.42.1",
+  "opentelemetry-api",
+  "opentelemetry-sdk",
+  "opentelemetry-exporter-otlp",
+  "opentelemetry-propagator-aws-xray",
+]
 
 [project.urls]
 Documentation = "https://github.com/aws/aws-durable-execution-sdk-python#readme"
@@ -29,7 +35,10 @@ Issues = "https://github.com/aws/aws-durable-execution-sdk-python/issues"
 Source = "https://github.com/aws/aws-durable-execution-sdk-python"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/aws_durable_execution_sdk_python"]
+packages = [
+  "src/aws_durable_execution_sdk_python",
+  "src/aws_durable_execution_sdk_python_otel",
+]
 
 [tool.hatch.version]
 path = "src/aws_durable_execution_sdk_python/__about__.py"

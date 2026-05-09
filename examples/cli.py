@@ -44,25 +44,34 @@ def build_examples():
         shutil.rmtree(build_dir)
     build_dir.mkdir()
 
+    # install all dependencies
+    os.system("pip install -t ./examples/build .")
+
     # Copy testing library from current environment
     try:
         import aws_durable_execution_sdk_python_testing
 
-        sdk_path = Path(aws_durable_execution_sdk_python_testing.__file__).parent
-        logger.info("Copying SDK from %s", sdk_path)
+        testing_path = Path(aws_durable_execution_sdk_python_testing.__file__).parent
+        logger.info("Copying testing library from %s", testing_path)
+        shutil.rmtree(
+            build_dir / "aws_durable_execution_sdk_python_testing", ignore_errors=True
+        )
         shutil.copytree(
-            sdk_path, build_dir / "aws_durable_execution_sdk_python_testing"
+            testing_path, build_dir / "aws_durable_execution_sdk_python_testing"
         )
     except (ImportError, OSError):
         logger.exception("Failed to copy testing library")
         return False
 
     # Copy testing SDK source
-    testing_src = (
-        Path(__file__).parent.parent / "src" / "aws_durable_execution_sdk_python"
-    )
-    logger.info("Copying SDK from %s", testing_src)
-    shutil.copytree(testing_src, build_dir / "aws_durable_execution_sdk_python")
+    for subdir in [
+        "aws_durable_execution_sdk_python",
+        "aws_durable_execution_sdk_python_otel",
+    ]:
+        sdk_src = Path(__file__).parent.parent / "src" / subdir
+        logger.info("Copying SDK folder from %s", sdk_src)
+        shutil.rmtree(build_dir / subdir, ignore_errors=True)
+        shutil.copytree(sdk_src, build_dir / subdir)
 
     # Copy example functions
     logger.info("Copying examples from %s", src_dir)
@@ -328,7 +337,11 @@ def deploy_function(example_name: str, function_name: str | None = None):
         "Timeout": 60,
         "MemorySize": 128,
         "Environment": {
-            "Variables": {"AWS_ENDPOINT_URL_LAMBDA": config["lambda_endpoint"]}
+            "Variables": {
+                "AWS_ENDPOINT_URL_LAMBDA": config["lambda_endpoint"],
+                "OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED": "true",
+                "AWS_LAMBDA_EXEC_WRAPPER": "/opt/otel-instrument",
+            }
         },
         "DurableConfig": example_config["durableConfig"],
         "LoggingConfig": example_config.get("loggingConfig", {}),
