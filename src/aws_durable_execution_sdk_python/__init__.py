@@ -10,6 +10,7 @@ from aws_durable_execution_sdk_python.concurrency.models import BatchResult
 from aws_durable_execution_sdk_python.config import ParallelBranch
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
+    durable_parallel_branch,
     durable_step,
     durable_wait_for_callback,
     durable_with_child_context,
@@ -39,6 +40,7 @@ __all__ = [
     "ValidationError",
     "__version__",
     "durable_execution",
+    "durable_parallel_branch",
     "durable_step",
     "durable_wait_for_callback",
     "durable_with_child_context",
