@@ -121,6 +121,52 @@ def durable_with_child_context(
     return wrapper
 
 
+def durable_parallel_branch(
+    name: str | None = None,
+) -> Callable[
+    [Callable[Concatenate[DurableContext, Params], T]],
+    Callable[Params, ParallelBranch[T]],
+]:
+    """Wrap your callable into a named ParallelBranch for use with context.parallel().
+
+    This is a decorator factory — call it with an optional name to produce
+    the actual decorator.
+
+    Args:
+        name: Optional custom name for this branch. When provided, replaces
+            the default "parallel-branch-{index}" naming in execution history.
+            If None, the function's __name__ is used.
+
+    Example:
+        @durable_parallel_branch(name="fetch-user-data")
+        def fetch_user(ctx: DurableContext, user_id: str) -> dict:
+            return ctx.step(lambda _: {"id": user_id, "name": "Jane"}, name="load_user")
+
+        @durable_parallel_branch(name="fetch-orders")
+        def fetch_orders(ctx: DurableContext, user_id: str) -> list:
+            return ctx.step(lambda _: ["order1", "order2"], name="load_orders")
+
+        # Usage in a durable handler:
+        results = context.parallel(
+            functions=[fetch_user(user_id), fetch_orders(user_id)],
+            name="load-data",
+        )
+    """
+
+    def decorator(
+        func: Callable[Concatenate[DurableContext, Params], T],
+    ) -> Callable[Params, ParallelBranch[T]]:
+        def wrapper(*args, **kwargs) -> ParallelBranch[T]:
+            def function_with_arguments(ctx: DurableContext) -> T:
+                return func(ctx, *args, **kwargs)
+
+            return ParallelBranch(func=function_with_arguments, name=name)
+
+        return wrapper
+
+    return decorator
+
+
 def durable_wait_for_callback(
     func: Callable[Concatenate[str, WaitForCallbackContext, Params], T],
 ) -> Callable[Params, Callable[[str, WaitForCallbackContext], T]]:

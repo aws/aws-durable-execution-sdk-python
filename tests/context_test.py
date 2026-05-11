@@ -14,6 +14,7 @@ from aws_durable_execution_sdk_python.config import (
     Duration,
     InvokeConfig,
     MapConfig,
+    ParallelBranch,
     ParallelConfig,
     StepConfig,
 )
@@ -21,6 +22,7 @@ from aws_durable_execution_sdk_python.context import (
     Callback,
     DurableContext,
     ExecutionContext,
+    durable_parallel_branch,
 )
 from aws_durable_execution_sdk_python.exceptions import (
     CallbackError,
@@ -2160,3 +2162,116 @@ def test_should_propagate_outer_parent_id_when_virtual_is_nested_in_virtual():
 
 
 # endregion Virtual-context identity tests
+
+
+# region durable_parallel_branch
+
+
+def test_durable_parallel_branch_returns_parallel_branch_with_name():
+    """Test that the decorator produces a ParallelBranch with the given name."""
+
+    @durable_parallel_branch(name="fetch-user-data")
+    def fetch_user(ctx: DurableContext, user_id: str) -> dict:
+        return {"id": user_id}
+
+    result = fetch_user("user-123")
+
+    assert isinstance(result, ParallelBranch)
+    assert result.name == "fetch-user-data"
+
+
+def test_durable_parallel_branch_with_no_name():
+    """Test that when name is None, ParallelBranch.name is None."""
+
+    @durable_parallel_branch()
+    def fetch_orders(ctx: DurableContext) -> list:
+        return ["order1"]
+
+    result = fetch_orders()
+
+    assert isinstance(result, ParallelBranch)
+    assert result.name is None
+
+
+def test_durable_parallel_branch_callable_delegates_to_func():
+    """Test that calling the ParallelBranch delegates to the wrapped function."""
+
+    @durable_parallel_branch(name="my-branch")
+    def my_branch(ctx: DurableContext, value: int) -> int:
+        return value * 2
+
+    branch = my_branch(21)
+    mock_ctx = Mock(spec=DurableContext)
+
+    result = branch(mock_ctx)
+
+    assert result == 42
+
+
+def test_durable_parallel_branch_with_multiple_args_and_kwargs():
+    """Test that positional and keyword arguments are correctly bound."""
+
+    @durable_parallel_branch(name="compute")
+    def compute(ctx: DurableContext, a: int, b: int, op: str = "add") -> str:
+        if op == "add":
+            return f"{a + b}"
+        return f"{a * b}"
+
+    branch = compute(3, 4, op="mul")
+    mock_ctx = Mock(spec=DurableContext)
+
+    result = branch(mock_ctx)
+
+    assert result == "12"
+
+
+def test_durable_parallel_branch_passes_context_as_first_arg():
+    """Test that the DurableContext is passed as the first argument to the function."""
+    received_ctx = None
+
+    @durable_parallel_branch(name="capture-ctx")
+    def capture(ctx: DurableContext) -> str:
+        nonlocal received_ctx
+        received_ctx = ctx
+        return "done"
+
+    branch = capture()
+    mock_ctx = Mock(spec=DurableContext)
+    branch(mock_ctx)
+
+    assert received_ctx is mock_ctx
+
+
+def test_durable_parallel_branch_multiple_invocations_are_independent():
+    """Test that calling the wrapper multiple times produces independent branches."""
+
+    @durable_parallel_branch(name="greet")
+    def greet(ctx: DurableContext, name: str) -> str:
+        return f"hello {name}"
+
+    branch_a = greet("Alice")
+    branch_b = greet("Bob")
+
+    mock_ctx = Mock(spec=DurableContext)
+
+    assert branch_a(mock_ctx) == "hello Alice"
+    assert branch_b(mock_ctx) == "hello Bob"
+
+
+def test_durable_parallel_branch_is_compatible_with_parallel_functions_arg():
+    """Test that the result can be used in a functions list alongside plain callables."""
+
+    @durable_parallel_branch(name="named-branch")
+    def named(ctx: DurableContext) -> str:
+        return "named"
+
+    plain = lambda ctx: "plain"  # noqa: E731
+
+    functions = [named(), plain]
+
+    assert isinstance(functions[0], ParallelBranch)
+    assert callable(functions[0])
+    assert callable(functions[1])
+
+
+# endregion durable_parallel_branch
