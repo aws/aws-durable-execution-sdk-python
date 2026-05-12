@@ -271,7 +271,6 @@ def test_invoke_config_defaults():
     """Test InvokeConfig defaults."""
     config = InvokeConfig()
     assert config.tenant_id is None
-    assert config.timeout_seconds == 0
 
 
 def test_invoke_config_with_tenant_id():

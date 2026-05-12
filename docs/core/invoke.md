@@ -28,8 +28,6 @@
 
 **Payload** - The input data sent to the invoked function. Can be any JSON-serializable value or use custom serialization.
 
-**Timeout** - The maximum time to wait for an invoked function to complete. If exceeded, the invoke operation fails with a timeout error.
-
 [↑ Back to top](#table-of-contents)
 
 ## What are invoke operations?
@@ -59,7 +57,6 @@ When you invoke a function, the SDK:
 - **Asynchronous execution** - Invoked functions run independently without blocking resources
 - **Result handling** - Results are automatically deserialized and returned
 - **Error propagation** - Errors from invoked functions propagate to the caller
-- **Timeout support** - Configure maximum wait time for invoked functions
 - **Custom serialization** - Control how payloads and results are serialized
 - **Named operations** - Identify invoke operations by name for debugging
 
@@ -131,7 +128,7 @@ def invoke(
 - `function_name` - The name of the Lambda function to invoke. This should be the function name, not the ARN.
 - `payload` - The input data to send to the invoked function. Can be any JSON-serializable value.
 - `name` (optional) - A name for the invoke operation, useful for debugging and testing.
-- `config` (optional) - An `InvokeConfig` object to configure timeout and serialization.
+- `config` (optional) - An `InvokeConfig` object to configure serialization and tenant isolation.
 
 **Returns:** The result returned by the invoked function.
 
@@ -291,51 +288,32 @@ from aws_durable_execution_sdk_python import (
     DurableContext,
     durable_execution,
 )
-from aws_durable_execution_sdk_python.config import Duration, InvokeConfig
+from aws_durable_execution_sdk_python.config import InvokeConfig
 
 @durable_execution
 def handler(event: dict, context: DurableContext) -> dict:
-    # Configure invoke with timeout
     invoke_config = InvokeConfig(
-        timeout=Duration.from_minutes(5),
+        serdes_payload=my_payload_serdes,
+        serdes_result=my_result_serdes,
     )
-    
+
     result = context.invoke(
-        function_name="long-running-function",
+        function_name="my-function",
         payload=event,
-        name="long_running",
+        name="my_invoke",
         config=invoke_config,
     )
-    
+
     return result
 ```
 
 ### InvokeConfig parameters
-
-**timeout** - Maximum duration to wait for the invoked function to complete. Default is no timeout. Use this to prevent long-running invocations from blocking execution indefinitely.
 
 **serdes_payload** - Custom serialization/deserialization for the payload sent to the invoked function. If None, uses default JSON serialization.
 
 **serdes_result** - Custom serialization/deserialization for the result returned from the invoked function. If None, uses default JSON serialization.
 
 **tenant_id** - Optional tenant identifier for multi-tenant isolation. If provided, the invocation will be scoped to this tenant.
-
-### Setting timeouts
-
-Use the `Duration` class to set timeouts:
-
-```python
-from aws_durable_execution_sdk_python.config import Duration, InvokeConfig
-
-# Timeout after 30 seconds
-config = InvokeConfig(timeout=Duration.from_seconds(30))
-
-# Timeout after 5 minutes
-config = InvokeConfig(timeout=Duration.from_minutes(5))
-
-# Timeout after 2 hours
-config = InvokeConfig(timeout=Duration.from_hours(2))
-```
 
 [↑ Back to top](#table-of-contents)
 
@@ -370,33 +348,6 @@ def handler(event: dict, context: DurableContext) -> dict:
             "status": "failed",
             "error": str(e),
         }
-```
-
-### Timeout handling
-
-Handle timeout errors specifically:
-
-```python
-from aws_durable_execution_sdk_python.config import Duration, InvokeConfig
-
-@durable_execution
-def handler(event: dict, context: DurableContext) -> dict:
-    """Handle timeout errors."""
-    config = InvokeConfig(timeout=Duration.from_seconds(30))
-    
-    try:
-        result = context.invoke(
-            function_name="slow-function",
-            payload=event,
-            config=config,
-        )
-        return {"status": "success", "result": result}
-    
-    except CallableRuntimeError as e:
-        if "timed out" in str(e).lower():
-            context.logger.warning("Function timed out, using fallback")
-            return {"status": "timeout", "fallback": True}
-        raise
 ```
 
 ### Retry patterns
@@ -551,8 +502,6 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 **Name invoke operations** - Use the `name` parameter to identify invoke operations in logs and tests.
 
-**Set appropriate timeouts** - Configure timeouts based on expected execution time. Don't set them too short or too long.
-
 **Handle errors explicitly** - Catch and handle errors from invoked functions. Don't let them propagate unexpectedly.
 
 **Keep payloads small** - Large payloads increase serialization overhead. Consider passing references instead of large data.
@@ -603,10 +552,6 @@ A: Yes, you can invoke the same function multiple times with different payloads 
 
 A: The `function_name` parameter accepts function names in the same account. For cross-account invocations, you need appropriate IAM permissions and may need to use function ARNs (check AWS documentation for cross-account Lambda invocations).
 
-**Q: What's the maximum timeout I can set?**
-
-A: The timeout is limited by Lambda's maximum execution time (15 minutes). However, durable functions can run longer by suspending and resuming.
-
 **Q: Can I invoke functions in parallel?**
 
 A: Not directly with `context.invoke()`. For parallel execution, consider using `context.parallel()` with steps that perform invocations, or invoke multiple functions sequentially.
@@ -614,10 +559,6 @@ A: Not directly with `context.invoke()`. For parallel execution, consider using 
 **Q: How do I debug invoke operations?**
 
 A: Use the `name` parameter to identify operations in logs. Check CloudWatch logs for both the calling and invoked functions.
-
-**Q: What happens if I don't set a timeout?**
-
-A: The invoke operation waits indefinitely for the invoked function to complete. It's recommended to set timeouts for better error handling.
 
 **Q: What's the difference between context.invoke() and using boto3's Lambda client to invoke functions?**
 
@@ -701,27 +642,6 @@ def test_invoke_error_handling(durable_runner):
     assert result.status is InvocationStatus.SUCCEEDED
     assert result.result["status"] == "failed"
     assert "error" in result.result
-```
-
-### Testing timeouts
-
-Test that timeouts are handled correctly:
-
-```python
-from aws_durable_execution_sdk_python.config import Duration, InvokeConfig
-
-@pytest.mark.durable_execution(
-    handler=handler_with_timeout,
-    lambda_function_name="timeout_function",
-)
-def test_invoke_timeout(durable_runner):
-    """Test invoke timeout handling."""
-    with durable_runner:
-        result = durable_runner.run(input={}, timeout=60)
-    
-    # Check that timeout was handled
-    assert result.status is InvocationStatus.SUCCEEDED
-    assert result.result["status"] == "timeout"
 ```
 
 ### Mocking invoked functions
