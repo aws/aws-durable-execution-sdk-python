@@ -181,7 +181,6 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
             check_context = WaitForConditionCheckContext(
                 logger=self.context_logger.with_log_info(
                     LogInfo.from_operation_identifier(
-                        execution_state=self.state,
                         op_id=self.operation_identifier,
                         attempt=attempt,
                     )

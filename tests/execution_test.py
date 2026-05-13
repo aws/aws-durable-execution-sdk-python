@@ -2690,8 +2690,9 @@ def _make_lambda_context():
 def test_durable_execution_replays_when_paginated_state_has_prior_operations():
     """Test paginated execution state starts in replay mode when prior operations exist."""
     mock_client = Mock(spec=DurableServiceClient)
+    # step_operation with operation_id = hashed(1)
     step_operation = Operation(
-        operation_id="step1",
+        operation_id="1ced8f5be2db23a6513eba4d819c73806424748a7bc6fa0d792cc1c7d1775a97",
         operation_type=OperationType.STEP,
         status=OperationStatus.SUCCEEDED,
     )
@@ -2704,7 +2705,7 @@ def test_durable_execution_replays_when_paginated_state_has_prior_operations():
 
     @durable_execution
     def test_handler(event: Any, context: DurableContext) -> dict:
-        return {"is_replaying": context.state.is_replaying()}
+        return {"is_replaying": context.is_replaying}
 
     result = test_handler(invocation_input, _make_lambda_context())
 

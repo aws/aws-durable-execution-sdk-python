@@ -2,6 +2,7 @@
 
 import importlib
 import json
+from collections import defaultdict
 from collections.abc import Mapping
 from typing import Any
 from unittest.mock import Mock, patch
@@ -811,13 +812,11 @@ def test_parallel_item_serialize(mock_serialize, item_serdes, batch_serdes):
     mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
     mock_state.create_checkpoint = Mock()
 
-    context_map = {}
+    context_map = defaultdict(set)
 
     def create_id(self, i):
         ctx_id = id(self)
-        if ctx_id not in context_map:
-            context_map[ctx_id] = []
-        context_map[ctx_id].append(i)
+        context_map[ctx_id].add(i)
         return (
             "parent"
             if len(context_map) == 1 and len(context_map[ctx_id]) == 1
@@ -872,13 +871,11 @@ def test_parallel_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
     mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
     mock_state.create_checkpoint = Mock()
 
-    context_map = {}
+    context_map = defaultdict(set)
 
     def create_id(self, i):
         ctx_id = id(self)
-        if ctx_id not in context_map:
-            context_map[ctx_id] = []
-        context_map[ctx_id].append(i)
+        context_map[ctx_id].add(i)
         return (
             "parent"
             if len(context_map) == 1 and len(context_map[ctx_id]) == 1
