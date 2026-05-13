@@ -4,6 +4,8 @@ import logging
 from collections.abc import Mapping
 from unittest.mock import Mock
 
+from aws_durable_execution_sdk_python import DurableContext
+from aws_durable_execution_sdk_python.context import ExecutionContext
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
@@ -84,6 +86,11 @@ EXECUTION_STATE = ExecutionState(
     operations={},
     service_client=Mock(),
 )
+EXECUTION_CONTEXT = ExecutionContext("arn:aws:test")
+DURABLE_CONTEXT = DurableContext(
+    state=EXECUTION_STATE,
+    execution_context=EXECUTION_CONTEXT,
+)
 
 
 def test_powertools_logger_compatibility():
@@ -102,8 +109,8 @@ def test_powertools_logger_compatibility():
     accepts_logger_interface(powertools_logger)
 
     # Test that our Logger can wrap the PowertoolsLoggerStub
-    log_info = LogInfo(EXECUTION_STATE)
-    wrapped_logger = Logger.from_log_info(powertools_logger, log_info)
+    log_info = LogInfo()
+    wrapped_logger = Logger.from_log_info(powertools_logger, log_info, DURABLE_CONTEXT)
 
     # Test all methods work
     wrapped_logger.debug("debug message")
@@ -115,8 +122,7 @@ def test_powertools_logger_compatibility():
 
 def test_log_info_creation():
     """Test LogInfo creation with all parameters."""
-    log_info = LogInfo(EXECUTION_STATE, "parent123", "operation123", "test_name", 5)
-    assert log_info.execution_state.durable_execution_arn == "arn:aws:test"
+    log_info = LogInfo("parent123", "operation123", "test_name", 5)
     assert log_info.parent_id == "parent123"
     assert log_info.operation_id == "operation123"
     assert log_info.name == "test_name"
@@ -125,8 +131,7 @@ def test_log_info_creation():
 
 def test_log_info_creation_minimal():
     """Test LogInfo creation with minimal parameters."""
-    log_info = LogInfo(EXECUTION_STATE)
-    assert log_info.execution_state.durable_execution_arn == "arn:aws:test"
+    log_info = LogInfo()
     assert log_info.parent_id is None
     assert log_info.operation_id is None
     assert log_info.name is None
@@ -136,8 +141,7 @@ def test_log_info_creation_minimal():
 def test_log_info_from_operation_identifier():
     """Test LogInfo.from_operation_identifier."""
     op_id = OperationIdentifier("op123", "parent456", "op_name")
-    log_info = LogInfo.from_operation_identifier(EXECUTION_STATE, op_id, 3)
-    assert log_info.execution_state.durable_execution_arn == "arn:aws:test"
+    log_info = LogInfo.from_operation_identifier(op_id, 3)
     assert log_info.parent_id == "parent456"
     assert log_info.operation_id == "op123"
     assert log_info.name == "op_name"
@@ -147,8 +151,7 @@ def test_log_info_from_operation_identifier():
 def test_log_info_from_operation_identifier_no_attempt():
     """Test LogInfo.from_operation_identifier without attempt."""
     op_id = OperationIdentifier("op123", "parent456", "op_name")
-    log_info = LogInfo.from_operation_identifier(EXECUTION_STATE, op_id)
-    assert log_info.execution_state.durable_execution_arn == "arn:aws:test"
+    log_info = LogInfo.from_operation_identifier(op_id)
     assert log_info.parent_id == "parent456"
     assert log_info.operation_id == "op123"
     assert log_info.name == "op_name"
@@ -157,9 +160,8 @@ def test_log_info_from_operation_identifier_no_attempt():
 
 def test_log_info_with_parent_id():
     """Test LogInfo.with_parent_id."""
-    original = LogInfo(EXECUTION_STATE, "old_parent", "op123", "test_name", 2)
+    original = LogInfo("old_parent", "op123", "test_name", 2)
     new_log_info = original.with_parent_id("new_parent")
-    assert new_log_info.execution_state.durable_execution_arn == "arn:aws:test"
     assert new_log_info.parent_id == "new_parent"
     assert new_log_info.operation_id == "op123"
     assert new_log_info.name == "test_name"
@@ -169,8 +171,8 @@ def test_log_info_with_parent_id():
 def test_logger_from_log_info_full():
     """Test Logger.from_log_info with all LogInfo fields."""
     mock_logger = Mock()
-    log_info = LogInfo(EXECUTION_STATE, "parent123", "op123", "test_name", 5)
-    logger = Logger.from_log_info(mock_logger, log_info)
+    log_info = LogInfo("parent123", "op123", "test_name", 5)
+    logger = Logger.from_log_info(mock_logger, log_info, DURABLE_CONTEXT)
 
     expected_extra = {
         "executionArn": "arn:aws:test",
@@ -188,20 +190,20 @@ def test_logger_from_log_info_partial_fields():
     mock_logger = Mock()
 
     # Test with parent_id but no name or attempt
-    log_info = LogInfo(EXECUTION_STATE, "parent123")
-    logger = Logger.from_log_info(mock_logger, log_info)
+    log_info = LogInfo("parent123")
+    logger = Logger.from_log_info(mock_logger, log_info, DURABLE_CONTEXT)
     expected_extra = {"executionArn": "arn:aws:test", "parentId": "parent123"}
     assert logger._default_extra == expected_extra  # noqa: SLF001
 
     # Test with name but no parent_id or attempt
-    log_info = LogInfo(EXECUTION_STATE, None, None, "test_name")
-    logger = Logger.from_log_info(mock_logger, log_info)
+    log_info = LogInfo(None, None, "test_name")
+    logger = Logger.from_log_info(mock_logger, log_info, DURABLE_CONTEXT)
     expected_extra = {"executionArn": "arn:aws:test", "operationName": "test_name"}
     assert logger._default_extra == expected_extra  # noqa: SLF001
 
     # Test with attempt but no parent_id or name
-    log_info = LogInfo(EXECUTION_STATE, None, None, None, 5)
-    logger = Logger.from_log_info(mock_logger, log_info)
+    log_info = LogInfo(None, None, None, 5)
+    logger = Logger.from_log_info(mock_logger, log_info, DURABLE_CONTEXT)
     expected_extra = {"executionArn": "arn:aws:test", "attempt": 5}
     assert logger._default_extra == expected_extra  # noqa: SLF001
 
@@ -209,8 +211,8 @@ def test_logger_from_log_info_partial_fields():
 def test_logger_from_log_info_minimal():
     """Test Logger.from_log_info with minimal LogInfo."""
     mock_logger = Mock()
-    log_info = LogInfo(EXECUTION_STATE)
-    logger = Logger.from_log_info(mock_logger, log_info)
+    log_info = LogInfo()
+    logger = Logger.from_log_info(mock_logger, log_info, DURABLE_CONTEXT)
 
     expected_extra = {"executionArn": "arn:aws:test"}
     assert logger._default_extra == expected_extra  # noqa: SLF001
@@ -219,8 +221,7 @@ def test_logger_from_log_info_minimal():
 def test_logger_with_log_info():
     """Test Logger.with_log_info."""
     mock_logger = Mock()
-    original_info = LogInfo(EXECUTION_STATE, "parent1")
-    logger = Logger.from_log_info(mock_logger, original_info)
+    original_info = LogInfo("parent1")
 
     execution_state_new = ExecutionState(
         durable_execution_arn="arn:aws:new",
@@ -228,7 +229,9 @@ def test_logger_with_log_info():
         operations={},
         service_client=Mock(),
     )
-    new_info = LogInfo(execution_state_new, "parent2", "op123", "new_name")
+    durable_context = DurableContext(execution_state_new, EXECUTION_CONTEXT)
+    logger = Logger.from_log_info(mock_logger, original_info, durable_context)
+    new_info = LogInfo("parent2", "op123", "new_name")
     new_logger = logger.with_log_info(new_info)
 
     expected_extra = {
@@ -244,16 +247,16 @@ def test_logger_with_log_info():
 def test_logger_get_logger():
     """Test Logger.get_logger."""
     mock_logger = Mock()
-    log_info = LogInfo(EXECUTION_STATE)
-    logger = Logger.from_log_info(mock_logger, log_info)
+    log_info = LogInfo()
+    logger = Logger.from_log_info(mock_logger, log_info, DURABLE_CONTEXT)
     assert logger.get_logger() is mock_logger
 
 
 def test_logger_debug():
     """Test Logger.debug method."""
     mock_logger = Mock()
-    log_info = LogInfo(EXECUTION_STATE, "parent123")
-    logger = Logger.from_log_info(mock_logger, log_info)
+    log_info = LogInfo("parent123")
+    logger = Logger.from_log_info(mock_logger, log_info, DURABLE_CONTEXT)
 
     logger.debug("test %s message", "arg1", extra={"custom": "value"})
 
@@ -270,8 +273,8 @@ def test_logger_debug():
 def test_logger_info():
     """Test Logger.info method."""
     mock_logger = Mock()
-    log_info = LogInfo(EXECUTION_STATE)
-    logger = Logger.from_log_info(mock_logger, log_info)
+    log_info = LogInfo()
+    logger = Logger.from_log_info(mock_logger, log_info, DURABLE_CONTEXT)
 
     logger.info("info message")
 
@@ -282,8 +285,8 @@ def test_logger_info():
 def test_logger_warning():
     """Test Logger.warning method."""
     mock_logger = Mock()
-    log_info = LogInfo(EXECUTION_STATE)
-    logger = Logger.from_log_info(mock_logger, log_info)
+    log_info = LogInfo()
+    logger = Logger.from_log_info(mock_logger, log_info, DURABLE_CONTEXT)
 
     logger.warning("warning %s %s message", "arg1", "arg2")
 
@@ -296,8 +299,8 @@ def test_logger_warning():
 def test_logger_error():
     """Test Logger.error method."""
     mock_logger = Mock()
-    log_info = LogInfo(EXECUTION_STATE)
-    logger = Logger.from_log_info(mock_logger, log_info)
+    log_info = LogInfo()
+    logger = Logger.from_log_info(mock_logger, log_info, DURABLE_CONTEXT)
 
     logger.error("error message", extra={"error_code": 500})
 
@@ -308,8 +311,8 @@ def test_logger_error():
 def test_logger_exception():
     """Test Logger.exception method."""
     mock_logger = Mock()
-    log_info = LogInfo(EXECUTION_STATE)
-    logger = Logger.from_log_info(mock_logger, log_info)
+    log_info = LogInfo()
+    logger = Logger.from_log_info(mock_logger, log_info, DURABLE_CONTEXT)
 
     logger.exception("exception message")
 
@@ -322,8 +325,8 @@ def test_logger_exception():
 def test_logger_methods_with_none_extra():
     """Test logger methods handle None extra parameter."""
     mock_logger = Mock()
-    log_info = LogInfo(EXECUTION_STATE)
-    logger = Logger.from_log_info(mock_logger, log_info)
+    log_info = LogInfo()
+    logger = Logger.from_log_info(mock_logger, log_info, DURABLE_CONTEXT)
 
     logger.debug("debug", extra=None)
     logger.info("info", extra=None)
@@ -342,8 +345,8 @@ def test_logger_methods_with_none_extra():
 def test_logger_extra_override():
     """Test that custom extra overrides default extra."""
     mock_logger = Mock()
-    log_info = LogInfo(EXECUTION_STATE, "parent123")
-    logger = Logger.from_log_info(mock_logger, log_info)
+    log_info = LogInfo("parent123")
+    logger = Logger.from_log_info(mock_logger, log_info, DURABLE_CONTEXT)
 
     logger.info("test", extra={"executionArn": "overridden", "newField": "value"})
 
@@ -357,8 +360,8 @@ def test_logger_extra_override():
 
 def test_logger_without_mocked_logger():
     """Test Logger methods without mocking the underlying logger."""
-    log_info = LogInfo(EXECUTION_STATE, "parent123", "test_name", 5)
-    logger = Logger.from_log_info(logging.getLogger(), log_info)
+    log_info = LogInfo("parent123", "op1", "test_name", 5)
+    logger = Logger.from_log_info(logging.getLogger(), log_info, DURABLE_CONTEXT)
 
     logger.info("test", extra={"execution_arn": "overridden", "new_field": "value"})
     logger.warning("test", extra={"execution_arn": "overridden", "new_field": "value"})
@@ -378,12 +381,13 @@ def test_logger_replay_no_logging():
         service_client=Mock(),
         replay_status=ReplayStatus.REPLAY,
     )
-    log_info = LogInfo(replay_execution_state, "parent123", "test_name", 5)
+    durable_context = Mock(DurableContext)
+    durable_context.is_replaying = True
+    durable_context.state = replay_execution_state
+    log_info = LogInfo("parent123", "op1", "test_name", 5)
     mock_logger = Mock()
-    logger = Logger.from_log_info(mock_logger, log_info)
+    logger = Logger.from_log_info(mock_logger, log_info, durable_context)
     logger.info("logging info")
-    replay_execution_state.track_replay(operation_id="op1")
-
     mock_logger.info.assert_not_called()
 
 
@@ -405,14 +409,16 @@ def test_logger_replay_then_new_logging():
         service_client=Mock(),
         replay_status=ReplayStatus.REPLAY,
     )
-    log_info = LogInfo(execution_state, "parent123", "test_name", 5)
+    durable_context = Mock(DurableContext)
+    durable_context.is_replaying = True
+    durable_context.state = execution_state
+    log_info = LogInfo("parent123", "op1", "test_name", 5)
     mock_logger = Mock()
-    logger = Logger.from_log_info(mock_logger, log_info)
-    execution_state.track_replay(operation_id="op1")
+    logger = Logger.from_log_info(mock_logger, log_info, durable_context)
     logger.info("logging info")
 
     mock_logger.info.assert_not_called()
 
-    execution_state.track_replay(operation_id="op2")
+    durable_context.is_replaying = False
     logger.info("logging info")
     mock_logger.info.assert_called_once()

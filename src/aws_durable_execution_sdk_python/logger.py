@@ -10,13 +10,12 @@ from aws_durable_execution_sdk_python.types import LoggerInterface
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, MutableMapping
 
-    from aws_durable_execution_sdk_python.context import ExecutionState
+    from aws_durable_execution_sdk_python import DurableContext
     from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 
 
 @dataclass(frozen=True)
 class LogInfo:
-    execution_state: ExecutionState
     parent_id: str | None = None
     operation_id: str | None = None
     name: str | None = None
@@ -25,13 +24,11 @@ class LogInfo:
     @classmethod
     def from_operation_identifier(
         cls,
-        execution_state: ExecutionState,
         op_id: OperationIdentifier,
         attempt: int | None = None,
     ) -> LogInfo:
         """Create new log info from an execution arn, OperationIdentifier and attempt."""
         return cls(
-            execution_state=execution_state,
             parent_id=op_id.parent_id,
             operation_id=op_id.operation_id,
             name=op_id.name,
@@ -41,7 +38,6 @@ class LogInfo:
     def with_parent_id(self, parent_id: str) -> LogInfo:
         """Clone the log info with a new parent id."""
         return LogInfo(
-            execution_state=self.execution_state,
             parent_id=parent_id,
             operation_id=self.operation_id,
             name=self.name,
@@ -54,17 +50,19 @@ class Logger(LoggerInterface):
         self,
         logger: LoggerInterface,
         default_extra: Mapping[str, object],
-        execution_state: ExecutionState,
+        context: DurableContext,
     ) -> None:
         self._logger = logger
         self._default_extra = default_extra
-        self._execution_state = execution_state
+        self._context = context
 
     @classmethod
-    def from_log_info(cls, logger: LoggerInterface, info: LogInfo) -> Logger:
+    def from_log_info(
+        cls, logger: LoggerInterface, info: LogInfo, context: DurableContext
+    ) -> Logger:
         """Create a new logger with the given LogInfo."""
         extra: MutableMapping[str, object] = {
-            "executionArn": info.execution_state.durable_execution_arn
+            "executionArn": context.state.durable_execution_arn
         }
         if info.parent_id:
             extra["parentId"] = info.parent_id
@@ -75,15 +73,14 @@ class Logger(LoggerInterface):
             extra["attempt"] = info.attempt
         if info.operation_id:
             extra["operationId"] = info.operation_id
-        return cls(
-            logger=logger, default_extra=extra, execution_state=info.execution_state
-        )
+        return cls(logger=logger, default_extra=extra, context=context)
 
     def with_log_info(self, info: LogInfo) -> Logger:
         """Clone the existing logger with new LogInfo."""
         return Logger.from_log_info(
             logger=self._logger,
             info=info,
+            context=self._context,
         )
 
     def get_logger(self) -> LoggerInterface:
@@ -128,4 +125,4 @@ class Logger(LoggerInterface):
         log_func(msg, *args, extra=merged_extra)
 
     def _should_log(self) -> bool:
-        return not self._execution_state.is_replaying()
+        return not self._context.is_replaying

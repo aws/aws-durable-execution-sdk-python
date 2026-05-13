@@ -343,39 +343,12 @@ class ExecutionState:
 
         return candidate
 
-    def track_replay(self, operation_id: str) -> None:
-        """Check if operation exists with completed status; if not, transition to NEW status.
-
-        This method is called before each operation (step, wait, invoke, etc.) to determine
-        if we've reached the replay boundary. Once we encounter an operation that doesn't
-        exist or isn't completed, we transition from REPLAY to NEW status, which enables
-        logging for all subsequent code.
-
-        Args:
-            operation_id: The operation ID to check
-        """
-        with self._replay_status_lock:
-            if self._replay_status == ReplayStatus.REPLAY:
-                self._visited_operations.add(operation_id)
-                completed_ops = {
-                    op_id
-                    for op_id, op in self.operations.items()
-                    if op.operation_type != OperationType.EXECUTION
-                    and op.status
-                    in {
-                        OperationStatus.SUCCEEDED,
-                        OperationStatus.FAILED,
-                        OperationStatus.CANCELLED,
-                        OperationStatus.STOPPED,
-                        OperationStatus.TIMED_OUT,
-                    }
-                }
-                if completed_ops.issubset(self._visited_operations):
-                    logger.debug(
-                        "Transitioning from REPLAY to NEW status at operation %s",
-                        operation_id,
-                    )
-                    self._replay_status = ReplayStatus.NEW
+    def transition_replay_status(self) -> None:
+        """Transition to NEW status"""
+        if self._replay_status is ReplayStatus.REPLAY:
+            with self._replay_status_lock:
+                logger.debug("Transitioning from REPLAY to NEW status")
+                self._replay_status = ReplayStatus.NEW
 
     def is_replaying(self) -> bool:
         """Check if execution is currently in replay mode.
