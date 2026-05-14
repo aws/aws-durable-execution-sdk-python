@@ -69,3 +69,11 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           packages-dir: dist/
+
+  notify-release:
+    needs: [pypi-publish]
+    uses: ./.github/workflows/notify-release.yml
+    with:
+      tag_name: ${{ github.event.release.tag_name }}
+      release_url: ${{ github.event.release.html_url }}
+    secrets: inherit
