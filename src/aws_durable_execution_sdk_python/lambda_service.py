@@ -105,6 +105,70 @@ class OperationSubType(Enum):
     CHAINED_INVOKE = "ChainedInvoke"
 
 
+class InvocationStatus(Enum):
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    PENDING = "PENDING"
+
+    # Used internally only: the invocation failed and the backend will retry
+    RETRY = "RETRY"
+
+
+@dataclass(frozen=True)
+class DurableExecutionInvocationOutput:
+    """Representation the DurableExecutionInvocationOutput. This is what the Durable lambda handler returns.
+
+    If the execution has been already completed via an update to the EXECUTION operation via CheckpointDurableExecution,
+    payload must be empty for SUCCEEDED/FAILED status.
+    """
+
+    status: InvocationStatus
+    result: str | None = None
+    error: ErrorObject | None = None
+
+    @classmethod
+    def from_dict(
+        cls, data: MutableMapping[str, Any]
+    ) -> DurableExecutionInvocationOutput:
+        """Create an instance from a dictionary.
+
+        Args:
+            data: Dictionary with camelCase keys matching the original structure
+
+        Returns:
+            A DurableExecutionInvocationOutput instance
+        """
+        status = InvocationStatus(data.get("Status"))
+        error = ErrorObject.from_dict(data["Error"]) if data.get("Error") else None
+        return cls(status=status, result=data.get("Result"), error=error)
+
+    def to_dict(self) -> MutableMapping[str, Any]:
+        """Convert to a dictionary with the original field names.
+
+        Returns:
+            Dictionary with the original camelCase keys
+        """
+        result: MutableMapping[str, Any] = {"Status": self.status.value}
+
+        if self.result is not None:
+            # large payloads return "", because checkpointed already
+            result["Result"] = self.result
+        if self.error:
+            result["Error"] = self.error.to_dict()
+
+        return result
+
+    @classmethod
+    def create_succeeded(cls, result: str) -> DurableExecutionInvocationOutput:
+        """Create a succeeded invocation output."""
+        return cls(status=InvocationStatus.SUCCEEDED, result=result)
+
+    @classmethod
+    def create_retry(cls, error: ErrorObject) -> DurableExecutionInvocationOutput:
+        """Create a failed invocation output."""
+        return cls(status=InvocationStatus.RETRY, error=error)
+
+
 @dataclass(frozen=True)
 class ExecutionDetails:
     input_payload: str | None = None

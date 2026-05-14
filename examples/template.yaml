@@ -941,6 +941,24 @@
           "ExecutionTimeout": 300
         }
       }
+    },
+    "ExecutionWithPlugin": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "execution_with_plugin.handler",
+        "Description": "Test plugin",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
     }
   }
 }
