@@ -26,6 +26,9 @@ from aws_durable_execution_sdk_python.exceptions import (
 # Core decorator - used in every durable function
 from aws_durable_execution_sdk_python.execution import durable_execution
 
+# Retry helpers
+from aws_durable_execution_sdk_python.retries import WithRetryConfig, with_retry
+
 # Essential context types - passed to user functions
 from aws_durable_execution_sdk_python.types import StepContext
 
@@ -38,10 +41,12 @@ __all__ = [
     "ParallelBranch",
     "StepContext",
     "ValidationError",
+    "WithRetryConfig",
     "__version__",
     "durable_execution",
     "durable_parallel_branch",
     "durable_step",
     "durable_wait_for_callback",
     "durable_with_child_context",
+    "with_retry",
 ]
