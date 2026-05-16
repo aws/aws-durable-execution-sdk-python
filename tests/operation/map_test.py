@@ -2,6 +2,7 @@
 
 import importlib
 import json
+from collections import defaultdict
 from unittest.mock import Mock, patch
 
 import pytest
@@ -26,7 +27,7 @@ from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.operation import child  # PLC0415
 from aws_durable_execution_sdk_python.operation.map import MapExecutor, map_handler
 from aws_durable_execution_sdk_python.serdes import serialize
-from aws_durable_execution_sdk_python.state import ExecutionState
+from aws_durable_execution_sdk_python.state import ExecutionState, CheckpointedResult
 from tests.serdes_test import CustomStrSerDes
 
 
@@ -846,13 +847,11 @@ def test_map_item_serialize(mock_serialize, item_serdes, batch_serdes):
     mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
     mock_state.create_checkpoint = Mock()
 
-    context_map = {}
+    context_map = defaultdict(set)
 
     def create_id(self, i):
         ctx_id = id(self)
-        if ctx_id not in context_map:
-            context_map[ctx_id] = []
-        context_map[ctx_id].append(i)
+        context_map[ctx_id].add(i)
         return (
             "parent"
             if len(context_map) == 1 and len(context_map[ctx_id]) == 1
@@ -908,13 +907,11 @@ def test_map_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
     mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
     mock_state.create_checkpoint = Mock()
 
-    context_map = {}
+    context_map = defaultdict(set)
 
     def create_id(self, i):
         ctx_id = id(self)
-        if ctx_id not in context_map:
-            context_map[ctx_id] = []
-        context_map[ctx_id].append(i)
+        context_map[ctx_id].add(i)
         return (
             "parent"
             if len(context_map) == 1 and len(context_map[ctx_id]) == 1

@@ -4,6 +4,7 @@ import hashlib
 import json
 import random
 from itertools import islice
+from unittest import mock
 from unittest.mock import ANY, MagicMock, Mock, patch
 
 import pytest
@@ -1932,6 +1933,7 @@ def test_execution_context_propagates_to_child_context():
     assert child_context.execution_context.durable_execution_arn == parent_arn
     # Should be the same instance (not a copy)
     assert child_context.execution_context is parent_context.execution_context
+    assert child_context.is_replaying
 
 
 def test_from_lambda_context_creates_execution_context():
@@ -1959,6 +1961,7 @@ def test_execution_context_type():
     context = create_test_context(state=mock_state)
 
     assert isinstance(context.execution_context, ExecutionContext)
+    assert context.is_replaying
 
 
 # endregion ExecutionContext tests
@@ -2142,6 +2145,7 @@ def test_should_propagate_outer_parent_id_when_virtual_is_nested_in_virtual():
     assert outer_branch._parent_id == "outer-parallel-op"  # noqa: SLF001
     assert outer_branch._step_id_prefix == "outer-branch-op"  # noqa: SLF001
     assert outer_branch.is_virtual is True
+    assert outer_branch.is_replaying
 
     # Second virtual layer: an inner FLAT map inside the outer branch,
     # whose per-item branch is also virtual.
@@ -2153,12 +2157,56 @@ def test_should_propagate_outer_parent_id_when_virtual_is_nested_in_virtual():
     assert inner_branch._parent_id == "outer-parallel-op"  # noqa: SLF001
     assert inner_branch._step_id_prefix == "inner-branch-op"  # noqa: SLF001
     assert inner_branch.is_virtual is True
+    assert inner_branch.is_replaying
 
     # Step ids inside the inner branch still prefix on the inner branch's
     # own operation id; they must not leak the outer ancestor into the
     # step-id namespace.
     expected = hashlib.blake2b(b"inner-branch-op-1").hexdigest()[:64]
     assert inner_branch._create_step_id_for_logical_step(1) == expected  # noqa: SLF001
+
+
+def test_context_created_with_new_status_when_check_result_returns_nonexistent():
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    context = create_test_context(state=mock_state)
+    assert not context.is_replaying
+
+    # op id for 1
+    mock_state.get_checkpoint_result.assert_called_once_with(
+        "1ced8f5be2db23a6513eba4d819c73806424748a7bc6fa0d792cc1c7d1775a97"
+    )
+
+
+def test_transition_replay_status_when_check_result_returns_nonexistent():
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    mock_checkpoint_result = Mock(spec=CheckpointedResult)
+    mock_state.get_checkpoint_result.return_value = mock_checkpoint_result
+    mock_checkpoint_result.is_existent.return_value = True
+    context = create_test_context(state=mock_state)
+    assert context.is_replaying
+
+    context._track_replay()
+    assert context.is_replaying
+
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    context._track_replay()
+    assert not context.is_replaying
+
+    # op id for 1
+    mock_state.get_checkpoint_result.assert_called_with(
+        "1ced8f5be2db23a6513eba4d819c73806424748a7bc6fa0d792cc1c7d1775a97"
+    )
 
 
 # endregion Virtual-context identity tests
