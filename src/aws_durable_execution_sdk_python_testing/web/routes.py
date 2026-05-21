@@ -39,14 +39,22 @@ class Route:
     def from_string(cls, path: str) -> Route:
         """Create a Route from a string.
 
+        Each segment is URL-decoded; ``raw_path`` is preserved as the
+        original wire path. Splitting on ``/`` happens before decoding so
+        that an encoded ``%2F`` inside a captured value (e.g. an ARN that
+        contains ``/``) stays inside its segment instead of being treated
+        as a path separator.
+
         Args:
             path: The raw path string
 
         Returns:
-            Route instance with parsed segments
+            Route instance with parsed, URL-decoded segments
         """
-        # Remove leading/trailing slashes and split into segments
-        segments = [s for s in path.strip("/").split("/") if s]
+        # Remove leading/trailing slashes, split on '/', then URL-decode each
+        # segment. Order matters: split on the literal '/' first so '%2F'-
+        # encoded slashes inside values don't act as separators.
+        segments = [unquote(s) for s in path.strip("/").split("/") if s]
         return cls(raw_path=path, segments=segments)
 
     def matches_pattern(self, pattern: list[str]) -> bool:
@@ -445,7 +453,7 @@ class CallbackSuccessRoute(BytesPayloadRoute):
         return cls(
             raw_path=route.raw_path,
             segments=route.segments,
-            callback_id=unquote(route.segments[2]),
+            callback_id=route.segments[2],
         )
 
 
@@ -488,7 +496,7 @@ class CallbackFailureRoute(BytesPayloadRoute):
         return cls(
             raw_path=route.raw_path,
             segments=route.segments,
-            callback_id=unquote(route.segments[2]),
+            callback_id=route.segments[2],
         )
 
 
@@ -531,7 +539,7 @@ class CallbackHeartbeatRoute(Route):
         return cls(
             raw_path=route.raw_path,
             segments=route.segments,
-            callback_id=unquote(route.segments[2]),
+            callback_id=route.segments[2],
         )
 
 

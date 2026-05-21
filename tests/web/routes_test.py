@@ -480,13 +480,28 @@ def test_route_immutability():
 
 
 def test_route_with_special_characters():
-    """Test route parsing with special characters in ARNs and IDs."""
-    # Test with URL-encoded characters
-    arn = "arn:aws:lambda:us-east-1:123456789012:function:my-function%20with%20spaces"
+    """Test route parsing with special characters in ARNs and IDs.
+
+    URL-decoding happens once in ``Route.from_string`` so every captured
+    path segment (``segments[N]`` and any named field that mirrors it,
+    such as ``arn`` or ``callback_id``) carries the literal value the
+    caller passed to boto. ``raw_path`` keeps the original wire string.
+    """
+    # ARN with %20-encoded spaces should round-trip back to a literal space.
+    encoded_arn = (
+        "arn:aws:lambda:us-east-1:123456789012:function:my-function%20with%20spaces"
+    )
+    decoded_arn = (
+        "arn:aws:lambda:us-east-1:123456789012:function:my-function with spaces"
+    )
+    raw_path = f"/2025-12-01/durable-executions/{encoded_arn}"
     router = Router()
-    route = router.find_route(f"/2025-12-01/durable-executions/{arn}", "GET")
+    route = router.find_route(raw_path, "GET")
     assert isinstance(route, GetDurableExecutionRoute)
-    assert route.arn == arn
+    assert route.arn == decoded_arn
+    assert route.segments[2] == decoded_arn
+    # raw_path is preserved as the original wire form for logging/debugging.
+    assert route.raw_path == raw_path
 
     # Test with callback ID containing special characters
     callback_id = "callback-123-abc_def"
