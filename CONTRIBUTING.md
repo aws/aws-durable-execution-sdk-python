@@ -9,7 +9,35 @@ information to effectively respond to your bug report or contribution.
 ## Dependencies
 Install [hatch](https://hatch.pypa.io/dev/install/).
 
+## Repository Structure
+
+This is a monorepo containing multiple packages under the `packages/` directory:
+
+```
+packages/
+├── aws-durable-execution-sdk-python/       # Core SDK
+│   ├── pyproject.toml
+│   ├── src/
+│   ├── tests/
+│   └── examples/
+└── aws-durable-execution-sdk-python-otel/  # OpenTelemetry instrumentation
+    ├── pyproject.toml
+    ├── src/
+    └── tests/
+```
+
+Shared files (`.github/`, `LICENSE`, `CONTRIBUTING.md`, etc.) live at the repository root.
+
 ## Developer workflow
+
+All `hatch` commands must be run from within a specific package directory:
+
+```bash
+cd packages/aws-durable-execution-sdk-python
+# or
+cd packages/aws-durable-execution-sdk-python-otel
+```
+
 These are all the checks you would typically do as you prepare a PR:
 ```
 # just test
@@ -25,7 +53,7 @@ hatch run types:check
 hatch fmt
 ```
 
-There is a convenience script for the above that you can run from the root of the repo as you prepare your PR:
+There is a convenience script that runs checks across all packages from the root of the repo:
 ```
 .github/scripts/ci-checks.sh
 ```
@@ -131,7 +159,8 @@ class WaitOptions:
 
 ## Set up your IDE
 Point your IDE at the hatch virtual environment to have it recognize dependencies
-and imports.
+and imports. Run these commands from within the package directory you're working on
+(e.g., `packages/aws-durable-execution-sdk-python`).
 
 You can find the path to the hatch Python interpreter like this:
 ```
@@ -148,6 +177,7 @@ errors finding the interpreter. You can create a local .venv file symlink _witho
 in the path:
 
 ```bash
+# From within the package directory, e.g. packages/aws-durable-execution-sdk-python
 # create a symlink at: ./.venv/bin/python
 rm -rf .venv && ln -s "$(hatch env find)" .venv
 ```
@@ -179,6 +209,8 @@ These `settings.json` settings are useful:
 
 ## Testing
 ### How to run tests
+Run these commands from within a package directory (e.g., `packages/aws-durable-execution-sdk-python`).
+
 To run all tests:
 ```
 hatch test
@@ -220,7 +252,8 @@ tests/mypackage/mymodule_test.py
 
 ## Examples and Deployment
 
-The project includes a unified CLI tool for managing examples, deployment, and AWS account setup:
+The project includes a unified CLI tool for managing examples, deployment, and AWS account setup.
+Run these commands from the core SDK package directory (`packages/aws-durable-execution-sdk-python`):
 
 ### Bootstrap AWS Account
 ```bash

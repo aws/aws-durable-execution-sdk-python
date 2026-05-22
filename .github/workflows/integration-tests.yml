@@ -37,11 +37,11 @@ jobs:
       run: python -m pip install hatch==1.16.5
 
     - name: Setup and run tests
-      working-directory: language-sdk
+      working-directory: language-sdk/packages/aws-durable-execution-sdk-python
       run: |
         echo "Running SDK tests..."
-        hatch run -- test:pip install -e ../testing-sdk
-        hatch run -- test:pip install -e ../language-sdk
+        hatch run -- test:pip install -e ../../../testing-sdk
+        hatch run -- test:pip install -e .
         hatch fmt --check
         hatch run types:check
         hatch run test:cov
@@ -84,7 +84,7 @@ jobs:
 
     - name: Get integration examples
       id: get-examples
-      working-directory: language-sdk/examples
+      working-directory: language-sdk/packages/aws-durable-execution-sdk-python/examples
       run: |
         echo "examples=$(jq -c '.examples | map(select(.integration == true)) | .[0:2]' examples-catalog.json)" >> $GITHUB_OUTPUT
 
@@ -97,7 +97,7 @@ jobs:
         rm -rf /tmp/aws/
 
     - name: Deploy and test examples
-      working-directory: language-sdk
+      working-directory: language-sdk/packages/aws-durable-execution-sdk-python
       env:
         AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         LAMBDA_ENDPOINT: "https://lambda.us-west-2.amazonaws.com"
@@ -105,7 +105,7 @@ jobs:
         KMS_KEY_ARN: ${{ secrets.KMS_KEY_ARN }}
       run: |
         echo "Building examples..."
-        hatch run -- examples:pip install -e ../testing-sdk
+        hatch run -- examples:pip install -e ../../../testing-sdk
         hatch run examples:build
 
         # Get first integration example for testing

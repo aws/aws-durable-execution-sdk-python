@@ -43,10 +43,42 @@ jobs:
       run: |
         python -m pip install hatch==1.16.5
     - name: static analysis
-      run: hatch fmt --check
+      run: |
+        for pkg in packages/*/; do
+          if [ -f "$pkg/pyproject.toml" ]; then
+            echo "=== Checking format: $pkg ==="
+            cd "$pkg"
+            hatch fmt --check
+            cd "$GITHUB_WORKSPACE"
+          fi
+        done
     - name: type checking
-      run: hatch run types:check
+      run: |
+        for pkg in packages/*/; do
+          if [ -f "$pkg/pyproject.toml" ]; then
+            echo "=== Type checking: $pkg ==="
+            cd "$pkg"
+            hatch run types:check
+            cd "$GITHUB_WORKSPACE"
+          fi
+        done
     - name: Run tests + coverage
-      run: hatch run test:cov
+      run: |
+        for pkg in packages/*/; do
+          if [ -f "$pkg/pyproject.toml" ]; then
+            echo "=== Testing: $pkg ==="
+            cd "$pkg"
+            hatch run test:cov
+            cd "$GITHUB_WORKSPACE"
+          fi
+        done
     - name: Build distribution
-      run: hatch build
+      run: |
+        for pkg in packages/*/; do
+          if [ -f "$pkg/pyproject.toml" ]; then
+            echo "=== Building: $pkg ==="
+            cd "$pkg"
+            hatch build
+            cd "$GITHUB_WORKSPACE"
+          fi
+        done

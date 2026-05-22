@@ -9,6 +9,7 @@ __pycache__/
 *$py.class
 *.egg-info/
 
+*.coverage
 /.coverage
 /.coverage.*
 /.cache
@@ -30,7 +31,7 @@ dist/
 
 .kiro/
 
-/examples/build/*
-/examples/*.zip
+examples/build/*
+examples/*.zip
 
 .env

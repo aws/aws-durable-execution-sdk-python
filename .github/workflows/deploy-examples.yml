@@ -4,8 +4,8 @@ on:
   pull_request:
     branches: [ "main", "development"]
     paths:
-      - 'src/aws_durable_execution_sdk_python/**'
-      - 'examples/**'
+      - 'packages/aws-durable-execution-sdk-python/src/**'
+      - 'packages/aws-durable-execution-sdk-python/examples/**'
       - '.github/workflows/deploy-examples.yml'
   workflow_dispatch:
 
@@ -26,7 +26,7 @@ jobs:
     
     - name: Get examples from catalog
       id: get-examples
-      working-directory: ./examples
+      working-directory: ./packages/aws-durable-execution-sdk-python/examples
       run: |
         echo "examples=$(jq -c '.examples | map(select(.integration == true))' examples-catalog.json)" >> $GITHUB_OUTPUT
 
@@ -58,10 +58,12 @@ jobs:
     - name: Install Hatch
       run: pip install hatch
     - name: Build examples
+      working-directory: ./packages/aws-durable-execution-sdk-python
       run: hatch run examples:build
 
     - name: Deploy Lambda function - ${{ matrix.example.name }}
       id: deploy
+      working-directory: ./packages/aws-durable-execution-sdk-python
       env:
         AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         LAMBDA_ENDPOINT: "https://lambda.us-west-2.amazonaws.com"
@@ -99,6 +101,7 @@ jobs:
         echo "QUALIFIED_FUNCTION_NAME=$QUALIFIED_FUNCTION_NAME" >> $GITHUB_OUTPUT
 
     - name: Run Integration Tests - ${{ matrix.example.name }}
+      working-directory: ./packages/aws-durable-execution-sdk-python
       env:
         AWS_REGION: ${{ env.AWS_REGION }}
         LAMBDA_ENDPOINT: "https://lambda.us-west-2.amazonaws.com"
