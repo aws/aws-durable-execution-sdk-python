@@ -4,6 +4,7 @@ import logging
 from collections.abc import Mapping
 from unittest.mock import Mock
 
+from aws_durable_execution_sdk_python.context import DurableContext, ExecutionContext
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
@@ -371,18 +372,23 @@ def test_logger_replay_no_logging():
         operation_type=OperationType.STEP,
         status=OperationStatus.SUCCEEDED,
     )
-    replay_execution_state = ExecutionState(
+    execution_state = ExecutionState(
         durable_execution_arn="arn:aws:test",
         initial_checkpoint_token="test_token",  # noqa: S106
         operations={"op1": operation},
         service_client=Mock(),
+    )
+    execution_context = ExecutionContext(durable_execution_arn="arn:aws:test")
+    context = DurableContext(
+        state=execution_state,
+        execution_context=execution_context,
         replay_status=ReplayStatus.REPLAY,
     )
-    log_info = LogInfo(replay_execution_state, "parent123", "test_name", 5)
+    log_info = LogInfo(context, "parent123", "test_name", 5)
     mock_logger = Mock()
     logger = Logger.from_log_info(mock_logger, log_info)
     logger.info("logging info")
-    replay_execution_state.track_replay(operation_id="op1")
+    context.track_replay(operation_id="op1")
 
     mock_logger.info.assert_not_called()
 
@@ -403,16 +409,21 @@ def test_logger_replay_then_new_logging():
         initial_checkpoint_token="test_token",  # noqa: S106
         operations={"op1": operation1, "op2": operation2},
         service_client=Mock(),
+    )
+    execution_context = ExecutionContext(durable_execution_arn="arn:aws:test")
+    context = DurableContext(
+        state=execution_state,
+        execution_context=execution_context,
         replay_status=ReplayStatus.REPLAY,
     )
-    log_info = LogInfo(execution_state, "parent123", "test_name", 5)
+    log_info = LogInfo(context, "parent123", "test_name", 5)
     mock_logger = Mock()
     logger = Logger.from_log_info(mock_logger, log_info)
-    execution_state.track_replay(operation_id="op1")
+    context.track_replay(operation_id="op1")
     logger.info("logging info")
 
     mock_logger.info.assert_not_called()
 
-    execution_state.track_replay(operation_id="op2")
+    context.track_replay(operation_id="op2")
     logger.info("logging info")
     mock_logger.info.assert_called_once()

@@ -56,6 +56,16 @@ def create_test_context(
             "arn:aws:durable:us-east-1:123456789012:execution/test"
         )
 
+    # Ensure mock state has _operations_lock and operations for child context creation
+    if not hasattr(state, "_operations_lock") or isinstance(
+        state._operations_lock, Mock
+    ):
+        from threading import Lock
+
+        state._operations_lock = Lock()
+    if not hasattr(state, "operations") or isinstance(state.operations, Mock):
+        state.operations = {}
+
     execution_context = ExecutionContext(
         durable_execution_arn=state.durable_execution_arn
     )
@@ -2275,3 +2285,336 @@ def test_durable_parallel_branch_is_compatible_with_parallel_functions_arg():
 
 
 # endregion durable_parallel_branch
+
+
+# region per-context replay status
+
+
+def test_is_replaying_returns_true_when_replay_status_is_replay():
+    """Test is_replaying() returns True when context is in REPLAY status."""
+    from aws_durable_execution_sdk_python.state import ReplayStatus
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    execution_context = ExecutionContext(
+        durable_execution_arn=mock_state.durable_execution_arn
+    )
+
+    context = DurableContext(
+        state=mock_state,
+        execution_context=execution_context,
+        replay_status=ReplayStatus.REPLAY,
+    )
+
+    assert context.is_replaying() is True
+
+
+def test_is_replaying_returns_false_when_replay_status_is_new():
+    """Test is_replaying() returns False when context is in NEW status."""
+    from aws_durable_execution_sdk_python.state import ReplayStatus
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    execution_context = ExecutionContext(
+        durable_execution_arn=mock_state.durable_execution_arn
+    )
+
+    context = DurableContext(
+        state=mock_state,
+        execution_context=execution_context,
+        replay_status=ReplayStatus.NEW,
+    )
+
+    assert context.is_replaying() is False
+
+
+def test_track_replay_adds_operation_id_to_visited_set():
+    """Test track_replay adds operation IDs to the visited operations set."""
+    from threading import Lock
+
+    from aws_durable_execution_sdk_python.lambda_service import (
+        Operation,
+        OperationStatus,
+        OperationType,
+    )
+    from aws_durable_execution_sdk_python.state import ReplayStatus
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    mock_state._operations_lock = Lock()
+    # Two completed operations scoped to this context (parent_id=None for root)
+    mock_state.operations = {
+        "op-1": Operation(
+            operation_id="op-1",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.SUCCEEDED,
+            parent_id=None,
+        ),
+        "op-2": Operation(
+            operation_id="op-2",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.SUCCEEDED,
+            parent_id=None,
+        ),
+    }
+
+    execution_context = ExecutionContext(
+        durable_execution_arn=mock_state.durable_execution_arn
+    )
+    context = DurableContext(
+        state=mock_state,
+        execution_context=execution_context,
+        replay_status=ReplayStatus.REPLAY,
+    )
+
+    context.track_replay("op-1")
+
+    assert "op-1" in context._visited_operations  # noqa: SLF001
+
+
+def test_track_replay_transitions_to_new_when_all_scoped_ops_visited():
+    """Test track_replay transitions from REPLAY to NEW when all scoped completed ops are visited."""
+    from threading import Lock
+
+    from aws_durable_execution_sdk_python.lambda_service import (
+        Operation,
+        OperationStatus,
+        OperationType,
+    )
+    from aws_durable_execution_sdk_python.state import ReplayStatus
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    mock_state._operations_lock = Lock()
+    mock_state.operations = {
+        "op-1": Operation(
+            operation_id="op-1",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.SUCCEEDED,
+            parent_id=None,
+        ),
+        "op-2": Operation(
+            operation_id="op-2",
+            operation_type=OperationType.WAIT,
+            status=OperationStatus.SUCCEEDED,
+            parent_id=None,
+        ),
+    }
+
+    execution_context = ExecutionContext(
+        durable_execution_arn=mock_state.durable_execution_arn
+    )
+    context = DurableContext(
+        state=mock_state,
+        execution_context=execution_context,
+        replay_status=ReplayStatus.REPLAY,
+    )
+
+    # After visiting first op, still replaying
+    context.track_replay("op-1")
+    assert context.is_replaying() is True
+
+    # After visiting second op, transitions to NEW
+    context.track_replay("op-2")
+    assert context.is_replaying() is False
+
+
+def test_track_replay_no_op_when_already_new():
+    """Test track_replay does nothing when context is already in NEW status."""
+    from aws_durable_execution_sdk_python.state import ReplayStatus
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    execution_context = ExecutionContext(
+        durable_execution_arn=mock_state.durable_execution_arn
+    )
+
+    context = DurableContext(
+        state=mock_state,
+        execution_context=execution_context,
+        replay_status=ReplayStatus.NEW,
+    )
+
+    # Should not raise or change state
+    context.track_replay("op-1")
+
+    assert context.is_replaying() is False
+    # Visited set should remain empty since early return skips adding
+    assert len(context._visited_operations) == 0  # noqa: SLF001
+
+
+def test_track_replay_transitions_immediately_when_no_scoped_ops():
+    """Test track_replay transitions to NEW immediately when no completed ops are scoped."""
+    from threading import Lock
+
+    from aws_durable_execution_sdk_python.lambda_service import (
+        Operation,
+        OperationStatus,
+        OperationType,
+    )
+    from aws_durable_execution_sdk_python.state import ReplayStatus
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    mock_state._operations_lock = Lock()
+    # Operations exist but belong to a different context (different parent_id)
+    mock_state.operations = {
+        "op-other": Operation(
+            operation_id="op-other",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.SUCCEEDED,
+            parent_id="other-parent",
+        ),
+    }
+
+    execution_context = ExecutionContext(
+        durable_execution_arn=mock_state.durable_execution_arn
+    )
+    context = DurableContext(
+        state=mock_state,
+        execution_context=execution_context,
+        replay_status=ReplayStatus.REPLAY,
+        parent_id=None,
+    )
+
+    # First track_replay call should transition immediately since no ops are scoped to root
+    context.track_replay("op-1")
+    assert context.is_replaying() is False
+
+
+def test_child_context_starts_in_replay_when_completed_ops_exist():
+    """Test create_child_context sets child to REPLAY when completed ops exist for child scope."""
+    from threading import Lock
+
+    from aws_durable_execution_sdk_python.lambda_service import (
+        Operation,
+        OperationStatus,
+        OperationType,
+    )
+    from aws_durable_execution_sdk_python.state import ReplayStatus
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    mock_state._operations_lock = Lock()
+    # A completed operation scoped to the child (parent_id = "child-op-id")
+    mock_state.operations = {
+        "child-step-1": Operation(
+            operation_id="child-step-1",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.SUCCEEDED,
+            parent_id="child-op-id",
+        ),
+    }
+
+    parent_context = create_test_context(state=mock_state)
+    child_context = parent_context.create_child_context("child-op-id")
+
+    assert child_context.is_replaying() is True
+
+
+def test_child_context_starts_in_new_when_no_completed_ops_exist():
+    """Test create_child_context sets child to NEW when no completed ops exist for child scope."""
+    from threading import Lock
+
+    from aws_durable_execution_sdk_python.lambda_service import (
+        Operation,
+        OperationStatus,
+        OperationType,
+    )
+    from aws_durable_execution_sdk_python.state import ReplayStatus
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    mock_state._operations_lock = Lock()
+    # No operations at all
+    mock_state.operations = {}
+
+    parent_context = create_test_context(state=mock_state)
+    child_context = parent_context.create_child_context("child-op-id")
+
+    assert child_context.is_replaying() is False
+
+
+def test_child_context_ignores_execution_type_ops_for_replay_determination():
+    """Test that EXECUTION type operations don't count for child replay status."""
+    from threading import Lock
+
+    from aws_durable_execution_sdk_python.lambda_service import (
+        Operation,
+        OperationStatus,
+        OperationType,
+    )
+    from aws_durable_execution_sdk_python.state import ReplayStatus
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    mock_state._operations_lock = Lock()
+    # Only an EXECUTION type operation exists for the child scope
+    mock_state.operations = {
+        "exec-op": Operation(
+            operation_id="exec-op",
+            operation_type=OperationType.EXECUTION,
+            status=OperationStatus.SUCCEEDED,
+            parent_id="child-op-id",
+        ),
+    }
+
+    parent_context = create_test_context(state=mock_state)
+    child_context = parent_context.create_child_context("child-op-id")
+
+    # Should be NEW because EXECUTION ops are excluded
+    assert child_context.is_replaying() is False
+
+
+def test_child_context_ignores_non_terminal_ops_for_replay_determination():
+    """Test that non-terminal operations don't count for child replay status."""
+    from threading import Lock
+
+    from aws_durable_execution_sdk_python.lambda_service import (
+        Operation,
+        OperationStatus,
+        OperationType,
+    )
+    from aws_durable_execution_sdk_python.state import ReplayStatus
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    mock_state._operations_lock = Lock()
+    # Only a STARTED (non-terminal) operation exists for the child scope
+    mock_state.operations = {
+        "started-op": Operation(
+            operation_id="started-op",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.STARTED,
+            parent_id="child-op-id",
+        ),
+    }
+
+    parent_context = create_test_context(state=mock_state)
+    child_context = parent_context.create_child_context("child-op-id")
+
+    # Should be NEW because STARTED is not a terminal status
+    assert child_context.is_replaying() is False
+
+
+# endregion per-context replay status

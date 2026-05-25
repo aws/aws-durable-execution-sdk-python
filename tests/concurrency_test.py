@@ -3379,6 +3379,8 @@ def test_flat_mode_stamps_grandparent_as_inner_op_parent_id():
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
+    execution_state._operations_lock = __import__("threading").Lock()
+    execution_state.operations = {}
 
     # Mock out the checkpoint so the real child_handler reports "not
     # existent" (non-existent checkpoint -> normal execution path).
@@ -3434,6 +3436,8 @@ def test_nested_mode_stamps_branch_op_as_inner_op_parent_id():
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
+    execution_state._operations_lock = __import__("threading").Lock()
+    execution_state.operations = {}
 
     mock_checkpoint = Mock()
     mock_checkpoint.is_succeeded.return_value = False

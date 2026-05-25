@@ -208,6 +208,20 @@ class DurableExecutionInvocationOutput:
 # endregion Invocation models
 
 
+def _determine_initial_replay_status(state: ExecutionState) -> ReplayStatus:
+    """Determine the initial replay status for the root context.
+
+    Returns REPLAY if any non-EXECUTION operations exist in state,
+    otherwise returns NEW.
+    """
+    with state._operations_lock:
+        has_prior_operations = any(
+            op.operation_type is not OperationType.EXECUTION
+            for op in state.operations.values()
+        )
+    return ReplayStatus.REPLAY if has_prior_operations else ReplayStatus.NEW
+
+
 def durable_execution(
     func: Callable[[Any, DurableContext], Any] | None = None,
     *,
@@ -254,7 +268,6 @@ def durable_execution(
             initial_checkpoint_token=invocation_input.checkpoint_token,
             operations={},
             service_client=service_client,
-            replay_status=ReplayStatus.NEW,
         )
 
         try:
@@ -278,7 +291,7 @@ def durable_execution(
                 ).to_dict()
             raise
 
-        execution_state.mark_replaying_if_prior_operations_exist()
+        initial_replay_status = _determine_initial_replay_status(execution_state)
 
         raw_input_payload: str | None = execution_state.get_input_payload()
 
@@ -296,7 +309,9 @@ def durable_execution(
                 raise
 
         durable_context: DurableContext = DurableContext.from_lambda_context(
-            state=execution_state, lambda_context=context
+            state=execution_state,
+            lambda_context=context,
+            replay_status=initial_replay_status,
         )
 
         # Use ThreadPoolExecutor for concurrent execution of user code and background checkpoint processing

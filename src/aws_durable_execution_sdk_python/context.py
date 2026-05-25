@@ -23,7 +23,12 @@ from aws_durable_execution_sdk_python.exceptions import (
     ValidationError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
-from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+from aws_durable_execution_sdk_python.lambda_service import (
+    Operation,
+    OperationStatus,
+    OperationSubType,
+    OperationType,
+)
 from aws_durable_execution_sdk_python.logger import Logger, LogInfo
 from aws_durable_execution_sdk_python.operation.callback import (
     CallbackOperationExecutor,
@@ -43,7 +48,7 @@ from aws_durable_execution_sdk_python.serdes import (
     SerDes,
     deserialize,
 )
-from aws_durable_execution_sdk_python.state import ExecutionState  # noqa: TCH001
+from aws_durable_execution_sdk_python.state import ExecutionState, ReplayStatus  # noqa: TCH001
 from aws_durable_execution_sdk_python.threading import OrderedCounter
 from aws_durable_execution_sdk_python.types import Callback as CallbackProtocol
 from aws_durable_execution_sdk_python.types import (
@@ -286,6 +291,7 @@ class DurableContext(DurableContextProtocol):
         parent_id: str | None = None,
         logger: Logger | None = None,
         step_id_prefix: str | None = None,
+        replay_status: ReplayStatus = ReplayStatus.NEW,
     ) -> None:
         self.state: ExecutionState = state
         self.execution_context: ExecutionContext = execution_context
@@ -300,9 +306,11 @@ class DurableContext(DurableContextProtocol):
         # cached at construction to make invariant even if parent/prefix mutates.
         self._is_virtual: bool = self._parent_id != self._step_id_prefix
         self._step_counter: OrderedCounter = OrderedCounter()
+        self._replay_status: ReplayStatus = replay_status
+        self._visited_operations: set[str] = set()
 
         log_info = LogInfo(
-            execution_state=state,
+            context=self,
             parent_id=parent_id,
         )
         self._log_info = log_info
@@ -323,11 +331,113 @@ class DurableContext(DurableContextProtocol):
         """
         return self._is_virtual
 
+    def is_replaying(self) -> bool:
+        """Check if this context is currently in replay mode."""
+        return self._replay_status is ReplayStatus.REPLAY
+
+    def track_replay(self, operation_id: str) -> None:
+        """Track an operation visit and evaluate replay transition.
+
+        Adds the operation_id to this context's visited set. If the context
+        is in REPLAY status, checks whether all completed operations scoped
+        to this context have been visited. If so, transitions to NEW.
+
+        Args:
+            operation_id: The operation ID being processed.
+        """
+        if self._replay_status is ReplayStatus.NEW:
+            return
+
+        self._visited_operations.add(operation_id)
+        scoped_completed = self._get_scoped_completed_operations()
+        if scoped_completed.issubset(self._visited_operations):
+            self._replay_status = ReplayStatus.NEW
+
+    def _get_scoped_completed_operations(self) -> set[str]:
+        """Compute the set of completed operation IDs scoped to this context.
+
+        Filters ExecutionState operations to find those that:
+        1. Are not of type EXECUTION
+        2. Have a terminal status (SUCCEEDED, FAILED, CANCELLED, STOPPED, TIMED_OUT)
+        3. Are scoped to this context (parent_id matches this context's _parent_id)
+
+        Returns:
+            Set of operation IDs that are completed and scoped to this context.
+        """
+        completed_statuses = {
+            OperationStatus.SUCCEEDED,
+            OperationStatus.FAILED,
+            OperationStatus.CANCELLED,
+            OperationStatus.STOPPED,
+            OperationStatus.TIMED_OUT,
+        }
+
+        scoped_ops: set[str] = set()
+        with self.state._operations_lock:
+            for op_id, op in self.state.operations.items():
+                if op.operation_type is OperationType.EXECUTION:
+                    continue
+                if op.status not in completed_statuses:
+                    continue
+                if self._is_operation_scoped_to_context(op):
+                    scoped_ops.add(op_id)
+        return scoped_ops
+
+    def _is_operation_scoped_to_context(self, operation: Operation) -> bool:
+        """Determine if an operation belongs to this context's scope.
+
+        An operation is scoped to this context if its parent_id matches
+        this context's _parent_id. Operations created by this context have
+        parent_id == self._parent_id (set via OperationIdentifier in each
+        operation method).
+
+        Args:
+            operation: The operation to check.
+
+        Returns:
+            True if the operation is scoped to this context.
+        """
+        return operation.parent_id == self._parent_id
+
+    def _determine_child_replay_status(
+        self, child_parent_id: str | None
+    ) -> ReplayStatus:
+        """Determine initial replay status for a child context.
+
+        Returns REPLAY if any completed operations exist with the given
+        parent_id, otherwise returns NEW.
+
+        Args:
+            child_parent_id: The parent_id that the child context's operations
+                would have.
+
+        Returns:
+            ReplayStatus.REPLAY if completed operations exist for the child's
+            scope, otherwise ReplayStatus.NEW.
+        """
+        completed_statuses = {
+            OperationStatus.SUCCEEDED,
+            OperationStatus.FAILED,
+            OperationStatus.CANCELLED,
+            OperationStatus.STOPPED,
+            OperationStatus.TIMED_OUT,
+        }
+
+        with self.state._operations_lock:
+            has_scoped_completed = any(
+                op.parent_id == child_parent_id
+                and op.operation_type is not OperationType.EXECUTION
+                and op.status in completed_statuses
+                for op in self.state.operations.values()
+            )
+        return ReplayStatus.REPLAY if has_scoped_completed else ReplayStatus.NEW
+
     # region factories
     @staticmethod
     def from_lambda_context(
         state: ExecutionState,
         lambda_context: LambdaContext,
+        replay_status: ReplayStatus = ReplayStatus.NEW,
     ):
         return DurableContext(
             state=state,
@@ -336,6 +446,7 @@ class DurableContext(DurableContextProtocol):
             ),
             lambda_context=lambda_context,
             parent_id=None,
+            replay_status=replay_status,
         )
 
     def create_child_context(
@@ -360,24 +471,33 @@ class DurableContext(DurableContextProtocol):
         # For a regular non-virtual child, the child's own `operation_id` is
         # the parent id for its inner operations (standard nesting).
         child_parent_id: str | None = self._parent_id if is_virtual else operation_id
+        child_replay_status = self._determine_child_replay_status(child_parent_id)
         logger.debug(
             "Creating child context for operation %s (is_virtual=%s)",
             operation_id,
             is_virtual,
         )
-        return DurableContext(
+        child_context = DurableContext(
             state=self.state,
             execution_context=self.execution_context,
             lambda_context=self.lambda_context,
             parent_id=child_parent_id,
             step_id_prefix=operation_id,
-            logger=self.logger.with_log_info(
-                LogInfo(
-                    execution_state=self.state,
-                    parent_id=child_parent_id,
-                )
-            ),
+            replay_status=child_replay_status,
+            logger=None,
         )
+        # Build the child's logger using the parent's underlying logger instance
+        # so custom loggers (set via set_logger) are inherited by children.
+        child_log_info = LogInfo(
+            context=child_context,
+            parent_id=child_parent_id,
+        )
+        child_context._log_info = child_log_info
+        child_context.logger = Logger.from_log_info(
+            logger=self.logger.get_logger(),
+            info=child_log_info,
+        )
+        return child_context
 
     # endregion factories
 
@@ -455,7 +575,7 @@ class DurableContext(DurableContextProtocol):
             state=self.state,
             serdes=config.serdes,
         )
-        self.state.track_replay(operation_id=operation_id)
+        self.track_replay(operation_id=operation_id)
         return result
 
     def invoke(
@@ -491,7 +611,7 @@ class DurableContext(DurableContextProtocol):
             config=config,
         )
         result: R = executor.process()
-        self.state.track_replay(operation_id=operation_id)
+        self.track_replay(operation_id=operation_id)
         return result
 
     def map(
@@ -539,7 +659,7 @@ class DurableContext(DurableContextProtocol):
                 item_serdes=None,
             ),
         )
-        self.state.track_replay(operation_id=operation_id)
+        self.track_replay(operation_id=operation_id)
         return result
 
     def parallel(
@@ -582,7 +702,7 @@ class DurableContext(DurableContextProtocol):
                 item_serdes=None,
             ),
         )
-        self.state.track_replay(operation_id=operation_id)
+        self.track_replay(operation_id=operation_id)
         return result
 
     def run_in_child_context(
@@ -626,7 +746,7 @@ class DurableContext(DurableContextProtocol):
             ),
             config=config,
         )
-        self.state.track_replay(operation_id=operation_id)
+        self.track_replay(operation_id=operation_id)
         return result
 
     def step(
@@ -652,7 +772,7 @@ class DurableContext(DurableContextProtocol):
             context_logger=self.logger,
         )
         result: T = executor.process()
-        self.state.track_replay(operation_id=operation_id)
+        self.track_replay(operation_id=operation_id)
         return result
 
     def wait(self, duration: Duration, name: str | None = None) -> None:
@@ -678,7 +798,7 @@ class DurableContext(DurableContextProtocol):
             ),
         )
         executor.process()
-        self.state.track_replay(operation_id=operation_id)
+        self.track_replay(operation_id=operation_id)
 
     def wait_for_callback(
         self,
@@ -735,7 +855,7 @@ class DurableContext(DurableContextProtocol):
             )
         )
         result: T = executor.process()
-        self.state.track_replay(operation_id=operation_id)
+        self.track_replay(operation_id=operation_id)
         return result
 
 

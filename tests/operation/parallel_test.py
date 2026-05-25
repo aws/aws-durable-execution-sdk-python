@@ -46,6 +46,16 @@ def create_test_context(
             "arn:aws:durable:us-east-1:123456789012:execution/test"
         )
 
+    # Ensure mock state has _operations_lock and operations for child context creation
+    if not hasattr(state, "_operations_lock") or isinstance(
+        state._operations_lock, Mock
+    ):
+        from threading import Lock
+
+        state._operations_lock = Lock()
+    if not hasattr(state, "operations") or isinstance(state.operations, Mock):
+        state.operations = {}
+
     execution_context = ExecutionContext(
         durable_execution_arn=state.durable_execution_arn
     )
