@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aws-durable-execution-sdk-python-examples"
+version = "0.0.0"
+description = "Examples for AWS Durable Execution SDK for Python"
+requires-python = ">=3.11"
+dependencies = [
+  "aws-durable-execution-sdk-python",
+  "aws-durable-execution-sdk-python-testing",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.hatch.envs.default]
+workspace.members = ["../aws-durable-execution-sdk-python"]
+
+[tool.hatch.envs.hatch-test]
+default-args = ["test"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+addopts = "-v --strict-markers"
+pythonpath = ["."]
+markers = [
+  "example: marks tests as example tests (deselect with '-m \"not example\"')",
+  "durable_execution: marks tests that use the durable_runner fixture (not used for test selection)",
+]
+[tool.hatch.envs.test]
+dependencies = [
+  "coverage[toml]",
+  "pytest",
+  "pytest-cov",
+  "aws-durable-execution-sdk-python-testing",
+]
+
+[tool.hatch.envs.test.scripts]
+examples = "pytest --runner-mode=local -m example test/ -v"
+examples-integration = "pytest --runner-mode=cloud -m example test/ -v {args}"
+cov = "pytest --cov-report=term-missing --cov-config=pyproject.toml -v test/"
+
+[tool.hatch.envs.examples]
+dependencies = [
+  "aws-durable-execution-sdk-python-testing>=1.0.0",
+]
+
+[tool.hatch.envs.examples.scripts]
+cli = "python cli.py {args}"
+bootstrap = "python cli.py bootstrap"
+generate-sam-template = "python scripts/generate_sam_template.py"
+build = "python cli.py build"
+deploy = "python cli.py deploy {args}"
+invoke = "python cli.py invoke {args}"
+get = "python cli.py get {args}"
+history = "python cli.py history {args}"
+policy = "python cli.py policy {args}"
+list = "python cli.py list"
+clean = "rm -rf build .aws-sam *.zip"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+preview = true
+select = ["TID252"]  # Enforce absolute imports (ban relative imports)
+
+[tool.ruff.lint.isort]
+known-first-party = ["aws_durable_execution_sdk_python"]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.ruff.lint.per-file-ignores]
+"test/**" = [
+  "ARG001",
+  "ARG002",
+  "ARG005",
+  "S101",
+  "PLR2004",
+  "SIM117",
+  "TRY301",
+]

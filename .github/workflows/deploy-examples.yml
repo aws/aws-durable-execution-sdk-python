@@ -5,7 +5,7 @@ on:
     branches: [ "main", "development"]
     paths:
       - 'packages/aws-durable-execution-sdk-python/src/**'
-      - 'packages/aws-durable-execution-sdk-python/examples/**'
+      - 'packages/examples/**'
       - '.github/workflows/deploy-examples.yml'
   workflow_dispatch:
 
@@ -26,7 +26,7 @@ jobs:
     
     - name: Get examples from catalog
       id: get-examples
-      working-directory: ./packages/aws-durable-execution-sdk-python/examples
+      working-directory: ./packages/examples
       run: |
         echo "examples=$(jq -c '.examples | map(select(.integration == true))' examples-catalog.json)" >> $GITHUB_OUTPUT
 

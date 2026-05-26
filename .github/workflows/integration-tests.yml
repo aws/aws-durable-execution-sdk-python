@@ -84,7 +84,7 @@ jobs:
 
     - name: Get integration examples
       id: get-examples
-      working-directory: language-sdk/packages/aws-durable-execution-sdk-python/examples
+      working-directory: language-sdk/packages/examples
       run: |
         echo "examples=$(jq -c '.examples | map(select(.integration == true)) | .[0:2]' examples-catalog.json)" >> $GITHUB_OUTPUT
 

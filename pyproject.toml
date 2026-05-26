@@ -1,0 +1,70 @@
+[project]
+name = "aws-durable-execution-sdk-python-monorepo"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[tool.hatch.envs.default]
+workspace.members = ["packages/*"]
+
+[tool.hatch.envs.test]
+workspace.members = ["packages/*"]
+dependencies = [
+  "coverage[toml]",
+  "pytest",
+  "pytest-cov",
+  "opentelemetry-sdk>=1.20.0",
+  "aws_durable_execution_sdk_python_testing"
+]
+
+[tool.hatch.envs.test.scripts]
+all = "pytest {args}"
+cov = "pytest --cov-report=term-missing --cov {args}"
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+testpaths = [
+    "packages/aws-durable-execution-sdk-python/tests",
+    "packages/aws-durable-execution-sdk-python-otel/tests",
+]
+
+
+[tool.hatch.envs.types]
+workspace.members = ["packages/*"]
+extra-dependencies = ["mypy>=1.0.0", "pytest", "boto3-stubs[lambda]"]
+
+[tool.hatch.envs.types.scripts]
+check = "mypy --install-types --non-interactive {args}"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+preview = true
+select = ["TID252"]  # Enforce absolute imports (ban relative imports)
+
+[tool.ruff.lint.isort]
+known-first-party = ["aws_durable_execution_sdk_python", "aws_durable_execution_sdk_python_otel"]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = [
+  "ARG001",
+  "ARG002",
+  "ARG005",
+  "S101",
+  "PLR2004",
+  "PLR6301",
+  "SIM117",
+  "TRY301",
+]
+"**/test/**" = [
+  "ARG001",
+  "ARG002",
+  "ARG005",
+  "S101",
+  "PLR2004",
+  "SIM117",
+  "TRY301",
+]

@@ -164,7 +164,7 @@ def lint_range(git_range: str, *, skip_dirty_check: bool = False) -> LintResult:
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True,
-            text=True,
+            text=True, check=False,
         )
         if status.stdout.strip():
             return LintResult(
@@ -178,7 +178,7 @@ def lint_range(git_range: str, *, skip_dirty_check: bool = False) -> LintResult:
     result = subprocess.run(
         ["git", "log", "--no-merges", git_range, "-z", "--format=%H%n%B"],
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     if result.returncode != 0:
         return LintResult(git_error=result.stderr.strip())

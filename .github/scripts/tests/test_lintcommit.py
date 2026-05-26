@@ -9,10 +9,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-import pytest
 
 from lintcommit import lint_range, validate_message, validate_subject
-
 
 # region validate_subject: valid subjects
 
