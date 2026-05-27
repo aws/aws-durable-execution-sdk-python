@@ -38,23 +38,6 @@ packages = ["src/aws_durable_execution_sdk_python_otel"]
 [tool.hatch.version]
 path = "src/aws_durable_execution_sdk_python_otel/__about__.py"
 
-[tool.hatch.envs.test]
-dependencies = [
-  "coverage[toml]",
-  "pytest",
-  "pytest-cov",
-  "opentelemetry-sdk>=1.20.0",
-]
-
-[tool.hatch.envs.test.scripts]
-cov = "pytest --cov-report=term-missing --cov-config=pyproject.toml --cov=src/aws_durable_execution_sdk_python_otel"
-
-[tool.hatch.envs.types]
-extra-dependencies = ["mypy>=1.0.0", "pytest"]
-
-[tool.hatch.envs.types.scripts]
-check = "mypy --install-types --non-interactive {args:src/aws_durable_execution_sdk_python_otel tests}"
-
 [tool.coverage.run]
 source_pkgs = ["aws_durable_execution_sdk_python_otel"]
 branch = true

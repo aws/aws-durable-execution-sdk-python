@@ -53,25 +53,9 @@ jobs:
           fi
         done
     - name: type checking
-      run: |
-        for pkg in packages/*/; do
-          if [ -f "$pkg/pyproject.toml" ]; then
-            echo "=== Type checking: $pkg ==="
-            cd "$pkg"
-            hatch run types:check
-            cd "$GITHUB_WORKSPACE"
-          fi
-        done
+      run: hatch run types:check
     - name: Run tests + coverage
-      run: |
-        for pkg in packages/*/; do
-          if [ -f "$pkg/pyproject.toml" ]; then
-            echo "=== Testing: $pkg ==="
-            cd "$pkg"
-            hatch run test:cov
-            cd "$GITHUB_WORKSPACE"
-          fi
-        done
+      run: hatch run test:cov
     - name: Build distribution
       run: |
         for pkg in packages/*/; do

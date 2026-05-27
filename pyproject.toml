@@ -25,6 +25,7 @@ addopts = "--import-mode=importlib"
 testpaths = [
     "packages/aws-durable-execution-sdk-python/tests",
     "packages/aws-durable-execution-sdk-python-otel/tests",
+    "packages/examples/test",
 ]
 
 
@@ -34,6 +35,81 @@ extra-dependencies = ["mypy>=1.0.0", "pytest", "boto3-stubs[lambda]"]
 
 [tool.hatch.envs.types.scripts]
 check = "mypy --install-types --non-interactive {args}"
+
+[tool.hatch.envs.dev-core]
+workspace.members = ["packages/aws-durable-execution-sdk-python"]
+dependencies = [
+  "pytest",
+  "pytest-cov",
+  "coverage[toml]",
+  "aws-durable-execution-sdk-python-testing",
+  "mypy>=1.0.0",
+  "boto3-stubs[lambda]",
+]
+
+[tool.hatch.envs.dev-core.scripts]
+test = "pytest packages/aws-durable-execution-sdk-python/tests {args}"
+cov = "pytest --cov-report=term-missing --cov-config=packages/aws-durable-execution-sdk-python/pyproject.toml --cov=packages/aws-durable-execution-sdk-python/src/aws_durable_execution_sdk_python --cov-fail-under=98 packages/aws-durable-execution-sdk-python/tests {args}"
+typecheck = "mypy --install-types --non-interactive packages/aws-durable-execution-sdk-python/src/aws_durable_execution_sdk_python packages/aws-durable-execution-sdk-python/tests"
+
+[tool.hatch.envs.dev-otel]
+workspace.members = [
+  "packages/aws-durable-execution-sdk-python",
+  "packages/aws-durable-execution-sdk-python-otel",
+]
+dependencies = [
+  "pytest",
+  "pytest-cov",
+  "coverage[toml]",
+  "opentelemetry-sdk>=1.20.0",
+  "mypy>=1.0.0",
+]
+
+[tool.hatch.envs.dev-otel.scripts]
+test = "pytest packages/aws-durable-execution-sdk-python-otel/tests {args}"
+cov = "pytest --cov-report=term-missing --cov-config=packages/aws-durable-execution-sdk-python-otel/pyproject.toml --cov=packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel packages/aws-durable-execution-sdk-python-otel/tests {args}"
+typecheck = "mypy --install-types --non-interactive packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel packages/aws-durable-execution-sdk-python-otel/tests"
+
+[tool.hatch.envs.dev-examples]
+workspace.members = [
+  "packages/aws-durable-execution-sdk-python",
+  "packages/examples",
+]
+dependencies = [
+  "pytest",
+  "aws-durable-execution-sdk-python-testing",
+]
+
+[tool.hatch.envs.dev-examples.scripts]
+test = "pytest packages/examples/test {args}"
+
+[tool.hatch.envs.test-pypi-otel]
+dependencies = [
+  "aws-durable-execution-sdk-python",
+  "opentelemetry-sdk>=1.20.0",
+  "pytest",
+  "pytest-cov",
+  "coverage[toml]",
+]
+pre-install-commands = [
+  "pip install -e packages/aws-durable-execution-sdk-python-otel",
+]
+
+[tool.hatch.envs.test-pypi-otel.scripts]
+test = "pytest packages/aws-durable-execution-sdk-python-otel/tests {args}"
+
+[tool.hatch.envs.test-pypi-examples]
+dependencies = [
+  "aws-durable-execution-sdk-python",
+  "aws-durable-execution-sdk-python-testing",
+  "pytest",
+]
+pre-install-commands = [
+  "pip install -e packages/examples",
+]
+
+[tool.hatch.envs.test-pypi-examples.scripts]
+test = "pytest packages/examples/test {args}"
 
 [tool.ruff]
 line-length = 88

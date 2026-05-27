@@ -37,16 +37,17 @@ jobs:
       run: python -m pip install hatch==1.16.5
 
     - name: Setup and run tests
-      working-directory: language-sdk/packages/aws-durable-execution-sdk-python
+      working-directory: language-sdk
       run: |
         echo "Running SDK tests..."
-        hatch run -- test:pip install -e ../../../testing-sdk
-        hatch run -- test:pip install -e .
+        hatch run -- test:pip install -e ../testing-sdk
         hatch fmt --check
         hatch run types:check
         hatch run test:cov
-        hatch run test:examples
-        hatch build
+
+    - name: Verify package build
+      working-directory: language-sdk/packages/aws-durable-execution-sdk-python
+      run: hatch build
 
   e2e-tests:
     needs: integration-tests

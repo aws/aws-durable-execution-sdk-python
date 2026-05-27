@@ -15,12 +15,6 @@ dependencies = [
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
-[tool.hatch.envs.default]
-workspace.members = ["../aws-durable-execution-sdk-python"]
-
-[tool.hatch.envs.hatch-test]
-default-args = ["test"]
-
 [tool.pytest.ini_options]
 testpaths = ["test"]
 addopts = "-v --strict-markers"
@@ -29,18 +23,6 @@ markers = [
   "example: marks tests as example tests (deselect with '-m \"not example\"')",
   "durable_execution: marks tests that use the durable_runner fixture (not used for test selection)",
 ]
-[tool.hatch.envs.test]
-dependencies = [
-  "coverage[toml]",
-  "pytest",
-  "pytest-cov",
-  "aws-durable-execution-sdk-python-testing",
-]
-
-[tool.hatch.envs.test.scripts]
-examples = "pytest --runner-mode=local -m example test/ -v"
-examples-integration = "pytest --runner-mode=cloud -m example test/ -v {args}"
-cov = "pytest --cov-report=term-missing --cov-config=pyproject.toml -v test/"
 
 [tool.hatch.envs.examples]
 dependencies = [
