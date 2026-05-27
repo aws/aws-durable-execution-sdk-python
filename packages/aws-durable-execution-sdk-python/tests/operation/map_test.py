@@ -1000,7 +1000,11 @@ def test_map_handler_serializes_batch_result():
             child_checkpoint.is_replay_children.return_value = False
 
             def get_checkpoint(op_id):
-                return child_checkpoint if op_id.startswith("child-") else parent_checkpoint
+                return (
+                    child_checkpoint
+                    if op_id.startswith("child-")
+                    else parent_checkpoint
+                )
 
             mock_state = Mock()
             mock_state.durable_execution_arn = "arn:test"
@@ -1054,7 +1058,11 @@ def test_map_default_serdes_serializes_batch_result():
             child_checkpoint.is_replay_children.return_value = False
 
             def get_checkpoint(op_id):
-                return child_checkpoint if op_id.startswith("child-") else parent_checkpoint
+                return (
+                    child_checkpoint
+                    if op_id.startswith("child-")
+                    else parent_checkpoint
+                )
 
             mock_state = Mock()
             mock_state.durable_execution_arn = "arn:test"
@@ -1096,7 +1104,9 @@ def test_map_custom_serdes_serializes_batch_result():
     custom_serdes = CustomStrSerDes()
 
     try:
-        with patch("aws_durable_execution_sdk_python.serdes.serialize") as mock_serialize:
+        with patch(
+            "aws_durable_execution_sdk_python.serdes.serialize"
+        ) as mock_serialize:
             mock_serialize.return_value = '"serialized"'
             importlib.reload(child)
 
@@ -1113,7 +1123,11 @@ def test_map_custom_serdes_serializes_batch_result():
             child_checkpoint.is_replay_children.return_value = False
 
             def get_checkpoint(op_id):
-                return child_checkpoint if op_id.startswith("child-") else parent_checkpoint
+                return (
+                    child_checkpoint
+                    if op_id.startswith("child-")
+                    else parent_checkpoint
+                )
 
             mock_state = Mock()
             mock_state.durable_execution_arn = "arn:test"

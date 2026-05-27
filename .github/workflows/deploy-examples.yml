@@ -101,7 +101,6 @@ jobs:
         echo "QUALIFIED_FUNCTION_NAME=$QUALIFIED_FUNCTION_NAME" >> $GITHUB_OUTPUT
 
     - name: Run Integration Tests - ${{ matrix.example.name }}
-      working-directory: ./packages/aws-durable-execution-sdk-python
       env:
         AWS_REGION: ${{ env.AWS_REGION }}
         LAMBDA_ENDPOINT: "https://lambda.us-west-2.amazonaws.com"
@@ -118,7 +117,7 @@ jobs:
         TEST_NAME="test_$(echo "${{ matrix.example.name }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')"
         echo "Test name: ${TEST_NAME}"
         
-        # Run integration tests
+        # Run integration tests from repo root
         hatch run test:examples-integration
 
         # Wait for function to be ready

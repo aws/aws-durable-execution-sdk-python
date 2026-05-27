@@ -19,6 +19,7 @@ dependencies = [
 [tool.hatch.envs.test.scripts]
 all = "pytest {args}"
 cov = "pytest --cov-report=term-missing --cov {args}"
+examples-integration = "pytest --runner-mode=cloud -m example packages/examples/test/ -v {args}"
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
