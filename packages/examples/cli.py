@@ -57,9 +57,12 @@ def build_examples():
         logger.exception("Failed to copy testing library")
         return False
 
-    # Copy testing SDK source
+    # Copy SDK source from the main SDK package
     testing_src = (
-        Path(__file__).parent.parent / "src" / "aws_durable_execution_sdk_python"
+        Path(__file__).parent.parent
+        / "aws-durable-execution-sdk-python"
+        / "src"
+        / "aws_durable_execution_sdk_python"
     )
     logger.info("Copying SDK from %s", testing_src)
     shutil.copytree(testing_src, build_dir / "aws_durable_execution_sdk_python")
