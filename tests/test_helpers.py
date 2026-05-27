@@ -17,4 +17,4 @@ def operation_id_sequence(parent_id: str | None = None):
     )
 
     while True:
-        yield context._create_step_id()  # noqa: SLF001
+        yield context._operation_id_generator.create_step_id()  # noqa: SLF001

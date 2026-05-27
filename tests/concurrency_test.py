@@ -2556,10 +2556,12 @@ def test_operation_id_determinism_across_shuffles():
         executor_context = Mock()
         executor_context._parent_id = "parent_123"  # noqa SLF001
 
-        def create_step_id(index):
+        def create_step_id(index, is_virtual):
             return f"step_{index}"
 
-        executor_context._create_step_id_for_logical_step = create_step_id  # noqa SLF001
+        executor_context._operation_id_generator.create_step_id_for_logical_step = (
+            create_step_id  # noqa SLF001
+        )
 
         def create_child_context(operation_id, *, is_virtual=False):
             child_ctx = Mock()
@@ -2620,12 +2622,12 @@ def test_concurrent_executor_replay_with_succeeded_operations():
 
     mock_execution_state.get_checkpoint_result = mock_get_checkpoint_result
 
-    def mock_create_step_id_for_logical_step(step):
+    def mock_create_step_id_for_logical_step(step, is_virtual):
         return f"op_{step}"
 
     # Mock executor context
     mock_executor_context = Mock()
-    mock_executor_context._create_step_id_for_logical_step = (  # noqa
+    mock_executor_context._operation_id_generator.create_step_id_for_logical_step = (  # noqa
         mock_create_step_id_for_logical_step
     )
 
@@ -3421,7 +3423,7 @@ def test_flat_mode_stamps_grandparent_as_inner_op_parent_id():
     assert branch_ctx.is_virtual is True
     assert branch_ctx._parent_id == map_op_id  # noqa: SLF001
     # The step-id prefix is the branch's own operation id (stable replay id).
-    assert branch_ctx._step_id_prefix != map_op_id  # noqa: SLF001
+    assert branch_ctx._operation_id_generator._step_id_prefix != map_op_id  # noqa: SLF001
 
 
 def test_nested_mode_stamps_branch_op_as_inner_op_parent_id():
@@ -3470,7 +3472,7 @@ def test_nested_mode_stamps_branch_op_as_inner_op_parent_id():
     # its own operation id, not the grandparent.
     branch_ctx = executor.last_child_context
     assert branch_ctx.is_virtual is False
-    assert branch_ctx._parent_id == branch_ctx._step_id_prefix  # noqa: SLF001
+    assert branch_ctx._parent_id == branch_ctx._operation_id_generator._step_id_prefix  # noqa: SLF001
     assert branch_ctx._parent_id != map_op_id  # noqa: SLF001
 
 

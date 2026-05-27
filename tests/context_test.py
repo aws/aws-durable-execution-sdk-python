@@ -312,7 +312,9 @@ def test_create_callback_with_name_and_config(mock_executor_class):
     operation_ids = operation_id_sequence()
     [next(operation_ids) for _ in range(5)]  # Skip 5 IDs
     expected_operation_id = next(operation_ids)  # Get the 6th ID
-    [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(5)
+    ]  # Set counter to 5 # noqa: SLF001
 
     callback = context.create_callback(config=config)
 
@@ -345,7 +347,9 @@ def test_create_callback_with_parent_id(mock_executor_class):
     operation_ids = operation_id_sequence("parent123")
     [next(operation_ids) for _ in range(2)]  # Skip 2 IDs
     expected_operation_id = next(operation_ids)  # Get the 3rd ID
-    [context._create_step_id() for _ in range(2)]  # Set counter to 2 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(2)
+    ]  # Set counter to 2 # noqa: SLF001
 
     callback = context.create_callback()
 
@@ -372,7 +376,9 @@ def test_create_callback_increments_counter(mock_executor_class):
     )
 
     context = create_test_context(state=mock_state)
-    [context._create_step_id() for _ in range(10)]  # Set counter to 10 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(10)
+    ]  # Set counter to 10 # noqa: SLF001
 
     callback1 = context.create_callback()
     callback2 = context.create_callback()
@@ -385,7 +391,7 @@ def test_create_callback_increments_counter(mock_executor_class):
 
     assert callback1.operation_id == expected_id1
     assert callback2.operation_id == expected_id2
-    assert context._step_counter.get_current() == 12  # noqa: SLF001
+    assert context._operation_id_generator._operation_counter.get_current() == 12  # noqa: SLF001
 
 
 # endregion create_callback
@@ -445,7 +451,9 @@ def test_step_with_name_and_config(mock_executor_class):
     config = StepConfig()
 
     context = create_test_context(state=mock_state)
-    [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(5)
+    ]  # Set counter to 5 # noqa: SLF001
 
     result = context.step(mock_callable, config=config)
 
@@ -483,7 +491,9 @@ def test_step_with_parent_id(mock_executor_class):
     )  # Ensure _original_name doesn't exist
 
     context = create_test_context(state=mock_state, parent_id="parent123")
-    [context._create_step_id() for _ in range(2)]  # Set counter to 2 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(2)
+    ]  # Set counter to 2 # noqa: SLF001
 
     context.step(mock_callable)
 
@@ -520,7 +530,9 @@ def test_step_increments_counter(mock_executor_class):
     )  # Ensure _original_name doesn't exist
 
     context = create_test_context(state=mock_state)
-    [context._create_step_id() for _ in range(10)]  # Set counter to 10 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(10)
+    ]  # Set counter to 10 # noqa: SLF001
 
     context.step(mock_callable)
     context.step(mock_callable)
@@ -531,7 +543,7 @@ def test_step_increments_counter(mock_executor_class):
     expected_id1 = next(seq)  # 11th
     expected_id2 = next(seq)  # 12th
 
-    assert context._step_counter.get_current() == 12  # noqa: SLF001
+    assert context._operation_id_generator._operation_counter.get_current() == 12  # noqa: SLF001
     assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
     ] == OperationIdentifier(expected_id1, None, None)
@@ -623,7 +635,9 @@ def test_invoke_with_name_and_config(mock_executor_class):
     config = InvokeConfig[str, str](timeout=Duration.from_seconds(30))
 
     context = create_test_context(state=mock_state)
-    [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(5)
+    ]  # Set counter to 5 # noqa: SLF001
 
     result = context.invoke(
         "test_function", {"key": "value"}, name="named_invoke", config=config
@@ -659,7 +673,9 @@ def test_invoke_with_parent_id(mock_executor_class):
     )
 
     context = create_test_context(state=mock_state, parent_id="parent123")
-    [context._create_step_id() for _ in range(2)]  # Set counter to 2 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(2)
+    ]  # Set counter to 2 # noqa: SLF001
 
     context.invoke("test_function", None)
 
@@ -691,7 +707,9 @@ def test_invoke_increments_counter(mock_executor_class):
     )
 
     context = create_test_context(state=mock_state)
-    [context._create_step_id() for _ in range(10)]  # Set counter to 10 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(10)
+    ]  # Set counter to 10 # noqa: SLF001
 
     context.invoke("function1", "payload1")
     context.invoke("function2", "payload2")
@@ -701,7 +719,7 @@ def test_invoke_increments_counter(mock_executor_class):
     expected_id1 = next(seq)
     expected_id2 = next(seq)
 
-    assert context._step_counter.get_current() == 12  # noqa: SLF001
+    assert context._operation_id_generator._operation_counter.get_current() == 12  # noqa: SLF001
     assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
     ] == OperationIdentifier(expected_id1, None, None)
@@ -831,7 +849,9 @@ def test_wait_with_name(mock_executor_class):
     )
 
     context = create_test_context(state=mock_state)
-    [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(5)
+    ]  # Set counter to 5 # noqa: SLF001
 
     context.wait(Duration.from_minutes(1), name="test_wait")
 
@@ -860,7 +880,9 @@ def test_wait_with_parent_id(mock_executor_class):
     )
 
     context = create_test_context(state=mock_state, parent_id="parent123")
-    [context._create_step_id() for _ in range(2)]  # Set counter to 2 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(2)
+    ]  # Set counter to 2 # noqa: SLF001
 
     context.wait(Duration.from_seconds(45))
 
@@ -889,7 +911,9 @@ def test_wait_increments_counter(mock_executor_class):
     )
 
     context = create_test_context(state=mock_state)
-    [context._create_step_id() for _ in range(10)]  # Set counter to 10 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(10)
+    ]  # Set counter to 10 # noqa: SLF001
 
     context.wait(Duration.from_seconds(15))
     context.wait(Duration.from_seconds(25))
@@ -899,7 +923,7 @@ def test_wait_increments_counter(mock_executor_class):
     expected_id1 = next(seq)
     expected_id2 = next(seq)
 
-    assert context._step_counter.get_current() == 12  # noqa: SLF001
+    assert context._operation_id_generator._operation_counter.get_current() == 12  # noqa: SLF001
     assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
     ] == OperationIdentifier(expected_id1, None, None)
@@ -994,7 +1018,9 @@ def test_run_in_child_context_with_name_and_config(mock_handler):
     config = ChildConfig()
 
     context = create_test_context(state=mock_state)
-    [context._create_step_id() for _ in range(3)]  # Set counter to 3 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(3)
+    ]  # Set counter to 3 # noqa: SLF001
 
     result = context.run_in_child_context(mock_callable, config=config)
 
@@ -1028,7 +1054,9 @@ def test_run_in_child_context_with_parent_id(mock_executor_class):
     )  # Ensure Mock doesn't have _original_name
 
     context = create_test_context(state=mock_state, parent_id="parent456")
-    [context._create_step_id() for _ in range(1)]  # Set counter to 1 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(1)
+    ]  # Set counter to 1 # noqa: SLF001
 
     context.run_in_child_context(mock_callable)
 
@@ -1089,7 +1117,9 @@ def test_run_in_child_context_increments_counter(mock_executor_class):
     )  # Ensure _original_name doesn't exist
 
     context = create_test_context(state=mock_state)
-    [context._create_step_id() for _ in range(5)]  # Set counter to 5 # noqa: SLF001
+    [
+        context._operation_id_generator.create_step_id() for _ in range(5)
+    ]  # Set counter to 5 # noqa: SLF001
 
     context.run_in_child_context(mock_callable)
     context.run_in_child_context(mock_callable)
@@ -1099,7 +1129,7 @@ def test_run_in_child_context_increments_counter(mock_executor_class):
     expected_id1 = next(seq)
     expected_id2 = next(seq)
 
-    assert context._step_counter.get_current() == 7  # noqa: SLF001
+    assert context._operation_id_generator._operation_counter.get_current() == 7  # noqa: SLF001
     assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
     ] == OperationIdentifier(expected_id1, None, None)
@@ -1986,7 +2016,7 @@ def test_should_default_step_id_prefix_to_parent_id_when_not_specified():
     )
 
     assert ctx._parent_id == "parent-op-1"  # noqa: SLF001
-    assert ctx._step_id_prefix == "parent-op-1"  # noqa: SLF001
+    assert ctx._operation_id_generator._step_id_prefix == "parent-op-1"  # noqa: SLF001
     assert ctx.is_virtual is False
 
 
@@ -2008,7 +2038,7 @@ def test_should_mark_context_virtual_when_parent_id_differs_from_step_prefix():
     )
 
     assert ctx._parent_id == "grandparent-op"  # noqa: SLF001
-    assert ctx._step_id_prefix == "branch-op"  # noqa: SLF001
+    assert ctx._operation_id_generator._step_id_prefix == "branch-op"  # noqa: SLF001
     assert ctx.is_virtual is True
 
 
@@ -2035,7 +2065,10 @@ def test_should_use_step_id_prefix_when_generating_step_ids():
     )
     expected_prefixed = hashlib.blake2b(b"branch-op-1").hexdigest()[:64]
 
-    assert virtual._create_step_id_for_logical_step(1) == expected_prefixed  # noqa: SLF001
+    assert (
+        virtual._operation_id_generator.create_step_id_for_logical_step(1, False)
+        == expected_prefixed
+    )  # noqa: SLF001
 
 
 def test_should_use_parent_id_as_step_prefix_when_non_virtual():
@@ -2062,7 +2095,10 @@ def test_should_use_parent_id_as_step_prefix_when_non_virtual():
     )
     expected = hashlib.blake2b(b"parent-op-1").hexdigest()[:64]
 
-    assert non_virtual._create_step_id_for_logical_step(1) == expected  # noqa: SLF001
+    assert (
+        non_virtual._operation_id_generator.create_step_id_for_logical_step(1, False)
+        == expected
+    )  # noqa: SLF001
     assert non_virtual.is_virtual is False
 
 
@@ -2077,7 +2113,7 @@ def test_should_create_non_virtual_child_when_is_virtual_false():
     child = parent.create_child_context("child-op")
 
     assert child._parent_id == "child-op"  # noqa: SLF001
-    assert child._step_id_prefix == "child-op"  # noqa: SLF001
+    assert child._operation_id_generator._step_id_prefix == "child-op"  # noqa: SLF001
     assert child.is_virtual is False
 
 
@@ -2092,7 +2128,7 @@ def test_should_create_virtual_child_that_propagates_grandparent_id():
     child = parent.create_child_context("child-op", is_virtual=True)
 
     assert child._parent_id == "grandparent-op"  # noqa: SLF001
-    assert child._step_id_prefix == "child-op"  # noqa: SLF001
+    assert child._operation_id_generator._step_id_prefix == "child-op"  # noqa: SLF001
     assert child.is_virtual is True
 
 
@@ -2112,11 +2148,14 @@ def test_should_create_virtual_child_with_none_parent_when_parent_is_root():
     child = root_parent.create_child_context("child-op", is_virtual=True)
 
     assert child._parent_id is None  # noqa: SLF001
-    assert child._step_id_prefix == "child-op"  # noqa: SLF001
+    assert child._operation_id_generator._step_id_prefix == "child-op"  # noqa: SLF001
     assert child.is_virtual is True
 
-    expected = hashlib.blake2b(b"child-op-1").hexdigest()[:64]
-    assert child._create_step_id_for_logical_step(1) == expected  # noqa: SLF001
+    expected = hashlib.blake2b(b"child-op-v-1").hexdigest()[:64]
+    assert (
+        child._operation_id_generator.create_step_id_for_logical_step(1, True)
+        == expected
+    )  # noqa: SLF001
 
 
 def test_should_propagate_outer_parent_id_when_virtual_is_nested_in_virtual():
@@ -2143,7 +2182,7 @@ def test_should_propagate_outer_parent_id_when_virtual_is_nested_in_virtual():
     # First virtual layer: outer parallel is FLAT, so its branch is virtual.
     outer_branch = outer.create_child_context("outer-branch-op", is_virtual=True)
     assert outer_branch._parent_id == "outer-parallel-op"  # noqa: SLF001
-    assert outer_branch._step_id_prefix == "outer-branch-op"  # noqa: SLF001
+    assert outer_branch._operation_id_generator._step_id_prefix == "outer-branch-op"  # noqa: SLF001
     assert outer_branch.is_virtual is True
     assert outer_branch.is_replaying
 
@@ -2155,15 +2194,18 @@ def test_should_propagate_outer_parent_id_when_virtual_is_nested_in_virtual():
     # inner operations would report to a logical layer that does not
     # appear in the execution history, breaking the hierarchy.
     assert inner_branch._parent_id == "outer-parallel-op"  # noqa: SLF001
-    assert inner_branch._step_id_prefix == "inner-branch-op"  # noqa: SLF001
+    assert inner_branch._operation_id_generator._step_id_prefix == "inner-branch-op"  # noqa: SLF001
     assert inner_branch.is_virtual is True
     assert inner_branch.is_replaying
 
     # Step ids inside the inner branch still prefix on the inner branch's
     # own operation id; they must not leak the outer ancestor into the
     # step-id namespace.
-    expected = hashlib.blake2b(b"inner-branch-op-1").hexdigest()[:64]
-    assert inner_branch._create_step_id_for_logical_step(1) == expected  # noqa: SLF001
+    expected = hashlib.blake2b(b"inner-branch-op-v-1").hexdigest()[:64]
+    assert (
+        inner_branch._operation_id_generator.create_step_id_for_logical_step(1, True)
+        == expected
+    )  # noqa: SLF001
 
 
 def test_context_created_with_new_status_when_check_result_returns_nonexistent():

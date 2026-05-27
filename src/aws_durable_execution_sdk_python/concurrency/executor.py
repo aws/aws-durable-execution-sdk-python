@@ -415,11 +415,13 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         and execution-order invariant.
         """
 
-        operation_id: str = executor_context._create_step_id_for_logical_step(  # noqa: SLF001
-            executable.index
+        is_virtual: bool = self.nesting_type is NestingType.FLAT
+        operation_id: str = (
+            executor_context._operation_id_generator.create_step_id_for_logical_step(  # noqa: SLF001
+                executable.index, is_virtual=is_virtual
+            )
         )
         name: str = self.get_iteration_name(executable.index)
-        is_virtual: bool = self.nesting_type is NestingType.FLAT
 
         child_context: DurableContext = executor_context.create_child_context(
             operation_id, is_virtual=is_virtual
@@ -457,10 +459,11 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         This will pre-generate all the operation ids for the children and collect the checkpointed
         results.
         """
+        is_virtual: bool = self.nesting_type is NestingType.FLAT
         items: list[BatchItem[ResultType]] = []
         for executable in self.executables:
-            operation_id = executor_context._create_step_id_for_logical_step(  # noqa: SLF001
-                executable.index
+            operation_id = executor_context._operation_id_generator.create_step_id_for_logical_step(  # noqa: SLF001
+                executable.index, is_virtual=is_virtual
             )
             checkpoint = execution_state.get_checkpoint_result(operation_id)
 

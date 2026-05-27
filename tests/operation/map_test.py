@@ -21,7 +21,11 @@ from aws_durable_execution_sdk_python.config import (
     MapConfig,
     NestingType,
 )
-from aws_durable_execution_sdk_python.context import DurableContext, ExecutionContext
+from aws_durable_execution_sdk_python.context import (
+    DurableContext,
+    ExecutionContext,
+    OperationIdGenerator,
+)
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 from aws_durable_execution_sdk_python.operation import child  # PLC0415
@@ -307,7 +311,9 @@ def test_map_handler_calls_executor_execute():
     )
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._operation_id_generator.create_step_id_for_logical_step = (
+        lambda *args: "1"
+    )  # noqa SLF001
     executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
     with patch.object(
@@ -358,7 +364,9 @@ def test_map_handler_with_none_config_creates_default():
         mock_from_items.return_value = mock_executor
 
         executor_context = Mock()
-        executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+        executor_context._operation_id_generator.create_step_id_for_logical_step = (
+            lambda *args: "1"
+        )  # noqa SLF001
         executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
         class MockExecutionState:
@@ -404,7 +412,9 @@ def test_map_handler_with_serdes():
         return f"RESULT_{item.upper()}"
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._operation_id_generator.create_step_id_for_logical_step = (
+        lambda *args, **kwargs: "1"
+    )  # noqa SLF001
     executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
     class MockExecutionState:
@@ -443,7 +453,9 @@ def test_map_handler_with_summary_generator():
     config = MapConfig(summary_generator=mock_summary_generator)
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = Mock(side_effect=["1", "2"])  # noqa SLF001
+    executor_context._operation_id_generator.create_step_id_for_logical_step = Mock(
+        side_effect=["1", "2"]
+    )  # noqa SLF001
     executor_context.create_child_context = Mock(return_value=Mock())
 
     class MockExecutionState:
@@ -469,8 +481,11 @@ def test_map_handler_with_summary_generator():
     assert executor_context.create_child_context.call_count == 2
 
     # Verify that _create_step_id_for_logical_step was called twice with unique values
-    assert executor_context._create_step_id_for_logical_step.call_count == 2  # noqa SLF001
-    calls = executor_context._create_step_id_for_logical_step.call_args_list  # noqa SLF001
+    assert (
+        executor_context._operation_id_generator.create_step_id_for_logical_step.call_count
+        == 2
+    )  # noqa SLF001
+    calls = executor_context._operation_id_generator.create_step_id_for_logical_step.call_args_list  # noqa SLF001
     # Verify unique values were passed
     assert calls[0] != calls[1]
 
@@ -501,7 +516,9 @@ def test_map_handler_default_summary_generator():
         return f"result_{item}"
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = Mock(return_value="1")  # noqa SLF001
+    executor_context._operation_id_generator.create_step_id_for_logical_step = Mock(
+        return_value="1"
+    )  # noqa SLF001
     executor_context.create_child_context = Mock(return_value=Mock())  # SLF001
 
     class MockExecutionState:
@@ -527,7 +544,10 @@ def test_map_handler_default_summary_generator():
     assert executor_context.create_child_context.call_count == 1
 
     # Verify that _create_step_id_for_logical_step was called once
-    assert executor_context._create_step_id_for_logical_step.call_count == 1  # noqa SLF001
+    assert (
+        executor_context._operation_id_generator.create_step_id_for_logical_step.call_count
+        == 1
+    )  # noqa SLF001
 
 
 def test_map_executor_init_with_summary_generator():
@@ -575,7 +595,7 @@ def test_map_handler_with_explicit_none_summary_generator():
     operation_identifier = OperationIdentifier("test_op", "parent", "test_map")
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = Mock(  # noqa: SLF001
+    executor_context._operation_id_generator.create_step_id_for_logical_step = Mock(  # noqa: SLF001
         side_effect=["1", "2", "3"]
     )
     executor_context.create_child_context = Mock(return_value=Mock())
@@ -849,7 +869,7 @@ def test_map_item_serialize(mock_serialize, item_serdes, batch_serdes):
 
     context_map = defaultdict(set)
 
-    def create_id(self, i):
+    def create_id(self, i, is_virtual):
         ctx_id = id(self)
         context_map[ctx_id].add(i)
         return (
@@ -858,7 +878,9 @@ def test_map_item_serialize(mock_serialize, item_serdes, batch_serdes):
             else f"child-{i}"
         )
 
-    with patch.object(DurableContext, "_create_step_id_for_logical_step", create_id):
+    with patch.object(
+        OperationIdGenerator, "create_step_id_for_logical_step", create_id
+    ):
         context = create_test_context(state=mock_state)
         context.map(
             ["a", "b"],
@@ -909,7 +931,7 @@ def test_map_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
 
     context_map = defaultdict(set)
 
-    def create_id(self, i):
+    def create_id(self, i, is_virtual):
         ctx_id = id(self)
         context_map[ctx_id].add(i)
         return (
@@ -918,7 +940,9 @@ def test_map_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
             else f"child-{i}"
         )
 
-    with patch.object(DurableContext, "_create_step_id_for_logical_step", create_id):
+    with patch.object(
+        OperationIdGenerator, "create_step_id_for_logical_step", create_id
+    ):
         context = create_test_context(state=mock_state)
         context.map(
             ["a", "b"],
@@ -1005,7 +1029,7 @@ def test_map_handler_serializes_batch_result():
 
         context_map = {}
 
-        def create_id(self, i):
+        def create_id(self, i, is_virtual):
             ctx_id = id(self)
             if ctx_id not in context_map:
                 context_map[ctx_id] = []
@@ -1017,7 +1041,7 @@ def test_map_handler_serializes_batch_result():
             )
 
         with patch.object(
-            DurableContext, "_create_step_id_for_logical_step", create_id
+            OperationIdGenerator, "create_step_id_for_logical_step", create_id
         ):
             context = create_test_context(state=mock_state)
             result = context.map(["a", "b"], lambda ctx, item, idx, items: item)
@@ -1057,7 +1081,7 @@ def test_map_default_serdes_serializes_batch_result():
 
         context_map = {}
 
-        def create_id(self, i):
+        def create_id(self, i, is_virtual):
             ctx_id = id(self)
             if ctx_id not in context_map:
                 context_map[ctx_id] = []
@@ -1069,7 +1093,7 @@ def test_map_default_serdes_serializes_batch_result():
             )
 
         with patch.object(
-            DurableContext, "_create_step_id_for_logical_step", create_id
+            OperationIdGenerator, "create_step_id_for_logical_step", create_id
         ):
             context = create_test_context(state=mock_state)
             result = context.map(["a", "b"], lambda ctx, item, idx, items: item)
@@ -1113,7 +1137,7 @@ def test_map_custom_serdes_serializes_batch_result():
 
         context_map = {}
 
-        def create_id(self, i):
+        def create_id(self, i, is_virtual):
             ctx_id = id(self)
             if ctx_id not in context_map:
                 context_map[ctx_id] = []
@@ -1125,7 +1149,7 @@ def test_map_custom_serdes_serializes_batch_result():
             )
 
         with patch.object(
-            DurableContext, "_create_step_id_for_logical_step", create_id
+            OperationIdGenerator, "create_step_id_for_logical_step", create_id
         ):
             context = create_test_context(state=mock_state)
             result = context.map(
