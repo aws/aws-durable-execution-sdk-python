@@ -980,109 +980,114 @@ def test_map_result_serialization_roundtrip():
 
 def test_map_handler_serializes_batch_result():
     """Verify map_handler serializes BatchResult at parent level."""
-    with patch(
-        "aws_durable_execution_sdk_python.serdes.serialize"
-    ) as mock_serdes_serialize:
-        mock_serdes_serialize.return_value = '"serialized"'
+    try:
+        with patch(
+            "aws_durable_execution_sdk_python.serdes.serialize"
+        ) as mock_serdes_serialize:
+            mock_serdes_serialize.return_value = '"serialized"'
+            importlib.reload(child)
+
+            parent_checkpoint = Mock()
+            parent_checkpoint.is_succeeded.return_value = False
+            parent_checkpoint.is_failed.return_value = False
+            parent_checkpoint.is_existent.return_value = False
+            parent_checkpoint.is_replay_children.return_value = False
+
+            child_checkpoint = Mock()
+            child_checkpoint.is_succeeded.return_value = False
+            child_checkpoint.is_failed.return_value = False
+            child_checkpoint.is_existent.return_value = False
+            child_checkpoint.is_replay_children.return_value = False
+
+            def get_checkpoint(op_id):
+                return child_checkpoint if op_id.startswith("child-") else parent_checkpoint
+
+            mock_state = Mock()
+            mock_state.durable_execution_arn = "arn:test"
+            mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
+            mock_state.create_checkpoint = Mock()
+
+            context_map = {}
+
+            def create_id(self, i):
+                ctx_id = id(self)
+                if ctx_id not in context_map:
+                    context_map[ctx_id] = []
+                context_map[ctx_id].append(i)
+                return (
+                    "parent"
+                    if len(context_map) == 1 and len(context_map[ctx_id]) == 1
+                    else f"child-{i}"
+                )
+
+            with patch.object(
+                DurableContext, "_create_step_id_for_logical_step", create_id
+            ):
+                context = create_test_context(state=mock_state)
+                result = context.map(["a", "b"], lambda ctx, item, idx, items: item)
+
+            assert len(mock_serdes_serialize.call_args_list) == 3
+            parent_call = mock_serdes_serialize.call_args_list[2]
+            assert parent_call[1]["value"] is result
+    finally:
         importlib.reload(child)
-
-        parent_checkpoint = Mock()
-        parent_checkpoint.is_succeeded.return_value = False
-        parent_checkpoint.is_failed.return_value = False
-        parent_checkpoint.is_existent.return_value = False
-        parent_checkpoint.is_replay_children.return_value = False
-
-        child_checkpoint = Mock()
-        child_checkpoint.is_succeeded.return_value = False
-        child_checkpoint.is_failed.return_value = False
-        child_checkpoint.is_existent.return_value = False
-        child_checkpoint.is_replay_children.return_value = False
-
-        def get_checkpoint(op_id):
-            return child_checkpoint if op_id.startswith("child-") else parent_checkpoint
-
-        mock_state = Mock()
-        mock_state.durable_execution_arn = "arn:test"
-        mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
-        mock_state.create_checkpoint = Mock()
-
-        context_map = {}
-
-        def create_id(self, i):
-            ctx_id = id(self)
-            if ctx_id not in context_map:
-                context_map[ctx_id] = []
-            context_map[ctx_id].append(i)
-            return (
-                "parent"
-                if len(context_map) == 1 and len(context_map[ctx_id]) == 1
-                else f"child-{i}"
-            )
-
-        with patch.object(
-            DurableContext, "_create_step_id_for_logical_step", create_id
-        ):
-            context = create_test_context(state=mock_state)
-            result = context.map(["a", "b"], lambda ctx, item, idx, items: item)
-
-        assert len(mock_serdes_serialize.call_args_list) == 3
-        parent_call = mock_serdes_serialize.call_args_list[2]
-        assert parent_call[1]["value"] is result
 
 
 def test_map_default_serdes_serializes_batch_result():
     """Verify default serdes automatically serializes BatchResult."""
+    try:
+        with patch(
+            "aws_durable_execution_sdk_python.serdes.serialize", wraps=serialize
+        ) as mock_serialize:
+            importlib.reload(child)
 
-    with patch(
-        "aws_durable_execution_sdk_python.serdes.serialize", wraps=serialize
-    ) as mock_serialize:
+            parent_checkpoint = Mock()
+            parent_checkpoint.is_succeeded.return_value = False
+            parent_checkpoint.is_failed.return_value = False
+            parent_checkpoint.is_existent.return_value = False
+            parent_checkpoint.is_replay_children.return_value = False
+
+            child_checkpoint = Mock()
+            child_checkpoint.is_succeeded.return_value = False
+            child_checkpoint.is_failed.return_value = False
+            child_checkpoint.is_existent.return_value = False
+            child_checkpoint.is_replay_children.return_value = False
+
+            def get_checkpoint(op_id):
+                return child_checkpoint if op_id.startswith("child-") else parent_checkpoint
+
+            mock_state = Mock()
+            mock_state.durable_execution_arn = "arn:test"
+            mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
+            mock_state.create_checkpoint = Mock()
+
+            context_map = {}
+
+            def create_id(self, i):
+                ctx_id = id(self)
+                if ctx_id not in context_map:
+                    context_map[ctx_id] = []
+                context_map[ctx_id].append(i)
+                return (
+                    "parent"
+                    if len(context_map) == 1 and len(context_map[ctx_id]) == 1
+                    else f"child-{i}"
+                )
+
+            with patch.object(
+                DurableContext, "_create_step_id_for_logical_step", create_id
+            ):
+                context = create_test_context(state=mock_state)
+                result = context.map(["a", "b"], lambda ctx, item, idx, items: item)
+
+            assert isinstance(result, BatchResult)
+            assert len(mock_serialize.call_args_list) == 3
+            parent_call = mock_serialize.call_args_list[2]
+            assert parent_call[1]["serdes"] is None
+            assert isinstance(parent_call[1]["value"], BatchResult)
+            assert parent_call[1]["value"] is result
+    finally:
         importlib.reload(child)
-
-        parent_checkpoint = Mock()
-        parent_checkpoint.is_succeeded.return_value = False
-        parent_checkpoint.is_failed.return_value = False
-        parent_checkpoint.is_existent.return_value = False
-        parent_checkpoint.is_replay_children.return_value = False
-
-        child_checkpoint = Mock()
-        child_checkpoint.is_succeeded.return_value = False
-        child_checkpoint.is_failed.return_value = False
-        child_checkpoint.is_existent.return_value = False
-        child_checkpoint.is_replay_children.return_value = False
-
-        def get_checkpoint(op_id):
-            return child_checkpoint if op_id.startswith("child-") else parent_checkpoint
-
-        mock_state = Mock()
-        mock_state.durable_execution_arn = "arn:test"
-        mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
-        mock_state.create_checkpoint = Mock()
-
-        context_map = {}
-
-        def create_id(self, i):
-            ctx_id = id(self)
-            if ctx_id not in context_map:
-                context_map[ctx_id] = []
-            context_map[ctx_id].append(i)
-            return (
-                "parent"
-                if len(context_map) == 1 and len(context_map[ctx_id]) == 1
-                else f"child-{i}"
-            )
-
-        with patch.object(
-            DurableContext, "_create_step_id_for_logical_step", create_id
-        ):
-            context = create_test_context(state=mock_state)
-            result = context.map(["a", "b"], lambda ctx, item, idx, items: item)
-
-        assert isinstance(result, BatchResult)
-        assert len(mock_serialize.call_args_list) == 3
-        parent_call = mock_serialize.call_args_list[2]
-        assert parent_call[1]["serdes"] is None
-        assert isinstance(parent_call[1]["value"], BatchResult)
-        assert parent_call[1]["value"] is result
 
 
 def test_map_custom_serdes_serializes_batch_result():
@@ -1090,58 +1095,61 @@ def test_map_custom_serdes_serializes_batch_result():
 
     custom_serdes = CustomStrSerDes()
 
-    with patch("aws_durable_execution_sdk_python.serdes.serialize") as mock_serialize:
-        mock_serialize.return_value = '"serialized"'
+    try:
+        with patch("aws_durable_execution_sdk_python.serdes.serialize") as mock_serialize:
+            mock_serialize.return_value = '"serialized"'
+            importlib.reload(child)
+
+            parent_checkpoint = Mock()
+            parent_checkpoint.is_succeeded.return_value = False
+            parent_checkpoint.is_failed.return_value = False
+            parent_checkpoint.is_existent.return_value = False
+            parent_checkpoint.is_replay_children.return_value = False
+
+            child_checkpoint = Mock()
+            child_checkpoint.is_succeeded.return_value = False
+            child_checkpoint.is_failed.return_value = False
+            child_checkpoint.is_existent.return_value = False
+            child_checkpoint.is_replay_children.return_value = False
+
+            def get_checkpoint(op_id):
+                return child_checkpoint if op_id.startswith("child-") else parent_checkpoint
+
+            mock_state = Mock()
+            mock_state.durable_execution_arn = "arn:test"
+            mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
+            mock_state.create_checkpoint = Mock()
+
+            context_map = {}
+
+            def create_id(self, i):
+                ctx_id = id(self)
+                if ctx_id not in context_map:
+                    context_map[ctx_id] = []
+                context_map[ctx_id].append(i)
+                return (
+                    "parent"
+                    if len(context_map) == 1 and len(context_map[ctx_id]) == 1
+                    else f"child-{i}"
+                )
+
+            with patch.object(
+                DurableContext, "_create_step_id_for_logical_step", create_id
+            ):
+                context = create_test_context(state=mock_state)
+                result = context.map(
+                    ["a", "b"],
+                    lambda ctx, item, idx, items: item,
+                    config=MapConfig(serdes=custom_serdes),
+                )
+
+            assert isinstance(result, BatchResult)
+            assert len(mock_serialize.call_args_list) == 3
+            parent_call = mock_serialize.call_args_list[2]
+            assert parent_call[1]["serdes"] is custom_serdes
+            assert isinstance(parent_call[1]["value"], BatchResult)
+    finally:
         importlib.reload(child)
-
-        parent_checkpoint = Mock()
-        parent_checkpoint.is_succeeded.return_value = False
-        parent_checkpoint.is_failed.return_value = False
-        parent_checkpoint.is_existent.return_value = False
-        parent_checkpoint.is_replay_children.return_value = False
-
-        child_checkpoint = Mock()
-        child_checkpoint.is_succeeded.return_value = False
-        child_checkpoint.is_failed.return_value = False
-        child_checkpoint.is_existent.return_value = False
-        child_checkpoint.is_replay_children.return_value = False
-
-        def get_checkpoint(op_id):
-            return child_checkpoint if op_id.startswith("child-") else parent_checkpoint
-
-        mock_state = Mock()
-        mock_state.durable_execution_arn = "arn:test"
-        mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
-        mock_state.create_checkpoint = Mock()
-
-        context_map = {}
-
-        def create_id(self, i):
-            ctx_id = id(self)
-            if ctx_id not in context_map:
-                context_map[ctx_id] = []
-            context_map[ctx_id].append(i)
-            return (
-                "parent"
-                if len(context_map) == 1 and len(context_map[ctx_id]) == 1
-                else f"child-{i}"
-            )
-
-        with patch.object(
-            DurableContext, "_create_step_id_for_logical_step", create_id
-        ):
-            context = create_test_context(state=mock_state)
-            result = context.map(
-                ["a", "b"],
-                lambda ctx, item, idx, items: item,
-                config=MapConfig(serdes=custom_serdes),
-            )
-
-        assert isinstance(result, BatchResult)
-        assert len(mock_serialize.call_args_list) == 3
-        parent_call = mock_serialize.call_args_list[2]
-        assert parent_call[1]["serdes"] is custom_serdes
-        assert isinstance(parent_call[1]["value"], BatchResult)
         assert parent_call[1]["value"] is result
 
 
