@@ -98,7 +98,7 @@ jobs:
         rm -rf /tmp/aws/
 
     - name: Deploy and test examples
-      working-directory: language-sdk/packages/aws-durable-execution-sdk-python
+      working-directory: language-sdk/packages/examples
       env:
         AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         LAMBDA_ENDPOINT: "https://lambda.us-west-2.amazonaws.com"

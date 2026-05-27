@@ -58,12 +58,14 @@ jobs:
     - name: Install Hatch
       run: pip install hatch
     - name: Build examples
-      working-directory: ./packages/aws-durable-execution-sdk-python
-      run: hatch run examples:build
+      working-directory: ./packages/examples
+      run: |
+        hatch run -- examples:pip install -e ../aws-durable-execution-sdk-python
+        hatch run examples:build
 
     - name: Deploy Lambda function - ${{ matrix.example.name }}
       id: deploy
-      working-directory: ./packages/aws-durable-execution-sdk-python
+      working-directory: ./packages/examples
       env:
         AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         LAMBDA_ENDPOINT: "https://lambda.us-west-2.amazonaws.com"
