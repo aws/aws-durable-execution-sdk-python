@@ -38,6 +38,9 @@ packages = ["src/aws_durable_execution_sdk_python_otel"]
 [tool.hatch.version]
 path = "src/aws_durable_execution_sdk_python_otel/__about__.py"
 
+[tool.hatch.publish.index]
+disable = true
+
 [tool.coverage.run]
 source_pkgs = ["aws_durable_execution_sdk_python_otel"]
 branch = true
