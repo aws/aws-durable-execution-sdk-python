@@ -40,8 +40,7 @@ jobs:
       working-directory: language-sdk
       run: |
         echo "Running SDK tests..."
-        hatch run -- test:pip install -e ../testing-sdk
-        hatch fmt --check
+        hatch run -- test:pip install -e ../packages/testing-sdk
         hatch run types:check
         hatch run test:cov
 
