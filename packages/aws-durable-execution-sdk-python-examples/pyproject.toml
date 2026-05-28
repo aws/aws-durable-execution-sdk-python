@@ -24,11 +24,6 @@ markers = [
   "durable_execution: marks tests that use the durable_runner fixture (not used for test selection)",
 ]
 
-[tool.hatch.envs.examples]
-dependencies = [
-  "aws-durable-execution-sdk-python-testing>=1.0.0",
-]
-
 [tool.hatch.envs.examples.scripts]
 cli = "python cli.py {args}"
 bootstrap = "python cli.py bootstrap"
