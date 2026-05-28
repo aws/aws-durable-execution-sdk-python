@@ -115,7 +115,7 @@ test = "pytest packages/examples/test {args}"
 [tool.ruff]
 line-length = 88
 target-version = "py311"
-exclude = [".github/scripts", ".github/workflows"]
+exclude = [".github/scripts/*.sh", ".github/workflows"]
 
 [tool.ruff.lint]
 preview = true

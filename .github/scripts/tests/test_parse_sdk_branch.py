@@ -74,7 +74,7 @@ TESTING_SDK_BRANCH = second-branch""",
     for input_text, expected in test_cases:
         result = parse_sdk_branch(input_text)
         # Assert is expected in test functions
-        assert result == expected, (
+        assert result == expected, (  # noqa: S101
             f"Expected '{expected}' but got '{result}' for input: {input_text[:50]}..."
         )
 
