@@ -19,14 +19,14 @@ dependencies = [
 [tool.hatch.envs.test.scripts]
 all = "pytest {args}"
 cov = "pytest --cov-report=term-missing --cov {args}"
-examples-integration = "pytest --runner-mode=cloud -m example packages/examples/test/ -v {args}"
+examples-integration = "pytest --runner-mode=cloud -m example packages/aws-durable-execution-sdk-python-examples/test/ -v {args}"
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
 testpaths = [
     "packages/aws-durable-execution-sdk-python/tests",
     "packages/aws-durable-execution-sdk-python-otel/tests",
-    "packages/examples/test",
+    "packages/aws-durable-execution-sdk-python-examples/test",
 ]
 
 
@@ -74,7 +74,7 @@ typecheck = "mypy --install-types --non-interactive packages/aws-durable-executi
 [tool.hatch.envs.dev-examples]
 workspace.members = [
   "packages/aws-durable-execution-sdk-python",
-  "packages/examples",
+  "packages/aws-durable-execution-sdk-python-examples",
 ]
 dependencies = [
   "pytest",
@@ -82,7 +82,7 @@ dependencies = [
 ]
 
 [tool.hatch.envs.dev-examples.scripts]
-test = "pytest packages/examples/test {args}"
+test = "pytest packages/aws-durable-execution-sdk-python-examples/test {args}"
 
 [tool.hatch.envs.test-pypi-otel]
 dependencies = [
@@ -106,11 +106,11 @@ dependencies = [
   "pytest",
 ]
 pre-install-commands = [
-  "pip install -e packages/examples",
+  "pip install -e packages/aws-durable-execution-sdk-python-examples",
 ]
 
 [tool.hatch.envs.test-pypi-examples.scripts]
-test = "pytest packages/examples/test {args}"
+test = "pytest packages/aws-durable-execution-sdk-python-examples/test {args}"
 
 [tool.ruff]
 line-length = 88

@@ -84,7 +84,7 @@ jobs:
 
     - name: Get integration examples
       id: get-examples
-      working-directory: language-sdk/packages/examples
+      working-directory: language-sdk/packages/aws-durable-execution-sdk-python-examples
       run: |
         echo "examples=$(jq -c '.examples | map(select(.integration == true)) | .[0:2]' examples-catalog.json)" >> $GITHUB_OUTPUT
 
@@ -97,7 +97,7 @@ jobs:
         rm -rf /tmp/aws/
 
     - name: Deploy and test examples
-      working-directory: language-sdk/packages/examples
+      working-directory: language-sdk/packages/aws-durable-execution-sdk-python-examples
       env:
         AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         LAMBDA_ENDPOINT: "https://lambda.us-west-2.amazonaws.com"

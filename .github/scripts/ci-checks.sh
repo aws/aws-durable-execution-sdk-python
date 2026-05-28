@@ -39,7 +39,7 @@ echo "SUCCESS: tests (examples)"
 PACKAGES=(
   "packages/aws-durable-execution-sdk-python"
   "packages/aws-durable-execution-sdk-python-otel"
-  "packages/examples"
+  "packages/aws-durable-execution-sdk-python-examples"
 )
 
 for package_dir in "${PACKAGES[@]}"; do

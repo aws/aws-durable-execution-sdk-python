@@ -3,7 +3,7 @@ name: Update SAM Template
 on:
   pull_request:
     paths:
-      - "packages/examples/**"
+      - "packages/aws-durable-execution-sdk-python-examples/**"
 
 permissions:
   contents: write
@@ -27,7 +27,7 @@ jobs:
           python-version: "3.13"
 
       - name: Generate SAM template
-        run: python packages/examples/scripts/generate_sam_template.py
+        run: python packages/aws-durable-execution-sdk-python-examples/scripts/generate_sam_template.py
 
       - name: Commit and push changes
         run: |
