@@ -1162,9 +1162,9 @@ def test_map_custom_serdes_serializes_batch_result():
             parent_call = mock_serialize.call_args_list[2]
             assert parent_call[1]["serdes"] is custom_serdes
             assert isinstance(parent_call[1]["value"], BatchResult)
+            assert parent_call[1]["value"] is result
     finally:
         importlib.reload(child)
-        assert parent_call[1]["value"] is result
 
 
 def test_map_with_empty_list_should_exit_early():

@@ -2,9 +2,11 @@
 
 OpenTelemetry instrumentation for the [AWS Durable Execution SDK for Python](https://github.com/aws/aws-durable-execution-sdk-python).
 
+> **Note:** v0.1.0 reserves the package name. Instrumentation lands in v0.2.0.
+
 ## Overview
 
-This package provides automatic OpenTelemetry tracing for durable execution workflows, giving you visibility into step execution, waits, retries, and overall workflow performance.
+This package will provide automatic OpenTelemetry tracing for durable execution workflows, giving you visibility into step execution, waits, retries, and overall workflow performance.
 
 ## Installation
 
@@ -15,20 +17,12 @@ pip install aws-durable-execution-sdk-python-otel
 ## Quick Start
 
 ```python
-from aws_durable_execution_sdk_python import DurableContext, durable_execution
-from aws_durable_execution_sdk_python_otel import instrument_durable_execution
+from aws_durable_execution_sdk_python_otel import __version__
 
-# Instrument the SDK (call once at module load)
-instrument_durable_execution()
-
-@durable_execution
-def handler(event: dict, context: DurableContext) -> dict:
-    # Steps, waits, and invokes are automatically traced
-    result = context.step(lambda _: do_work(), name="my-step")
-    return {"result": result}
+print(__version__)
 ```
 
-## Features
+## Planned Features (v0.2.0)
 
 - Automatic span creation for steps, waits, invokes, and child contexts
 - Replay-aware tracing (distinguishes fresh executions from replays)
