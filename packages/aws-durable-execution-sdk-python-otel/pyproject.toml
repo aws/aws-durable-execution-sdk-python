@@ -80,7 +80,3 @@ lines-after-imports = 2
   "SIM117",
   "TRY301",
 ]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-v --strict-markers"
