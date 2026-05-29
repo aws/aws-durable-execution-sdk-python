@@ -604,6 +604,17 @@
       "path": "./src/parallel/parallel_with_named_branches.py"
     },
     {
+      "name": "With Retry Callback",
+      "description": "Demonstrates with_retry wrapping a wait_for_callback operation with exponential backoff",
+      "handler": "with_retry_callback.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/with_retry/with_retry_callback.py"
+    },
+    {
       "name": "Plugin",
       "description": "Test plugin",
       "handler": "execution_with_plugin.handler",

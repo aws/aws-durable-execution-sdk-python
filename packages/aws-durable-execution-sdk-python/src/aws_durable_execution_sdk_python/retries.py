@@ -5,12 +5,19 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from aws_durable_execution_sdk_python.config import Duration, JitterStrategy
+from aws_durable_execution_sdk_python.exceptions import SuspendExecution
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from aws_durable_execution_sdk_python.config import ChildConfig
+    from aws_durable_execution_sdk_python.types import DurableContext
+
+T = TypeVar("T")
 
 Numeric = int | float
 
@@ -172,3 +179,99 @@ class RetryPresets:
                 jitter_strategy=JitterStrategy.NONE,
             )
         )
+
+
+@dataclass(frozen=True)
+class WithRetryConfig(Generic[T]):
+    """Configuration for with_retry.
+
+    Holds a retry strategy callable (same type used by StepConfig) and
+    adds execution-mode options specific to with_retry.
+
+    Attributes:
+        retry_strategy: A callable that decides whether to retry and with
+            what delay. Accepts (Exception, int) and returns RetryDecision.
+            Use create_retry_strategy(RetryStrategyConfig(...)) to build one,
+            or provide a custom callable. If None, the default retry strategy
+            (RetryStrategyConfig defaults) is used.
+        wrap_with_run_in_child_context: Whether to wrap the retry loop in
+            a child context for isolation. Default True. When True, final
+            failure is rethrown as CallableRuntimeError with the original
+            exception on `cause`. When False, the original error is
+            rethrown unchanged.
+        child_context_config: Optional ChildConfig forwarded to
+            run_in_child_context when wrapping is enabled. Ignored when
+            wrap_with_run_in_child_context is False.
+    """
+
+    retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
+    wrap_with_run_in_child_context: bool = True
+    child_context_config: ChildConfig[T] | None = None
+
+
+def with_retry(
+    context: DurableContext,
+    func: Callable[[DurableContext, int], T],
+    config: WithRetryConfig[T],
+    name: str | None = None,
+) -> T:
+    """Retry a block of durable logic with configurable backoff.
+
+    Semantically a run_in_child_context with a retry policy wrapped around
+    it — on failure the whole function body is re-run from the beginning
+    with configurable backoff.
+
+    Unlike context.step() which retries a single atomic operation,
+    with_retry retries an entire function body that may contain multiple
+    durable operations (steps, waits, invokes, callbacks, etc.).
+
+    Args:
+        context: The DurableContext to execute within.
+        func: A callable that accepts (DurableContext, attempt: int) and
+              returns T. The function body may contain multiple durable
+              operations.
+        config: WithRetryConfig containing a retry strategy callable plus
+              execution-mode options.
+        name: Optional name for the child context and backoff waits.
+              When provided, backoff waits are named
+              "{name}-backoff-{attempt}".
+
+    Returns:
+        The result of func on successful execution.
+
+    Raises:
+        The exception from the last failed attempt when retries are
+        exhausted or the retry strategy returns should_retry=False.
+        When wrap_with_run_in_child_context is True (default),
+        ChildOperationExecutor.process wraps non-InvocationError /
+        SuspendExecution exceptions as CallableRuntimeError with the
+        original error in cause.
+        When wrap_with_run_in_child_context is False, the original
+        exception propagates unchanged.
+        SuspendExecution: Re-raised immediately (SDK control flow).
+    """
+    retry_strategy = config.retry_strategy or create_retry_strategy()
+
+    def run_loop(ctx: DurableContext) -> T:
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return func(ctx, attempt)
+            except SuspendExecution:
+                raise  # SDK control flow - never intercept
+            except Exception as err:
+                decision = retry_strategy(err, attempt)
+                if not decision.should_retry:
+                    raise
+                wait_name = f"{name}-backoff-{attempt}" if name else None
+                ctx.wait(duration=decision.delay, name=wait_name)
+
+    if config.wrap_with_run_in_child_context:
+        return context.run_in_child_context(
+            run_loop,
+            name=name,
+            config=config.child_context_config,
+        )
+    else:
+        return run_loop(context)
