@@ -1002,6 +1002,12 @@
         "CodeUri": "build/",
         "Handler": "execution_with_otel.handler",
         "Description": "Test Otel plugin",
+    "WithRetryCallback": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "with_retry_callback.handler",
+        "Description": "Demonstrates with_retry wrapping a wait_for_callback operation with exponential backoff",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
