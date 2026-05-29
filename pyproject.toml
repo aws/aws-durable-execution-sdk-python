@@ -22,13 +22,19 @@ cov = "pytest --cov-report=term-missing --cov {args}"
 examples-integration = "pytest --runner-mode=cloud -m example packages/aws-durable-execution-sdk-python-examples/test/ -v {args}"
 
 [tool.pytest.ini_options]
-addopts = "--import-mode=importlib"
+# Declare custom markers to avoid warnings with --strict-markers
+addopts = "-v --strict-markers --import-mode=importlib"
 testpaths = [
     "packages/aws-durable-execution-sdk-python/tests",
     "packages/aws-durable-execution-sdk-python-otel/tests",
     "packages/aws-durable-execution-sdk-python-examples/test",
 ]
-
+markers = [
+  # Used for test selection with -m example
+  "example: marks tests as example tests (deselect with '-m \"not example\"')",
+  # Used for configuration - passes handler and lambda_function_name to durable_runner fixture
+  "durable_execution: marks tests that use the durable_runner fixture (not used for test selection)",
+]
 
 [tool.hatch.envs.types]
 workspace.members = ["packages/*"]

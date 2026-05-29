@@ -73,16 +73,3 @@ lines-after-imports = 2
   "SIM117",
   "TRY301",
 ]
-
-[tool.pytest.ini_options]
-# Declare custom markers to avoid warnings with --strict-markers
-markers = [
-  # Used for test selection with -m example
-  "example: marks tests as example tests (deselect with '-m \"not example\"')",
-  # Used for configuration - passes handler and lambda_function_name to durable_runner fixture
-  "durable_execution: marks tests that use the durable_runner fixture (not used for test selection)",
-]
-# Default test discovery paths
-testpaths = ["tests"]
-# Default options for all test runs
-addopts = "-v --strict-markers"

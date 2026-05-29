@@ -15,15 +15,6 @@ dependencies = [
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
-[tool.pytest.ini_options]
-testpaths = ["test"]
-addopts = "-v --strict-markers"
-pythonpath = ["."]
-markers = [
-  "example: marks tests as example tests (deselect with '-m \"not example\"')",
-  "durable_execution: marks tests that use the durable_runner fixture (not used for test selection)",
-]
-
 [tool.hatch.envs.examples.scripts]
 cli = "python cli.py {args}"
 bootstrap = "python cli.py bootstrap"
