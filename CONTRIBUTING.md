@@ -15,16 +15,15 @@ This is a monorepo containing multiple packages under the `packages/` directory:
 
 ```
 packages/
-├── aws-durable-execution-sdk-python/       # Core SDK
-│   ├── pyproject.toml
-│   ├── src/
-│   ├── tests/
-│   └── examples/
-├── aws-durable-execution-sdk-python-otel/  # OpenTelemetry instrumentation
+├── aws-durable-execution-sdk-python/              # Core SDK
 │   ├── pyproject.toml
 │   ├── src/
 │   └── tests/
-└── examples/                               # Example functions and tests
+├── aws-durable-execution-sdk-python-otel/         # OpenTelemetry instrumentation
+│   ├── pyproject.toml
+│   ├── src/
+│   └── tests/
+└── aws-durable-execution-sdk-python-examples/     # Example functions and tests
     ├── pyproject.toml
     ├── src/
     └── test/
@@ -93,7 +92,8 @@ hatch fmt
 # Build distribution
 hatch build
 
-# Examples deployment
+# Examples deployment (from examples package)
+cd ../aws-durable-execution-sdk-python-examples
 hatch run examples:build
 hatch run examples:deploy "Hello World"
 ```
@@ -309,7 +309,7 @@ tests/mypackage/mymodule_test.py
 ## Examples and Deployment
 
 The project includes a unified CLI tool for managing examples, deployment, and AWS account setup.
-Run these commands from the core SDK package directory (`packages/aws-durable-execution-sdk-python`).
+Run these commands from the examples package directory (`packages/aws-durable-execution-sdk-python-examples`).
 
 To run examples tests from the repo root:
 ```bash
