@@ -21,7 +21,6 @@ def handler(_event: Any, context: DurableContext) -> str:
     )
 
     # Extract the first successful result
-    first_result = (
-        results.successful_results[0] if results.successful_results else "None"
-    )
+    successful = results.get_results()
+    first_result = successful[0] if successful else "None"
     return f"First successful result: {first_result}"
