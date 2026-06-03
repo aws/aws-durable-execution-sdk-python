@@ -318,6 +318,7 @@ class PluginExecutor:
         Args:
             update: the operation update that is checkpointed
         """
+        # todo: this could be called more than once for step when it's retried
         if update.action is OperationAction.START:
             # we handle only START action here because on_operation_update may not be able to see a STARTED update
             # when START is checkpointed in batch with terminal status updates.
@@ -330,7 +331,7 @@ class PluginExecutor:
                     parent_id=update.parent_id,
                     start_time=datetime.datetime.now(datetime.UTC),
                 ),
-                sync=False,
+                sync=True,
             )
 
     def on_operation_update(self, operation: Operation | None):
@@ -357,7 +358,7 @@ class PluginExecutor:
                     status=operation.status,
                     error=self._extract_error(operation),
                 ),
-                sync=False,
+                sync=True,
             )
 
     @staticmethod

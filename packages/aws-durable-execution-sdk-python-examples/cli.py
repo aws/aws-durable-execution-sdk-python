@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import time
 import zipfile
@@ -35,6 +36,7 @@ def build_examples():
 
     build_dir = Path(__file__).parent / "build"
     src_dir = Path(__file__).parent / "src"
+    packages_dir = Path(__file__).parent.parent
 
     logger.info("Building examples...")
 
@@ -57,15 +59,29 @@ def build_examples():
         logger.exception("Failed to copy testing library")
         return False
 
-    # Copy SDK source from the main SDK package
-    testing_src = (
-        Path(__file__).parent.parent
-        / "aws-durable-execution-sdk-python"
-        / "src"
-        / "aws_durable_execution_sdk_python"
-    )
-    logger.info("Copying SDK from %s", testing_src)
-    shutil.copytree(testing_src, build_dir / "aws_durable_execution_sdk_python")
+    # Install local packages so their runtime dependencies are included in
+    # the Lambda deployment package.
+    runtime_packages = [
+        packages_dir / "aws-durable-execution-sdk-python",
+        packages_dir / "aws-durable-execution-sdk-python-otel",
+    ]
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--target",
+                str(build_dir),
+                *[str(package) for package in runtime_packages],
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError:
+        logger.exception("Failed to install runtime dependencies")
+        return False
 
     # Copy example functions
     logger.info("Copying examples from %s", src_dir)
