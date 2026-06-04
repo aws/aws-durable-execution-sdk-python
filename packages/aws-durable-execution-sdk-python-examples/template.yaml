@@ -19,6 +19,24 @@
     "LambdaEndpoint": {
       "Type": "String",
       "Default": "https://lambda.us-west-2.amazonaws.com"
+    },
+    "KmsKeyArn": {
+      "Type": "String",
+      "Default": ""
+    }
+  },
+  "Conditions": {
+    "HasKmsKeyArn": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "KmsKeyArn"
+            },
+            ""
+          ]
+        }
+      ]
     }
   },
   "Resources": {
@@ -38,19 +56,20 @@
           ]
         },
         "ManagedPolicyArns": [
-          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicDurableExecutionRolePolicy"
         ],
         "Policies": [
           {
-            "PolicyName": "DurableExecutionPolicy",
+            "PolicyName": "DurableExecutionExamplesKmsPolicy",
             "PolicyDocument": {
               "Version": "2012-10-17",
               "Statement": [
                 {
                   "Effect": "Allow",
                   "Action": [
-                    "lambda:CheckpointDurableExecution",
-                    "lambda:GetDurableExecutionState"
+                    "kms:CreateGrant",
+                    "kms:Decrypt",
+                    "kms:Encrypt"
                   ],
                   "Resource": "*"
                 }
@@ -63,13 +82,24 @@
     "HelloWorld": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "hello_world.handler",
         "Description": "A simple hello world example with no durable operations",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -81,13 +111,24 @@
     "Step": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "step.handler",
         "Description": "Basic usage of context.step() to checkpoint a simple operation",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -99,13 +140,24 @@
     "StepWithName": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "step_with_name.handler",
         "Description": "Step operation with explicit name parameter",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -117,13 +169,24 @@
     "StepWithRetry": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "step_with_retry.handler",
         "Description": "Usage of context.step() with retry configuration for fault tolerance",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -135,13 +198,24 @@
     "Wait": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "wait.handler",
         "Description": "Basic usage of context.wait() to pause execution",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -153,13 +227,24 @@
     "MultipleWait": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "multiple_wait.handler",
         "Description": "Usage of demonstrating multiple sequential wait operations.",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -171,13 +256,24 @@
     "Callback": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "callback.handler",
         "Description": "Basic usage of context.create_callback() to create a callback for external systems",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -189,13 +285,24 @@
     "WaitForCallback": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "wait_for_callback.handler",
         "Description": "Usage of context.wait_for_callback() to wait for external system responses",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -207,13 +314,24 @@
     "WaitForCallbackAnonymous": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "wait_for_callback_anonymous.handler",
         "Description": "Usage of context.wait_for_callback() to wait for external system responses",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -225,13 +343,24 @@
     "WaitForCallbackHeartbeat": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "wait_for_callback_heartbeat.handler",
         "Description": "Usage of context.wait_for_callback() to wait for external system responses",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -243,13 +372,24 @@
     "WaitForCallbackChild": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "wait_for_callback_child.handler",
         "Description": "Usage of context.wait_for_callback() to wait for external system responses",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -261,13 +401,24 @@
     "WaitForCallbackMixedOps": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "wait_for_callback_mixed_ops.handler",
         "Description": "Usage of context.wait_for_callback() to wait for external system responses",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -279,13 +430,24 @@
     "WaitForCallbackMultipleInvocations": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "wait_for_callback_multiple_invocations.handler",
         "Description": "Usage of context.wait_for_callback() to wait for external system responses",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -297,13 +459,24 @@
     "WaitForCallbackSubmitterFailureCatchable": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "wait_for_callback_submitter_failure_catchable.handler",
         "Description": "Usage of context.wait_for_callback() to wait for external system responses",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -315,13 +488,24 @@
     "WaitForCallbackSubmitterFailure": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "wait_for_callback_submitter_failure.handler",
         "Description": "Usage of context.wait_for_callback() to wait for external system responses",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -333,13 +517,24 @@
     "WaitForCallbackSerdes": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "wait_for_callback_serdes.handler",
         "Description": "Usage of context.wait_for_callback() to wait for external system responses",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -351,13 +546,24 @@
     "WaitForCallbackNested": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "wait_for_callback_nested.handler",
         "Description": "Usage of context.wait_for_callback() to wait for external system responses",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -369,13 +575,24 @@
     "RunInChildContext": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "run_in_child_context.handler",
         "Description": "Usage of context.run_in_child_context() to execute operations in isolated contexts",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -387,13 +604,24 @@
     "Parallel": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "parallel.handler",
         "Description": "Executing multiple durable operations in parallel",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -405,13 +633,24 @@
     "MapOperations": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "map_operations.handler",
         "Description": "Processing collections using map-like durable operations",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -423,13 +662,24 @@
     "MapOperationsFlat": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "map_operations_flat.handler",
         "Description": "Processing collections using map-like durable operations in FLAT mode",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -441,13 +691,24 @@
     "MapWithLargeScale": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "map_with_large_scale.handler",
         "Description": "Processing collections using map-like durable operations in large scale",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -459,13 +720,24 @@
     "BlockExample": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "block_example.handler",
         "Description": "Nested child contexts demonstrating block operations",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -477,7 +749,7 @@
     "LoggerExample": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "logger_example.handler",
         "Description": "Demonstrating logger usage and enrichment in DurableContext",
         "Role": {
@@ -486,22 +758,48 @@
             "Arn"
           ]
         },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
+          ]
+        },
         "DurableConfig": {
           "RetentionPeriodInDays": 7,
           "ExecutionTimeout": 300
+        },
+        "LoggingConfig": {
+          "ApplicationLogLevel": "INFO",
+          "LogFormat": "JSON"
         }
       }
     },
     "StepsWithRetry": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "steps_with_retry.handler",
         "Description": "Multiple steps with retry logic in a polling pattern",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -513,13 +811,24 @@
     "WaitForCondition": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "wait_for_condition.handler",
         "Description": "Polling pattern that waits for a condition to be met",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -531,13 +840,24 @@
     "RunInChildContextLargeData": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "run_in_child_context_large_data.handler",
         "Description": "Usage of context.run_in_child_context() to execute operations in isolated contexts with large data",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -549,13 +869,24 @@
     "SimpleExecution": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "simple_execution.handler",
         "Description": "Simple execution without durable execution",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -567,13 +898,24 @@
     "MapWithMaxConcurrency": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "map_with_max_concurrency.handler",
         "Description": "Map operation with maxConcurrency limit",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -585,13 +927,24 @@
     "MapWithMinSuccessful": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "map_with_min_successful.handler",
         "Description": "Map operation with min_successful completion config",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -603,13 +956,24 @@
     "MapWithFailureTolerance": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "map_with_failure_tolerance.handler",
         "Description": "Map operation with failure tolerance",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -621,13 +985,24 @@
     "MapCompletion": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "map_completion.handler",
         "Description": "Reproduces issue where map with minSuccessful loses failure count",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -639,13 +1014,24 @@
     "ParallelWithMaxConcurrency": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "parallel_with_max_concurrency.handler",
         "Description": "Parallel operation with maxConcurrency limit",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -657,13 +1043,24 @@
     "ParallelWithWait": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "parallel_with_wait.handler",
         "Description": "Parallel operation with wait operations in branches",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -675,13 +1072,24 @@
     "ParallelWithFailureTolerance": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "parallel_with_failure_tolerance.handler",
         "Description": "Parallel operation with failure tolerance",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -693,13 +1101,24 @@
     "MapWithCustomSerdes": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "map_with_custom_serdes.handler",
         "Description": "Map operation with custom item-level serialization",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -711,13 +1130,24 @@
     "MapWithBatchSerdes": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "map_with_batch_serdes.handler",
         "Description": "Map operation with custom batch-level serialization",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -729,13 +1159,24 @@
     "ParallelWithCustomSerdes": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "parallel_with_custom_serdes.handler",
         "Description": "Parallel operation with custom item-level serialization",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -747,13 +1188,24 @@
     "ParallelWithBatchSerdes": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "parallel_with_batch_serdes.handler",
         "Description": "Parallel operation with custom batch-level serialization",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -765,13 +1217,24 @@
     "HandlerError": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "handler_error.handler",
         "Description": "Simple function with handler error",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -783,13 +1246,24 @@
     "NoneResults": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "none_results.handler",
         "Description": "Test handling of step operations with undefined result after replay.",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -801,13 +1275,24 @@
     "CallbackSimple": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "callback_simple.handler",
         "Description": "Creating a callback ID for external systems to use",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -819,13 +1304,24 @@
     "CallbackHeartbeat": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "callback_heartbeat.handler",
         "Description": "Demonstrates callback failure scenarios where the error propagates and is handled by framework",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -837,13 +1333,24 @@
     "CallbackMixedOps": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "callback_mixed_ops.handler",
         "Description": "Demonstrates createCallback mixed with steps, waits, and other operations",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -855,13 +1362,24 @@
     "CallbackSerdes": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "callback_serdes.handler",
         "Description": "Demonstrates createCallback with custom serialization/deserialization for Date objects",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -873,13 +1391,24 @@
     "NoReplayExecution": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "no_replay_execution.handler",
         "Description": "Execution with simples steps and without replay",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -891,13 +1420,24 @@
     "RunInChildContextStepFailure": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "run_in_child_context_step_failure.handler",
         "Description": "Demonstrates runInChildContext with a failing step followed by a successful wait",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -909,13 +1449,24 @@
     "ComprehensiveOperations": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "comprehensive_operations.handler",
         "Description": "Complex multi-operation example demonstrating all major operations",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -927,7 +1478,7 @@
     "CallbackConcurrency": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "callback_concurrency.handler",
         "Description": "Demonstrates multiple concurrent createCallback operations using context.parallel",
         "Role": {
@@ -936,22 +1487,48 @@
             "Arn"
           ]
         },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
+          ]
+        },
         "DurableConfig": {
           "RetentionPeriodInDays": 7,
           "ExecutionTimeout": 300
+        },
+        "LoggingConfig": {
+          "ApplicationLogLevel": "DEBUG",
+          "LogFormat": "JSON"
         }
       }
     },
     "MapWithItemNamer": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "map_with_item_namer.handler",
         "Description": "Map operation with custom item_namer for iteration naming",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -963,13 +1540,24 @@
     "ParallelWithNamedBranches": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "parallel_with_named_branches.handler",
         "Description": "Parallel operation with named branches using ParallelBranch",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -981,13 +1569,24 @@
     "ExecutionWithPlugin": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "execution_with_plugin.handler",
         "Description": "Test plugin",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
             "Arn"
+          ]
+        },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         },
         "DurableConfig": {
@@ -999,7 +1598,7 @@
     "ExecutionWithOtel": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "CodeUri": "build/",
+        "CodeUri": ".aws-sam/source",
         "Handler": "execution_with_otel.handler",
         "Description": "Test Otel plugin",
         "Role": {
@@ -1008,10 +1607,924 @@
             "Arn"
           ]
         },
+        "KmsKeyArn": {
+          "Fn::If": [
+            "HasKmsKeyArn",
+            {
+              "Ref": "KmsKeyArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
+          ]
+        },
         "DurableConfig": {
           "RetentionPeriodInDays": 7,
           "ExecutionTimeout": 300
         }
+      }
+    }
+  },
+  "Outputs": {
+    "HelloWorldFunctionName": {
+      "Value": {
+        "Ref": "HelloWorld"
+      }
+    },
+    "HelloWorldQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "HelloWorld"
+            }
+          }
+        ]
+      }
+    },
+    "StepFunctionName": {
+      "Value": {
+        "Ref": "Step"
+      }
+    },
+    "StepQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "Step"
+            }
+          }
+        ]
+      }
+    },
+    "StepWithNameFunctionName": {
+      "Value": {
+        "Ref": "StepWithName"
+      }
+    },
+    "StepWithNameQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "StepWithName"
+            }
+          }
+        ]
+      }
+    },
+    "StepWithRetryFunctionName": {
+      "Value": {
+        "Ref": "StepWithRetry"
+      }
+    },
+    "StepWithRetryQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "StepWithRetry"
+            }
+          }
+        ]
+      }
+    },
+    "WaitFunctionName": {
+      "Value": {
+        "Ref": "Wait"
+      }
+    },
+    "WaitQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "Wait"
+            }
+          }
+        ]
+      }
+    },
+    "MultipleWaitFunctionName": {
+      "Value": {
+        "Ref": "MultipleWait"
+      }
+    },
+    "MultipleWaitQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "MultipleWait"
+            }
+          }
+        ]
+      }
+    },
+    "CallbackFunctionName": {
+      "Value": {
+        "Ref": "Callback"
+      }
+    },
+    "CallbackQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "Callback"
+            }
+          }
+        ]
+      }
+    },
+    "WaitForCallbackFunctionName": {
+      "Value": {
+        "Ref": "WaitForCallback"
+      }
+    },
+    "WaitForCallbackQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "WaitForCallback"
+            }
+          }
+        ]
+      }
+    },
+    "WaitForCallbackAnonymousFunctionName": {
+      "Value": {
+        "Ref": "WaitForCallbackAnonymous"
+      }
+    },
+    "WaitForCallbackAnonymousQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "WaitForCallbackAnonymous"
+            }
+          }
+        ]
+      }
+    },
+    "WaitForCallbackHeartbeatFunctionName": {
+      "Value": {
+        "Ref": "WaitForCallbackHeartbeat"
+      }
+    },
+    "WaitForCallbackHeartbeatQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "WaitForCallbackHeartbeat"
+            }
+          }
+        ]
+      }
+    },
+    "WaitForCallbackChildFunctionName": {
+      "Value": {
+        "Ref": "WaitForCallbackChild"
+      }
+    },
+    "WaitForCallbackChildQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "WaitForCallbackChild"
+            }
+          }
+        ]
+      }
+    },
+    "WaitForCallbackMixedOpsFunctionName": {
+      "Value": {
+        "Ref": "WaitForCallbackMixedOps"
+      }
+    },
+    "WaitForCallbackMixedOpsQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "WaitForCallbackMixedOps"
+            }
+          }
+        ]
+      }
+    },
+    "WaitForCallbackMultipleInvocationsFunctionName": {
+      "Value": {
+        "Ref": "WaitForCallbackMultipleInvocations"
+      }
+    },
+    "WaitForCallbackMultipleInvocationsQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "WaitForCallbackMultipleInvocations"
+            }
+          }
+        ]
+      }
+    },
+    "WaitForCallbackSubmitterFailureCatchableFunctionName": {
+      "Value": {
+        "Ref": "WaitForCallbackSubmitterFailureCatchable"
+      }
+    },
+    "WaitForCallbackSubmitterFailureCatchableQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "WaitForCallbackSubmitterFailureCatchable"
+            }
+          }
+        ]
+      }
+    },
+    "WaitForCallbackSubmitterFailureFunctionName": {
+      "Value": {
+        "Ref": "WaitForCallbackSubmitterFailure"
+      }
+    },
+    "WaitForCallbackSubmitterFailureQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "WaitForCallbackSubmitterFailure"
+            }
+          }
+        ]
+      }
+    },
+    "WaitForCallbackSerdesFunctionName": {
+      "Value": {
+        "Ref": "WaitForCallbackSerdes"
+      }
+    },
+    "WaitForCallbackSerdesQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "WaitForCallbackSerdes"
+            }
+          }
+        ]
+      }
+    },
+    "WaitForCallbackNestedFunctionName": {
+      "Value": {
+        "Ref": "WaitForCallbackNested"
+      }
+    },
+    "WaitForCallbackNestedQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "WaitForCallbackNested"
+            }
+          }
+        ]
+      }
+    },
+    "RunInChildContextFunctionName": {
+      "Value": {
+        "Ref": "RunInChildContext"
+      }
+    },
+    "RunInChildContextQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "RunInChildContext"
+            }
+          }
+        ]
+      }
+    },
+    "ParallelFunctionName": {
+      "Value": {
+        "Ref": "Parallel"
+      }
+    },
+    "ParallelQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "Parallel"
+            }
+          }
+        ]
+      }
+    },
+    "MapOperationsFunctionName": {
+      "Value": {
+        "Ref": "MapOperations"
+      }
+    },
+    "MapOperationsQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "MapOperations"
+            }
+          }
+        ]
+      }
+    },
+    "MapOperationsFlatFunctionName": {
+      "Value": {
+        "Ref": "MapOperationsFlat"
+      }
+    },
+    "MapOperationsFlatQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "MapOperationsFlat"
+            }
+          }
+        ]
+      }
+    },
+    "MapWithLargeScaleFunctionName": {
+      "Value": {
+        "Ref": "MapWithLargeScale"
+      }
+    },
+    "MapWithLargeScaleQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "MapWithLargeScale"
+            }
+          }
+        ]
+      }
+    },
+    "BlockExampleFunctionName": {
+      "Value": {
+        "Ref": "BlockExample"
+      }
+    },
+    "BlockExampleQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "BlockExample"
+            }
+          }
+        ]
+      }
+    },
+    "LoggerExampleFunctionName": {
+      "Value": {
+        "Ref": "LoggerExample"
+      }
+    },
+    "LoggerExampleQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "LoggerExample"
+            }
+          }
+        ]
+      }
+    },
+    "StepsWithRetryFunctionName": {
+      "Value": {
+        "Ref": "StepsWithRetry"
+      }
+    },
+    "StepsWithRetryQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "StepsWithRetry"
+            }
+          }
+        ]
+      }
+    },
+    "WaitForConditionFunctionName": {
+      "Value": {
+        "Ref": "WaitForCondition"
+      }
+    },
+    "WaitForConditionQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "WaitForCondition"
+            }
+          }
+        ]
+      }
+    },
+    "RunInChildContextLargeDataFunctionName": {
+      "Value": {
+        "Ref": "RunInChildContextLargeData"
+      }
+    },
+    "RunInChildContextLargeDataQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "RunInChildContextLargeData"
+            }
+          }
+        ]
+      }
+    },
+    "SimpleExecutionFunctionName": {
+      "Value": {
+        "Ref": "SimpleExecution"
+      }
+    },
+    "SimpleExecutionQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "SimpleExecution"
+            }
+          }
+        ]
+      }
+    },
+    "MapWithMaxConcurrencyFunctionName": {
+      "Value": {
+        "Ref": "MapWithMaxConcurrency"
+      }
+    },
+    "MapWithMaxConcurrencyQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "MapWithMaxConcurrency"
+            }
+          }
+        ]
+      }
+    },
+    "MapWithMinSuccessfulFunctionName": {
+      "Value": {
+        "Ref": "MapWithMinSuccessful"
+      }
+    },
+    "MapWithMinSuccessfulQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "MapWithMinSuccessful"
+            }
+          }
+        ]
+      }
+    },
+    "MapWithFailureToleranceFunctionName": {
+      "Value": {
+        "Ref": "MapWithFailureTolerance"
+      }
+    },
+    "MapWithFailureToleranceQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "MapWithFailureTolerance"
+            }
+          }
+        ]
+      }
+    },
+    "MapCompletionFunctionName": {
+      "Value": {
+        "Ref": "MapCompletion"
+      }
+    },
+    "MapCompletionQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "MapCompletion"
+            }
+          }
+        ]
+      }
+    },
+    "ParallelWithMaxConcurrencyFunctionName": {
+      "Value": {
+        "Ref": "ParallelWithMaxConcurrency"
+      }
+    },
+    "ParallelWithMaxConcurrencyQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "ParallelWithMaxConcurrency"
+            }
+          }
+        ]
+      }
+    },
+    "ParallelWithWaitFunctionName": {
+      "Value": {
+        "Ref": "ParallelWithWait"
+      }
+    },
+    "ParallelWithWaitQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "ParallelWithWait"
+            }
+          }
+        ]
+      }
+    },
+    "ParallelWithFailureToleranceFunctionName": {
+      "Value": {
+        "Ref": "ParallelWithFailureTolerance"
+      }
+    },
+    "ParallelWithFailureToleranceQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "ParallelWithFailureTolerance"
+            }
+          }
+        ]
+      }
+    },
+    "MapWithCustomSerdesFunctionName": {
+      "Value": {
+        "Ref": "MapWithCustomSerdes"
+      }
+    },
+    "MapWithCustomSerdesQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "MapWithCustomSerdes"
+            }
+          }
+        ]
+      }
+    },
+    "MapWithBatchSerdesFunctionName": {
+      "Value": {
+        "Ref": "MapWithBatchSerdes"
+      }
+    },
+    "MapWithBatchSerdesQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "MapWithBatchSerdes"
+            }
+          }
+        ]
+      }
+    },
+    "ParallelWithCustomSerdesFunctionName": {
+      "Value": {
+        "Ref": "ParallelWithCustomSerdes"
+      }
+    },
+    "ParallelWithCustomSerdesQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "ParallelWithCustomSerdes"
+            }
+          }
+        ]
+      }
+    },
+    "ParallelWithBatchSerdesFunctionName": {
+      "Value": {
+        "Ref": "ParallelWithBatchSerdes"
+      }
+    },
+    "ParallelWithBatchSerdesQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "ParallelWithBatchSerdes"
+            }
+          }
+        ]
+      }
+    },
+    "HandlerErrorFunctionName": {
+      "Value": {
+        "Ref": "HandlerError"
+      }
+    },
+    "HandlerErrorQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "HandlerError"
+            }
+          }
+        ]
+      }
+    },
+    "NoneResultsFunctionName": {
+      "Value": {
+        "Ref": "NoneResults"
+      }
+    },
+    "NoneResultsQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "NoneResults"
+            }
+          }
+        ]
+      }
+    },
+    "CallbackSimpleFunctionName": {
+      "Value": {
+        "Ref": "CallbackSimple"
+      }
+    },
+    "CallbackSimpleQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "CallbackSimple"
+            }
+          }
+        ]
+      }
+    },
+    "CallbackHeartbeatFunctionName": {
+      "Value": {
+        "Ref": "CallbackHeartbeat"
+      }
+    },
+    "CallbackHeartbeatQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "CallbackHeartbeat"
+            }
+          }
+        ]
+      }
+    },
+    "CallbackMixedOpsFunctionName": {
+      "Value": {
+        "Ref": "CallbackMixedOps"
+      }
+    },
+    "CallbackMixedOpsQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "CallbackMixedOps"
+            }
+          }
+        ]
+      }
+    },
+    "CallbackSerdesFunctionName": {
+      "Value": {
+        "Ref": "CallbackSerdes"
+      }
+    },
+    "CallbackSerdesQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "CallbackSerdes"
+            }
+          }
+        ]
+      }
+    },
+    "NoReplayExecutionFunctionName": {
+      "Value": {
+        "Ref": "NoReplayExecution"
+      }
+    },
+    "NoReplayExecutionQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "NoReplayExecution"
+            }
+          }
+        ]
+      }
+    },
+    "RunInChildContextStepFailureFunctionName": {
+      "Value": {
+        "Ref": "RunInChildContextStepFailure"
+      }
+    },
+    "RunInChildContextStepFailureQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "RunInChildContextStepFailure"
+            }
+          }
+        ]
+      }
+    },
+    "ComprehensiveOperationsFunctionName": {
+      "Value": {
+        "Ref": "ComprehensiveOperations"
+      }
+    },
+    "ComprehensiveOperationsQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "ComprehensiveOperations"
+            }
+          }
+        ]
+      }
+    },
+    "CallbackConcurrencyFunctionName": {
+      "Value": {
+        "Ref": "CallbackConcurrency"
+      }
+    },
+    "CallbackConcurrencyQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "CallbackConcurrency"
+            }
+          }
+        ]
+      }
+    },
+    "MapWithItemNamerFunctionName": {
+      "Value": {
+        "Ref": "MapWithItemNamer"
+      }
+    },
+    "MapWithItemNamerQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "MapWithItemNamer"
+            }
+          }
+        ]
+      }
+    },
+    "ParallelWithNamedBranchesFunctionName": {
+      "Value": {
+        "Ref": "ParallelWithNamedBranches"
+      }
+    },
+    "ParallelWithNamedBranchesQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "ParallelWithNamedBranches"
+            }
+          }
+        ]
+      }
+    },
+    "ExecutionWithPluginFunctionName": {
+      "Value": {
+        "Ref": "ExecutionWithPlugin"
+      }
+    },
+    "ExecutionWithPluginQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "ExecutionWithPlugin"
+            }
+          }
+        ]
+      }
+    },
+    "ExecutionWithOtelFunctionName": {
+      "Value": {
+        "Ref": "ExecutionWithOtel"
+      }
+    },
+    "ExecutionWithOtelQualifiedFunctionName": {
+      "Value": {
+        "Fn::Sub": [
+          "${FunctionName}:$LATEST",
+          {
+            "FunctionName": {
+              "Ref": "ExecutionWithOtel"
+            }
+          }
+        ]
       }
     }
   }

@@ -54,6 +54,7 @@ jobs:
     if: github.event_name == 'pull_request'
     env:
       AWS_REGION: us-west-2
+      SAM_CLI_TELEMETRY: 0
 
     steps:
     - name: Checkout Language SDK (this PR)
@@ -82,6 +83,9 @@ jobs:
     - name: Install Hatch
       run: python -m pip install hatch==1.16.5
 
+    - name: Set up SAM CLI
+      uses: aws-actions/setup-sam@v2
+
     - name: Get integration examples
       id: get-examples
       working-directory: language-sdk/packages/aws-durable-execution-sdk-python-examples
@@ -104,17 +108,54 @@ jobs:
         INVOKE_ACCOUNT_ID: ${{ secrets.INVOKE_ACCOUNT_ID }}
         KMS_KEY_ARN: ${{ secrets.KMS_KEY_ARN }}
       run: |
-        echo "Building examples..."
         hatch run -- examples:pip install -e packages/testing-sdk
-        hatch run examples:build
 
         # Get first integration example for testing
         EXAMPLE_NAME=$(echo '${{ steps.get-examples.outputs.examples }}' | jq -r '.[0].name')
         EXAMPLE_NAME_CLEAN=$(echo "$EXAMPLE_NAME" | sed 's/ //g')
         FUNCTION_NAME="${EXAMPLE_NAME_CLEAN}-LanguageSDK-PR-${{ github.event.number }}"
+        STACK_NAME="${FUNCTION_NAME}-stack"
+        SOURCE_DIR="$PWD/packages/aws-durable-execution-sdk-python-examples/.aws-sam/source"
+        TEMPLATE_FILE="$PWD/packages/aws-durable-execution-sdk-python-examples/.aws-sam/template.generated.json"
+        BUILD_DIR="$PWD/packages/aws-durable-execution-sdk-python-examples/.aws-sam/build"
+
+        # Remove a legacy directly-created Lambda only when no SAM stack owns it.
+        if ! aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "${{ env.AWS_REGION }}" >/dev/null 2>&1; then
+          echo "Cleaning up legacy function if present..."
+          aws lambda delete-function \
+            --function-name "$FUNCTION_NAME" \
+            --endpoint-url "$LAMBDA_ENDPOINT" \
+            --region "${{ env.AWS_REGION }}" 2>/dev/null || echo "No legacy function to clean up"
+          sleep 5
+        fi
 
         echo "Deploying example: $EXAMPLE_NAME as $FUNCTION_NAME"
-        hatch run examples:deploy "$EXAMPLE_NAME" --function-name "$FUNCTION_NAME"
+        python packages/aws-durable-execution-sdk-python-examples/scripts/build_deployment_artifacts.py "$SOURCE_DIR"
+        python packages/aws-durable-execution-sdk-python-examples/scripts/generate_sam_template.py \
+          --example-name "$EXAMPLE_NAME" \
+          --function-name "$FUNCTION_NAME" \
+          --code-uri "$SOURCE_DIR" \
+          --output "$TEMPLATE_FILE"
+
+        sam build \
+          --template-file "$TEMPLATE_FILE" \
+          --build-dir "$BUILD_DIR" \
+          --use-container
+
+        PARAMETER_OVERRIDES=("LambdaEndpoint=$LAMBDA_ENDPOINT")
+        if [ -n "${KMS_KEY_ARN:-}" ]; then
+          PARAMETER_OVERRIDES+=("KmsKeyArn=$KMS_KEY_ARN")
+        fi
+
+        sam deploy \
+          --template-file "$BUILD_DIR/template.yaml" \
+          --stack-name "$STACK_NAME" \
+          --capabilities CAPABILITY_IAM \
+          --resolve-s3 \
+          --no-confirm-changeset \
+          --no-fail-on-empty-changeset \
+          --region "${{ env.AWS_REGION }}" \
+          --parameter-overrides "${PARAMETER_OVERRIDES[@]}"
 
         QUALIFIED_FUNCTION_NAME="$FUNCTION_NAME:\$LATEST"
 
@@ -155,8 +196,8 @@ jobs:
         cat /tmp/executions.json
 
         # Cleanup
-        echo "Cleaning up function: $FUNCTION_NAME"
-        aws lambda delete-function \
-          --function-name "$FUNCTION_NAME" \
-          --endpoint-url "$LAMBDA_ENDPOINT" \
-          --region "${{ env.AWS_REGION }}" || echo "Function cleanup failed or already deleted"
+        echo "Cleaning up stack: $STACK_NAME"
+        sam delete \
+          --stack-name "$STACK_NAME" \
+          --region "${{ env.AWS_REGION }}" \
+          --no-prompts || echo "Stack cleanup failed or already deleted"

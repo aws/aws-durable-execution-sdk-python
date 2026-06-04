@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,62 +36,14 @@ def build_examples():
     """Build examples with SDK dependencies."""
 
     build_dir = Path(__file__).parent / "build"
-    src_dir = Path(__file__).parent / "src"
-    packages_dir = Path(__file__).parent.parent
-
-    logger.info("Building examples...")
-
-    # Clean and create build directory
-    if build_dir.exists():
-        logger.info("Cleaning existing build directory")
-        shutil.rmtree(build_dir)
-    build_dir.mkdir()
-
-    # Copy testing library from current environment
-    try:
-        import aws_durable_execution_sdk_python_testing
-
-        sdk_path = Path(aws_durable_execution_sdk_python_testing.__file__).parent
-        logger.info("Copying SDK from %s", sdk_path)
-        shutil.copytree(
-            sdk_path, build_dir / "aws_durable_execution_sdk_python_testing"
-        )
-    except (ImportError, OSError):
-        logger.exception("Failed to copy testing library")
-        return False
-
-    # Install local packages so their runtime dependencies are included in
-    # the Lambda deployment package.
-    runtime_packages = [
-        packages_dir / "aws-durable-execution-sdk-python",
-        packages_dir / "aws-durable-execution-sdk-python-otel",
-    ]
-    try:
+    build_script = Path(__file__).parent / "scripts" / "build_deployment_artifacts.py"
+    return (
         subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--upgrade",
-                "--target",
-                str(build_dir),
-                *[str(package) for package in runtime_packages],
-            ],
-            check=True,
-        )
-    except subprocess.CalledProcessError:
-        logger.exception("Failed to install runtime dependencies")
-        return False
-
-    # Copy example functions
-    logger.info("Copying examples from %s", src_dir)
-    for file_path in src_dir.rglob("*"):
-        if file_path.is_file():
-            shutil.copy2(file_path, build_dir / file_path.name)
-
-    logger.info("Build completed successfully")
-    return True
+            [sys.executable, str(build_script), str(build_dir)],
+            check=False,
+        ).returncode
+        == 0
+    )
 
 
 def create_kms_key(kms_client, account_id):
@@ -260,7 +213,7 @@ def create_deployment_package(example_name: str) -> Path:
 
 def get_aws_config():
     """Get AWS configuration from environment."""
-    config = {
+    return {
         "region": os.getenv("AWS_REGION", "us-west-2"),
         "lambda_endpoint": os.getenv(
             "LAMBDA_ENDPOINT", "https://lambda.us-west-2.amazonaws.com"
@@ -268,12 +221,6 @@ def get_aws_config():
         "account_id": os.getenv("AWS_ACCOUNT_ID"),
         "kms_key_arn": os.getenv("KMS_KEY_ARN"),
     }
-
-    if not config["account_id"]:
-        msg = "Missing AWS_ACCOUNT_ID"
-        raise ValueError(msg)
-
-    return config
 
 
 def get_lambda_client():
@@ -311,8 +258,94 @@ def retry_on_resource_conflict(func, *args, max_retries=5, **kwargs):
     return None
 
 
-def deploy_function(example_name: str, function_name: str | None = None):
-    """Deploy function to AWS Lambda."""
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _run_command(command: list[str], *, cwd: Path) -> None:
+    logger.info("Running: %s", " ".join(command))
+    subprocess.run(command, cwd=cwd, check=True)
+
+
+def _stack_name_for_function(function_name: str) -> str:
+    stack_name = re.sub(r"[^A-Za-z0-9-]", "-", f"{function_name}-stack")
+    stack_name = re.sub(r"-+", "-", stack_name).strip("-")
+    if not stack_name or not stack_name[0].isalpha():
+        stack_name = f"Durable-{stack_name}"
+    return stack_name[:128]
+
+
+def _write_sam_template(
+    *,
+    example_name: str | None = None,
+    function_name: str | None = None,
+) -> Path:
+    examples_dir = Path(__file__).parent
+    sam_dir = examples_dir / ".aws-sam"
+    sam_dir.mkdir(exist_ok=True)
+    source_dir = sam_dir / "source"
+    template_path = sam_dir / "template.generated.json"
+    generator = examples_dir / "scripts" / "generate_sam_template.py"
+    source_builder = examples_dir / "scripts" / "build_deployment_artifacts.py"
+
+    _run_command(
+        [sys.executable, str(source_builder), str(source_dir)],
+        cwd=_repo_root(),
+    )
+
+    command = [
+        sys.executable,
+        str(generator),
+        "--output",
+        str(template_path),
+        "--code-uri",
+        str(source_dir.resolve()),
+    ]
+    if example_name:
+        command.extend(["--example-name", example_name])
+    if function_name:
+        command.extend(["--function-name", function_name])
+
+    _run_command(command, cwd=_repo_root())
+    return template_path
+
+
+def sam_build(
+    *,
+    example_name: str | None = None,
+    function_name: str | None = None,
+    use_container: bool = True,
+) -> Path:
+    """Build examples with SAM."""
+    examples_dir = Path(__file__).parent
+    template_path = _write_sam_template(
+        example_name=example_name,
+        function_name=function_name,
+    )
+    build_dir = examples_dir / ".aws-sam" / "build"
+
+    command = [
+        "sam",
+        "build",
+        "--template-file",
+        str(template_path),
+        "--build-dir",
+        str(build_dir),
+    ]
+    if use_container:
+        command.append("--use-container")
+
+    _run_command(command, cwd=_repo_root())
+    return build_dir / "template.yaml"
+
+
+def deploy_function(
+    example_name: str,
+    function_name: str | None = None,
+    stack_name: str | None = None,
+    use_container: bool = True,
+):
+    """Deploy function to AWS Lambda using SAM."""
     catalog = load_catalog()
 
     example_config = None
@@ -329,52 +362,39 @@ def deploy_function(example_name: str, function_name: str | None = None):
     if not function_name:
         function_name = f"{example_name.replace(' ', '')}-Python"
 
-    handler_file = example_config["handler"].replace(".handler", "")
-    zip_path = create_deployment_package(handler_file)
     config = get_aws_config()
-    lambda_client = get_lambda_client()
-
-    role_arn = (
-        f"arn:aws:iam::{config['account_id']}:role/DurableFunctionsIntegrationTestRole"
+    stack_name = stack_name or _stack_name_for_function(function_name)
+    built_template = sam_build(
+        example_name=example_name,
+        function_name=function_name,
+        use_container=use_container,
     )
 
-    function_config = {
-        "FunctionName": function_name,
-        "Runtime": "python3.13",
-        "Role": role_arn,
-        "Handler": example_config["handler"],
-        "Description": example_config["description"],
-        "Timeout": 60,
-        "MemorySize": 128,
-        "Environment": {
-            "Variables": {"AWS_ENDPOINT_URL_LAMBDA": config["lambda_endpoint"]}
-        },
-        "DurableConfig": example_config["durableConfig"],
-        "LoggingConfig": example_config.get("loggingConfig", {}),
-    }
-
+    parameter_overrides = [f"LambdaEndpoint={config['lambda_endpoint']}"]
     if config["kms_key_arn"]:
-        function_config["KMSKeyArn"] = config["kms_key_arn"]
+        parameter_overrides.append(f"KmsKeyArn={config['kms_key_arn']}")
 
-    with open(zip_path, "rb") as f:
-        zip_content = f.read()
-
-    try:
-        lambda_client.get_function(FunctionName=function_name)
-        retry_on_resource_conflict(
-            lambda_client.update_function_code,
-            FunctionName=function_name,
-            ZipFile=zip_content,
-            max_retries=8,
-        )
-        retry_on_resource_conflict(
-            lambda_client.update_function_configuration, **function_config
-        )
-
-    except lambda_client.exceptions.ResourceNotFoundException:
-        lambda_client.create_function(**function_config, Code={"ZipFile": zip_content})
+    command = [
+        "sam",
+        "deploy",
+        "--template-file",
+        str(built_template),
+        "--stack-name",
+        stack_name,
+        "--capabilities",
+        "CAPABILITY_IAM",
+        "--resolve-s3",
+        "--no-confirm-changeset",
+        "--no-fail-on-empty-changeset",
+        "--region",
+        config["region"],
+        "--parameter-overrides",
+        *parameter_overrides,
+    ]
+    _run_command(command, cwd=_repo_root())
 
     logger.info("Function deployed successfully! %s", function_name)
+    logger.info("SAM stack: %s", stack_name)
     return True
 
 
@@ -448,7 +468,16 @@ def main():
     subparsers.add_parser("bootstrap", help="Bootstrap account with necessary IAM role")
 
     # Build command
-    subparsers.add_parser("build", help="Build examples with dependencies")
+    build_parser = subparsers.add_parser("build", help="Build examples with SAM")
+    build_parser.add_argument("--example-name", help="Build one example")
+    build_parser.add_argument(
+        "--function-name", help="Set FunctionName in generated template"
+    )
+    build_parser.add_argument(
+        "--no-use-container",
+        action="store_true",
+        help="Run SAM build without a Lambda-compatible build container",
+    )
 
     # List command
     subparsers.add_parser("list", help="List available examples")
@@ -457,6 +486,14 @@ def main():
     deploy_parser = subparsers.add_parser("deploy", help="Deploy an example")
     deploy_parser.add_argument("example_name", help="Name of example to deploy")
     deploy_parser.add_argument("--function-name", help="Custom function name")
+    deploy_parser.add_argument(
+        "--stack-name", help="Custom SAM/CloudFormation stack name"
+    )
+    deploy_parser.add_argument(
+        "--no-use-container",
+        action="store_true",
+        help="Run SAM build without a Lambda-compatible build container",
+    )
 
     # Invoke command
     invoke_parser = subparsers.add_parser("invoke", help="Invoke a deployed function")
@@ -485,11 +522,20 @@ def main():
         if args.command == "bootstrap":
             bootstrap_account()
         elif args.command == "build":
-            build_examples()
+            sam_build(
+                example_name=args.example_name,
+                function_name=args.function_name,
+                use_container=not args.no_use_container,
+            )
         elif args.command == "list":
             list_examples()
         elif args.command == "deploy":
-            deploy_function(args.example_name, args.function_name)
+            deploy_function(
+                args.example_name,
+                args.function_name,
+                args.stack_name,
+                use_container=not args.no_use_container,
+            )
         elif args.command == "invoke":
             invoke_function(args.function_name, args.payload)
         elif args.command == "policy":
