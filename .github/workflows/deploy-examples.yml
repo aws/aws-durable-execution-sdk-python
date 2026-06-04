@@ -59,7 +59,7 @@ jobs:
       run: pip install hatch
     - name: Build examples
       run: |
-        hatch run -- examples:pip install -e packages/aws-durable-execution-sdk-python
+        hatch run -- examples:pip install -e packages/aws-durable-execution-sdk-python packages/aws-durable-execution-sdk-python-otel
         hatch run examples:build
 
     - name: Deploy Lambda function - ${{ matrix.example.name }}
