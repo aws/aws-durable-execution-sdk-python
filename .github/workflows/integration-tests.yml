@@ -97,7 +97,7 @@ jobs:
         rm -rf /tmp/aws/
 
     - name: Deploy and test examples
-      working-directory: language-sdk/packages/aws-durable-execution-sdk-python-examples
+      working-directory: language-sdk
       env:
         AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         LAMBDA_ENDPOINT: "https://lambda.us-west-2.amazonaws.com"
@@ -105,7 +105,7 @@ jobs:
         KMS_KEY_ARN: ${{ secrets.KMS_KEY_ARN }}
       run: |
         echo "Building examples..."
-        hatch run -- examples:pip install -e ../testing-sdk
+        hatch run -- examples:pip install -e packages/testing-sdk
         hatch run examples:build
 
         # Get first integration example for testing

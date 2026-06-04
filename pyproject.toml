@@ -118,6 +118,26 @@ pre-install-commands = [
 [tool.hatch.envs.test-pypi-examples.scripts]
 test = "pytest packages/aws-durable-execution-sdk-python-examples/test {args}"
 
+[tool.hatch.envs.examples]
+workspace.members = [
+  "packages/aws-durable-execution-sdk-python",
+  "packages/aws-durable-execution-sdk-python-examples",
+  "packages/aws-durable-execution-sdk-python-otel",
+]
+
+[tool.hatch.envs.examples.scripts]
+cli = "python packages/aws-durable-execution-sdk-python-examples/cli.py {args}"
+bootstrap = "python packages/aws-durable-execution-sdk-python-examples/cli.py bootstrap"
+generate-sam-template = "python packages/aws-durable-execution-sdk-python-examples/scripts/generate_sam_template.py"
+build = "python packages/aws-durable-execution-sdk-python-examples/cli.py build"
+deploy = "python packages/aws-durable-execution-sdk-python-examples/cli.py deploy {args}"
+invoke = "python packages/aws-durable-execution-sdk-python-examples/cli.py invoke {args}"
+get = "python packages/aws-durable-execution-sdk-python-examples/cli.py get {args}"
+history = "python packages/aws-durable-execution-sdk-python-examples/cli.py history {args}"
+policy = "python packages/aws-durable-execution-sdk-python-examples/cli.py policy {args}"
+list = "python packages/aws-durable-execution-sdk-python-examples/cli.py list"
+clean = "rm -rf packages/aws-durable-execution-sdk-python-examples/build packages/aws-durable-execution-sdk-python-examples/.aws-sam packages/aws-durable-execution-sdk-python-examples/*.zip"
+
 [tool.ruff]
 line-length = 88
 target-version = "py311"

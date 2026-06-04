@@ -12,14 +12,14 @@ Tests run against the in-memory `DurableFunctionTestRunner`:
 - ✅ Validates local runner behavior
 
 ```bash
-# Run all example tests locally (default)
-hatch run test:examples
+# Run all example tests locally (default, from repo root)
+hatch run dev-examples:test
 
 # Run with explicit mode flag
-pytest --runner-mode=local -m example examples/test/
+pytest --runner-mode=local -m example packages/aws-durable-execution-sdk-python-examples/test/
 
 # Run specific test
-pytest --runner-mode=local -k test_hello_world examples/test/
+pytest --runner-mode=local -k test_hello_world packages/aws-durable-execution-sdk-python-examples/test/
 ```
 
 ### Cloud Mode (Integration)
@@ -30,7 +30,7 @@ Tests run against actual AWS Lambda functions using `DurableFunctionCloudTestRun
 - ⚠️ Requires deployed functions
 
 ```bash
-# Deploy function first
+# Deploy function first (from repo root)
 hatch run examples:deploy "hello world" --function-name HelloWorld-Test
 
 # Set environment variables for cloud testing
@@ -39,10 +39,10 @@ export LAMBDA_ENDPOINT=https://lambda.us-west-2.amazonaws.com
 export QUALIFIED_FUNCTION_NAME="HelloWorld-Test:\$LATEST"
 export LAMBDA_FUNCTION_TEST_NAME="hello world"
 
-# Run tests
-pytest --runner-mode=cloud -k test_hello_world examples/test/
+# Run tests (from repo root)
+pytest --runner-mode=cloud -k test_hello_world packages/aws-durable-execution-sdk-python-examples/test/
 
-# Or using hatch
+# Or using hatch (from repo root)
 hatch run test:examples-integration -k test_hello_world
 ```
 
@@ -116,4 +116,4 @@ result = runner.run(input="test", timeout=120)  # Increase to 120s
 
 **Solution**: Install dependencies:
 ```bash
-hatch run test:examples  # Installs dependencies automatically
+hatch run dev-examples:test  # Installs dependencies automatically

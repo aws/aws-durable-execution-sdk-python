@@ -92,8 +92,7 @@ hatch fmt
 # Build distribution
 hatch build
 
-# Examples deployment (from examples package)
-cd ../aws-durable-execution-sdk-python-examples
+# Examples deployment (from repo root)
 hatch run examples:build
 hatch run examples:deploy "Hello World"
 ```
@@ -309,7 +308,7 @@ tests/mypackage/mymodule_test.py
 ## Examples and Deployment
 
 The project includes a unified CLI tool for managing examples, deployment, and AWS account setup.
-Run these commands from the examples package directory (`packages/aws-durable-execution-sdk-python-examples`).
+Run these commands from the **repository root**.
 
 To run examples tests from the repo root:
 ```bash

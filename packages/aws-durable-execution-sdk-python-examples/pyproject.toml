@@ -10,23 +10,11 @@ requires-python = ">=3.11"
 dependencies = [
   "aws-durable-execution-sdk-python",
   "aws-durable-execution-sdk-python-testing",
+  "aws-durable-execution-sdk-python-otel"
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
-
-[tool.hatch.envs.examples.scripts]
-cli = "python cli.py {args}"
-bootstrap = "python cli.py bootstrap"
-generate-sam-template = "python scripts/generate_sam_template.py"
-build = "python cli.py build"
-deploy = "python cli.py deploy {args}"
-invoke = "python cli.py invoke {args}"
-get = "python cli.py get {args}"
-history = "python cli.py history {args}"
-policy = "python cli.py policy {args}"
-list = "python cli.py list"
-clean = "rm -rf build .aws-sam *.zip"
 
 [tool.ruff]
 line-length = 88
