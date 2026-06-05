@@ -13,7 +13,7 @@ dependencies = [
   "pytest",
   "pytest-cov",
   "opentelemetry-sdk>=1.20.0",
-  "aws_durable_execution_sdk_python_testing"
+  "aws-durable-execution-sdk-python-testing",
 ]
 
 [tool.hatch.envs.test.scripts]
@@ -27,6 +27,7 @@ addopts = "-v --strict-markers --import-mode=importlib"
 testpaths = [
     "packages/aws-durable-execution-sdk-python/tests",
     "packages/aws-durable-execution-sdk-python-otel/tests",
+    "packages/aws-durable-execution-sdk-python-testing/tests",
     "packages/aws-durable-execution-sdk-python-examples/test",
 ]
 markers = [
@@ -77,11 +78,29 @@ test = "pytest packages/aws-durable-execution-sdk-python-otel/tests {args}"
 cov = "pytest --cov-report=term-missing --cov-config=packages/aws-durable-execution-sdk-python-otel/pyproject.toml --cov=packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel packages/aws-durable-execution-sdk-python-otel/tests {args}"
 typecheck = "mypy --install-types --non-interactive packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel packages/aws-durable-execution-sdk-python-otel/tests"
 
+[tool.hatch.envs.dev-testing]
+workspace.members = [
+  "packages/aws-durable-execution-sdk-python",
+  "packages/aws-durable-execution-sdk-python-testing",
+]
+dependencies = [
+  "pytest",
+  "pytest-cov",
+  "coverage[toml]",
+  "mypy>=1.0.0",
+]
+
+[tool.hatch.envs.dev-testing.scripts]
+test = "pytest packages/aws-durable-execution-sdk-python-testing/tests {args}"
+cov = "pytest --cov-report=term-missing --cov-config=packages/aws-durable-execution-sdk-python-testing/pyproject.toml --cov=packages/aws-durable-execution-sdk-python-testing/src/aws_durable_execution_sdk_python_testing --cov-fail-under=95 packages/aws-durable-execution-sdk-python-testing/tests {args}"
+typecheck = "mypy --install-types --non-interactive packages/aws-durable-execution-sdk-python-testing/src/aws_durable_execution_sdk_python_testing packages/aws-durable-execution-sdk-python-testing/tests"
+
 [tool.hatch.envs.dev-examples]
 workspace.members = [
   "packages/aws-durable-execution-sdk-python",
   "packages/aws-durable-execution-sdk-python-examples",
   "packages/aws-durable-execution-sdk-python-otel",
+  "packages/aws-durable-execution-sdk-python-testing",
 ]
 dependencies = [
   "pytest",
@@ -149,7 +168,11 @@ preview = true
 select = ["TID252"]  # Enforce absolute imports (ban relative imports)
 
 [tool.ruff.lint.isort]
-known-first-party = ["aws_durable_execution_sdk_python", "aws_durable_execution_sdk_python_otel"]
+known-first-party = [
+  "aws_durable_execution_sdk_python",
+  "aws_durable_execution_sdk_python_otel",
+  "aws_durable_execution_sdk_python_testing",
+]
 force-single-line = false
 lines-after-imports = 2
 

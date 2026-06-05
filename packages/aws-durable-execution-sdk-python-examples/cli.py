@@ -46,24 +46,12 @@ def build_examples():
         shutil.rmtree(build_dir)
     build_dir.mkdir()
 
-    # Copy testing library from current environment
-    try:
-        import aws_durable_execution_sdk_python_testing
-
-        sdk_path = Path(aws_durable_execution_sdk_python_testing.__file__).parent
-        logger.info("Copying SDK from %s", sdk_path)
-        shutil.copytree(
-            sdk_path, build_dir / "aws_durable_execution_sdk_python_testing"
-        )
-    except (ImportError, OSError):
-        logger.exception("Failed to copy testing library")
-        return False
-
     # Install local packages so their runtime dependencies are included in
     # the Lambda deployment package.
     runtime_packages = [
         packages_dir / "aws-durable-execution-sdk-python",
         packages_dir / "aws-durable-execution-sdk-python-otel",
+        packages_dir / "aws-durable-execution-sdk-python-testing",
     ]
     try:
         subprocess.run(
