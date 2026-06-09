@@ -4,13 +4,13 @@ import unittest
 from unittest.mock import MagicMock
 
 from aws_durable_execution_sdk_python.lambda_service import (
+    DurableExecutionInvocationOutput,
     ErrorObject,
     InvocationStatus,
     OperationAction,
     OperationStatus,
     OperationSubType,
     OperationType,
-    DurableExecutionInvocationOutput,
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -19,9 +19,9 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationEndInfo,
     OperationStartInfo,
     PluginExecutor,
+    UserFunctionEndInfo,
     UserFunctionOutcome,
     UserFunctionStartInfo,
-    UserFunctionEndInfo,
 )
 
 
@@ -715,6 +715,102 @@ class TestPluginExecutorIsTerminalStatus(unittest.TestCase):
         self.assertFalse(PluginExecutor._is_terminal_status(OperationStatus.READY))
 
 
+class TestPluginExecutorWrapLogger(unittest.TestCase):
+    """Tests for PluginExecutor.wrap_logger."""
+
+    def test_no_plugins_returns_logger_unchanged(self):
+        """With no plugins, the logger is returned as-is."""
+        executor = PluginExecutor(plugins=None)
+        logger = MagicMock()
+
+        self.assertIs(executor.wrap_logger(logger), logger)
+
+    def test_empty_plugins_returns_logger_unchanged(self):
+        """With an empty plugin list, the logger is returned as-is."""
+        executor = PluginExecutor(plugins=[])
+        logger = MagicMock()
+
+        self.assertIs(executor.wrap_logger(logger), logger)
+
+    def test_plugin_returning_none_leaves_logger_unchanged(self):
+        """A plugin returning None does not replace the logger."""
+        executor = PluginExecutor(plugins=[_NoOpPlugin()])
+        logger = MagicMock()
+
+        self.assertIs(executor.wrap_logger(logger), logger)
+
+    def test_plugin_wrapping_replaces_logger(self):
+        """A plugin returning a wrapped logger replaces the original."""
+        wrapped = MagicMock()
+        executor = PluginExecutor(plugins=[_WrappingPlugin(wrapped)])
+        logger = MagicMock()
+
+        self.assertIs(executor.wrap_logger(logger), wrapped)
+
+    def test_multiple_plugins_chain_wrappers(self):
+        """Each plugin wraps the output of the previous plugin in order."""
+        first_wrap = MagicMock(name="first")
+        second_wrap = MagicMock(name="second")
+        plugin1 = _WrappingPlugin(first_wrap)
+        plugin2 = _WrappingPlugin(second_wrap)
+        executor = PluginExecutor(plugins=[plugin1, plugin2])
+        logger = MagicMock(name="original")
+
+        result = executor.wrap_logger(logger)
+
+        # plugin1 receives the original logger
+        self.assertIs(plugin1.received, logger)
+        # plugin2 receives plugin1's wrapped logger
+        self.assertIs(plugin2.received, first_wrap)
+        # final result is plugin2's wrapper
+        self.assertIs(result, second_wrap)
+
+    def test_plugin_returning_none_passes_original_to_next(self):
+        """A plugin returning None passes the unchanged logger to the next plugin."""
+        wrapped = MagicMock(name="wrapped")
+        noop = _NoOpPlugin()
+        wrapping = _WrappingPlugin(wrapped)
+        executor = PluginExecutor(plugins=[noop, wrapping])
+        logger = MagicMock(name="original")
+
+        result = executor.wrap_logger(logger)
+
+        # The wrapping plugin still receives the original logger
+        self.assertIs(wrapping.received, logger)
+        self.assertIs(result, wrapped)
+
+    def test_plugin_exception_is_swallowed_and_chain_continues(self):
+        """If a plugin's wrap_logger raises, it is logged and the chain continues."""
+        wrapped = MagicMock(name="wrapped")
+        failing = _WrapLoggerFailingPlugin()
+        wrapping = _WrappingPlugin(wrapped)
+        executor = PluginExecutor(plugins=[failing, wrapping])
+        logger = MagicMock(name="original")
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ):
+            result = executor.wrap_logger(logger)
+
+        # The failing plugin did not break the chain; wrapping plugin still ran
+        self.assertIs(wrapping.received, logger)
+        self.assertIs(result, wrapped)
+
+    def test_all_plugins_failing_returns_original_logger(self):
+        """If every plugin fails, the original logger is returned unchanged."""
+        executor = PluginExecutor(
+            plugins=[_WrapLoggerFailingPlugin(), _WrapLoggerFailingPlugin()]
+        )
+        logger = MagicMock(name="original")
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ):
+            result = executor.wrap_logger(logger)
+
+        self.assertIs(result, logger)
+
+
 # endregion PluginExecutor Tests
 
 
@@ -750,6 +846,25 @@ class _TrackingPlugin(DurableInstrumentationPlugin):
 
     def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
         self.calls.append(f"user_function_end:{info.operation_id}")
+
+
+class _WrappingPlugin(DurableInstrumentationPlugin):
+    """Plugin that wraps the logger with a fixed replacement and records input."""
+
+    def __init__(self, replacement) -> None:
+        self._replacement = replacement
+        self.received = None
+
+    def wrap_logger(self, logger):
+        self.received = logger
+        return self._replacement
+
+
+class _WrapLoggerFailingPlugin(DurableInstrumentationPlugin):
+    """Plugin whose wrap_logger always raises."""
+
+    def wrap_logger(self, logger):
+        raise RuntimeError("boom")
 
 
 class _FailingPlugin(DurableInstrumentationPlugin):

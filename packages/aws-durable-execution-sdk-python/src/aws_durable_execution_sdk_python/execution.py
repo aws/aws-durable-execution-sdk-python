@@ -9,7 +9,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
@@ -21,20 +20,21 @@ from aws_durable_execution_sdk_python.exceptions import (
     SuspendExecution,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
+    DurableExecutionInvocationOutput,
     DurableServiceClient,
     ErrorObject,
+    InvocationStatus,
     LambdaClient,
     Operation,
     OperationType,
     OperationUpdate,
-    InvocationStatus,
-    DurableExecutionInvocationOutput,
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     PluginExecutor,
 )
 from aws_durable_execution_sdk_python.state import ExecutionState, ReplayStatus
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable, MutableMapping
@@ -272,6 +272,11 @@ def durable_execution(
         durable_context: DurableContext = DurableContext.from_lambda_context(
             state=execution_state, lambda_context=context
         )
+
+        # Trigger plugin logger wrapping on the root context's default logger
+        # (e.g., OTel trace context injection). Child contexts inherit the
+        # already-wrapped logger and do not re-wrap.
+        durable_context.set_logger(durable_context.logger.get_logger())
 
         # Use ThreadPoolExecutor for concurrent execution of user code and background checkpoint processing
         with (
