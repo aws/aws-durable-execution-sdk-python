@@ -978,6 +978,24 @@
         }
       }
     },
+    "WithRetryCallback": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "with_retry_callback.handler",
+        "Description": "Demonstrates with_retry wrapping a wait_for_callback operation with exponential backoff",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
     "ExecutionWithPlugin": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
