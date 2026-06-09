@@ -20,7 +20,6 @@ from aws_durable_execution_sdk_python.plugin import (
 )
 from opentelemetry import context, trace
 from opentelemetry.context import Context
-from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
 from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
 from opentelemetry.trace import (
@@ -40,10 +39,11 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     DeterministicIdGenerator,
     operation_id_to_span_id,
 )
+from aws_durable_execution_sdk_python_otel.logger import OtelEnrichedLogger
 
 
 if TYPE_CHECKING:
-    pass
+    from aws_durable_execution_sdk_python.types import LoggerInterface
 
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,7 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         context_extractor: ContextExtractor | None = None,
         sampling_rate: float = 1.0,
         instrument_name: str = DEFAULT_INSTRUMENT_NAME,
+        enrich_logger: bool = True,
     ) -> None:
         """Initialize the plugin with an OpenTelemetry tracer provider.
 
@@ -93,6 +94,7 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         deterministic ID generator and sampling strategy so spans for a durable
         execution share stable trace and logical operation identifiers.
         """
+        self._enrich_logger = enrich_logger
         self._context_extractor: ContextExtractor = (
             context_extractor or xray_context_extractor
         )
@@ -115,6 +117,24 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._operation_spans: dict[str | None, Span] = {}
         self._operation_spans_lock = threading.RLock()
 
+    def wrap_logger(self, logger: LoggerInterface) -> LoggerInterface | None:
+        """Wrap the execution logger to inject OTel trace context.
+
+        When enrich_logger is enabled (default), returns an OtelEnrichedLogger
+        that adds trace_id, span_id, and trace_sampled to every log message.
+        Idempotent: returns None if the logger is already an OtelEnrichedLogger.
+
+        Args:
+            logger: The current logger interface from the execution context.
+
+        Returns:
+            An OtelEnrichedLogger wrapping the input, or None if disabled or
+            already wrapped.
+        """
+        if not self._enrich_logger or isinstance(logger, OtelEnrichedLogger):
+            return None
+        return OtelEnrichedLogger(inner=logger, plugin=self)
+
     def _set_span(self, operation_id: str | None, span: Span) -> None:
         """Register the active span for an operation ID."""
         with self._operation_spans_lock:
@@ -129,6 +149,34 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         """Return the active span for an operation ID, if present."""
         with self._operation_spans_lock:
             return self._operation_spans.get(operation_id)
+
+    def get_current_span_context(self) -> SpanContext | None:
+        """Return the span context to use for log correlation.
+
+        Resolution order:
+        1. The span attached to the OTel thread-local context. Inside a step or
+           child context this is the active operation span (attached in
+           on_user_function_start), and between operations it is the enclosing
+           operation span (restored in on_user_function_end).
+        2. The invocation span from the plugin registry. This is the path used
+           for top-level handler code: the invocation span is never attached to
+           the worker thread's context, so the registry is the only way to
+           resolve it.
+
+        Returns:
+            A valid SpanContext, or None if no span is active.
+        """
+        span_context = trace.get_current_span().get_span_context()
+        if span_context and span_context.is_valid:
+            return span_context
+
+        invocation_span = self._get_span(None)
+        if invocation_span:
+            invocation_context = invocation_span.get_span_context()
+            if invocation_context and invocation_context.is_valid:
+                return invocation_context
+
+        return None
 
     # ------------------------------------------------------------------
     # Context resolution
@@ -256,7 +304,7 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
 
         self._start_span(
             operation_id=None,
-            name=f"invocation",
+            name="invocation",
             attributes=self._extract_attributes(info),
         )
 
@@ -413,7 +461,16 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         if end_timestamp is not None and end_timestamp == info.start_time:
             end_timestamp += datetime.timedelta(microseconds=1)
         self._end_span(info.operation_id, end_timestamp)
-        # We don't call context.detach because the next operation will override it anyway
+        # Restore the enclosing operation span as current so code that runs
+        # after this operation (e.g. between steps in a child context)
+        # correlates to its enclosing operation, not the operation that just
+        # ended. For a top-level operation (parent_id is None) this is the
+        # invocation span; for a nested operation it is the parent context span.
+        parent_span = self._get_span(info.parent_id) or self._get_span(None)
+        if parent_span:
+            context.attach(
+                trace.set_span_in_context(parent_span, self._extracted_context)
+            )
 
     def _extract_attributes(self, info: Any) -> dict[str, str]:
         """Extract durable execution fields as OpenTelemetry span attributes.

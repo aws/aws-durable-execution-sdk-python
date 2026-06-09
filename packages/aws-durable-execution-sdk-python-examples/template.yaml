@@ -1031,6 +1031,24 @@
           "ExecutionTimeout": 300
         }
       }
+    },
+    "OtelLoggerExample": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "otel_logger_example.handler",
+        "Description": "Demonstrates OTel-enriched logging correlated to durable spans",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
     }
   }
 }

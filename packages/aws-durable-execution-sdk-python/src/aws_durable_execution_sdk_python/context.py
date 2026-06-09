@@ -395,9 +395,14 @@ class DurableContext(DurableContextProtocol):
         return name or getattr(func, "_original_name", None)
 
     def set_logger(self, new_logger: LoggerInterface):
-        """Set the logger for the current context."""
+        """Set the logger for the current context.
+
+        If plugins are registered, the logger will be wrapped by plugin logger
+        enrichment (e.g., OTel trace context injection) before being applied.
+        """
+        wrapped = self.state._plugin_executor.wrap_logger(new_logger)
         self.logger = Logger.from_log_info(
-            logger=new_logger,
+            logger=wrapped,
             info=self._log_info,
         )
 

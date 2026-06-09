@@ -9,6 +9,7 @@ from aws_durable_execution_sdk_python_otel.context_extractors import (
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     DeterministicIdGenerator,
 )
+from aws_durable_execution_sdk_python_otel.logger import OtelEnrichedLogger
 from aws_durable_execution_sdk_python_otel.plugin import (
     DurableExecutionOtelPlugin,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "ContextExtractor",
     "DeterministicIdGenerator",
     "DurableExecutionOtelPlugin",
+    "OtelEnrichedLogger",
     "w3c_client_context_extractor",
     "xray_context_extractor",
 ]
