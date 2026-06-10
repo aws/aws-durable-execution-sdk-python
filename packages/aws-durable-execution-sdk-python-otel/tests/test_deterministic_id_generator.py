@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from opentelemetry.sdk.trace import IdGenerator, RandomIdGenerator
+
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     HASHED_ID_PATTERN,
     DeterministicIdGenerator,
@@ -12,6 +14,20 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     _xray_trace_id_to_otel,
     operation_id_to_span_id,
 )
+
+
+class _StubIdGenerator(IdGenerator):
+    """An IdGenerator that returns fixed, identifiable IDs."""
+
+    def __init__(self, trace_id: int, span_id: int) -> None:
+        self._trace_id = trace_id
+        self._span_id = span_id
+
+    def generate_trace_id(self) -> int:
+        return self._trace_id
+
+    def generate_span_id(self) -> int:
+        return self._span_id
 
 
 def test_parse_xray_root_trace_id_returns_root_from_header():
@@ -94,7 +110,7 @@ def test_deterministic_id_generator_falls_back_to_random_trace_id(monkeypatch):
     expected_trace_id = int("1" * 32, 16)
     generator = DeterministicIdGenerator()
     monkeypatch.setattr(
-        generator._random_id_generator,
+        generator._fallback_id_generator,
         "generate_trace_id",
         lambda: expected_trace_id,
     )
@@ -108,7 +124,7 @@ def test_deterministic_id_generator_uses_next_span_id_once(monkeypatch):
     random_span_id = int("3" * 16, 16)
     generator = DeterministicIdGenerator()
     monkeypatch.setattr(
-        generator._random_id_generator,
+        generator._fallback_id_generator,
         "generate_span_id",
         lambda: random_span_id,
     )
@@ -124,7 +140,7 @@ def test_deterministic_id_generator_accepts_cleared_next_span_id(monkeypatch):
     expected_span_id = int("4" * 16, 16)
     generator = DeterministicIdGenerator()
     monkeypatch.setattr(
-        generator._random_id_generator,
+        generator._fallback_id_generator,
         "generate_span_id",
         lambda: expected_span_id,
     )
@@ -132,3 +148,58 @@ def test_deterministic_id_generator_accepts_cleared_next_span_id(monkeypatch):
     generator.set_next_span_id(None)
 
     assert generator.generate_span_id() == expected_span_id
+
+
+def test_deterministic_id_generator_defaults_to_random_fallback():
+    """Verify the fallback defaults to a RandomIdGenerator when none is given."""
+    generator = DeterministicIdGenerator()
+
+    assert isinstance(generator._fallback_id_generator, RandomIdGenerator)
+
+
+def test_deterministic_id_generator_uses_provided_fallback_for_trace_id(monkeypatch):
+    """Verify the supplied fallback generator produces trace IDs when no
+    execution trace ID is set."""
+    monkeypatch.delenv("_X_AMZN_TRACE_ID", raising=False)
+    fallback = _StubIdGenerator(trace_id=int("a" * 32, 16), span_id=int("b" * 16, 16))
+    generator = DeterministicIdGenerator(fallback_id_generator=fallback)
+
+    assert generator.generate_trace_id() == int("a" * 32, 16)
+
+
+def test_deterministic_id_generator_uses_provided_fallback_for_span_id():
+    """Verify the supplied fallback generator produces span IDs when no
+    deterministic span ID is pending."""
+    fallback = _StubIdGenerator(trace_id=int("a" * 32, 16), span_id=int("b" * 16, 16))
+    generator = DeterministicIdGenerator(fallback_id_generator=fallback)
+
+    assert generator.generate_span_id() == int("b" * 16, 16)
+
+
+def test_deterministic_id_generator_prefers_execution_trace_id_over_fallback(
+    monkeypatch,
+):
+    """Verify a configured execution trace ID takes precedence over the fallback."""
+    monkeypatch.delenv("_X_AMZN_TRACE_ID", raising=False)
+    fallback = _StubIdGenerator(trace_id=int("a" * 32, 16), span_id=int("b" * 16, 16))
+    generator = DeterministicIdGenerator(fallback_id_generator=fallback)
+
+    generator.set_trace_id(
+        "arn:aws:lambda:us-west-2:123456789012:function:workflow:$LATEST",
+        datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC),
+    )
+
+    assert generator.generate_trace_id() == int("65937d253aa8c3f7ffe36c50d65b1a6d", 16)
+
+
+def test_deterministic_id_generator_prefers_next_span_id_over_fallback():
+    """Verify a pending deterministic span ID takes precedence over the fallback."""
+    deterministic_span_id = int("c" * 16, 16)
+    fallback = _StubIdGenerator(trace_id=int("a" * 32, 16), span_id=int("b" * 16, 16))
+    generator = DeterministicIdGenerator(fallback_id_generator=fallback)
+
+    generator.set_next_span_id(deterministic_span_id)
+
+    assert generator.generate_span_id() == deterministic_span_id
+    # Subsequent calls fall back to the provided generator.
+    assert generator.generate_span_id() == int("b" * 16, 16)

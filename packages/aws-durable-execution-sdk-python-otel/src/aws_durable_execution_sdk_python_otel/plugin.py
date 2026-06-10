@@ -7,19 +7,6 @@ import logging
 import threading
 from typing import TYPE_CHECKING, Any
 
-from opentelemetry import trace, context
-from opentelemetry.context import Context
-from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
-from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
-from opentelemetry.trace import (
-    Tracer,
-    StatusCode,
-    SpanContext,
-    Span,
-    Link,
-    TraceFlags,
-)
-
 from aws_durable_execution_sdk_python.lambda_service import OperationType
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -27,10 +14,24 @@ from aws_durable_execution_sdk_python.plugin import (
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
-    UserFunctionStartInfo,
     UserFunctionEndInfo,
     UserFunctionOutcome,
+    UserFunctionStartInfo,
 )
+from opentelemetry import context, trace
+from opentelemetry.context import Context
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
+from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
+from opentelemetry.trace import (
+    Link,
+    Span,
+    SpanContext,
+    StatusCode,
+    TraceFlags,
+    Tracer,
+)
+
 from aws_durable_execution_sdk_python_otel.context_extractors import (
     ContextExtractor,
     xray_context_extractor,
@@ -39,6 +40,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     DeterministicIdGenerator,
     operation_id_to_span_id,
 )
+
 
 if TYPE_CHECKING:
     pass
@@ -95,9 +97,13 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
             context_extractor or xray_context_extractor
         )
 
-        self._id_generator: DeterministicIdGenerator = DeterministicIdGenerator()
-
         self._provider = trace_provider
+        # A ProxyTracerProvider (the API default from trace.get_tracer_provider()
+        # before an SDK provider is configured) has no id_generator; fall back to
+        # None so DeterministicIdGenerator uses its own default generator.
+        self._id_generator: DeterministicIdGenerator = DeterministicIdGenerator(
+            fallback_id_generator=getattr(self._provider, "id_generator", None)
+        )
         self._provider.id_generator = self._id_generator
         self._provider.sampler = TraceIdRatioBased(sampling_rate)
         self._tracer: Tracer = self._provider.get_tracer(instrument_name)
