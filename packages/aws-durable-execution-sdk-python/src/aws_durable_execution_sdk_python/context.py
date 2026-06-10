@@ -61,7 +61,7 @@ from aws_durable_execution_sdk_python.types import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from aws_durable_execution_sdk_python.concurrency.models import BatchResult
     from aws_durable_execution_sdk_python.state import CheckpointedResult
@@ -95,8 +95,8 @@ class ExecutionContext:
 
 
 def durable_step(
-    func: Callable[Concatenate[StepContext, Params], T],
-) -> Callable[Params, Callable[[StepContext], T]]:
+    func: Callable[Concatenate[StepContext, Params], T | Awaitable[T]],
+) -> Callable[Params, Callable[[StepContext], T | Awaitable[T]]]:
     """Wrap your callable into a named function that a Durable step can run."""
 
     def wrapper(*args, **kwargs):
@@ -110,8 +110,8 @@ def durable_step(
 
 
 def durable_with_child_context(
-    func: Callable[Concatenate[DurableContext, Params], T],
-) -> Callable[Params, Callable[[DurableContext], T]]:
+    func: Callable[Concatenate[DurableContext, Params], T | Awaitable[T]],
+) -> Callable[Params, Callable[[DurableContext], T | Awaitable[T]]]:
     """Wrap your callable into a Durable child context."""
 
     def wrapper(*args, **kwargs):
@@ -127,7 +127,7 @@ def durable_with_child_context(
 def durable_parallel_branch(
     name: str | None = None,
 ) -> Callable[
-    [Callable[Concatenate[DurableContext, Params], T]],
+    [Callable[Concatenate[DurableContext, Params], T | Awaitable[T]]],
     Callable[Params, ParallelBranch[T]],
 ]:
     """Wrap your callable into a named ParallelBranch for use with context.parallel().
@@ -157,7 +157,7 @@ def durable_parallel_branch(
     """
 
     def decorator(
-        func: Callable[Concatenate[DurableContext, Params], T],
+        func: Callable[Concatenate[DurableContext, Params], T | Awaitable[T]],
     ) -> Callable[Params, ParallelBranch[T]]:
         def wrapper(*args, **kwargs) -> ParallelBranch[T]:
             def function_with_arguments(ctx: DurableContext) -> T:
@@ -171,8 +171,8 @@ def durable_parallel_branch(
 
 
 def durable_wait_for_callback(
-    func: Callable[Concatenate[str, WaitForCallbackContext, Params], T],
-) -> Callable[Params, Callable[[str, WaitForCallbackContext], T]]:
+    func: Callable[Concatenate[str, WaitForCallbackContext, Params], T | Awaitable[T]],
+) -> Callable[Params, Callable[[str, WaitForCallbackContext], T | Awaitable[T]]]:
     """Wrap your callable into a wait_for_callback submitter function.
 
     This decorator allows you to define a submitter function with additional
@@ -596,7 +596,7 @@ class DurableContext(DurableContextProtocol):
 
     def run_in_child_context(
         self,
-        func: Callable[[DurableContext], T],
+        func: Callable[[DurableContext], T | Awaitable[T]],
         name: str | None = None,
         config: ChildConfig | None = None,
     ) -> T:
@@ -646,7 +646,7 @@ class DurableContext(DurableContextProtocol):
 
     def step(
         self,
-        func: Callable[[StepContext], T],
+        func: Callable[[StepContext], T | Awaitable[T]],
         name: str | None = None,
         config: StepConfig | None = None,
     ) -> T:
@@ -699,7 +699,7 @@ class DurableContext(DurableContextProtocol):
 
     def wait_for_callback(
         self,
-        submitter: Callable[[str, WaitForCallbackContext], None],
+        submitter: Callable[[str, WaitForCallbackContext], Any],
         name: str | None = None,
         config: WaitForCallbackConfig | None = None,
     ) -> Any:
@@ -716,7 +716,7 @@ class DurableContext(DurableContextProtocol):
 
     def wait_for_condition(
         self,
-        check: Callable[[T, WaitForConditionCheckContext], T],
+        check: Callable[[T, WaitForConditionCheckContext], T | Awaitable[T]],
         config: WaitForConditionConfig[T],
         name: str | None = None,
     ) -> T:

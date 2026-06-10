@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 from aws_durable_execution_sdk_python.config import Duration, WaitForCallbackConfig
@@ -8,14 +9,17 @@ from aws_durable_execution_sdk_python.context import (
 from aws_durable_execution_sdk_python.execution import durable_execution
 
 
-def external_system_call(_callback_id: str, _context: WaitForCallbackContext) -> None:
+async def external_system_call(
+    _callback_id: str, _context: WaitForCallbackContext
+) -> None:
     """Simulate calling an external system with callback ID."""
+    await asyncio.sleep(0)
     # In real usage, this would make an API call to an external system
     # passing the callback_id for the system to call back when done
 
 
 @durable_execution
-def handler(_event: Any, context: DurableContext) -> str:
+async def handler(_event: Any, context: DurableContext) -> str:
     config = WaitForCallbackConfig(
         timeout=Duration.from_seconds(120), heartbeat_timeout=Duration.from_seconds(60)
     )

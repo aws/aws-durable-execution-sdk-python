@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from aws_durable_execution_sdk_python.config import (
         BatchedInput,
@@ -95,7 +95,7 @@ class DurableContext(Protocol):
     @abstractmethod
     def step(
         self,
-        func: Callable[[StepContext], T],
+        func: Callable[[StepContext], T | Awaitable[T]],
         name: str | None = None,
         config: StepConfig | None = None,
     ) -> T:
@@ -105,7 +105,7 @@ class DurableContext(Protocol):
     @abstractmethod
     def run_in_child_context(
         self,
-        func: Callable[[DurableContext], T],
+        func: Callable[[DurableContext], T | Awaitable[T]],
         name: str | None = None,
         config: ChildConfig | None = None,
     ) -> T:
@@ -116,7 +116,10 @@ class DurableContext(Protocol):
     def map(
         self,
         inputs: Sequence[U],
-        func: Callable[[DurableContext, U | BatchedInput[Any, U], int, Sequence[U]], T],
+        func: Callable[
+            [DurableContext, U | BatchedInput[Any, U], int, Sequence[U]],
+            T | Awaitable[T],
+        ],
         name: str | None = None,
         config: MapConfig | None = None,
     ) -> BatchResult[T]:
@@ -126,7 +129,9 @@ class DurableContext(Protocol):
     @abstractmethod
     def parallel(
         self,
-        functions: Sequence[Callable[[DurableContext], T] | ParallelBranch[T]],
+        functions: Sequence[
+            Callable[[DurableContext], T | Awaitable[T]] | ParallelBranch[T]
+        ],
         name: str | None = None,
         config: ParallelConfig | None = None,
     ) -> BatchResult[T]:

@@ -149,7 +149,7 @@ class CallbackOperationExecutor(OperationExecutor[str]):
 
 def wait_for_callback_handler(
     context: DurableContext,
-    submitter: Callable[[str, WaitForCallbackContext], None],
+    submitter: Callable[[str, WaitForCallbackContext], Any],
     name: str | None = None,
     config: WaitForCallbackConfig | None = None,
 ) -> Any:

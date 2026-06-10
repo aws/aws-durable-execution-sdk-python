@@ -19,6 +19,7 @@ Build reliable, long-running AWS Lambda workflows with checkpointed steps, waits
 - **Child contexts** - Structure complex workflows into isolated subflows
 - **Replay-safe logging** - Use `context.logger` for structured, de-duplicated logs
 - **Local and cloud testing** - Validate workflows with the testing SDK
+- **Async Python support** - Use `async def` for handlers, steps, child contexts, callback submitters, and wait-for-condition checks
 
 ## 📦 Packages
 
@@ -64,6 +65,30 @@ def handler(event: dict, context: DurableContext) -> dict:
     context.wait(duration=Duration.from_seconds(5), name="await_confirmation")
 
     return {"status": "approved", "order_id": order_id}
+```
+
+Async callables are supported anywhere the SDK accepts user code. The public Durable APIs stay synchronous, so async work is awaited transparently for you:
+
+```python
+import asyncio
+
+from aws_durable_execution_sdk_python import (
+    DurableContext,
+    StepContext,
+    durable_execution,
+    durable_step,
+)
+
+@durable_step
+async def fetch_order(step_ctx: StepContext, order_id: str) -> dict:
+    await asyncio.sleep(0)
+    step_ctx.logger.info("Fetched order", extra={"order_id": order_id})
+    return {"order_id": order_id, "status": "ready"}
+
+@durable_execution
+async def handler(event: dict, context: DurableContext) -> dict:
+    order = context.step(fetch_order(event["order_id"]), name="fetch_order")
+    return {"order": order}
 ```
 
 ## 📚 Documentation

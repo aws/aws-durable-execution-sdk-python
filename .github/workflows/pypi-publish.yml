@@ -80,11 +80,4 @@ jobs:
         with:
           packages-dir: dist/
 
-  notify-release:
-    if: always() && contains(needs.pypi-publish.result, 'success')
-    needs: [pypi-publish]
-    uses: ./.github/workflows/notify-release.yml
-    with:
-      tag_name: ${{ github.event.release.tag_name }}
-      release_url: ${{ github.event.release.html_url }}
-    secrets: inherit
+

@@ -13,6 +13,7 @@ from enum import Enum
 from threading import Lock
 from typing import TYPE_CHECKING, Callable, Any
 
+from aws_durable_execution_sdk_python.async_tools import resolve_awaitable
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     CallableRuntimeError,
@@ -936,7 +937,7 @@ class ExecutionState:
                 operation_identifier, is_replay_children, attempt
             )
             try:
-                result = user_function(*args, **kwargs)
+                result = resolve_awaitable(user_function(*args, **kwargs))
                 self._plugin_executor.on_user_function_end(start_info, None)
                 return result
             except SuspendExecution as e:

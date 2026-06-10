@@ -1,5 +1,6 @@
 """Tests for execution."""
 
+import asyncio
 import datetime
 import json
 import time
@@ -2973,6 +2974,56 @@ def test_durable_execution_with_plugins_pending():
     # Execution end should NOT be fired for PENDING
     execution_end_calls = [c for c in plugin.calls if c.startswith("execution_end")]
     assert len(execution_end_calls) == 0
+
+
+def test_durable_execution_supports_async_handler():
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    @durable_execution
+    async def test_handler(event: Any, context: DurableContext) -> dict:
+        await asyncio.sleep(0)
+        context.logger.info("handled async invocation")
+        return {"result": "async-success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert json.loads(result["Result"]) == {"result": "async-success"}
+
+
+def test_durable_execution_supports_async_steps_inside_async_handler():
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    async def async_step(_step_context) -> str:
+        await asyncio.sleep(0)
+        return "async-step-success"
+
+    @durable_execution
+    async def test_handler(event: Any, context: DurableContext) -> dict:
+        await asyncio.sleep(0)
+        step_result = context.step(async_step, name="async-step")
+        return {"step_result": step_result}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert json.loads(result["Result"]) == {"step_result": "async-step-success"}
 
 
 def test_durable_execution_with_plugins_retryable_error():

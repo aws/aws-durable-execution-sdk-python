@@ -1,5 +1,6 @@
 """Example demonstrating wait-for-condition pattern."""
 
+import asyncio
 from typing import Any
 
 from aws_durable_execution_sdk_python.context import DurableContext
@@ -12,11 +13,12 @@ from aws_durable_execution_sdk_python.waits import (
 
 
 @durable_execution
-def handler(_event: Any, context: DurableContext) -> int:
+async def handler(_event: Any, context: DurableContext) -> int:
     """Handler demonstrating wait-for-condition pattern."""
 
-    def condition_function(state: int, _) -> int:
+    async def condition_function(state: int, _) -> int:
         """Increment state by 1."""
+        await asyncio.sleep(0)
         return state + 1
 
     def wait_strategy(state: int, attempt: int) -> dict[str, Any]:

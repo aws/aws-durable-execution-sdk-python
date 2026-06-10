@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 
+from aws_durable_execution_sdk_python.async_tools import invoke_callable
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
@@ -37,7 +38,7 @@ from aws_durable_execution_sdk_python.plugin import (
 from aws_durable_execution_sdk_python.state import ExecutionState, ReplayStatus
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, MutableMapping
+    from collections.abc import Awaitable, Callable, MutableMapping
 
     from mypy_boto3_lambda import LambdaClient as Boto3LambdaClient
 
@@ -160,7 +161,11 @@ class DurableExecutionInvocationInputWithClient(DurableExecutionInvocationInput)
 
 
 def durable_execution(
-    func: Callable[[Any, DurableContext], Any] | None = None,
+    func: (
+        Callable[[Any, DurableContext], Any]
+        | Callable[[Any, DurableContext], Awaitable[Any]]
+        | None
+    ) = None,
     *,
     boto3_client: Boto3LambdaClient | None = None,
     plugins: list[DurableInstrumentationPlugin] | None = None,
@@ -294,7 +299,9 @@ def durable_execution(
             logger.debug(
                 "%s entering user-space...", invocation_input.durable_execution_arn
             )
-            user_future = executor.submit(func, input_event, durable_context)
+            user_future = executor.submit(
+                invoke_callable, func, input_event, durable_context
+            )
 
             logger.debug(
                 "%s waiting for user code completion...",
