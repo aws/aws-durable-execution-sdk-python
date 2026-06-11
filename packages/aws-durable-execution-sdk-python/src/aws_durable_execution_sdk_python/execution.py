@@ -280,11 +280,17 @@ def durable_execution(
             ) as executor,
             contextlib.closing(execution_state) as execution_state,
         ):
+            execution_operation = execution_state.get_execution_operation()
+
             # execute the plugins
             plugin_executor.on_invocation_start(
                 execution_arn=invocation_input.durable_execution_arn,
                 lambda_context=context,
-                execution_start_time=execution_state.get_execution_operation().start_timestamp,
+                execution_start_time=(
+                    execution_operation.start_timestamp
+                    if execution_operation is not None
+                    else None
+                ),
                 is_first_invocation=not execution_state.is_replaying(),
             )
             # Thread 1: Run background checkpoint processing

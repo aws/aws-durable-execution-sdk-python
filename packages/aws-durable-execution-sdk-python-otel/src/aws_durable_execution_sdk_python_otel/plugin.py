@@ -9,13 +9,13 @@ from typing import TYPE_CHECKING, Any
 
 from opentelemetry import trace, context
 from opentelemetry.context import Context
+from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
 from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
 from opentelemetry.trace import (
     Tracer,
     StatusCode,
     SpanContext,
     Span,
-    TracerProvider,
     Link,
     TraceFlags,
 )
@@ -80,7 +80,7 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
 
     def __init__(
         self,
-        trace_provider: TracerProvider,
+        trace_provider: SdkTracerProvider,
         context_extractor: ContextExtractor | None = None,
         sampling_rate: float = 1.0,
         instrument_name: str = DEFAULT_INSTRUMENT_NAME,

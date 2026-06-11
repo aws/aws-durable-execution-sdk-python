@@ -7,7 +7,7 @@ import os
 import re
 from datetime import datetime, UTC
 
-from opentelemetry.sdk.trace import IdGenerator, RandomIdGenerator
+from opentelemetry.sdk.trace import RandomIdGenerator
 
 HASH_LENGTH = 16
 HASHED_ID_PATTERN = re.compile(r"^[0-9a-f]{16}$")
@@ -65,7 +65,7 @@ def operation_id_to_span_id(operation_id: str) -> int:
     return int(hashed_operation_id, 16)
 
 
-class DeterministicIdGenerator(IdGenerator):
+class DeterministicIdGenerator(RandomIdGenerator):
     """An ID generator that produces deterministic span IDs when a pending
     operation ID is set, and random IDs otherwise.
 
