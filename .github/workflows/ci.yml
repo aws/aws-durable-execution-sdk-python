@@ -67,3 +67,9 @@ jobs:
             cd "$GITHUB_WORKSPACE"
           fi
         done
+    - name: Verify legal files in published distributions
+      run: |
+        python .github/scripts/check_dist_legal_files.py \
+          packages/aws-durable-execution-sdk-python \
+          packages/aws-durable-execution-sdk-python-otel \
+          packages/aws-durable-execution-sdk-python-testing
