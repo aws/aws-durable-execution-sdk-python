@@ -1,0 +1,1 @@
+"""Checkpoint validation module."""

@@ -68,33 +68,10 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 ## 📚 Documentation
 
-- **[AWS Documentation](https://docs.aws.amazon.com/lambda/latest/dg/durable-functions.html)** - Official AWS Lambda durable functions guide
-- **[Documentation index](docs/index.md)** - SDK Overview and navigation
+The complete documentation for the AWS Durable Execution SDK for Python lives on the AWS Documentation site:
 
-**New to durable functions?**
-- [Getting started guide](docs/getting-started.md) - Build your first durable function
-
-**Core operations:**
-- [Steps](docs/core/steps.md) - Execute code with automatic checkpointing and retry support
-- [Wait operations](docs/core/wait.md) - Pause execution without blocking Lambda resources
-- [Callbacks](docs/core/callbacks.md) - Wait for external systems to respond
-- [Invoke operations](docs/core/invoke.md) - Call other durable functions and compose workflows
-- [Child contexts](docs/core/child-contexts.md) - Organize complex workflows into isolated units
-- [Parallel operations](docs/core/parallel.md) - Run multiple operations concurrently
-- [Map operations](docs/core/map.md) - Process collections in parallel with batching
-- [Logger integration](docs/core/logger.md) - Add structured logging to track execution
-
-**Advanced topics:**
-- [Error handling](docs/advanced/error-handling.md) - Handle failures and implement retry strategies
-- [Testing modes](docs/advanced/testing-modes.md) - Run tests locally or against deployed Lambda functions
-- [Testing patterns](docs/testing-patterns/basic-tests.md) - Practical testing examples
-- [Serialization](docs/advanced/serialization.md) - Customize how data is serialized in checkpoints
-
-**Architecture:**
-- [Architecture diagrams](docs/architecture.md) - Class diagrams and concurrency flows
-
-**API reference:**
-- API reference docs are in progress. Use the core operation docs above for now.
+- **[AWS Durable Execution Documentation](https://docs.aws.amazon.com/durable-execution/)** - Concepts, getting started, core operations, advanced topics, and API reference
+- **[AWS Lambda Durable Functions Guide](https://docs.aws.amazon.com/lambda/latest/dg/durable-functions.html)** - How durable functions work on Lambda
 
 ## 💬 Feedback & Support
 

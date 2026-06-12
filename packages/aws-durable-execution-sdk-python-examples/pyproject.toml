@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aws-durable-execution-sdk-python-examples"
+version = "0.0.0"
+description = "Examples for AWS Durable Execution SDK for Python"
+requires-python = ">=3.11"
+dependencies = [
+  "aws-durable-execution-sdk-python",
+  "aws-durable-execution-sdk-python-testing",
+  "aws-durable-execution-sdk-python-otel"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+preview = true
+select = ["TID252"]  # Enforce absolute imports (ban relative imports)
+
+[tool.ruff.lint.isort]
+known-first-party = ["aws_durable_execution_sdk_python"]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.ruff.lint.per-file-ignores]
+"test/**" = [
+  "ARG001",
+  "ARG002",
+  "ARG005",
+  "S101",
+  "PLR2004",
+  "SIM117",
+  "TRY301",
+]

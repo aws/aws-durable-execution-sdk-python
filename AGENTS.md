@@ -926,9 +926,4 @@ Resources:
 **Python SDK:**
 
 - [SDK Repository](https://github.com/aws/aws-durable-execution-sdk-python)
-- [Documentation Index](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/docs/index.md)
-- [Getting Started](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/docs/getting-started.md)
-- [Steps](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/docs/core/steps.md)
-- [Wait Operations](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/docs/core/wait.md)
-- [Callbacks](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/docs/core/callbacks.md)
-- [Testing Patterns](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/docs/testing-patterns/basic-tests.md)
+- [AWS Durable Execution Documentation](https://docs.aws.amazon.com/durable-execution/)

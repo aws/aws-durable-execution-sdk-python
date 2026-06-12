@@ -1,0 +1,1036 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Transform": "AWS::Serverless-2016-10-31",
+  "Globals": {
+    "Function": {
+      "Runtime": "python3.13",
+      "Timeout": 60,
+      "MemorySize": 128,
+      "Environment": {
+        "Variables": {
+          "AWS_ENDPOINT_URL_LAMBDA": {
+            "Ref": "LambdaEndpoint"
+          }
+        }
+      }
+    }
+  },
+  "Parameters": {
+    "LambdaEndpoint": {
+      "Type": "String",
+      "Default": "https://lambda.us-west-2.amazonaws.com"
+    }
+  },
+  "Resources": {
+    "DurableFunctionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ],
+        "Policies": [
+          {
+            "PolicyName": "DurableExecutionPolicy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "lambda:CheckpointDurableExecution",
+                    "lambda:GetDurableExecutionState"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "HelloWorld": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "hello_world.handler",
+        "Description": "A simple hello world example with no durable operations",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "Step": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "step.handler",
+        "Description": "Basic usage of context.step() to checkpoint a simple operation",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "StepWithName": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "step_with_name.handler",
+        "Description": "Step operation with explicit name parameter",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "StepWithRetry": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "step_with_retry.handler",
+        "Description": "Usage of context.step() with retry configuration for fault tolerance",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "Wait": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "wait.handler",
+        "Description": "Basic usage of context.wait() to pause execution",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "MultipleWait": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "multiple_wait.handler",
+        "Description": "Usage of demonstrating multiple sequential wait operations.",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "Callback": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "callback.handler",
+        "Description": "Basic usage of context.create_callback() to create a callback for external systems",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "WaitForCallback": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "wait_for_callback.handler",
+        "Description": "Usage of context.wait_for_callback() to wait for external system responses",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "WaitForCallbackAnonymous": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "wait_for_callback_anonymous.handler",
+        "Description": "Usage of context.wait_for_callback() to wait for external system responses",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "WaitForCallbackHeartbeat": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "wait_for_callback_heartbeat.handler",
+        "Description": "Usage of context.wait_for_callback() to wait for external system responses",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "WaitForCallbackChild": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "wait_for_callback_child.handler",
+        "Description": "Usage of context.wait_for_callback() to wait for external system responses",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "WaitForCallbackMixedOps": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "wait_for_callback_mixed_ops.handler",
+        "Description": "Usage of context.wait_for_callback() to wait for external system responses",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "WaitForCallbackMultipleInvocations": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "wait_for_callback_multiple_invocations.handler",
+        "Description": "Usage of context.wait_for_callback() to wait for external system responses",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "WaitForCallbackSubmitterFailureCatchable": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "wait_for_callback_submitter_failure_catchable.handler",
+        "Description": "Usage of context.wait_for_callback() to wait for external system responses",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "WaitForCallbackSubmitterFailure": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "wait_for_callback_submitter_failure.handler",
+        "Description": "Usage of context.wait_for_callback() to wait for external system responses",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "WaitForCallbackSerdes": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "wait_for_callback_serdes.handler",
+        "Description": "Usage of context.wait_for_callback() to wait for external system responses",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "WaitForCallbackNested": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "wait_for_callback_nested.handler",
+        "Description": "Usage of context.wait_for_callback() to wait for external system responses",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "RunInChildContext": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "run_in_child_context.handler",
+        "Description": "Usage of context.run_in_child_context() to execute operations in isolated contexts",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "Parallel": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "parallel.handler",
+        "Description": "Executing multiple durable operations in parallel",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "MapOperations": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "map_operations.handler",
+        "Description": "Processing collections using map-like durable operations",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "MapOperationsFlat": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "map_operations_flat.handler",
+        "Description": "Processing collections using map-like durable operations in FLAT mode",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "MapWithLargeScale": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "map_with_large_scale.handler",
+        "Description": "Processing collections using map-like durable operations in large scale",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "BlockExample": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "block_example.handler",
+        "Description": "Nested child contexts demonstrating block operations",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "LoggerExample": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "logger_example.handler",
+        "Description": "Demonstrating logger usage and enrichment in DurableContext",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "StepsWithRetry": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "steps_with_retry.handler",
+        "Description": "Multiple steps with retry logic in a polling pattern",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "WaitForCondition": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "wait_for_condition.handler",
+        "Description": "Polling pattern that waits for a condition to be met",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "RunInChildContextLargeData": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "run_in_child_context_large_data.handler",
+        "Description": "Usage of context.run_in_child_context() to execute operations in isolated contexts with large data",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "SimpleExecution": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "simple_execution.handler",
+        "Description": "Simple execution without durable execution",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "MapWithMaxConcurrency": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "map_with_max_concurrency.handler",
+        "Description": "Map operation with maxConcurrency limit",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "MapWithMinSuccessful": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "map_with_min_successful.handler",
+        "Description": "Map operation with min_successful completion config",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "MapWithFailureTolerance": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "map_with_failure_tolerance.handler",
+        "Description": "Map operation with failure tolerance",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "MapCompletion": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "map_completion.handler",
+        "Description": "Reproduces issue where map with minSuccessful loses failure count",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "ParallelWithMaxConcurrency": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "parallel_with_max_concurrency.handler",
+        "Description": "Parallel operation with maxConcurrency limit",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "ParallelWithWait": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "parallel_with_wait.handler",
+        "Description": "Parallel operation with wait operations in branches",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "ParallelWithFailureTolerance": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "parallel_with_failure_tolerance.handler",
+        "Description": "Parallel operation with failure tolerance",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "MapWithCustomSerdes": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "map_with_custom_serdes.handler",
+        "Description": "Map operation with custom item-level serialization",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "MapWithBatchSerdes": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "map_with_batch_serdes.handler",
+        "Description": "Map operation with custom batch-level serialization",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "ParallelWithCustomSerdes": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "parallel_with_custom_serdes.handler",
+        "Description": "Parallel operation with custom item-level serialization",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "ParallelWithBatchSerdes": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "parallel_with_batch_serdes.handler",
+        "Description": "Parallel operation with custom batch-level serialization",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "HandlerError": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "handler_error.handler",
+        "Description": "Simple function with handler error",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "NoneResults": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "none_results.handler",
+        "Description": "Test handling of step operations with undefined result after replay.",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "CallbackSimple": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "callback_simple.handler",
+        "Description": "Creating a callback ID for external systems to use",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "CallbackHeartbeat": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "callback_heartbeat.handler",
+        "Description": "Demonstrates callback failure scenarios where the error propagates and is handled by framework",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "CallbackMixedOps": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "callback_mixed_ops.handler",
+        "Description": "Demonstrates createCallback mixed with steps, waits, and other operations",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "CallbackSerdes": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "callback_serdes.handler",
+        "Description": "Demonstrates createCallback with custom serialization/deserialization for Date objects",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "NoReplayExecution": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "no_replay_execution.handler",
+        "Description": "Execution with simples steps and without replay",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "RunInChildContextStepFailure": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "run_in_child_context_step_failure.handler",
+        "Description": "Demonstrates runInChildContext with a failing step followed by a successful wait",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "ComprehensiveOperations": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "comprehensive_operations.handler",
+        "Description": "Complex multi-operation example demonstrating all major operations",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "CallbackConcurrency": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "callback_concurrency.handler",
+        "Description": "Demonstrates multiple concurrent createCallback operations using context.parallel",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "MapWithItemNamer": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "map_with_item_namer.handler",
+        "Description": "Map operation with custom item_namer for iteration naming",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "ParallelWithNamedBranches": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "parallel_with_named_branches.handler",
+        "Description": "Parallel operation with named branches using ParallelBranch",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "WithRetryCallback": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "with_retry_callback.handler",
+        "Description": "Demonstrates with_retry wrapping a wait_for_callback operation with exponential backoff",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "ExecutionWithPlugin": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "execution_with_plugin.handler",
+        "Description": "Test plugin",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "ExecutionWithOtel": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "execution_with_otel.handler",
+        "Description": "Test Otel plugin",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    }
+  }
+}

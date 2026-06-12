@@ -9,25 +9,107 @@ information to effectively respond to your bug report or contribution.
 ## Dependencies
 Install [hatch](https://hatch.pypa.io/dev/install/).
 
-## Developer workflow
-These are all the checks you would typically do as you prepare a PR:
-```
-# just test
-hatch test
+## Repository Structure
 
-# coverage
+This is a monorepo containing multiple packages under the `packages/` directory:
+
+```
+packages/
+├── aws-durable-execution-sdk-python/              # Core SDK
+│   ├── pyproject.toml
+│   ├── src/
+│   └── tests/
+├── aws-durable-execution-sdk-python-otel/         # OpenTelemetry instrumentation
+│   ├── pyproject.toml
+│   ├── src/
+│   └── tests/
+└── aws-durable-execution-sdk-python-examples/     # Example functions and tests
+    ├── pyproject.toml
+    ├── src/
+    └── test/
+```
+
+The root `pyproject.toml` defines all shared Hatch environments for testing, type checking, and development. Each package's `pyproject.toml` contains only build metadata, publishing configuration, and package-local tool settings (ruff, coverage, pytest markers).
+
+Shared files (`.github/`, `LICENSE`, `CONTRIBUTING.md`, etc.) live at the repository root.
+
+## Developer workflow
+
+All test, type checking, and development commands are run from the **repository root**:
+
+```bash
+# Run all tests across all packages
+hatch run test:all
+
+# Run tests with coverage
 hatch run test:cov
 
-# type checks
+# Type checking across all packages
 hatch run types:check
 
-# static analysis
-hatch fmt
+# Static analysis (per-package, since ruff config is package-local)
+for pkg in packages/*/; do (cd "$pkg" && hatch fmt --check); done
 ```
 
-There is a convenience script for the above that you can run from the root of the repo as you prepare your PR:
+### Per-package development environments
+
+For focused work on a single package, use the `dev-*` environments from the repo root:
+
+```bash
+# Core SDK
+hatch run dev-core:test        # run core SDK tests only
+hatch run dev-core:cov         # run core SDK tests with coverage
+hatch run dev-core:typecheck   # type check core SDK only
+
+# OpenTelemetry package
+hatch run dev-otel:test        # run otel tests only
+hatch run dev-otel:cov         # run otel tests with coverage
+hatch run dev-otel:typecheck   # type check otel only
+
+# Examples
+hatch run dev-examples:test    # run examples tests only
 ```
-ops/ci-checks.sh
+
+### PyPI release testing
+
+To verify packages work against the published PyPI version of the core SDK (rather than the local workspace):
+
+```bash
+hatch run test-pypi-otel:test       # test otel against PyPI core SDK
+hatch run test-pypi-examples:test   # test examples against PyPI core SDK
+```
+
+### Package-level commands
+
+Some commands still run from within a package directory:
+
+```bash
+cd packages/aws-durable-execution-sdk-python
+
+# Static analysis with auto-fix
+hatch fmt
+
+# Build distribution
+hatch build
+
+# Examples deployment (from repo root)
+hatch run examples:build
+hatch run examples:deploy "Hello World"
+```
+
+### CI checks script
+
+There is a convenience script that runs all checks (tests, types, lint) from the root of the repo:
+```
+.github/scripts/ci-checks.sh
+```
+
+This script also validates your commit messages against the [Conventional Commits](https://www.conventionalcommits.org/) format.
+Commit all your changes before you run the check. If your working directory is dirty the script will skip commit message validation with a warning. 
+
+You can also run the commit message check independently:
+```
+hatch run python .github/scripts/lintcommit.py
 ```
 
 ## Coding Standards
@@ -123,17 +205,36 @@ class WaitOptions:
 
 ## Set up your IDE
 Point your IDE at the hatch virtual environment to have it recognize dependencies
-and imports.
+and imports. You can use either the root environment (for cross-package work) or a
+per-package dev environment (for focused work).
 
 You can find the path to the hatch Python interpreter like this:
 ```
-echo "$(hatch env find)/bin/python"
+# From the repo root — use the dev environment for the package you're working on
+hatch env find dev-core
+hatch env find dev-otel
+hatch env find dev-examples
 ```
 
 ### VS Code
+#### Interpreter
 If you're using VS Code, "Python: Select Interpreter" and use the hatch venv Python interpreter
 as found with the `hatch env find` command.
 
+Kiro and VS Code mangles the interpreter path if it contains spaces, which results in
+errors finding the interpreter. You can create a local .venv file symlink _without_ spaces
+in the path:
+
+```bash
+# From the repo root — symlink the dev environment you want to use
+rm -rf .venv && ln -s "$(hatch env find dev-core)" .venv
+```
+
+When you "Select Interpreter", enter path `./.venv/bin/python`.
+
+You'll have to rerun this command whenever you recreate your hatch envs.
+
+#### Linting
 Hatch uses Ruff for static analysis.
 
 You might want to install the [Ruff extension for VS Code](https://github.com/astral-sh/ruff-vscode)
@@ -156,24 +257,33 @@ These `settings.json` settings are useful:
 
 ## Testing
 ### How to run tests
-To run all tests:
+Run these commands from the **repository root**:
+
+To run all tests across all packages:
 ```
-hatch test
+hatch run test:all
+```
+
+To run tests for a specific package:
+```
+hatch run dev-core:test
+hatch run dev-otel:test
+hatch run dev-examples:test
 ```
 
 To run a single test file:
 ```
-hatch test tests/path_to_test_module.py
+hatch run dev-core:test packages/aws-durable-execution-sdk-python/tests/path_to_test_module.py
 ```
 
 To run a specific test in a module:
 ```
-hatch test tests/path_to_test_module.py::test_mytestmethod
+hatch run dev-core:test packages/aws-durable-execution-sdk-python/tests/path_to_test_module.py::test_mytestmethod
 ```
 
-To run a single test, or a subset of tests:
+To run a subset of tests by pattern:
 ```
-$ hatch test -k TEST_PATTERN
+hatch run test:all -k TEST_PATTERN
 ```
 
 This will run tests which contain names that match the given string expression (case-insensitive),
@@ -195,18 +305,72 @@ Mimic the package structure in the src/aws_durable_execution_sdk_python director
 Name your module so that src/mypackage/mymodule.py has a dedicated unit test file
 tests/mypackage/mymodule_test.py
 
-## Coverage
+## Examples and Deployment
+
+The project includes a unified CLI tool for managing examples, deployment, and AWS account setup.
+Run these commands from the **repository root**.
+
+To run examples tests from the repo root:
+```bash
+hatch run dev-examples:test
 ```
+
+### Bootstrap AWS Account
+```bash
+# Set up IAM role and KMS key for durable functions
+export AWS_ACCOUNT_ID=your-account-id
+hatch run examples:bootstrap
+```
+
+### Build and Deploy Examples
+```bash
+# Build all examples with dependencies
+hatch run examples:build
+
+# Generate SAM template for all examples
+hatch run examples:generate-sam-template
+
+# List available examples
+hatch run examples:list
+
+# Deploy specific example (when durable functions are available)
+hatch run examples:deploy "Hello World"
+```
+
+### Other CLI Commands
+```bash
+# Invoke deployed function
+hatch run examples:invoke function-name --payload '{}'
+
+# Get execution details
+hatch run examples:get execution-arn
+
+# Get execution history
+hatch run examples:history execution-arn
+
+# Clean build artifacts
+hatch run examples:clean
+```
+
+## Coverage
+
+From the repository root:
+```
+# All packages combined
 hatch run test:cov
+
+# Per-package coverage
+hatch run dev-core:cov
+hatch run dev-otel:cov
 ```
 
 ## Linting and type checks
-Type checking:
+Type checking (from repo root):
 ```
 hatch run types:check
 ```
 
-Static analysis (with auto-fix of known issues):
+Static analysis (from within a package directory, with auto-fix):
 ```
 hatch fmt
 ```
