@@ -5,11 +5,6 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
-from opentelemetry.context import Context
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-
 from aws_durable_execution_sdk_python.lambda_service import (
     InvocationStatus,
     OperationStatus,
@@ -24,6 +19,11 @@ from aws_durable_execution_sdk_python.plugin import (
     UserFunctionOutcome,
     UserFunctionStartInfo,
 )
+from opentelemetry.context import Context
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
@@ -131,7 +131,9 @@ def test_operation_end_without_start_emits_continuation_span_with_link():
     plugin.on_invocation_start(_invocation_start_info())
     operation_id = "wait-existing"
     random_span_id = int("1234567890abcdef", 16)
-    plugin._id_generator._random_id_generator.generate_span_id = lambda: random_span_id
+    plugin._id_generator._fallback_id_generator.generate_span_id = lambda: (
+        random_span_id
+    )
 
     plugin.on_operation_end(
         OperationEndInfo(

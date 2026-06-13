@@ -5,11 +5,11 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
-from opentelemetry.sdk.trace import RandomIdGenerator
+from opentelemetry.sdk.trace import IdGenerator, RandomIdGenerator
 
-HASH_LENGTH = 16
+
 HASHED_ID_PATTERN = re.compile(r"^[0-9a-f]{16}$")
 
 
@@ -67,19 +67,25 @@ def operation_id_to_span_id(operation_id: str) -> int:
 
 class DeterministicIdGenerator(RandomIdGenerator):
     """An ID generator that produces deterministic span IDs when a pending
-    operation ID is set, and random IDs otherwise.
+    operation ID is set, and falls back to the provided generator otherwise.
 
     Trace IDs are deterministic when an execution ARN is set, ensuring all
-    invocations of the same durable execution share a single trace.
+    invocations of the same durable execution share a single trace. When no
+    deterministic ID is available, generation is delegated to the fallback
+    generator (the tracer provider's original ID generator by default).
 
     Trace IDs embed a real timestamp so they satisfy the X-Ray format
     requirement (first 8 hex chars = Unix epoch seconds).
+
+    Args:
+        fallback_id_generator: Generator used when no deterministic ID is
+            available. Defaults to a new ``RandomIdGenerator``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, fallback_id_generator: IdGenerator | None = None) -> None:
         self._next_span_id: int | None = None
         self._execution_trace_id: int | None = None
-        self._random_id_generator = RandomIdGenerator()
+        self._fallback_id_generator = fallback_id_generator or RandomIdGenerator()
 
     def set_next_span_id(self, span_id: int | None) -> None:
         """Set the operation ID to use for the next span's ID.
@@ -101,9 +107,11 @@ class DeterministicIdGenerator(RandomIdGenerator):
 
     def generate_trace_id(self) -> int:
         """Generate a 128-bit trace ID."""
-        return self._execution_trace_id or self._random_id_generator.generate_trace_id()
+        return (
+            self._execution_trace_id or self._fallback_id_generator.generate_trace_id()
+        )
 
     def generate_span_id(self) -> int:
         """Generate a 64-bit span ID."""
         span_id, self._next_span_id = self._next_span_id, None
-        return span_id or self._random_id_generator.generate_span_id()
+        return span_id or self._fallback_id_generator.generate_span_id()
