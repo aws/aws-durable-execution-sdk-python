@@ -59,7 +59,7 @@ class TimerScheduler:
     """Manage timed suspend tasks with a background timer thread."""
 
     def __init__(
-        self, resubmit_callback: Callable[[ExecutableWithState], None]
+        self, resubmit_callback: Callable[[list[ExecutableWithState]], None]
     ) -> None:
         self.resubmit_callback = resubmit_callback
         self._pending_resumes: list[tuple[float, int, ExecutableWithState]] = []
@@ -114,18 +114,31 @@ class TimerScheduler:
 
             current_time = time.time()
             if current_time >= next_resume_time:
-                # Time to resume
+                # Drain every due resume under the lock, transitioning each to
+                # PENDING atomically with the pop. Keeping pop+reset_to_pending
+                # together is required: should_execution_suspend reads branch
+                # status without this lock, so an item that is removed from the
+                # heap but still SUSPENDED_WITH_TIMEOUT could trigger a spurious
+                # parent suspend.
+                ready: list[ExecutableWithState] = []
                 with self._lock:
-                    # no branch cover because hard to test reliably - this is a double-safety check if heap mutated
-                    # since the first peek on next_resume_time further up
-                    if (  # pragma: no branch
+                    while (
                         self._pending_resumes
                         and self._pending_resumes[0][0] <= current_time
                     ):
                         _, _, exe_state = heapq.heappop(self._pending_resumes)
                         if exe_state.can_resume:
                             exe_state.reset_to_pending()
-                            self.resubmit_callback(exe_state)
+                            ready.append(exe_state)
+                # Resubmit outside the lock. Only the heap pop and the PENDING
+                # transition need the lock. The checkpoint refresh is a blocking
+                # network call and the submit hands work to the pool, so running
+                # them off the lock keeps timed resumes from serializing behind
+                # the network round trip and keeps the timer thread from
+                # re-entering this non-reentrant lock when a submitted future
+                # completes inline and its done-callback calls schedule_resume.
+                if ready:
+                    self.resubmit_callback(ready)
             else:
                 # Wait until next resume time
                 wait_time = min(next_resume_time - current_time, 0.1)
@@ -169,6 +182,7 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         # Event-driven state tracking for when the executor is done
         self._completion_event = threading.Event()
         self._suspend_exception: SuspendExecution | None = None
+        self._resume_error: Exception | None = None
 
         # ExecutionCounters will keep track of completion criteria and on-going counters
         min_successful = self.completion_config.min_successful or len(self.executables)
@@ -222,11 +236,32 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
         ]
         self._completion_event.clear()
         self._suspend_exception = None
+        self._resume_error = None
 
-        def resubmitter(executable_with_state: ExecutableWithState) -> None:
-            """Resubmit a timed suspended task."""
-            execution_state.create_checkpoint()
-            submit_task(executable_with_state)
+        def resubmitter(ready: list[ExecutableWithState]) -> None:
+            """Resubmit a wave of timed-suspended tasks.
+
+            One checkpoint refresh serves the whole due wave: the fetch returns
+            all operations, so every resumed branch reads fresh state. The
+            refresh only raises when the background checkpoint subsystem has
+            failed, which is terminal for the whole execution, so record the
+            error and wake the parent to re-raise it. Catching here keeps the
+            single timer thread alive so a failure does not strand the other
+            pending resumes.
+            """
+            try:
+                execution_state.create_checkpoint()
+            except Exception as exc:  # noqa: BLE001
+                # resubmitter runs only on the single timer thread, so this
+                # check-then-set needs no lock. First error wins: keep the
+                # earliest failure if several waves fail before execute() reads
+                # it (they are the same terminal checkpoint failure anyway).
+                if self._resume_error is None:  # pragma: no branch
+                    self._resume_error = exc
+                self._completion_event.set()
+                return
+            for executable_with_state in ready:
+                submit_task(executable_with_state)
 
         thread_executor = ThreadPoolExecutor(max_workers=max_workers)
         try:
@@ -258,6 +293,12 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
                 # Cancel futures that haven't started yet
                 for future in futures:
                     future.cancel()
+
+                # A timed resume failed to refresh state (terminal checkpoint
+                # subsystem failure). Re-raise so the invocation fails and the
+                # backend retries from the last durable checkpoint.
+                if self._resume_error is not None:
+                    raise self._resume_error
 
                 # Suspend execution if everything done and at least one of the tasks raised a suspend exception.
                 if self._suspend_exception:

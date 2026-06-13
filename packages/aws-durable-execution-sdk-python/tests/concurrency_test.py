@@ -1370,6 +1370,74 @@ def test_concurrent_executor_with_single_task_resubmit():
         executor.execute(execution_state, executor_context)
 
 
+def test_concurrent_executor_resume_checkpoint_failure_propagates():
+    """A resume-time checkpoint refresh failure propagates out of execute().
+
+    Regression guard: the timer resubmit does a blocking checkpoint refresh.
+    That refresh only raises when the checkpoint subsystem has failed, which
+    is terminal. execute() must re-raise it (so the invocation fails and the
+    backend retries from the last durable checkpoint) rather than leave the
+    wave PENDING forever - the completion wait has no timeout, so a stranded
+    PENDING branch would hang the whole map.
+    """
+
+    class TestExecutor(ConcurrentExecutor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.calls: dict[int, int] = {}
+            self.long_runner_release = threading.Event()
+
+        def execute_item(self, child_context, executable):
+            task_id = executable.index
+            self.calls[task_id] = self.calls.get(task_id, 0) + 1
+            if task_id == 0:
+                # Long-runner keeps the map alive so task 1 resumes in-process.
+                self.long_runner_release.wait(timeout=5)
+                return "result_A"
+            # Task 1 suspends with a past timestamp -> immediate in-process resume.
+            msg = "resume-me"
+            raise TimedSuspendExecution(msg, time.time() - 1)
+
+    executables = [Executable(0, lambda: "task_A"), Executable(1, lambda: "task_B")]
+    completion_config = CompletionConfig(
+        min_successful=2,
+        tolerated_failure_count=None,
+        tolerated_failure_percentage=None,
+    )
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=2,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    execution_state = Mock()
+
+    def checkpoint(*args, **kwargs):
+        # The resume refresh calls create_checkpoint() with no arguments.
+        # Fail that call; leave the branches' own checkpoints as no-ops.
+        if not args and not kwargs:
+            msg = "resume refresh failed"
+            raise RuntimeError(msg)
+
+    execution_state.create_checkpoint = Mock(side_effect=checkpoint)
+
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa: SLF001
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    # Must re-raise (not hang): the resume failure surfaces as the original error.
+    with pytest.raises(RuntimeError, match="resume refresh failed"):
+        executor.execute(execution_state, executor_context)
+    executor.long_runner_release.set()
+
+
 def test_concurrent_executor_with_timed_resubmit_while_other_task_running():
     """Test timed resubmission while other tasks are still running."""
 
@@ -3200,7 +3268,9 @@ def test_timer_scheduler_fifo_ordering_with_same_timestamp():
     items synchronously, so callback order is deterministic.
     """
     results = []
-    resubmit_callback = Mock(side_effect=lambda exe: results.append(exe.index))
+    resubmit_callback = Mock(
+        side_effect=lambda batch: results.extend(exe.index for exe in batch)
+    )
 
     with TimerScheduler(resubmit_callback) as scheduler:
         # Use a past timestamp so they trigger immediately
