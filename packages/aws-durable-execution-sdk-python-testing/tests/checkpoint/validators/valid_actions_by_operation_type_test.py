@@ -6,8 +6,8 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
 )
 
-from aws_durable_execution_sdk_python_testing.checkpoint.validators.transitions import (
-    ValidActionsByOperationTypeValidator,
+from aws_durable_execution_sdk_python_testing.checkpoint.validators.checkpoint import (
+    CheckpointValidator,
 )
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
@@ -23,7 +23,7 @@ def test_validate_step_valid_actions():
         OperationAction.SUCCEED,
     ]
     for action in valid_actions:
-        ValidActionsByOperationTypeValidator.validate(OperationType.STEP, action)
+        CheckpointValidator._validate_valid_action_for_type(OperationType.STEP, action)
 
 
 def test_validate_context_valid_actions():
@@ -34,7 +34,9 @@ def test_validate_context_valid_actions():
         OperationAction.SUCCEED,
     ]
     for action in valid_actions:
-        ValidActionsByOperationTypeValidator.validate(OperationType.CONTEXT, action)
+        CheckpointValidator._validate_valid_action_for_type(
+            OperationType.CONTEXT, action
+        )
 
 
 def test_validate_wait_valid_actions():
@@ -44,7 +46,7 @@ def test_validate_wait_valid_actions():
         OperationAction.CANCEL,
     ]
     for action in valid_actions:
-        ValidActionsByOperationTypeValidator.validate(OperationType.WAIT, action)
+        CheckpointValidator._validate_valid_action_for_type(OperationType.WAIT, action)
 
 
 def test_validate_callback_valid_actions():
@@ -53,7 +55,9 @@ def test_validate_callback_valid_actions():
         OperationAction.START,
     ]
     for action in valid_actions:
-        ValidActionsByOperationTypeValidator.validate(OperationType.CALLBACK, action)
+        CheckpointValidator._validate_valid_action_for_type(
+            OperationType.CALLBACK, action
+        )
 
 
 def test_validate_invoke_valid_actions():
@@ -63,7 +67,7 @@ def test_validate_invoke_valid_actions():
         OperationAction.CANCEL,
     ]
     for action in valid_actions:
-        ValidActionsByOperationTypeValidator.validate(
+        CheckpointValidator._validate_valid_action_for_type(
             OperationType.CHAINED_INVOKE, action
         )
 
@@ -75,7 +79,9 @@ def test_validate_execution_valid_actions():
         OperationAction.FAIL,
     ]
     for action in valid_actions:
-        ValidActionsByOperationTypeValidator.validate(OperationType.EXECUTION, action)
+        CheckpointValidator._validate_valid_action_for_type(
+            OperationType.EXECUTION, action
+        )
 
 
 def test_validate_invalid_action_for_step():
@@ -84,7 +90,7 @@ def test_validate_invalid_action_for_step():
         InvalidParameterValueException,
         match="Invalid action for the given operation type",
     ):
-        ValidActionsByOperationTypeValidator.validate(
+        CheckpointValidator._validate_valid_action_for_type(
             OperationType.STEP, OperationAction.CANCEL
         )
 
@@ -95,7 +101,7 @@ def test_validate_invalid_action_for_context():
         InvalidParameterValueException,
         match="Invalid action for the given operation type",
     ):
-        ValidActionsByOperationTypeValidator.validate(
+        CheckpointValidator._validate_valid_action_for_type(
             OperationType.CONTEXT, OperationAction.RETRY
         )
 
@@ -106,7 +112,7 @@ def test_validate_invalid_action_for_wait():
         InvalidParameterValueException,
         match="Invalid action for the given operation type",
     ):
-        ValidActionsByOperationTypeValidator.validate(
+        CheckpointValidator._validate_valid_action_for_type(
             OperationType.WAIT, OperationAction.SUCCEED
         )
 
@@ -117,7 +123,7 @@ def test_validate_invalid_action_for_callback():
         InvalidParameterValueException,
         match="Invalid action for the given operation type",
     ):
-        ValidActionsByOperationTypeValidator.validate(
+        CheckpointValidator._validate_valid_action_for_type(
             OperationType.CALLBACK, OperationAction.FAIL
         )
 
@@ -128,7 +134,7 @@ def test_validate_invalid_action_for_invoke():
         InvalidParameterValueException,
         match="Invalid action for the given operation type",
     ):
-        ValidActionsByOperationTypeValidator.validate(
+        CheckpointValidator._validate_valid_action_for_type(
             OperationType.CHAINED_INVOKE, OperationAction.RETRY
         )
 
@@ -139,7 +145,7 @@ def test_validate_invalid_action_for_execution():
         InvalidParameterValueException,
         match="Invalid action for the given operation type",
     ):
-        ValidActionsByOperationTypeValidator.validate(
+        CheckpointValidator._validate_valid_action_for_type(
             OperationType.EXECUTION, OperationAction.START
         )
 
@@ -147,4 +153,4 @@ def test_validate_invalid_action_for_execution():
 def test_validate_unknown_operation_type():
     """Test validation with unknown operation type."""
     with pytest.raises(InvalidParameterValueException, match="Unknown operation type"):
-        ValidActionsByOperationTypeValidator.validate(None, OperationAction.START)
+        CheckpointValidator._validate_valid_action_for_type(None, OperationAction.START)

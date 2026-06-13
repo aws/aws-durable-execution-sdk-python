@@ -22,8 +22,6 @@ class MockExecutionObserver(ExecutionObserver):
         self.on_failed_calls = []
         self.on_timed_out_calls = []
         self.on_stopped_calls = []
-        self.on_wait_timer_scheduled_calls = []
-        self.on_step_retry_scheduled_calls = []
         self.on_callback_created_calls = []
 
     def on_completed(self, execution_arn: str, result: str | None = None) -> None:
@@ -37,16 +35,6 @@ class MockExecutionObserver(ExecutionObserver):
 
     def on_stopped(self, execution_arn: str, error: ErrorObject) -> None:
         self.on_stopped_calls.append((execution_arn, error))
-
-    def on_wait_timer_scheduled(
-        self, execution_arn: str, operation_id: str, delay: float
-    ) -> None:
-        self.on_wait_timer_scheduled_calls.append((execution_arn, operation_id, delay))
-
-    def on_step_retry_scheduled(
-        self, execution_arn: str, operation_id: str, delay: float
-    ) -> None:
-        self.on_step_retry_scheduled_calls.append((execution_arn, operation_id, delay))
 
     def on_callback_created(
         self,
@@ -139,46 +127,6 @@ def test_execution_notifier_notify_failed():
     assert observer.on_failed_calls[0] == (execution_arn, error)
 
 
-def test_execution_notifier_notify_wait_timer_scheduled():
-    """Test notifying observers about wait timer scheduling."""
-    notifier = ExecutionNotifier()
-    observer = MockExecutionObserver()
-    notifier.add_observer(observer)
-
-    execution_arn = "test-arn"
-    operation_id = "test-operation"
-    delay = 5.0
-
-    notifier.notify_wait_timer_scheduled(execution_arn, operation_id, delay)
-
-    assert len(observer.on_wait_timer_scheduled_calls) == 1
-    assert observer.on_wait_timer_scheduled_calls[0] == (
-        execution_arn,
-        operation_id,
-        delay,
-    )
-
-
-def test_execution_notifier_notify_step_retry_scheduled():
-    """Test notifying observers about step retry scheduling."""
-    notifier = ExecutionNotifier()
-    observer = MockExecutionObserver()
-    notifier.add_observer(observer)
-
-    execution_arn = "test-arn"
-    operation_id = "test-operation"
-    delay = 10.0
-
-    notifier.notify_step_retry_scheduled(execution_arn, operation_id, delay)
-
-    assert len(observer.on_step_retry_scheduled_calls) == 1
-    assert observer.on_step_retry_scheduled_calls[0] == (
-        execution_arn,
-        operation_id,
-        delay,
-    )
-
-
 def test_execution_notifier_multiple_observers_all_notified():
     """Test that all observers are notified when multiple are registered."""
     notifier = ExecutionNotifier()
@@ -209,8 +157,6 @@ def test_execution_notifier_no_observers():
     notifier.notify_failed(
         "test-arn", ErrorObject("Error", "Message", "data", ["trace"])
     )
-    notifier.notify_wait_timer_scheduled("test-arn", "op-id", 1.0)
-    notifier.notify_step_retry_scheduled("test-arn", "op-id", 2.0)
 
 
 def test_execution_notifier_thread_safety():
@@ -260,16 +206,12 @@ def test_mock_execution_observer_implementation():
     observer.on_failed("arn", error)
     observer.on_timed_out("arn", error)
     observer.on_stopped("arn", error)
-    observer.on_wait_timer_scheduled("arn", "op", 1.0)
-    observer.on_step_retry_scheduled("arn", "op", 2.0)
 
     # Verify calls were recorded
     assert len(observer.on_completed_calls) == 1
     assert len(observer.on_failed_calls) == 1
     assert len(observer.on_timed_out_calls) == 1
     assert len(observer.on_stopped_calls) == 1
-    assert len(observer.on_wait_timer_scheduled_calls) == 1
-    assert len(observer.on_step_retry_scheduled_calls) == 1
 
 
 def test_execution_notifier_notify_observers_with_exception():
@@ -308,8 +250,10 @@ def test_execution_observer_abstract_method_coverage():
     assert "on_failed" in method_names
     assert "on_timed_out" in method_names
     assert "on_stopped" in method_names
-    assert "on_wait_timer_scheduled" in method_names
-    assert "on_step_retry_scheduled" in method_names
+    # on_wait_timer_scheduled and on_step_retry_scheduled were
+    # removed in — timer scheduling no longer dispatched
+    # via the observer pattern.
+    assert "on_callback_created" in method_names
 
 
 def test_execution_notifier_notify_observers_internal():
@@ -346,10 +290,7 @@ def test_execution_notifier_all_notification_methods():
     notifier.notify_failed("arn3", error)
     assert observer.on_failed_calls[-1] == ("arn3", error)
 
-    # Test notify_wait_timer_scheduled
-    notifier.notify_wait_timer_scheduled("arn4", "op1", 5.5)
-    assert observer.on_wait_timer_scheduled_calls[-1] == ("arn4", "op1", 5.5)
-
-    # Test notify_step_retry_scheduled
-    notifier.notify_step_retry_scheduled("arn5", "op2", 10.5)
-    assert observer.on_step_retry_scheduled_calls[-1] == ("arn5", "op2", 10.5)
+    # notify_wait_timer_scheduled and notify_step_retry_scheduled
+    # were removed in () —
+    # timer scheduling centralised in
+    # Executor._schedule_earliest_pending.

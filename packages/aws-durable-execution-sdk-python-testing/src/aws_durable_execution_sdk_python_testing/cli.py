@@ -210,6 +210,18 @@ class CliApp:
             default=self.config.store_path,
             help=f"Path for filesystem store (default: {self.config.store_path or '.durable_executions'}, env: AWS_DEX_STORE_PATH)",
         )
+        start_server_parser.add_argument(
+            "--execution-timeout",
+            type=int,
+            default=300,
+            help="Default execution timeout in seconds (default: 300)",
+        )
+        start_server_parser.add_argument(
+            "--invocation-timeout",
+            type=int,
+            default=900,
+            help="Per-invocation timeout in seconds, simulates Lambda Timeout (default: 900)",
+        )
         start_server_parser.set_defaults(func=self.start_server_command)
 
     def _create_invoke_parser(self, subparsers) -> None:
@@ -282,6 +294,7 @@ class CliApp:
                 local_runner_mode=args.local_runner_mode,
                 store_type=StoreType(args.store_type),
                 store_path=args.store_path,
+                invocation_timeout_seconds=args.invocation_timeout,
             )
 
             logger.info(

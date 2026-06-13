@@ -118,11 +118,12 @@ def test_process_retry_action():
     assert result.operation_id == "step-123"
     assert result.status == OperationStatus.PENDING
     assert result.step_details.attempt == 2
-    assert result.step_details.result == "previous-result"
+    assert result.step_details.result is None
     assert result.step_details.next_attempt_timestamp is not None
 
-    assert len(notifier.step_retry_calls) == 1
-    assert notifier.step_retry_calls[0] == (execution_arn, "step-123", 30)
+    # step retry scheduling moved to
+    # Executor._schedule_earliest_pending. No per-op notifier call.
+    assert len(notifier.step_retry_calls) == 0
 
 
 def test_process_retry_action_without_step_options():
@@ -149,8 +150,8 @@ def test_process_retry_action_without_step_options():
     result = processor.process(update, current_op, notifier, execution_arn)
 
     assert result.step_details.attempt == 1
-    assert len(notifier.step_retry_calls) == 1
-    assert notifier.step_retry_calls[0] == (execution_arn, "step-123", 0)
+    # no per-op notifier call; central scheduler.
+    assert len(notifier.step_retry_calls) == 0
 
 
 def test_process_retry_action_without_current_operation():
@@ -376,8 +377,8 @@ def test_retry_preserves_current_operation_details():
     result = processor.process(update, current_op, notifier, execution_arn)
 
     assert result.step_details.attempt == 3
-    assert result.step_details.result == "old-result"
-    assert result.step_details.error == current_op.step_details.error
+    assert result.step_details.result is None
+    assert result.step_details.error is None
     assert result.execution_details == current_op.execution_details
     assert result.context_details == current_op.context_details
     assert result.wait_details == current_op.wait_details

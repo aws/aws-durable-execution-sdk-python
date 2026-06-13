@@ -21,7 +21,13 @@ from aws_durable_execution_sdk_python.lambda_service import (
 
 from datetime import datetime, UTC
 
-from aws_durable_execution_sdk_python_testing.execution import Execution
+from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
+    DEFAULT_MAX_INVOCATION_PAGE_BYTES,
+)
+from aws_durable_execution_sdk_python_testing.execution import (
+    Execution,
+    OperationPaginatorState,
+)
 from aws_durable_execution_sdk_python_testing.invoker import (
     InProcessInvoker,
     LambdaInvoker,
@@ -298,6 +304,8 @@ def test_lambda_invoker_create_invocation_input_with_operations():
 
     assert isinstance(invocation_input, DurableExecutionInvocationInput)
     assert len(invocation_input.initial_execution_state.operations) > 0
+    # A single page that fits carries an empty next_marker (no
+    # continuation), never a real marker.
     assert invocation_input.initial_execution_state.next_marker == ""
 
 
@@ -652,3 +660,74 @@ def test_lambda_invoker_invoke_unexpected_exception():
         DurableFunctionsTestError, match="Unexpected error during Lambda invocation"
     ):
         invoker.invoke("test-function", input_data)
+
+
+def _make_execution_with_ops(op_ids: list[str]) -> Execution:
+    """Build a started execution and append STEP ops for the given ids."""
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="test-invocation",
+    )
+    execution = Execution.new(start_input)
+    for op_id in op_ids:
+        execution.operations.append(
+            Operation(
+                operation_id=op_id,
+                operation_type=OperationType.STEP,
+                status=OperationStatus.STARTED,
+                start_timestamp=datetime.now(UTC),
+            )
+        )
+    return execution
+
+
+def test_in_process_invoker_pages_oversized_initial_state():
+    """When the operation list exceeds the page budget, the invocation
+    input carries a partial page plus a real continuation marker, and
+    the marker round-trips through the paginator to the remaining ops.
+    """
+    op_ids = ["op-0", "op-1", "op-2", "op-3", "op-4"]
+    execution = _make_execution_with_ops(op_ids)
+
+    # Budget of 2 bytes with floor-1 sizing forces a split after 2 ops.
+    invoker = InProcessInvoker(Mock(), Mock(), max_page_bytes=2)
+    invocation_input = invoker.create_invocation_input(execution)
+
+    first_page = invocation_input.initial_execution_state
+    assert len(first_page.operations) < len(op_ids)
+    assert first_page.next_marker
+    assert first_page.next_marker != ""
+
+    # The marker must resolve against a fresh pin of the same execution
+    # and yield exactly the remaining ops in creation order.
+    combined_ids: list[str] = [op.operation_id for op in first_page.operations]
+    marker: str | None = first_page.next_marker
+    paginator = OperationPaginatorState.pin(execution)
+    while marker:
+        ops, marker = paginator.page(marker, 2)
+        combined_ids += [op.operation_id for op in ops]
+
+    assert combined_ids == op_ids
+
+
+def test_in_process_invoker_single_page_has_empty_marker():
+    """A state that fits in one page carries an empty next_marker."""
+    execution = _make_execution_with_ops(["op-0", "op-1"])
+
+    invoker = InProcessInvoker(
+        Mock(), Mock(), max_page_bytes=DEFAULT_MAX_INVOCATION_PAGE_BYTES
+    )
+    invocation_input = invoker.create_invocation_input(execution)
+
+    assert [
+        op.operation_id for op in invocation_input.initial_execution_state.operations
+    ] == [
+        "op-0",
+        "op-1",
+    ]
+    assert invocation_input.initial_execution_state.next_marker == ""

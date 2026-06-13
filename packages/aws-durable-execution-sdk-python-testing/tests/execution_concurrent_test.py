@@ -34,10 +34,13 @@ def test_concurrent_token_generation():
         for future in as_completed(futures):
             future.result()
 
-    # All tokens should be unique and sequential
+    # All tokens should be identical since get_new_checkpoint_token
+    # no longer bumps token_sequence. The method is
+    # now semantically "get the current checkpoint token", so under
+    # concurrent calls all 20 threads see the same token_sequence=0.
     assert len(tokens) == 20
-    assert len(set(tokens)) == 20  # All unique
-    assert execution.token_sequence == 20
+    assert len(set(tokens)) == 1
+    assert execution.token_sequence == 0
 
 
 def test_concurrent_operations_modification():

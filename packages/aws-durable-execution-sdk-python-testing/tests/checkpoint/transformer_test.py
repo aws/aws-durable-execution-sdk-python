@@ -1,9 +1,20 @@
-"""Unit tests for OperationTransformer."""
+"""Unit tests for CheckpointRequestDispatcher.
+
+Covers the new ``apply_updates(execution, updates, client_token,
+notifier, touch)`` API introduced in of
+. The dispatcher mutates
+``execution.operations`` in place, records per-op size in
+``execution.operation_size_bytes``, and calls ``touch`` once per
+accepted update.
+"""
+
+from __future__ import annotations
 
 from unittest.mock import Mock
 
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
+    ErrorObject,
     OperationAction,
     OperationType,
     OperationUpdate,
@@ -13,145 +24,185 @@ from aws_durable_execution_sdk_python_testing.checkpoint.processors.base import 
     OperationProcessor,
 )
 from aws_durable_execution_sdk_python_testing.checkpoint.transformer import (
-    OperationTransformer,
+    CheckpointRequestDispatcher,
 )
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
 )
+from aws_durable_execution_sdk_python_testing.execution import Execution
+from aws_durable_execution_sdk_python_testing.model import StartDurableExecutionInput
 
 
-class MockProcessor(OperationProcessor):
-    """Mock processor for testing."""
+class _MockProcessor(OperationProcessor):
+    """Hand-rolled processor stub. Records calls, returns a configured
+    Operation (or None) for each invocation."""
 
     def __init__(self, return_value=None):
         self.return_value = return_value
-        self.process_calls = []
+        self.calls: list[tuple] = []
 
     def process(self, update, current_op, notifier, execution_arn):
-        self.process_calls.append((update, current_op, notifier, execution_arn))
+        self.calls.append((update, current_op, notifier, execution_arn))
         return self.return_value
 
 
-def test_init_with_default_processors():
-    """Test initialization with default processors."""
-    transformer = OperationTransformer()
-
-    assert OperationType.STEP in transformer.processors
-    assert OperationType.WAIT in transformer.processors
-    assert OperationType.CONTEXT in transformer.processors
-    assert OperationType.CALLBACK in transformer.processors
-    assert OperationType.EXECUTION in transformer.processors
-
-
-def test_init_with_custom_processors():
-    """Test initialization with custom processors."""
-    custom_processors = {OperationType.STEP: MockProcessor()}
-    transformer = OperationTransformer(processors=custom_processors)
-
-    assert transformer.processors == custom_processors
+def _make_execution(operations: list | None = None) -> Execution:
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="test-invocation-id",
+    )
+    return Execution("test-arn", start_input, operations or [])
 
 
-def test_process_updates_empty_lists():
-    """Test processing with empty updates and operations."""
-    transformer = OperationTransformer()
-    notifier = Mock()
+def test_dispatcher_init_uses_default_processors():
+    dispatcher = CheckpointRequestDispatcher()
 
-    operations, updates = transformer.process_updates([], [], notifier, "arn:test")
+    assert OperationType.STEP in dispatcher.processors
+    assert OperationType.WAIT in dispatcher.processors
+    assert OperationType.CONTEXT in dispatcher.processors
+    assert OperationType.CALLBACK in dispatcher.processors
+    assert OperationType.EXECUTION in dispatcher.processors
 
-    assert operations == []
-    assert updates == []
+
+def test_dispatcher_init_accepts_custom_processors():
+    custom = {OperationType.STEP: _MockProcessor()}
+    dispatcher = CheckpointRequestDispatcher(processors=custom)
+
+    assert dispatcher.processors is custom
 
 
-def test_process_updates_processor_not_found_raises_error():
-    """Test that missing processor raises InvalidParameterValueException."""
-    transformer = OperationTransformer(processors={OperationType.STEP: MockProcessor()})
+def test_apply_updates_with_empty_list_is_a_noop():
+    dispatcher = CheckpointRequestDispatcher()
+    execution = _make_execution()
+    touched: list[str] = []
+
+    dispatcher.apply_updates(
+        execution=execution,
+        updates=[],
+        client_token=None,
+        notifier=Mock(),
+        touch=touched.append,
+    )
+
+    assert execution.operations == []
+    assert execution.operation_size_bytes == {}
+    assert touched == []
+
+
+def test_apply_updates_unknown_type_raises():
+    dispatcher = CheckpointRequestDispatcher(
+        processors={OperationType.STEP: _MockProcessor()},
+    )
+    execution = _make_execution()
     update = OperationUpdate(
-        operation_id="test-id",
+        operation_id="some-id",
         operation_type=OperationType.WAIT,
         action=OperationAction.START,
     )
-    notifier = Mock()
 
     with pytest.raises(
         InvalidParameterValueException,
         match="Checkpoint for OperationType.WAIT is not implemented yet.",
     ):
-        transformer.process_updates([update], [], notifier, "arn:test")
+        dispatcher.apply_updates(
+            execution=execution,
+            updates=[update],
+            client_token=None,
+            notifier=Mock(),
+            touch=lambda _: None,
+        )
 
 
-def test_process_updates_processor_returns_none():
-    """Test processing when processor returns None."""
-    mock_processor = MockProcessor(return_value=None)
-    transformer = OperationTransformer(processors={OperationType.STEP: mock_processor})
-
+def test_apply_updates_skips_ops_when_processor_returns_none():
+    mock_processor = _MockProcessor(return_value=None)
+    dispatcher = CheckpointRequestDispatcher(
+        processors={OperationType.STEP: mock_processor},
+    )
+    execution = _make_execution()
     update = OperationUpdate(
-        operation_id="test-id",
+        operation_id="skipped",
         operation_type=OperationType.STEP,
         action=OperationAction.START,
     )
-    notifier = Mock()
+    touched: list[str] = []
 
-    operations, updates = transformer.process_updates(
-        [update], [], notifier, "arn:test"
+    dispatcher.apply_updates(
+        execution=execution,
+        updates=[update],
+        client_token=None,
+        notifier=Mock(),
+        touch=touched.append,
     )
 
-    assert operations == []
-    assert updates == [update]
-    assert len(mock_processor.process_calls) == 1
+    assert execution.operations == []
+    assert touched == []
+    # Update is still recorded for audit purposes.
+    assert execution.updates == [update]
 
 
-def test_process_updates_new_operation():
-    """Test processing creates new operation."""
-    new_operation = Mock()
-    new_operation.operation_id = "new-id"
-    mock_processor = MockProcessor(return_value=new_operation)
-    transformer = OperationTransformer(processors={OperationType.STEP: mock_processor})
+def test_apply_updates_appends_new_operation_and_touches():
+    new_op = Mock()
+    new_op.operation_id = "new-op"
+    dispatcher = CheckpointRequestDispatcher(
+        processors={OperationType.STEP: _MockProcessor(return_value=new_op)},
+    )
+    execution = _make_execution()
+    touched: list[str] = []
 
     update = OperationUpdate(
-        operation_id="new-id",
+        operation_id="new-op",
         operation_type=OperationType.STEP,
         action=OperationAction.START,
     )
-    notifier = Mock()
 
-    operations, updates = transformer.process_updates(
-        [update], [], notifier, "arn:test"
+    dispatcher.apply_updates(
+        execution=execution,
+        updates=[update],
+        client_token=None,
+        notifier=Mock(),
+        touch=touched.append,
     )
 
-    assert len(operations) == 1
-    assert operations[0] == new_operation
-    assert updates == [update]
+    assert execution.operations == [new_op]
+    assert touched == ["new-op"]
+    assert "new-op" in execution.operation_size_bytes
 
 
-def test_process_updates_existing_operation():
-    """Test processing updates existing operation."""
-    existing_operation = Mock()
-    existing_operation.operation_id = "existing-id"
-    updated_operation = Mock()
-    updated_operation.operation_id = "existing-id"
+def test_apply_updates_replaces_existing_operation_in_place():
+    existing = Mock()
+    existing.operation_id = "target"
+    replaced = Mock()
+    replaced.operation_id = "target"
 
-    mock_processor = MockProcessor(return_value=updated_operation)
-    transformer = OperationTransformer(processors={OperationType.STEP: mock_processor})
+    dispatcher = CheckpointRequestDispatcher(
+        processors={OperationType.STEP: _MockProcessor(return_value=replaced)},
+    )
+    execution = _make_execution([existing])
 
     update = OperationUpdate(
-        operation_id="existing-id",
+        operation_id="target",
         operation_type=OperationType.STEP,
         action=OperationAction.SUCCEED,
     )
-    notifier = Mock()
 
-    operations, updates = transformer.process_updates(
-        [update], [existing_operation], notifier, "arn:test"
+    dispatcher.apply_updates(
+        execution=execution,
+        updates=[update],
+        client_token=None,
+        notifier=Mock(),
+        touch=lambda _: None,
     )
 
-    assert len(operations) == 1
-    assert operations[0] == updated_operation
-    assert updates == [update]
+    assert execution.operations == [replaced]
 
 
-def test_process_updates_multiple_operations_preserve_order():
-    """Test processing multiple operations preserves order."""
-    op1 = Mock()
+def test_apply_updates_preserves_order_across_multiple_updates():
+    op1 = Mock(operation_id="op1")
     op1.operation_id = "op1"
     op2 = Mock()
     op2.operation_id = "op2"
@@ -163,232 +214,207 @@ def test_process_updates_multiple_operations_preserve_order():
     new_op4 = Mock()
     new_op4.operation_id = "op4"
 
-    mock_processor = MockProcessor()
-    transformer = OperationTransformer(processors={OperationType.STEP: mock_processor})
-
-    mock_processor.return_value = updated_op2
-
-    updates = [
-        OperationUpdate(
-            operation_id="op2",
-            operation_type=OperationType.STEP,
-            action=OperationAction.SUCCEED,
-        ),
-    ]
-    notifier = Mock()
-
-    operations, result_updates = transformer.process_updates(
-        updates, [op1, op2, op3], notifier, "arn:test"
+    processor = _MockProcessor()
+    dispatcher = CheckpointRequestDispatcher(
+        processors={OperationType.STEP: processor},
     )
+    execution = _make_execution([op1, op2, op3])
+    touched: list[str] = []
 
-    assert len(operations) == 3
-    assert operations[0] == op1
-    assert operations[1] == updated_op2
-    assert operations[2] == op3
-    assert result_updates == updates
-
-    mock_processor.return_value = new_op4
-    updates2 = [
-        OperationUpdate(
-            operation_id="op4",
-            operation_type=OperationType.STEP,
-            action=OperationAction.START,
-        )
-    ]
-
-    operations2, result_updates2 = transformer.process_updates(
-        updates2, [op1, updated_op2, op3], notifier, "arn:test"
+    # First: update op2 in the middle.
+    processor.return_value = updated_op2
+    dispatcher.apply_updates(
+        execution=execution,
+        updates=[
+            OperationUpdate(
+                operation_id="op2",
+                operation_type=OperationType.STEP,
+                action=OperationAction.SUCCEED,
+            ),
+        ],
+        client_token=None,
+        notifier=Mock(),
+        touch=touched.append,
     )
+    assert execution.operations == [op1, updated_op2, op3]
 
-    assert len(operations2) == 4
-    assert operations2[0] == op1
-    assert operations2[1] == updated_op2
-    assert operations2[2] == op3
-    assert operations2[3] == new_op4
+    # Second: append op4 at the end.
+    processor.return_value = new_op4
+    dispatcher.apply_updates(
+        execution=execution,
+        updates=[
+            OperationUpdate(
+                operation_id="op4",
+                operation_type=OperationType.STEP,
+                action=OperationAction.START,
+            ),
+        ],
+        client_token=None,
+        notifier=Mock(),
+        touch=touched.append,
+    )
+    assert execution.operations == [op1, updated_op2, op3, new_op4]
+    assert touched == ["op2", "op4"]
 
 
-def test_process_updates_multiple_processors():
-    """Test processing with multiple processor types."""
+def test_apply_updates_dispatches_by_operation_type():
     step_op = Mock()
     step_op.operation_id = "step-id"
     wait_op = Mock()
     wait_op.operation_id = "wait-id"
 
-    step_processor = MockProcessor(return_value=step_op)
-    wait_processor = MockProcessor(return_value=wait_op)
+    step_processor = _MockProcessor(return_value=step_op)
+    wait_processor = _MockProcessor(return_value=wait_op)
 
-    transformer = OperationTransformer(
+    dispatcher = CheckpointRequestDispatcher(
         processors={
             OperationType.STEP: step_processor,
             OperationType.WAIT: wait_processor,
-        }
+        },
+    )
+    execution = _make_execution()
+
+    dispatcher.apply_updates(
+        execution=execution,
+        updates=[
+            OperationUpdate(
+                operation_id="step-id",
+                operation_type=OperationType.STEP,
+                action=OperationAction.START,
+            ),
+            OperationUpdate(
+                operation_id="wait-id",
+                operation_type=OperationType.WAIT,
+                action=OperationAction.START,
+            ),
+        ],
+        client_token=None,
+        notifier=Mock(),
+        touch=lambda _: None,
     )
 
-    updates = [
-        OperationUpdate(
-            operation_id="step-id",
-            operation_type=OperationType.STEP,
-            action=OperationAction.START,
-        ),
-        OperationUpdate(
-            operation_id="wait-id",
-            operation_type=OperationType.WAIT,
-            action=OperationAction.START,
-        ),
-    ]
+    assert execution.operations == [step_op, wait_op]
+    assert len(step_processor.calls) == 1
+    assert len(wait_processor.calls) == 1
+
+
+def test_apply_updates_forwards_arn_notifier_and_current_op_to_processor():
+    existing = Mock()
+    existing.operation_id = "id"
+    processor = _MockProcessor(return_value=existing)
+    dispatcher = CheckpointRequestDispatcher(
+        processors={OperationType.STEP: processor},
+    )
+    execution = _make_execution([existing])
     notifier = Mock()
 
-    operations, result_updates = transformer.process_updates(
-        updates, [], notifier, "arn:test"
-    )
-
-    assert len(operations) == 2
-    assert operations[0] == step_op
-    assert operations[1] == wait_op
-    assert len(step_processor.process_calls) == 1
-    assert len(wait_processor.process_calls) == 1
-
-
-def test_process_updates_passes_correct_parameters():
-    """Test that correct parameters are passed to processor."""
-    existing_op = Mock()
-    existing_op.operation_id = "test-id"
-    mock_processor = MockProcessor(return_value=existing_op)
-    transformer = OperationTransformer(processors={OperationType.STEP: mock_processor})
-
     update = OperationUpdate(
-        operation_id="test-id",
+        operation_id="id",
         operation_type=OperationType.STEP,
         action=OperationAction.START,
     )
-    notifier = Mock()
-    execution_arn = "arn:aws:states:us-east-1:123456789012:execution:test"
 
-    transformer.process_updates([update], [existing_op], notifier, execution_arn)
+    dispatcher.apply_updates(
+        execution=execution,
+        updates=[update],
+        client_token=None,
+        notifier=notifier,
+        touch=lambda _: None,
+    )
 
-    call_args = mock_processor.process_calls[0]
-    assert call_args[0] == update
-    assert call_args[1] == existing_op
-    assert call_args[2] == notifier
-    assert call_args[3] == execution_arn
+    forwarded_update, forwarded_current_op, forwarded_notifier, forwarded_arn = (
+        processor.calls[0]
+    )
+    assert forwarded_update == update
+    assert forwarded_current_op == existing
+    assert forwarded_notifier is notifier
+    assert forwarded_arn == execution.durable_execution_arn
 
 
-def test_process_updates_new_operation_not_in_map():
-    """Test processing creates new operation when operation_id not in current operations."""
-    new_operation = Mock()
-    new_operation.operation_id = "new-id"
-    mock_processor = MockProcessor(return_value=new_operation)
-    transformer = OperationTransformer(processors={OperationType.STEP: mock_processor})
-
-    # Existing operations with different IDs
-    existing_op = Mock()
-    existing_op.operation_id = "existing-id"
+def test_apply_updates_records_payload_size_for_paging():
+    """The sidecar dict feeds OperationPaginatorState._size_for."""
+    new_op = Mock()
+    new_op.operation_id = "with-payload"
+    processor = _MockProcessor(return_value=new_op)
+    dispatcher = CheckpointRequestDispatcher(
+        processors={OperationType.STEP: processor},
+    )
+    execution = _make_execution()
 
     update = OperationUpdate(
-        operation_id="new-id",  # Different from existing operation
+        operation_id="with-payload",
         operation_type=OperationType.STEP,
         action=OperationAction.START,
-    )
-    notifier = Mock()
-
-    operations, updates = transformer.process_updates(
-        [update], [existing_op], notifier, "arn:test"
+        payload="hello-world-payload",
     )
 
-    # Should have both existing and new operation
-    assert len(operations) == 2
-    assert operations[0] == existing_op  # Original operation preserved
-    assert operations[1] == new_operation  # New operation appended
-    assert updates == [update]
-
-
-def test_process_updates_in_place_update_with_multiple_operations():
-    """Test in-place update when operation exists in middle of operations list."""
-    # Create three operations
-    op1 = Mock()
-    op1.operation_id = "op1"
-    op2 = Mock()
-    op2.operation_id = "op2"
-    op3 = Mock()
-    op3.operation_id = "op3"
-
-    # Updated version of op2
-    updated_op2 = Mock()
-    updated_op2.operation_id = "op2"
-
-    mock_processor = MockProcessor(return_value=updated_op2)
-    transformer = OperationTransformer(processors={OperationType.STEP: mock_processor})
-
-    # Update for op2 (middle operation)
-    update = OperationUpdate(
-        operation_id="op2",
-        operation_type=OperationType.STEP,
-        action=OperationAction.SUCCEED,
-    )
-    notifier = Mock()
-
-    # Process update with op2 in the middle of the list
-    operations, updates = transformer.process_updates(
-        [update], [op1, op2, op3], notifier, "arn:test"
+    dispatcher.apply_updates(
+        execution=execution,
+        updates=[update],
+        client_token=None,
+        notifier=Mock(),
+        touch=lambda _: None,
     )
 
-    # Verify in-place update occurred
-    assert len(operations) == 3
-    assert operations[0] == op1  # First operation unchanged
-    assert operations[1] == updated_op2  # Middle operation updated in-place
-    assert operations[2] == op3  # Last operation unchanged
-    assert updates == [update]
+    assert execution.operation_size_bytes["with-payload"] >= len(b"hello-world-payload")
 
 
-def test_process_updates_in_place_update_break_coverage():
-    """Test to ensure break statement in in-place update loop is covered."""
-    # Create operations where target is first in list to ensure break is hit
-    target_op = Mock()
-    target_op.operation_id = "target"
-    other_op = Mock()
-    other_op.operation_id = "other"
-
-    updated_target = Mock()
-    updated_target.operation_id = "target"
-
-    mock_processor = MockProcessor(return_value=updated_target)
-    transformer = OperationTransformer(processors={OperationType.STEP: mock_processor})
+def test_apply_updates_records_size_for_error_payload():
+    """Covers the error-branch of _estimate_payload_size. When the
+    update carries an error (not a payload), the size estimate should
+    include the JSON-serialised error dict."""
+    new_op = Mock()
+    new_op.operation_id = "with-error"
+    processor = _MockProcessor(return_value=new_op)
+    dispatcher = CheckpointRequestDispatcher(
+        processors={OperationType.STEP: processor},
+    )
+    execution = _make_execution()
 
     update = OperationUpdate(
-        operation_id="target",
+        operation_id="with-error",
         operation_type=OperationType.STEP,
-        action=OperationAction.SUCCEED,
-    )
-    notifier = Mock()
-
-    # Target operation is first - should hit break immediately
-    operations, updates = transformer.process_updates(
-        [update], [target_op, other_op], notifier, "arn:test"
+        action=OperationAction.FAIL,
+        error=ErrorObject.from_message("something broke"),
     )
 
-    assert len(operations) == 2
-    assert operations[0] == updated_target
+    dispatcher.apply_updates(
+        execution=execution,
+        updates=[update],
+        client_token=None,
+        notifier=Mock(),
+        touch=lambda _: None,
+    )
+
+    # Some non-zero size was recorded (exact value depends on
+    # error.to_dict() shape; just assert > 0).
+    assert execution.operation_size_bytes["with-error"] > 0
 
 
-def test_process_updates_empty_operations_list():
-    """Test for loop exit when result_operations is empty."""
-    updated_op = Mock()
-    updated_op.operation_id = "test-id"
-
-    mock_processor = MockProcessor(return_value=updated_op)
-    transformer = OperationTransformer(processors={OperationType.STEP: mock_processor})
+def test_apply_updates_records_size_for_bytes_payload():
+    """Covers the bytes-payload branch of _byte_length."""
+    new_op = Mock()
+    new_op.operation_id = "with-bytes"
+    processor = _MockProcessor(return_value=new_op)
+    dispatcher = CheckpointRequestDispatcher(
+        processors={OperationType.STEP: processor},
+    )
+    execution = _make_execution()
 
     update = OperationUpdate(
-        operation_id="test-id",
+        operation_id="with-bytes",
         operation_type=OperationType.STEP,
-        action=OperationAction.SUCCEED,
-    )
-    notifier = Mock()
-
-    # Empty current_operations list - for loop should exit immediately
-    operations, updates = transformer.process_updates(
-        [update], [], notifier, "arn:test"
+        action=OperationAction.START,
+        payload=b"binary-bytes",
     )
 
-    assert len(operations) == 1
-    assert operations[0] == updated_op
+    dispatcher.apply_updates(
+        execution=execution,
+        updates=[update],
+        client_token=None,
+        notifier=Mock(),
+        touch=lambda _: None,
+    )
+
+    # bytes payload length == 12.
+    assert execution.operation_size_bytes["with-bytes"] == 12

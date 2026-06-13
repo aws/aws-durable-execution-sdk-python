@@ -438,7 +438,7 @@ class StopDurableExecutionHandler(EndpointHandler):
 class GetDurableExecutionStateHandler(EndpointHandler):
     """Handler for GET /2025-12-01/durable-executions/{arn}/state."""
 
-    def handle(self, parsed_route: Route, request: HTTPRequest) -> HTTPResponse:  # noqa: ARG002
+    def handle(self, parsed_route: Route, request: HTTPRequest) -> HTTPResponse:
         """Handle get durable execution state request.
 
         Args:
@@ -452,8 +452,19 @@ class GetDurableExecutionStateHandler(EndpointHandler):
             state_route = cast(GetDurableExecutionStateRoute, parsed_route)
             execution_arn: str = state_route.arn
 
+            checkpoint_token: str | None = self._parse_query_param(
+                request, "CheckpointToken"
+            )
+            marker: str | None = self._parse_query_param(request, "Marker") or None
+            max_items: str | None = self._parse_query_param(request, "MaxItems")
+
             state_response: GetDurableExecutionStateResponse = (
-                self.executor.get_execution_state(execution_arn)
+                self.executor.get_execution_state(
+                    execution_arn,
+                    checkpoint_token=checkpoint_token,
+                    marker=marker,
+                    max_items=int(max_items) if max_items else None,
+                )
             )
 
             response_data: dict[str, Any] = state_response.to_dict()
