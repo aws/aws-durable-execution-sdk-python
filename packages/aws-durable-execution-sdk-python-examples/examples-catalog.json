@@ -635,6 +635,21 @@
         "ExecutionTimeout": 300
       },
       "path": "./src/plugin/execution_with_otel.py"
+    },
+    {
+      "name": "Otel Logger Example",
+      "description": "Demonstrates OTel-enriched logging correlated to durable spans",
+      "handler": "otel_logger_example.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "loggingConfig": {
+        "ApplicationLogLevel": "INFO",
+        "LogFormat": "JSON"
+      },
+      "path": "./src/otel/otel_logger_example.py"
     }
   ]
 }
