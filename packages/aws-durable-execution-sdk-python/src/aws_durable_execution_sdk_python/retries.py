@@ -125,6 +125,34 @@ def create_retry_strategy(
     return retry_strategy
 
 
+def create_linear_retry_strategy(
+    max_attempts: int = 6,
+    initial_delay: Duration | None = None,
+    increment: Duration | None = None,
+) -> Callable[[Exception, int], RetryDecision]:
+    """Linearly increasing delay between retries: initial + increment * (attempts_made - 1).
+
+    Mirrors the JS SDK's ``createLinearRetryStrategy``. With the defaults this
+    yields delays of 1s, 2s, 3s, 4s, 5s. No jitter is applied and there is no
+    upper cap on the delay; callers who need either can build their own
+    strategy via ``create_retry_strategy``.
+    """
+    initial: Duration = (
+        initial_delay if initial_delay is not None else Duration.from_seconds(1)
+    )
+    step: Duration = increment if increment is not None else Duration.from_seconds(1)
+
+    def linear_retry_strategy(_error: Exception, attempts_made: int) -> RetryDecision:
+        if attempts_made >= max_attempts:
+            return RetryDecision.no_retry()
+        delay_seconds: int = initial.to_seconds() + step.to_seconds() * (
+            attempts_made - 1
+        )
+        return RetryDecision.retry(Duration(seconds=delay_seconds))
+
+    return linear_retry_strategy
+
+
 class RetryPresets:
     """Default retry presets."""
 
@@ -176,6 +204,31 @@ class RetryPresets:
                 initial_delay=Duration.from_seconds(1),
                 max_delay=Duration.from_minutes(1),
                 backoff_rate=1.5,
+                jitter_strategy=JitterStrategy.NONE,
+            )
+        )
+
+    @classmethod
+    def linear(cls) -> Callable[[Exception, int], RetryDecision]:
+        """Linearly increasing delay between retries: 1s, 2s, 3s, 4s, 5s."""
+        return create_linear_retry_strategy(
+            max_attempts=6,
+            initial_delay=Duration.from_seconds(1),
+            increment=Duration.from_seconds(1),
+        )
+
+    @classmethod
+    def fixed(
+        cls, interval: Duration | None = None
+    ) -> Callable[[Exception, int], RetryDecision]:
+        """Constant delay between retries (5s by default, no jitter)."""
+        delay: Duration = interval if interval is not None else Duration.from_seconds(5)
+        return create_retry_strategy(
+            RetryStrategyConfig(
+                max_attempts=5,
+                initial_delay=delay,
+                max_delay=delay,
+                backoff_rate=1,
                 jitter_strategy=JitterStrategy.NONE,
             )
         )
