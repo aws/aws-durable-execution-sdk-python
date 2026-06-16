@@ -250,7 +250,7 @@ class ExecutionState:
     ):
         self.durable_execution_arn: str = durable_execution_arn
         self._current_checkpoint_token: str = initial_checkpoint_token
-        self.operations: MutableMapping[str, Operation] = operations
+        self._operations: dict[str, Operation] = dict(operations)
         self._service_client: DurableServiceClient = service_client
         self._plugin_executor: PluginExecutor = plugin_executor
         self._ordered_checkpoint_lock: OrderedLock = OrderedLock()
@@ -278,6 +278,16 @@ class ExecutionState:
         self._replay_status: ReplayStatus = replay_status
         self._replay_status_lock: Lock = Lock()
         self._visited_operations: set[str] = set()
+
+    @property
+    def operations(self) -> dict[str, Operation]:
+        """Return a point-in-time snapshot copy of the operations map.
+
+        The returned dict is a copy, so mutating it does not affect execution
+        state and iterating it is safe against concurrent updates.
+        """
+        with self._operations_lock:
+            return dict(self._operations)
 
     def fetch_paginated_operations(
         self,
@@ -324,7 +334,7 @@ class ExecutionState:
             # Always store whatever operations we successfully fetched
             if all_operations:
                 with self._operations_lock:
-                    self.operations.update(
+                    self._operations.update(
                         {op.operation_id: op for op in all_operations}
                     )
         return all_operations
@@ -341,7 +351,8 @@ class ExecutionState:
     def get_execution_operation(self) -> Operation | None:
         # invocation id is id of execution operation
         invocation_id = self.durable_execution_arn.split("/")[-1]
-        candidate = self.operations.get(invocation_id)
+        with self._operations_lock:
+            candidate = self._operations.get(invocation_id)
         if not candidate:
             # Due to payload size limitations we may have an empty operations list.
             # This will only happen when loading the initial page of results and is
@@ -370,19 +381,21 @@ class ExecutionState:
         with self._replay_status_lock:
             if self._replay_status == ReplayStatus.REPLAY:
                 self._visited_operations.add(operation_id)
-                completed_ops = {
-                    op_id
-                    for op_id, op in self.operations.items()
-                    if op.operation_type != OperationType.EXECUTION
-                    and op.status
-                    in {
-                        OperationStatus.SUCCEEDED,
-                        OperationStatus.FAILED,
-                        OperationStatus.CANCELLED,
-                        OperationStatus.STOPPED,
-                        OperationStatus.TIMED_OUT,
+                # Lock order: _replay_status_lock then _operations_lock.
+                with self._operations_lock:
+                    completed_ops = {
+                        op_id
+                        for op_id, op in self._operations.items()
+                        if op.operation_type != OperationType.EXECUTION
+                        and op.status
+                        in {
+                            OperationStatus.SUCCEEDED,
+                            OperationStatus.FAILED,
+                            OperationStatus.CANCELLED,
+                            OperationStatus.STOPPED,
+                            OperationStatus.TIMED_OUT,
+                        }
                     }
-                }
                 if completed_ops.issubset(self._visited_operations):
                     logger.debug(
                         "Transitioning from REPLAY to NEW status at operation %s",
@@ -404,7 +417,7 @@ class ExecutionState:
         with self._operations_lock:
             has_prior_operations: bool = any(
                 op.operation_type is not OperationType.EXECUTION
-                for op in self.operations.values()
+                for op in self._operations.values()
             )
 
         if has_prior_operations:
@@ -431,7 +444,7 @@ class ExecutionState:
         """
         # checking status are deliberately under a lighter non-serialized lock
         with self._operations_lock:
-            if checkpoint := self.operations.get(checkpoint_id):
+            if checkpoint := self._operations.get(checkpoint_id):
                 return CheckpointedResult.create_from_operation(checkpoint)
 
         return CHECKPOINT_NOT_FOUND
