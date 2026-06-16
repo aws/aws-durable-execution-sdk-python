@@ -3,8 +3,6 @@
 import json
 from pathlib import Path
 
-import json
-
 
 def load_catalog():
     """Load examples catalog."""
@@ -94,6 +92,21 @@ def generate_sam_template():
             template["Resources"][function_name]["Properties"]["DurableConfig"] = (
                 example["durableConfig"]
             )
+
+        if "layers" in example:
+            template["Resources"][function_name]["Properties"]["Layers"] = example[
+                "layers"
+            ]
+
+        if "tracing" in example:
+            template["Resources"][function_name]["Properties"]["Tracing"] = example[
+                "tracing"
+            ]
+
+        if "environment" in example:
+            template["Resources"][function_name]["Properties"]["Environment"] = {
+                "Variables": example["environment"]
+            }
 
     template_path = Path(__file__).parent.parent / "template.yaml"
     with open(template_path, "w") as f:
