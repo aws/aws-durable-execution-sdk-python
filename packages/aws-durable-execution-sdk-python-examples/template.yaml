@@ -38,7 +38,8 @@
           ]
         },
         "ManagedPolicyArns": [
-          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+          "arn:aws:iam::aws:policy/CloudWatchLambdaApplicationSignalsExecutionRolePolicy"
         ],
         "Policies": [
           {
@@ -1043,6 +1044,16 @@
             "DurableFunctionRole",
             "Arn"
           ]
+        },
+        "Tracing": "Active",
+        "Layers": [
+          "arn:aws:lambda:us-west-2:615299751070:layer:AWSOpenTelemetryDistroPython:32" # from https://aws-otel.github.io/docs/getting-started/lambda#adot-lambda-layer-arns
+        ],
+        "Environment": {
+          "Variables": {
+            "AWS_LAMBDA_EXEC_WRAPPER": "/opt/otel-instrument",
+            "OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED": "true"
+          }
         },
         "DurableConfig": {
           "RetentionPeriodInDays": 7,

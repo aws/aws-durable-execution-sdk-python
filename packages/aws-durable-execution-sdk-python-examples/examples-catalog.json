@@ -634,6 +634,13 @@
         "RetentionPeriodInDays": 7,
         "ExecutionTimeout": 300
       },
+      "tracing": "Active",
+      "layers": [
+        "arn:aws:lambda:us-west-2:615299751070:layer:AWSOpenTelemetryDistroPython:32"
+      ],
+      "environment": {
+        "AWS_LAMBDA_EXEC_WRAPPER": "/opt/otel-instrument"
+      },
       "path": "./src/plugin/execution_with_otel.py"
     },
     {
@@ -648,6 +655,14 @@
       "loggingConfig": {
         "ApplicationLogLevel": "INFO",
         "LogFormat": "JSON"
+      },
+      "tracing": "Active",
+      "layers": [
+        "arn:aws:lambda:us-west-2:615299751070:layer:AWSOpenTelemetryDistroPython:32"
+      ],
+      "environment": {
+        "AWS_LAMBDA_EXEC_WRAPPER": "/opt/otel-instrument",
+        "OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED": "true"
       },
       "path": "./src/otel/otel_logger_example.py"
     }

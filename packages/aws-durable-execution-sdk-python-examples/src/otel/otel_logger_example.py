@@ -28,11 +28,7 @@ from aws_durable_execution_sdk_python.context import (
 from aws_durable_execution_sdk_python.execution import durable_execution
 
 
-tracer_provider = TracerProvider()
-trace.set_tracer_provider(tracer_provider)
-
-# enrich_logger defaults to True, so the execution logger is wrapped with OTel
-# trace context injection (otel.trace_id, otel.span_id, otel.trace_sampled).
+tracer_provider = trace.get_tracer_provider()
 otel = DurableExecutionOtelPlugin(tracer_provider)
 
 

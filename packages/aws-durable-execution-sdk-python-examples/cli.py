@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 try:
     import boto3
+
     from aws_durable_execution_sdk_python.lambda_service import LambdaClient
 except ImportError:
     sys.exit(1)
@@ -326,6 +327,9 @@ def deploy_function(example_name: str, function_name: str | None = None):
         f"arn:aws:iam::{config['account_id']}:role/DurableFunctionsIntegrationTestRole"
     )
 
+    env_vars = {"AWS_ENDPOINT_URL_LAMBDA": config["lambda_endpoint"]}
+    env_vars.update(example_config.get("environment", {}))
+
     function_config = {
         "FunctionName": function_name,
         "Runtime": "python3.13",
@@ -334,12 +338,16 @@ def deploy_function(example_name: str, function_name: str | None = None):
         "Description": example_config["description"],
         "Timeout": 60,
         "MemorySize": 128,
-        "Environment": {
-            "Variables": {"AWS_ENDPOINT_URL_LAMBDA": config["lambda_endpoint"]}
-        },
+        "Environment": {"Variables": env_vars},
         "DurableConfig": example_config["durableConfig"],
         "LoggingConfig": example_config.get("loggingConfig", {}),
     }
+
+    if "layers" in example_config:
+        function_config["Layers"] = example_config["layers"]
+
+    if "tracing" in example_config:
+        function_config["TracingConfig"] = {"Mode": example_config["tracing"]}
 
     if config["kms_key_arn"]:
         function_config["KMSKeyArn"] = config["kms_key_arn"]
