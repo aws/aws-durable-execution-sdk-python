@@ -1397,7 +1397,7 @@ def test_concurrent_access_to_operations_dictionary():
         operation_type=OperationType.STEP,
         status=OperationStatus.SUCCEEDED,
     )
-    state.operations["op1"] = operation
+    state._operations["op1"] = operation
 
     results = []
     errors = []
@@ -1422,7 +1422,7 @@ def test_concurrent_access_to_operations_dictionary():
                     status=OperationStatus.SUCCEEDED,
                 )
                 with state._operations_lock:
-                    state.operations[f"op{i}"] = new_op
+                    state._operations[f"op{i}"] = new_op
                 time.sleep(0.001)
         except Exception as e:
             errors.append(e)
@@ -4260,3 +4260,87 @@ def test_plugin_executor_not_called_for_pending_operations():
 
 
 # endregion Plugin Executor Integration Tests
+
+
+def _make_execution_state_for_operations(
+    mock_lambda_client, *, replay_status=ReplayStatus.NEW, operations=None
+):
+    return ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations=operations or {},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+        replay_status=replay_status,
+    )
+
+
+def test_operations_property_returns_snapshot_copy():
+    """The operations property exposes a copy; mutating it must not affect state."""
+    mock_lambda_client = Mock(spec=LambdaClient)
+    op = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+    )
+    state = _make_execution_state_for_operations(
+        mock_lambda_client, operations={"op1": op}
+    )
+
+    snapshot = state.operations
+    assert snapshot == {"op1": op}
+
+    snapshot["op2"] = op  # mutating the returned copy must not leak into state
+    assert "op2" not in state.operations
+    assert len(state.operations) == 1
+
+
+def test_track_replay_iteration_safe_under_concurrent_update():
+    """track_replay must not raise when operations are updated concurrently.
+
+    A worker thread iterates operations inside track_replay while the checkpoint
+    path updates the same map. Without consistent locking this raises
+    "dictionary changed size during iteration".
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    state = _make_execution_state_for_operations(
+        mock_lambda_client, replay_status=ReplayStatus.REPLAY
+    )
+    # Seed completed operations so track_replay keeps iterating (stays REPLAY).
+    for i in range(50):
+        state._operations[f"seed{i}"] = Operation(
+            operation_id=f"seed{i}",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.SUCCEEDED,
+        )
+
+    errors: list[Exception] = []
+    stop = threading.Event()
+
+    def writer():
+        i = 0
+        while not stop.is_set():
+            with state._operations_lock:
+                state._operations[f"w{i}"] = Operation(
+                    operation_id=f"w{i}",
+                    operation_type=OperationType.STEP,
+                    status=OperationStatus.SUCCEEDED,
+                )
+            i += 1
+
+    def reader():
+        try:
+            for _ in range(2000):
+                state.track_replay(operation_id="probe")
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    writer_t = threading.Thread(target=writer, daemon=True)
+    reader_t = threading.Thread(target=reader, daemon=True)
+    writer_t.start()
+    reader_t.start()
+    reader_t.join(timeout=30)
+    stop.set()
+    writer_t.join(timeout=5)
+
+    assert not errors, f"track_replay raced with concurrent update: {errors}"
