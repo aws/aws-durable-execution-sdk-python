@@ -1196,6 +1196,7 @@ def test_wait_for_callback_basic(mock_executor_class):
         # Verify the child context callable
         call_args = mock_run_in_child.call_args
         assert call_args[0][1] is None  # name should be None
+        assert call_args[0][2].sub_type is OperationSubType.WAIT_FOR_CALLBACK
 
 
 @patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
@@ -1225,6 +1226,7 @@ def test_wait_for_callback_with_name_and_config(mock_executor_class):
         assert (
             call_args[0][1] == "submit_function"
         )  # name should be from _original_name
+        assert call_args[0][2].sub_type is OperationSubType.WAIT_FOR_CALLBACK
 
 
 @patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
@@ -1250,6 +1252,7 @@ def test_wait_for_callback_resolves_name_from_submitter(mock_executor_class):
 
         call_args = mock_run_in_child.call_args
         assert call_args[0][1] == "submit_task"
+        assert call_args[0][2].sub_type is OperationSubType.WAIT_FOR_CALLBACK
 
 
 @patch("aws_durable_execution_sdk_python.context.wait_for_callback_handler")
@@ -1270,8 +1273,9 @@ def test_wait_for_callback_passes_child_context(mock_executor_class):
 
     with patch.object(DurableContext, "run_in_child_context") as mock_run_in_child:
 
-        def run_child_context(callable_func, name):
+        def run_child_context(callable_func, name, config):
             # Execute the child context callable
+            assert config.sub_type is OperationSubType.WAIT_FOR_CALLBACK
             child_context = create_test_context(state=mock_state, parent_id="test")
             return callable_func(child_context)
 

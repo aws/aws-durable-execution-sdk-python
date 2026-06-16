@@ -717,6 +717,7 @@ class DurableContext(DurableContextProtocol):
         return self.run_in_child_context(
             wait_in_child_context,
             step_name,
+            ChildConfig(sub_type=OperationSubType.WAIT_FOR_CALLBACK),
         )
 
     def wait_for_condition(
