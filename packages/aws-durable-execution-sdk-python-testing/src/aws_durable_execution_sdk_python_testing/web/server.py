@@ -1,4 +1,4 @@
-"""Local testing web server for AWS Lambda Durable Functions that mimics the actual Lambda backend services."""
+"""Local testing web server for AWS Lambda Durable Functions for local testing."""
 
 from __future__ import annotations
 

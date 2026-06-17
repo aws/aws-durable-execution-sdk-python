@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 from aws_durable_execution_sdk_python_testing.exceptions import (
@@ -46,8 +47,15 @@ class FileSystemExecutionStore(BaseExecutionStore):
         file_path = self._get_file_path(execution.durable_execution_arn)
         data = execution.to_json_dict()
 
-        with open(file_path, "w", encoding="utf-8") as f:
+        # Write to a temporary file in the same directory, then replace
+        # the target in one atomic step. A concurrent reader then sees
+        # either the old file or the new file, never a partial or empty
+        # one. Saves for one execution run on its worker lane, so two
+        # writes never target the same temp path at once.
+        tmp_path = file_path.with_name(f"{file_path.name}.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp_path, file_path)
 
     def load(self, execution_arn: str) -> Execution:
         """Load execution from file system."""

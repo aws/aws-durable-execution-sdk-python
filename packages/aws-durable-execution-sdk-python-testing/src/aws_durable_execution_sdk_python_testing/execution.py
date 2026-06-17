@@ -49,10 +49,10 @@ class ExecutionStatus(Enum):
 class CheckpointIdempotencyRecord:
     """Single-slot cache of the most recent accepted checkpoint response.
 
-    A retried checkpoint call with the same
+    Single-slot cache of the most recent accepted checkpoint response.
     ``(client_token, inbound_checkpoint_token)`` pair is entitled to a
-    byte-identical response. This record is what we compare against and
-    replay from.
+    byte-identical response; this record is what we compare
+    against and replay from.
     """
 
     client_token: str
@@ -610,6 +610,7 @@ class OperationPaginatorState:
       delivery watermark on the wrapped :class:`Execution`, called
       after a checkpoint response is constructed and its ops are
       known.
+
 
     Pinning ``token_sequence`` and ``operations`` at construction
     guarantees that paginated reads and delta computation see the same

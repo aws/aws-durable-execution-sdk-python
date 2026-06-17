@@ -1,11 +1,9 @@
 """Unit tests for CheckpointRequestDispatcher.
 
-Covers the new ``apply_updates(execution, updates, client_token,
-notifier, touch)`` API introduced in of
-. The dispatcher mutates
-``execution.operations`` in place, records per-op size in
-``execution.operation_size_bytes``, and calls ``touch`` once per
-accepted update.
+Covers ``apply_updates(execution, updates, client_token, touch)``: it
+mutates ``execution.operations`` in place, records per-op size in
+``execution.operation_size_bytes``, calls ``touch`` once per accepted
+update, and returns the lifecycle effects raised by the updates.
 """
 
 from __future__ import annotations
@@ -20,12 +18,14 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationUpdate,
 )
 
+from aws_durable_execution_sdk_python_testing.checkpoint.effects import Completed
 from aws_durable_execution_sdk_python_testing.checkpoint.processors.base import (
     OperationProcessor,
 )
 from aws_durable_execution_sdk_python_testing.checkpoint.transformer import (
     CheckpointRequestDispatcher,
 )
+from aws_durable_execution_sdk_python_testing.observer import ExecutionNotifier
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
 )
@@ -85,7 +85,6 @@ def test_apply_updates_with_empty_list_is_a_noop():
         execution=execution,
         updates=[],
         client_token=None,
-        notifier=Mock(),
         touch=touched.append,
     )
 
@@ -113,7 +112,6 @@ def test_apply_updates_unknown_type_raises():
             execution=execution,
             updates=[update],
             client_token=None,
-            notifier=Mock(),
             touch=lambda _: None,
         )
 
@@ -135,7 +133,6 @@ def test_apply_updates_skips_ops_when_processor_returns_none():
         execution=execution,
         updates=[update],
         client_token=None,
-        notifier=Mock(),
         touch=touched.append,
     )
 
@@ -164,7 +161,6 @@ def test_apply_updates_appends_new_operation_and_touches():
         execution=execution,
         updates=[update],
         client_token=None,
-        notifier=Mock(),
         touch=touched.append,
     )
 
@@ -194,7 +190,6 @@ def test_apply_updates_replaces_existing_operation_in_place():
         execution=execution,
         updates=[update],
         client_token=None,
-        notifier=Mock(),
         touch=lambda _: None,
     )
 
@@ -233,7 +228,6 @@ def test_apply_updates_preserves_order_across_multiple_updates():
             ),
         ],
         client_token=None,
-        notifier=Mock(),
         touch=touched.append,
     )
     assert execution.operations == [op1, updated_op2, op3]
@@ -250,7 +244,6 @@ def test_apply_updates_preserves_order_across_multiple_updates():
             ),
         ],
         client_token=None,
-        notifier=Mock(),
         touch=touched.append,
     )
     assert execution.operations == [op1, updated_op2, op3, new_op4]
@@ -289,7 +282,6 @@ def test_apply_updates_dispatches_by_operation_type():
             ),
         ],
         client_token=None,
-        notifier=Mock(),
         touch=lambda _: None,
     )
 
@@ -306,7 +298,6 @@ def test_apply_updates_forwards_arn_notifier_and_current_op_to_processor():
         processors={OperationType.STEP: processor},
     )
     execution = _make_execution([existing])
-    notifier = Mock()
 
     update = OperationUpdate(
         operation_id="id",
@@ -318,7 +309,6 @@ def test_apply_updates_forwards_arn_notifier_and_current_op_to_processor():
         execution=execution,
         updates=[update],
         client_token=None,
-        notifier=notifier,
         touch=lambda _: None,
     )
 
@@ -327,8 +317,58 @@ def test_apply_updates_forwards_arn_notifier_and_current_op_to_processor():
     )
     assert forwarded_update == update
     assert forwarded_current_op == existing
-    assert forwarded_notifier is notifier
+    assert isinstance(forwarded_notifier, ExecutionNotifier)
     assert forwarded_arn == execution.durable_execution_arn
+
+
+def test_apply_updates_returns_completion_effect():
+    """An EXECUTION SUCCEED update surfaces a Completed effect for the
+    caller to apply after the write."""
+    dispatcher = CheckpointRequestDispatcher()
+    execution = _make_execution()
+
+    update = OperationUpdate(
+        operation_id="exec-op",
+        operation_type=OperationType.EXECUTION,
+        action=OperationAction.SUCCEED,
+        payload="final-result",
+    )
+
+    effects = dispatcher.apply_updates(
+        execution=execution,
+        updates=[update],
+        client_token=None,
+        touch=lambda _: None,
+    )
+
+    assert effects == [
+        Completed(execution_arn=execution.durable_execution_arn, result="final-result")
+    ]
+
+
+def test_apply_updates_returns_no_effects_for_plain_step():
+    """A STEP START produces an operation but no lifecycle effect."""
+    new_op = Mock()
+    new_op.operation_id = "step-op"
+    dispatcher = CheckpointRequestDispatcher(
+        processors={OperationType.STEP: _MockProcessor(return_value=new_op)},
+    )
+    execution = _make_execution()
+
+    effects = dispatcher.apply_updates(
+        execution=execution,
+        updates=[
+            OperationUpdate(
+                operation_id="step-op",
+                operation_type=OperationType.STEP,
+                action=OperationAction.START,
+            )
+        ],
+        client_token=None,
+        touch=lambda _: None,
+    )
+
+    assert effects == []
 
 
 def test_apply_updates_records_payload_size_for_paging():
@@ -352,7 +392,6 @@ def test_apply_updates_records_payload_size_for_paging():
         execution=execution,
         updates=[update],
         client_token=None,
-        notifier=Mock(),
         touch=lambda _: None,
     )
 
@@ -382,7 +421,6 @@ def test_apply_updates_records_size_for_error_payload():
         execution=execution,
         updates=[update],
         client_token=None,
-        notifier=Mock(),
         touch=lambda _: None,
     )
 
@@ -412,7 +450,6 @@ def test_apply_updates_records_size_for_bytes_payload():
         execution=execution,
         updates=[update],
         client_token=None,
-        notifier=Mock(),
         touch=lambda _: None,
     )
 

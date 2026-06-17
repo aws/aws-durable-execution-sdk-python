@@ -12,6 +12,12 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 
 from aws_durable_execution_sdk_python_testing.client import InMemoryServiceClient
+from aws_durable_execution_sdk_python_testing.worker.registry import ExecutionRegistry
+
+
+def _client(processor: Mock) -> InMemoryServiceClient:
+    """Build a client whose registry uses a stub store/scheduler."""
+    return InMemoryServiceClient(processor, ExecutionRegistry(Mock(), Mock()))
 
 
 def test_checkpoint():
@@ -23,7 +29,7 @@ def test_checkpoint():
     )
     processor.process_checkpoint.return_value = expected_output
 
-    client = InMemoryServiceClient(processor)
+    client = _client(processor)
 
     updates = [
         OperationUpdate(
@@ -52,7 +58,7 @@ def test_get_execution_state():
     expected_output = StateOutput(operations=[], next_marker="marker")
     processor.get_execution_state.return_value = expected_output
 
-    client = InMemoryServiceClient(processor)
+    client = _client(processor)
 
     result = client.get_execution_state(
         "arn:aws:lambda:us-east-1:123456789012:function:test", "token", "marker", 500
@@ -68,7 +74,7 @@ def test_get_execution_state_default_max_items():
     expected_output = StateOutput(operations=[], next_marker="marker")
     processor.get_execution_state.return_value = expected_output
 
-    client = InMemoryServiceClient(processor)
+    client = _client(processor)
 
     result = client.get_execution_state(
         "arn:aws:lambda:us-east-1:123456789012:function:test", "token", "marker"
@@ -81,7 +87,7 @@ def test_get_execution_state_default_max_items():
 def test_stop():
     """Test stop method returns current datetime."""
     processor = Mock()
-    client = InMemoryServiceClient(processor)
+    client = _client(processor)
 
     before = datetime.datetime.now(tz=datetime.UTC)
     result = client.stop(
@@ -96,7 +102,7 @@ def test_stop():
 def test_stop_with_none_payload():
     """Test stop method with None payload."""
     processor = Mock()
-    client = InMemoryServiceClient(processor)
+    client = _client(processor)
 
     result = client.stop("arn:aws:states:us-east-1:123456789012:execution:test", None)
 

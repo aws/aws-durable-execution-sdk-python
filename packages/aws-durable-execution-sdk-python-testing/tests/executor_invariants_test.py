@@ -85,7 +85,7 @@ def _make_executor() -> tuple[Executor, InMemoryExecutionStore, str, str]:
     store.save(execution)
     executor = Executor(store, Mock(), Mock(), Mock())
     arn = execution.durable_execution_arn
-    executor._invocation_state[arn] = InvocationState.INVOKING  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.INVOKING)  # noqa: SLF001
     token = CheckpointToken(execution_arn=arn, token_sequence=0).to_str()
     return executor, store, arn, token
 
@@ -300,14 +300,14 @@ def test_invariant_gate_release_after_transient_failures():
     # Drive a few failed attempts (still under MAX=5).
     for _ in range(3):
         asyncio.run(executor._invoke_handler(arn)())  # noqa: SLF001
-        state = executor._invocation_state.get(arn, InvocationState.PRE_INVOKE)  # noqa: SLF001
+        state = executor._invocation_gate(arn)  # noqa: SLF001
         assert state is not InvocationState.INVOKING
 
     # After the budget is exhausted the execution is terminal; state
     # becomes COMPLETED (also not INVOKING).
     for _ in range(Executor.MAX_CONSECUTIVE_FAILED_ATTEMPTS):
         asyncio.run(executor._invoke_handler(arn)())  # noqa: SLF001
-    state = executor._invocation_state.get(arn, InvocationState.PRE_INVOKE)  # noqa: SLF001
+    state = executor._invocation_gate(arn)  # noqa: SLF001
     assert state is not InvocationState.INVOKING
 
 
@@ -675,7 +675,7 @@ def test_invoke_handler_bails_out_on_completed_gate():
     execution.start()
     store.save(execution)
     arn = execution.durable_execution_arn
-    executor._invocation_state[arn] = InvocationState.COMPLETED  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.COMPLETED)  # noqa: SLF001
 
     asyncio.run(executor._invoke_handler(arn)())  # noqa: SLF001
 
@@ -684,9 +684,8 @@ def test_invoke_handler_bails_out_on_completed_gate():
 
 
 def test_invoke_handler_bails_out_on_is_complete():
-    """Similarly, if the Execution is already is_complete when the
-    handler starts, the handler transitions state to COMPLETED and
-    exits without calling the invoker."""
+    """If the Execution is already is_complete when the handler starts,
+    the handler exits without calling the invoker."""
     store = InMemoryExecutionStore()
     invoker = Mock()
     executor = Executor(store, Mock(), invoker, Mock())
@@ -710,11 +709,10 @@ def test_invoke_handler_bails_out_on_is_complete():
     asyncio.run(executor._invoke_handler(arn)())  # noqa: SLF001
 
     assert invoker.invoke.call_count == 0
-    # Gate transitioned to COMPLETED.
-    assert (
-        executor._invocation_state.get(arn)  # noqa: SLF001
-        is InvocationState.COMPLETED
-    )
+    # Execution stays terminal; the worker tears down on COMPLETED, so
+    # the gate has no live worker and reads PRE_INVOKE.
+    assert store.load(arn).is_complete
+    assert executor._invocation_gate(arn) is InvocationState.PRE_INVOKE  # noqa: SLF001
 
 
 def test_is_current_token_returns_false_for_none_token():
@@ -738,7 +736,7 @@ def test_is_current_token_returns_false_for_none_token():
     execution.start()
     store.save(execution)
     arn = execution.durable_execution_arn
-    executor._invocation_state[arn] = InvocationState.INVOKING  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.INVOKING)  # noqa: SLF001
 
     with pytest.raises(
         InvalidParameterValueException, match="Invalid checkpoint token"
@@ -766,7 +764,7 @@ def test_is_current_token_returns_false_for_malformed_token():
     execution.start()
     store.save(execution)
     arn = execution.durable_execution_arn
-    executor._invocation_state[arn] = InvocationState.INVOKING  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.INVOKING)  # noqa: SLF001
 
     with pytest.raises(
         InvalidParameterValueException, match="Invalid checkpoint token"
@@ -940,7 +938,7 @@ def test_checkpoint_returns_full_delta_in_one_response():
     execution.start()
     store.save(execution)
     arn = execution.durable_execution_arn
-    executor._invocation_state[arn] = InvocationState.INVOKING  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.INVOKING)  # noqa: SLF001
 
     token = CheckpointToken(execution_arn=arn, token_sequence=0).to_str()
 
