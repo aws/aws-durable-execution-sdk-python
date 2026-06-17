@@ -9,8 +9,9 @@
 name: Upload PyPI Package
 
 on:
-  release:
-    types: [published]
+  push:
+    branches:
+      - feat/dummy-otel-plugin-package
 
 permissions:
   contents: read
@@ -22,17 +23,11 @@ jobs:
       fail-fast: false
       matrix:
         package:
-          - name: aws-durable-execution-sdk-python
-            path: packages/aws-durable-execution-sdk-python
           - name: aws-durable-execution-sdk-python-otel
             path: packages/aws-durable-execution-sdk-python-otel
-          - name: aws-durable-execution-sdk-python-testing
-            path: packages/aws-durable-execution-sdk-python-testing
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          ref: ${{ github.event.release.tag_name }}
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: "3.11"
@@ -61,15 +56,12 @@ jobs:
       fail-fast: false
       matrix:
         package:
-          - name: aws-durable-execution-sdk-python
           - name: aws-durable-execution-sdk-python-otel
-          - name: aws-durable-execution-sdk-python-testing
     permissions:
       id-token: write
 
     environment:
       name: pypi
-      url: https://pypi.org/project/${{ matrix.package.name }}/${{ github.event.release.name }}
 
     steps:
       - name: Retrieve release distributions
@@ -83,11 +75,3 @@ jobs:
         with:
           packages-dir: dist/
 
-  notify-release:
-    if: always() && contains(needs.pypi-publish.result, 'success')
-    needs: [pypi-publish]
-    uses: ./.github/workflows/notify-release.yml
-    with:
-      tag_name: ${{ github.event.release.tag_name }}
-      release_url: ${{ github.event.release.html_url }}
-    secrets: inherit
