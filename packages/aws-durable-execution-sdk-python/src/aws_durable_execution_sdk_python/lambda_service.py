@@ -914,7 +914,14 @@ class Operation:
                 "InputPayload": self.execution_details.input_payload
             }
         if self.context_details:
-            result["ContextDetails"] = {"Result": self.context_details.result}
+            context_dict: MutableMapping[str, Any] = {
+                "Result": self.context_details.result,
+            }
+            if self.context_details.error:
+                context_dict["Error"] = self.context_details.error.to_dict()
+            if self.context_details.replay_children:
+                context_dict["ReplayChildren"] = self.context_details.replay_children
+            result["ContextDetails"] = context_dict
         if self.step_details:
             step_dict: MutableMapping[str, Any] = {"Attempt": self.step_details.attempt}
             if self.step_details.next_attempt_timestamp:
