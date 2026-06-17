@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import os
 import re
@@ -11,6 +12,12 @@ from opentelemetry.sdk.trace import IdGenerator, RandomIdGenerator
 
 
 HASHED_ID_PATTERN = re.compile(r"^[0-9a-f]{16}$")
+
+# Scoping the pending span ID to the execution context ensures concurrent
+# operations cannot consume each other's deterministic span ID.
+_next_span_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "next_span_id", default=None
+)
 
 
 def _parse_xray_root_trace_id(trace_header: str | None) -> str | None:
@@ -83,7 +90,6 @@ class DeterministicIdGenerator(RandomIdGenerator):
     """
 
     def __init__(self, fallback_id_generator: IdGenerator | None = None) -> None:
-        self._next_span_id: int | None = None
         self._execution_trace_id: int | None = None
         self._fallback_id_generator = fallback_id_generator or RandomIdGenerator()
 
@@ -92,7 +98,7 @@ class DeterministicIdGenerator(RandomIdGenerator):
 
         After one span is created, it resets to random.
         """
-        self._next_span_id = span_id
+        _next_span_id.set(span_id)
 
     def set_trace_id(
         self, execution_arn: str, start_timestamp: datetime | None
@@ -113,5 +119,8 @@ class DeterministicIdGenerator(RandomIdGenerator):
 
     def generate_span_id(self) -> int:
         """Generate a 64-bit span ID."""
-        span_id, self._next_span_id = self._next_span_id, None
+        span_id = _next_span_id.get()
+        # Consume once: the deterministic ID applies only to the next span
+        # created in this context; subsequent spans fall back to random.
+        _next_span_id.set(None)
         return span_id or self._fallback_id_generator.generate_span_id()
