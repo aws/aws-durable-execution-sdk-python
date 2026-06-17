@@ -57,6 +57,7 @@ jobs:
       matrix:
         package:
           - name: aws-durable-execution-sdk-python-otel
+          - url: https://pypi.org/p/aws-durable-execution-sdk-python-otel
     permissions:
       id-token: write
 
