@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from aws_durable_execution_sdk_python.lambda_service import OperationType
 from aws_durable_execution_sdk_python.plugin import (
@@ -39,11 +39,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     DeterministicIdGenerator,
     operation_id_to_span_id,
 )
-from aws_durable_execution_sdk_python_otel.logger import OtelEnrichedLogger
-
-
-if TYPE_CHECKING:
-    from aws_durable_execution_sdk_python.types import LoggerInterface
+from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
 
 
 logger = logging.getLogger(__name__)
@@ -93,6 +89,10 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         The provided tracer provider is configured with this plugin's
         deterministic ID generator and sampling strategy so spans for a durable
         execution share stable trace and logical operation identifiers.
+
+        When enrich_logger is enabled (default), the plugin installs a logging
+        filter on the root logger at invocation start that stamps the active
+        OTel trace context onto every emitted log record.
         """
         self._enrich_logger = enrich_logger
         self._context_extractor: ContextExtractor = (
@@ -116,24 +116,6 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         # Maps operation ID (None for root) to the active span.
         self._operation_spans: dict[str | None, Span] = {}
         self._operation_spans_lock = threading.RLock()
-
-    def wrap_logger(self, logger: LoggerInterface) -> LoggerInterface | None:
-        """Wrap the execution logger to inject OTel trace context.
-
-        When enrich_logger is enabled (default), returns an OtelEnrichedLogger
-        that adds trace_id, span_id, and trace_sampled to every log message.
-        Idempotent: returns None if the logger is already an OtelEnrichedLogger.
-
-        Args:
-            logger: The current logger interface from the execution context.
-
-        Returns:
-            An OtelEnrichedLogger wrapping the input, or None if disabled or
-            already wrapped.
-        """
-        if not self._enrich_logger or isinstance(logger, OtelEnrichedLogger):
-            return None
-        return OtelEnrichedLogger(inner=logger, plugin=self)
 
     def _set_span(self, operation_id: str | None, span: Span) -> None:
         """Register the active span for an operation ID."""
@@ -225,8 +207,8 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         Returns:
             The started OpenTelemetry span.
         """
-        logger.info(
-            "starting a span: operation_id=%s, name=%s, parent_span=%s",
+        logger.debug(
+            "Starting OTel span: operation_id=%s, name=%s, parent_span=%s",
             operation_id,
             name,
             parent_span,
@@ -269,7 +251,7 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
             )
             self._operation_spans[operation_id] = span
 
-        logger.info("started a span: %s", span)
+        logger.debug("Started OTel span: %s", span)
         return span
 
     def _end_span(
@@ -283,24 +265,30 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
             end_timestamp: Optional durable end timestamp to use as the span end
                 time. When omitted, OpenTelemetry uses the current time.
         """
-        logger.info("ending a span for operation: %s", operation_id)
+        logger.debug("Ending OTel span: operation_id=%s", operation_id)
         with self._operation_spans_lock:
             span = self._operation_spans.pop(operation_id, None)
         if span:
             # the span is not going to be populated if it has the same end_time and start_time
             end_time = _to_otel_timestamp(end_timestamp) if end_timestamp else None
             span.end(end_time=end_time)
-            logger.info("ended otel span: %s", span)
+            logger.debug("Ended OTel span: %s", span)
 
     # ------------------------------------------------------------------
     # Plugin lifecycle callbacks
     # ------------------------------------------------------------------
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         """Called at the start of each invocation. Creates the invocation span."""
-        logger.info("Invocation started: %s", info)
+        logger.debug("Durable invocation started: %s", info)
         self._execution_arn = info.execution_arn or ""
         self._extracted_context = self._context_extractor(info)
         self._id_generator.set_trace_id(self._execution_arn, info.start_time)
+
+        if self._enrich_logger:
+            # Install (idempotently) the root-logger filter so every log record
+            # emitted during this invocation is stamped with the active span
+            # context. Safe to call on every invocation, including warm reuse.
+            install_log_filter(self)
 
         self._start_span(
             operation_id=None,
@@ -310,7 +298,7 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         """Called at the end of each invocation. Ends the invocation span and flushes."""
-        logger.info(f"Invocation ended: {info}")
+        logger.debug("Durable invocation ended: %s", info)
         end_time = info.end_time
         # end all pending spans
         with self._operation_spans_lock:
@@ -334,7 +322,7 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
 
     def on_operation_start(self, info: OperationStartInfo) -> None:
         """Called when an operation begins. Creates a span for the operation."""
-        logger.info(f"Operation started: {info}")
+        logger.debug("Durable operation started: %s", info)
         if info.operation_type in [OperationType.CONTEXT, OperationType.STEP]:
             # Context and Step operations are tracked using on_user_function_start
             return
@@ -358,7 +346,7 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         continuation span is created and linked to the deterministic logical
         operation span before being ended.
         """
-        logger.info(f"Operation ended: {info}")
+        logger.debug("Durable operation ended: %s", info)
         if info.operation_type in [OperationType.CONTEXT, OperationType.STEP]:
             # Context and Step operations are tracked using on_user_function_end
             return
@@ -401,7 +389,7 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         Args:
             info: Information about the operation attempt.
         """
-        logger.info("User function started: %s", info)
+        logger.debug("Durable user function started: %s", info)
         # Context and Step operations are tracked using on_user_function_start
         if info.operation_type not in [OperationType.CONTEXT, OperationType.STEP]:
             raise RuntimeError(
@@ -429,7 +417,7 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         Args:
             info: Information about the operation attempt.
         """
-        logger.info("User function ended: %s", info)
+        logger.debug("Durable user function ended: %s", info)
         if info.operation_type not in [OperationType.CONTEXT, OperationType.STEP]:
             raise RuntimeError(
                 "on_user_function_end should only be called for CONTEXT and STEP operations"

@@ -273,11 +273,6 @@ def durable_execution(
             state=execution_state, lambda_context=context
         )
 
-        # Trigger plugin logger wrapping on the root context's default logger
-        # (e.g., OTel trace context injection). Child contexts inherit the
-        # already-wrapped logger and do not re-wrap.
-        durable_context.set_logger(durable_context.logger.get_logger())
-
         # Use ThreadPoolExecutor for concurrent execution of user code and background checkpoint processing
         with (
             ThreadPoolExecutor(

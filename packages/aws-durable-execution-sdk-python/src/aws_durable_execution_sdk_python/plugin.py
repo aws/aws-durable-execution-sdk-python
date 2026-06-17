@@ -20,7 +20,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     OperationUpdate,
 )
-from aws_durable_execution_sdk_python.types import LambdaContext, LoggerInterface
+from aws_durable_execution_sdk_python.types import LambdaContext
 
 
 logger = logging.getLogger(__name__)
@@ -192,51 +192,12 @@ class DurableInstrumentationPlugin:
         """
         pass
 
-    def wrap_logger(self, logger: LoggerInterface) -> LoggerInterface | None:
-        """Optionally wrap the execution logger to enrich log output.
-
-        Called once per invocation after the root DurableContext is created.
-        Return a wrapped logger to add plugin-specific fields to log output,
-        or None to leave the logger unchanged.
-
-        Args:
-            logger: The current logger interface used by the execution context.
-
-        Returns:
-            A wrapped LoggerInterface, or None to keep the existing logger.
-        """
-        pass
-
 
 class PluginExecutor:
     def __init__(self, plugins: list[DurableInstrumentationPlugin] | None):
         self._plugins = plugins or []
         self._executor: ThreadPoolExecutor | None = None
         self._invocation_status: InvocationStartInfo | None = None
-
-    def wrap_logger(self, current_logger: LoggerInterface) -> LoggerInterface:
-        """Chain all plugin logger wrappers, returning the final wrapped logger.
-
-        Each plugin's wrap_logger is called in order. If a plugin returns a
-        wrapped logger, it becomes the input for the next plugin.
-
-        Args:
-            current_logger: The current logger interface from the DurableContext.
-
-        Returns:
-            The final logger after all plugins have had a chance to wrap it.
-        """
-        for plugin in self._plugins:
-            try:
-                wrapped = plugin.wrap_logger(current_logger)
-                if wrapped is not None:
-                    current_logger = wrapped
-            except Exception:
-                logger.exception(
-                    "Plugin %s wrap_logger exception ignored",
-                    plugin.__class__.__name__,
-                )
-        return current_logger
 
     @contextlib.contextmanager
     def run(self):
