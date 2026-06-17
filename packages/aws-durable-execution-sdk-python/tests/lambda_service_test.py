@@ -2843,3 +2843,42 @@ def test_timestamp_converter_millisecond_boundaries():
 
 
 # endregion
+
+
+def test_operation_to_dict_serializes_context_error_and_replay_children():
+    """Operation.to_dict includes Error and ReplayChildren in ContextDetails."""
+    op = Operation(
+        operation_id="ctx-1",
+        operation_type=OperationType.CONTEXT,
+        status=OperationStatus.FAILED,
+        context_details=ContextDetails(
+            replay_children=True,
+            result=None,
+            error=ErrorObject(
+                message="boom",
+                type="ChildContextError",
+                data=None,
+                stack_trace=None,
+            ),
+        ),
+    )
+
+    context = op.to_dict()["ContextDetails"]
+
+    assert context["Error"]["ErrorType"] == "ChildContextError"
+    assert context["Error"]["ErrorMessage"] == "boom"
+    assert context["ReplayChildren"] is True
+
+
+def test_operation_to_dict_omits_absent_context_error_and_replay_children():
+    """Operation.to_dict omits Error and ReplayChildren when they are not set."""
+    op = Operation(
+        operation_id="ctx-2",
+        operation_type=OperationType.CONTEXT,
+        status=OperationStatus.SUCCEEDED,
+        context_details=ContextDetails(result='"hello"'),
+    )
+
+    context = op.to_dict()["ContextDetails"]
+
+    assert context == {"Result": '"hello"'}
