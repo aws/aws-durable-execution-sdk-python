@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
@@ -588,6 +589,17 @@ class JitterStrategy(StrEnum):
             case _:  # default is FULL
                 # Full jitter: random(0, delay)
                 return random.random() * delay  # noqa: S311
+
+    def finalize_delay(self, base_delay: float) -> int:
+        """Apply jitter, round up, and clamp to a minimum of 1 second.
+
+        Args:
+            base_delay: The base delay value before jitter is applied
+
+        Returns:
+            The final delay in whole seconds, at least 1
+        """
+        return max(1, math.ceil(self.apply_jitter(base_delay)))
 
 
 # endregion Jitter
