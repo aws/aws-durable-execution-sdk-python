@@ -5,22 +5,23 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 import pytest
-from aws_durable_execution_sdk_python.lambda_service import (
-    ErrorObject,
-    OperationPayload,
-)
-from aws_durable_execution_sdk_python.serdes import ExtendedTypeSerDes
-
 from aws_durable_execution_sdk_python_testing.runner import (
     DurableFunctionCloudTestRunner,
     DurableFunctionTestResult,
     DurableFunctionTestRunner,
 )
+
+from aws_durable_execution_sdk_python.lambda_service import (
+    ErrorObject,
+    OperationPayload,
+)
+from aws_durable_execution_sdk_python.serdes import ExtendedTypeSerDes
 
 
 # Add examples/src to Python path for imports
@@ -266,3 +267,109 @@ def _get_deployed_function_name(
     pytest.skip(
         f"Test '{lambda_function_name}' doesn't match LAMBDA_FUNCTION_TEST_NAME '{env_function_name}'"
     )
+
+
+# X-Ray ingestion is eventually consistent; give the backend time to receive and
+# index spans before querying, then retry a few times.
+_XRAY_QUERY_RETRIES = 3
+_XRAY_RETRY_DELAY_SECONDS = 10
+
+
+class XRaySpanFetcher:
+    """Encapsulates all AWS X-Ray interaction for span-validation tests.
+
+    Wraps a boto3 X-Ray client and exposes a single high-level operation that
+    queries trace summaries in a time window (with retries for eventual
+    consistency), batch-fetches the full traces, and locates the trace whose
+    segment documents reference a marker span name.
+    """
+
+    def __init__(self, client: Any):
+        """Initialize with a boto3 X-Ray client."""
+        self._client = client
+
+    def _query_trace_summaries(
+        self, start_time: datetime, end_time: datetime
+    ) -> list[dict]:
+        """Query trace summaries in a window, retrying for consistency."""
+        import time
+
+        for attempt in range(_XRAY_QUERY_RETRIES):
+            response = self._client.get_trace_summaries(
+                StartTime=start_time,
+                EndTime=end_time,
+                TimeRangeType="Event",
+                Sampling=False,
+            )
+            summaries = response.get("TraceSummaries", [])
+            if summaries:
+                return summaries
+
+            logger.info(
+                "X-Ray query returned 0 traces, retrying in %ss (attempt %d/%d)",
+                _XRAY_RETRY_DELAY_SECONDS,
+                attempt + 1,
+                _XRAY_QUERY_RETRIES,
+            )
+            time.sleep(_XRAY_RETRY_DELAY_SECONDS)
+        return []
+
+    def fetch_trace_with_span(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        marker_span: str,
+    ) -> tuple[str, str]:
+        """Find the trace containing ``marker_span`` and return its segment text.
+
+        Queries trace summaries in the window, then batch-fetches full traces
+        (X-Ray caps BatchGetTraces at 5 trace IDs per call) and locates the
+        trace whose segment documents reference the marker span name.
+
+        Args:
+            start_time: Start of the X-Ray query window.
+            end_time: End of the X-Ray query window.
+            marker_span: A span name expected to appear in the target trace.
+
+        Returns:
+            A tuple of (trace_id, concatenated segment-document JSON text).
+        """
+        summaries = self._query_trace_summaries(start_time, end_time)
+        assert summaries, "Expected at least one trace in X-Ray after execution"
+
+        trace_ids = [s["Id"] for s in summaries]
+
+        for i in range(0, len(trace_ids), 5):
+            batch = trace_ids[i : i + 5]
+            result = self._client.batch_get_traces(TraceIds=batch)
+            for trace in result.get("Traces", []):
+                documents = [
+                    seg.get("Document", "") for seg in trace.get("Segments", [])
+                ]
+                segment_text = "\n".join(documents)
+                if marker_span in segment_text:
+                    return trace["Id"], segment_text
+
+        pytest.fail(
+            f"Did not find a trace containing span '{marker_span}' in the time "
+            f"window across {len(trace_ids)} trace(s)"
+        )
+
+
+@pytest.fixture
+def xray_spans(request):
+    """Provide an XRaySpanFetcher for cloud-mode span validation tests.
+
+    The underlying boto3 X-Ray client is created in the same region as the
+    cloud runner (AWS_REGION, default us-west-2). In local mode there is no
+    X-Ray backend, so the fixture skips the test, mirroring the cloud-only
+    gating of the durable_runner cloud path.
+    """
+    runner_mode: str = request.config.getoption("--runner-mode")
+    if runner_mode != RunnerMode.CLOUD:
+        pytest.skip("X-Ray span validation only runs in cloud mode")
+
+    import boto3
+
+    region = os.environ.get("AWS_REGION", "us-west-2")
+    return XRaySpanFetcher(boto3.client("xray", region_name=region))
