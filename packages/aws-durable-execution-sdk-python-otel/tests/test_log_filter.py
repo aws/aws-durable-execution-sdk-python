@@ -200,14 +200,13 @@ def test_install_log_filter_returns_none_without_handlers():
     assert install_log_filter(plugin, target_logger=target) is None
 
 
-def test_on_invocation_start_installs_filter_on_root_logger():
-    """The plugin installs the filter on the root logger at invocation start."""
-    plugin, _ = _create_plugin(enrich_logger=True)
+def test_plugin_installs_filter_on_root_logger_at_construction():
+    """The plugin installs the filter on the root logger when constructed."""
     root = logging.getLogger()
     handler = logging.NullHandler()
     root.addHandler(handler)
     try:
-        plugin.on_invocation_start(_invocation_start_info())
+        _create_plugin(enrich_logger=True)
 
         assert any(isinstance(f, OtelContextLogFilter) for f in handler.filters)
     finally:
@@ -216,14 +215,13 @@ def test_on_invocation_start_installs_filter_on_root_logger():
         root.removeHandler(handler)
 
 
-def test_on_invocation_start_skips_filter_when_disabled():
+def test_plugin_skips_filter_when_disabled():
     """No filter is installed when enrich_logger is disabled."""
-    plugin, _ = _create_plugin(enrich_logger=False)
     root = logging.getLogger()
     handler = logging.NullHandler()
     root.addHandler(handler)
     try:
-        plugin.on_invocation_start(_invocation_start_info())
+        _create_plugin(enrich_logger=False)
 
         assert not any(isinstance(f, OtelContextLogFilter) for f in handler.filters)
     finally:
