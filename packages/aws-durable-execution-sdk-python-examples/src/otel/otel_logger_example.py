@@ -1,10 +1,12 @@
 """Demonstrates OTel-enriched logging in a durable execution.
 
-The DurableExecutionOtelPlugin wraps the execution logger (enrich_logger=True
-by default) so every log line emitted through context.logger / step_context.logger
-is automatically enriched with the active OpenTelemetry trace context
-(otel.trace_id, otel.span_id, otel.trace_sampled). This lets logs correlate to
-the spans the plugin emits without any user code changes.
+The DurableExecutionOtelPlugin installs a logging filter on the root logger
+(enrich_logger=True by default) when the plugin is constructed. The filter
+stamps the active OpenTelemetry trace context (otel_trace_id, otel_span_id,
+otel_trace_sampled) onto every log record that flows through the root handler.
+This includes logs emitted via context.logger / step_context.logger as well as
+direct logging.getLogger() calls and third-party library logs, so logs
+correlate to the spans the plugin emits without any user code changes.
 
 Logs emitted:
 - at the top level correlate to the invocation span

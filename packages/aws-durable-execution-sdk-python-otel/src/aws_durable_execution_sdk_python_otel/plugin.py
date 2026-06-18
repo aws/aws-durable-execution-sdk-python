@@ -117,6 +117,13 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._operation_spans: dict[str | None, Span] = {}
         self._operation_spans_lock = threading.RLock()
 
+        if self._enrich_logger:
+            # Install the root-logger filter so every log record is stamped with
+            # the active span context. The Lambda runtime attaches its root
+            # handler before the handler module is imported (and thus before the
+            # plugin is constructed), so the handlers are available here.
+            install_log_filter(self)
+
     def _set_span(self, operation_id: str | None, span: Span) -> None:
         """Register the active span for an operation ID."""
         with self._operation_spans_lock:
@@ -283,12 +290,6 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._execution_arn = info.execution_arn or ""
         self._extracted_context = self._context_extractor(info)
         self._id_generator.set_trace_id(self._execution_arn, info.start_time)
-
-        if self._enrich_logger:
-            # Install (idempotently) the root-logger filter so every log record
-            # emitted during this invocation is stamped with the active span
-            # context. Safe to call on every invocation, including warm reuse.
-            install_log_filter(self)
 
         self._start_span(
             operation_id=None,
