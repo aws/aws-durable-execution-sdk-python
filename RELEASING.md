@@ -41,14 +41,14 @@ The tag should be the version of the package being bumped, prepended with a desc
 
 - **SDK only:** `sdk-v<version>` (e.g., `sdk-v1.6.0`)
 - **OTel only:** `otel-v<version>` (e.g., `otel-v0.3.0`)
-- **Both packages in a single release:** comma-separate the sub-tags (e.g., `sdk-1.6.0,otel-0.3.0`)
+- **Both packages in a single release:** comma-separate the sub-tags (e.g., `sdk-v1.6.0,otel-v0.3.0`)
 
 Examples:
 
 ```
-sdk-1.6.0
-otel-0.3.0
-sdk-1.6.0,otel-0.3.0
+sdk-v1.6.0
+otel-v0.3.0
+sdk-v1.6.0,otel-v0.3.0
 ```
 
 If additional packages are added to the monorepo in the future, follow the same pattern: choose a short descriptive prefix for the package and use `<prefix>-<version>`.
