@@ -222,17 +222,6 @@
       "path": "./src/parallel/parallel.py"
     },
     {
-      "name": "Parallel Operations",
-      "description": "Executing multiple durable operations in parallel",
-      "handler": "parallel.handler",
-      "integration": true,
-      "durableConfig": {
-        "RetentionPeriodInDays": 7,
-        "ExecutionTimeout": 300
-      },
-      "path": "./src/parallel/parallel.py"
-    },
-    {
       "name": "Map Operations",
       "description": "Processing collections using map-like durable operations",
       "handler": "map_operations.handler",
