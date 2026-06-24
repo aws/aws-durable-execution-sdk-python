@@ -2515,4 +2515,85 @@ def test_replay_aware_stays_replaying_between_two_completed_ops():
     assert ctx.is_replaying() is True
 
 
+def test_replay_aware_user_code_flips_before_retrying_op():
+    """A retrying/re-executing user-code op flips to NEW BEFORE the body runs.
+
+    A step whose checkpoint is non-terminal (e.g. PENDING/STARTED from a retry)
+    is about to re-run the user function, which is real new work. With
+    executes_user_code=True the context flips to NEW before the body so the
+    step's logs (and future plugin state) reflect an executing attempt.
+    """
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    next_id = ctx._peek_next_operation_id()  # noqa: SLF001
+    # STARTED == non-terminal: a retry attempt about to re-execute.
+    ctx.state._operations[next_id] = _step_op(  # noqa: SLF001
+        next_id, OperationStatus.STARTED
+    )
+
+    inside_status: list[bool] = []
+    with ctx._replay_aware(executes_user_code=True):  # noqa: SLF001
+        ctx._create_step_id()  # noqa: SLF001
+        inside_status.append(ctx.is_replaying())
+
+    # Flipped BEFORE the body (contrast with the non-user-code resume point,
+    # which stays replaying through the op).
+    assert inside_status == [False]
+    assert ctx.is_replaying() is False
+
+
+def test_replay_aware_user_code_stays_replaying_for_completed_op():
+    """A cached SUCCEEDED user-code op does not run its body, so stays replaying."""
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    # Wrapped op completed; a following op also completed so nothing flips.
+    first_id = ctx._create_step_id_for_logical_step(1)  # noqa: SLF001
+    second_id = ctx._create_step_id_for_logical_step(2)  # noqa: SLF001
+    ctx.state._operations[first_id] = _step_op(  # noqa: SLF001
+        first_id, OperationStatus.SUCCEEDED
+    )
+    ctx.state._operations[second_id] = _step_op(  # noqa: SLF001
+        second_id, OperationStatus.SUCCEEDED
+    )
+
+    with ctx._replay_aware(executes_user_code=True):  # noqa: SLF001
+        ctx._create_step_id()  # noqa: SLF001
+        assert ctx.is_replaying() is True
+
+    assert ctx.is_replaying() is True
+
+
+def test_replay_aware_non_user_code_stays_replaying_through_resume_point():
+    """A non-user-code resume point (e.g. wait) stays replaying through the op.
+
+    Contrast with the user-code case: a non-terminal wait is a pure resume
+    point with no user body, so logs emitted by the resuming op stay
+    de-duplicated and the flip is deferred until after.
+    """
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    next_id = ctx._peek_next_operation_id()  # noqa: SLF001
+    ctx.state._operations[next_id] = _step_op(  # noqa: SLF001
+        next_id, OperationStatus.STARTED
+    )
+
+    inside_status: list[bool] = []
+    with ctx._replay_aware():  # noqa: SLF001 - executes_user_code defaults False
+        ctx._create_step_id()  # noqa: SLF001
+        inside_status.append(ctx.is_replaying())
+
+    # Stayed replaying THROUGH the op, flipped after.
+    assert inside_status == [True]
+    assert ctx.is_replaying() is False
+
+
 # endregion per-context replay status
