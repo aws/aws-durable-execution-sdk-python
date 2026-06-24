@@ -2,23 +2,16 @@
 
 from typing import Any
 
-from opentelemetry import trace
+from aws_durable_execution_sdk_python_otel import DurableExecutionOtelPlugin
 
 from aws_durable_execution_sdk_python import StepContext
-from aws_durable_execution_sdk_python.config import Duration, StepConfig, StepSemantics
+from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
     durable_step,
     durable_with_child_context,
 )
 from aws_durable_execution_sdk_python.execution import durable_execution
-
-from aws_durable_execution_sdk_python_otel import DurableExecutionOtelPlugin
-
-
-# use default provider
-tracer_provider = trace.get_tracer_provider()
-otel = DurableExecutionOtelPlugin(tracer_provider)
 
 
 @durable_step
@@ -39,7 +32,7 @@ def add_numbers_in_child(child_context: DurableContext, a: int, b: int):
     return result
 
 
-@durable_execution(plugins=[otel])
+@durable_execution(plugins=[DurableExecutionOtelPlugin()])
 def handler(_event: Any, context: DurableContext) -> int:
     result = 0
     for i in range(3):

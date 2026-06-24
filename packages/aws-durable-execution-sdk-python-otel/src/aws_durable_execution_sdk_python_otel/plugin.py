@@ -68,6 +68,8 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
 
     Args:
         trace_provider: OpenTelemetry tracer provider used to create spans.
+            Optional; when omitted, the globally configured tracer provider
+            (``opentelemetry.trace.get_tracer_provider()``) is used.
         context_extractor: Optional extractor for upstream context. Defaults to
             AWS X-Ray header extraction.
         sampling_rate: Ratio used by ``TraceIdRatioBased`` sampling.
@@ -78,7 +80,7 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
 
     def __init__(
         self,
-        trace_provider: SdkTracerProvider,
+        trace_provider: SdkTracerProvider | None = None,
         context_extractor: ContextExtractor | None = None,
         sampling_rate: float = 1.0,
         instrument_name: str = DEFAULT_INSTRUMENT_NAME,
@@ -86,9 +88,10 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
     ) -> None:
         """Initialize the plugin with an OpenTelemetry tracer provider.
 
-        The provided tracer provider is configured with this plugin's
-        deterministic ID generator and sampling strategy so spans for a durable
-        execution share stable trace and logical operation identifiers.
+        The tracer provider is configured with this plugin's deterministic ID
+        generator and sampling strategy so spans for a durable execution share
+        stable trace and logical operation identifiers. When no provider is
+        supplied, the globally configured tracer provider is used.
 
         When enrich_logger is enabled (default), the plugin installs a logging
         filter on the root logger at invocation start that stamps the active
@@ -99,15 +102,29 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
             context_extractor or xray_context_extractor
         )
 
-        self._provider = trace_provider
-        # A ProxyTracerProvider (the API default from trace.get_tracer_provider()
-        # before an SDK provider is configured) has no id_generator; fall back to
-        # None so DeterministicIdGenerator uses its own default generator.
+        self._provider = trace_provider or trace.get_tracer_provider()
         self._id_generator: DeterministicIdGenerator = DeterministicIdGenerator(
             fallback_id_generator=getattr(self._provider, "id_generator", None)
         )
-        self._provider.id_generator = self._id_generator
-        self._provider.sampler = TraceIdRatioBased(sampling_rate)
+        # Deterministic trace stitching requires the SDK TracerProvider, which
+        # exposes id_generator/sampler. The API's default ProxyTracerProvider
+        # (returned before an SDK provider is configured) does not. Rather than
+        # fail the invocation over an observability concern, warn and continue:
+        # the proxy's tracer is effectively a no-op (and auto-delegates if an SDK
+        # provider is configured later). In a Lambda OTel/ADOT deployment the
+        # layer configures a real SDK provider before the handler imports.
+        if isinstance(self._provider, SdkTracerProvider):
+            self._provider.id_generator = self._id_generator
+            self._provider.sampler = TraceIdRatioBased(sampling_rate)
+        else:
+            logger.warning(
+                "DurableExecutionOtelPlugin expected an SDK TracerProvider "
+                "(opentelemetry.sdk.trace.TracerProvider) but got %s. Spans will "
+                "not use deterministic IDs or the configured sampling rate. "
+                "Ensure the OpenTelemetry SDK is configured (e.g. via the ADOT "
+                "Lambda layer) or pass an explicit trace_provider.",
+                type(self._provider).__name__,
+            )
         self._tracer: Tracer = self._provider.get_tracer(instrument_name)
 
         # per invocation status:

@@ -17,9 +17,6 @@ Logs emitted:
 from typing import Any
 
 from aws_durable_execution_sdk_python_otel import DurableExecutionOtelPlugin
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 
 from aws_durable_execution_sdk_python import StepContext
 from aws_durable_execution_sdk_python.context import (
@@ -28,10 +25,6 @@ from aws_durable_execution_sdk_python.context import (
     durable_with_child_context,
 )
 from aws_durable_execution_sdk_python.execution import durable_execution
-
-
-tracer_provider = trace.get_tracer_provider()
-otel = DurableExecutionOtelPlugin(tracer_provider)
 
 
 @durable_step
@@ -51,7 +44,7 @@ def greet_in_child(child_context: DurableContext, name: str) -> str:
     return result
 
 
-@durable_execution(plugins=[otel])
+@durable_execution(plugins=[DurableExecutionOtelPlugin()])
 def handler(_event: Any, context: DurableContext) -> str:
     # Logged at the top level: enriched with the invocation span_id.
     context.logger.info("Workflow started")
