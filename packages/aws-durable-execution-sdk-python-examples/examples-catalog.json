@@ -292,6 +292,21 @@
       "path": "./src/logger_example/logger_example.py"
     },
     {
+      "name": "Replay Logging",
+      "description": "Demonstrating replay-aware logger de-duplication across a wait/replay boundary",
+      "handler": "replay_logging.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "loggingConfig": {
+        "ApplicationLogLevel": "INFO",
+        "LogFormat": "JSON"
+      },
+      "path": "./src/logger_example/replay_logging.py"
+    },
+    {
       "name": "Steps with Retry",
       "description": "Multiple steps with retry logic in a polling pattern",
       "handler": "steps_with_retry.handler",
