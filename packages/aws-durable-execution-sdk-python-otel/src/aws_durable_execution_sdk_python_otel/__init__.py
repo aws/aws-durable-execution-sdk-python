@@ -14,7 +14,7 @@ from aws_durable_execution_sdk_python_otel.log_filter import (
     install_log_filter,
 )
 from aws_durable_execution_sdk_python_otel.plugin import (
-    DurableExecutionOtelPlugin,
+    OtelPlugin,
 )
 
 
@@ -22,8 +22,8 @@ __all__ = [
     "__version__",
     "ContextExtractor",
     "DeterministicIdGenerator",
-    "DurableExecutionOtelPlugin",
     "OtelContextLogFilter",
+    "OtelPlugin",
     "install_log_filter",
     "w3c_client_context_extractor",
     "xray_context_extractor",

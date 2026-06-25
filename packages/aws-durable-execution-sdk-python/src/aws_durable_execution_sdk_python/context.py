@@ -466,48 +466,28 @@ class DurableContext(DurableContextProtocol):
             self._step_counter.get_current() + 1
         )
 
-    def _next_operation_is_terminal_checkpoint(self) -> bool:
-        """True if this context's next operation already completed in a prior invocation."""
-        result: CheckpointedResult = self.state.get_checkpoint_result(
-            self._peek_next_operation_id()
-        )
-
-        return result.is_succeeded() or result.is_failed()
+    def _peek_next_checkpoint(self) -> CheckpointedResult:
+        """Return the checkpoint for this context's next operation, without consuming it."""
+        return self.state.get_checkpoint_result(self._peek_next_operation_id())
 
     def _next_operation_exists(self) -> bool:
         """True if a checkpoint exists for this context's next operation."""
-        return self.state.get_checkpoint_result(
-            self._peek_next_operation_id()
-        ).is_existent()
+        return self._peek_next_checkpoint().is_existent()
 
     @contextmanager
-    def _replay_aware(self, *, executes_user_code: bool = False):
+    def _replay_aware(self):
         """Wrap a single operation with replay-boundary detection.
 
-        Args:
-            executes_user_code: True for operations that invoke a user-provided
-                function on (re-)entry — `step` and `wait_for_condition`'s check
-                (and, transitively, `wait_for_callback`'s submitter, which runs
-                as a step). When such an operation actually runs the user
-                function it is, by definition, doing new work (a cached
-                SUCCEEDED operation returns its checkpoint without invoking the
-                function). So a non-terminal user-code operation flips the
-                context to NEW *before* its body runs, including on retries. For
-                all other operations (default False), a non-terminal next
-                operation is a pure resume point with no user body, so we keep
-                replay status through it and flip afterwards.
+        The operation kind is inferred from its own checkpoint (when one
+        exists), so no per-call-site flag is needed.
 
         The boundary has these parts:
 
         - Existence flip (before the op): if we are replaying and the next
           operation has no checkpoint at all, it is brand-new code, so flip to
           NEW immediately so the operation and its logs count as new.
-        - User-code flip (before the op): if `executes_user_code` and the next
-          operation is non-terminal (brand-new OR retrying/re-executing), the
-          user function is about to run, so flip to NEW before it.
-        - Deferred status flip (after the op): for non-user-code operations, if
-          we are replaying and the next operation exists but is NOT terminal,
-          that operation is the resume point. We keep replay status through the
+        - Deferred status flip (after the op): a non-terminal next operation is a pure
+          resume point with no user body. We keep replay status through the
           operation and flip to NEW afterwards, so the resuming operation's own
           logs stay de-duplicated but subsequent code counts as new.
         - Post-op existence flip (after the op): if we are still replaying once
@@ -517,26 +497,32 @@ class DurableContext(DurableContextProtocol):
         was_replaying: bool = self.is_replaying()
         # Only peek when replaying; avoids unnecessary checkpoint lookups (and
         # any step-id side effects) on the common non-replay path.
-        next_exists: bool = was_replaying and self._next_operation_exists()
-        next_terminal: bool = (
-            was_replaying and self._next_operation_is_terminal_checkpoint()
+        next_checkpoint: CheckpointedResult | None = (
+            self._peek_next_checkpoint() if was_replaying else None
+        )
+        next_exists: bool = (
+            next_checkpoint.is_existent() if next_checkpoint is not None else False
+        )
+        next_terminal: bool = next_checkpoint is not None and (
+            next_checkpoint.is_succeeded() or next_checkpoint.is_failed()
         )
 
-        # Deferred flip applies only to non-user-code resume points. For
-        # user-code ops we flip before instead, so don't defer.
+        next_is_step: bool = (
+            next_checkpoint is not None
+            and next_checkpoint.operation is not None
+            and next_checkpoint.operation.operation_type is OperationType.STEP
+        )
+
+        # Deferred flip applies only to non-step resume points. For step ops we
+        # flip before instead, so don't defer.
         flip_after: bool = (
-            was_replaying
-            and not executes_user_code
-            and next_exists
-            and not next_terminal
+            was_replaying and next_exists and not next_terminal and not next_is_step
         )
         # Before-the-op flips:
         # - brand-new next op (no checkpoint): always flip to NEW.
-        # - user-code op that is non-terminal (brand-new or retrying): the user
-        #   function is about to run real work, so flip to NEW before it.
-        if was_replaying and (
-            not next_exists or (executes_user_code and not next_terminal)
-        ):
+        # - non-terminal STEP-type op (brand-new or retrying): the user function
+        #   is about to run real work, so flip to NEW before it.
+        if was_replaying and (not next_exists or (next_is_step and not next_terminal)):
             self._set_replay_status_new()
         try:
             yield
@@ -777,7 +763,7 @@ class DurableContext(DurableContextProtocol):
         logger.debug("Step name: %s", step_name)
         if not config:
             config = StepConfig()
-        with self._replay_aware(executes_user_code=True):
+        with self._replay_aware():
             operation_id = self._create_step_id()
             executor: StepOperationExecutor[T] = StepOperationExecutor(
                 func=func,
@@ -860,7 +846,7 @@ class DurableContext(DurableContextProtocol):
             msg = "`config` is required for wait_for_condition"
             raise ValidationError(msg)
 
-        with self._replay_aware(executes_user_code=True):
+        with self._replay_aware():
             operation_id = self._create_step_id()
             executor: WaitForConditionOperationExecutor[T] = (
                 WaitForConditionOperationExecutor(

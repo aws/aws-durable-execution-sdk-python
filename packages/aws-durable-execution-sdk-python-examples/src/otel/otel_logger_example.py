@@ -1,6 +1,6 @@
 """Demonstrates OTel-enriched logging in a durable execution.
 
-The DurableExecutionOtelPlugin installs a logging filter on the root logger
+The OtelPlugin installs a logging filter on the root logger
 (enrich_logger=True by default) when the plugin is constructed. The filter
 stamps the active OpenTelemetry trace context (otel_trace_id, otel_span_id,
 otel_trace_sampled) onto every log record that flows through the root handler.
@@ -16,10 +16,7 @@ Logs emitted:
 
 from typing import Any
 
-from aws_durable_execution_sdk_python_otel import DurableExecutionOtelPlugin
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+from aws_durable_execution_sdk_python_otel import OtelPlugin
 
 from aws_durable_execution_sdk_python import StepContext
 from aws_durable_execution_sdk_python.context import (
@@ -28,10 +25,6 @@ from aws_durable_execution_sdk_python.context import (
     durable_with_child_context,
 )
 from aws_durable_execution_sdk_python.execution import durable_execution
-
-
-tracer_provider = trace.get_tracer_provider()
-otel = DurableExecutionOtelPlugin(tracer_provider)
 
 
 @durable_step
@@ -51,7 +44,7 @@ def greet_in_child(child_context: DurableContext, name: str) -> str:
     return result
 
 
-@durable_execution(plugins=[otel])
+@durable_execution(plugins=[OtelPlugin()])
 def handler(_event: Any, context: DurableContext) -> str:
     # Logged at the top level: enriched with the invocation span_id.
     context.logger.info("Workflow started")
