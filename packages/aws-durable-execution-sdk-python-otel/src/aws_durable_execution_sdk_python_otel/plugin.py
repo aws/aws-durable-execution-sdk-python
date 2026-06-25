@@ -21,7 +21,6 @@ from aws_durable_execution_sdk_python.plugin import (
 from opentelemetry import context, trace
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
-from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
 from opentelemetry.trace import (
     Link,
     Span,
@@ -52,7 +51,7 @@ def _to_otel_timestamp(dt: datetime.datetime | None) -> int | None:
     return int(dt.timestamp() * 1_000_000_000)
 
 
-class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
+class OtelPlugin(DurableInstrumentationPlugin):
     """OpenTelemetry instrumentation plugin for durable executions.
 
     The plugin creates spans for Lambda invocations, durable operations, and
@@ -72,7 +71,6 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
             (``opentelemetry.trace.get_tracer_provider()``) is used.
         context_extractor: Optional extractor for upstream context. Defaults to
             AWS X-Ray header extraction.
-        sampling_rate: Ratio used by ``TraceIdRatioBased`` sampling.
         instrument_name: Instrumentation scope name registered with the tracer.
     """
 
@@ -82,16 +80,15 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         self,
         trace_provider: SdkTracerProvider | None = None,
         context_extractor: ContextExtractor | None = None,
-        sampling_rate: float = 1.0,
         instrument_name: str = DEFAULT_INSTRUMENT_NAME,
         enrich_logger: bool = True,
     ) -> None:
         """Initialize the plugin with an OpenTelemetry tracer provider.
 
         The tracer provider is configured with this plugin's deterministic ID
-        generator and sampling strategy so spans for a durable execution share
-        stable trace and logical operation identifiers. When no provider is
-        supplied, the globally configured tracer provider is used.
+        generator so spans for a durable execution share stable trace and
+        logical operation identifiers. When no provider is supplied, the
+        globally configured tracer provider is used.
 
         When enrich_logger is enabled (default), the plugin installs a logging
         filter on the root logger at invocation start that stamps the active
@@ -115,12 +112,11 @@ class DurableExecutionOtelPlugin(DurableInstrumentationPlugin):
         # layer configures a real SDK provider before the handler imports.
         if isinstance(self._provider, SdkTracerProvider):
             self._provider.id_generator = self._id_generator
-            self._provider.sampler = TraceIdRatioBased(sampling_rate)
         else:
             logger.warning(
-                "DurableExecutionOtelPlugin expected an SDK TracerProvider "
+                "OtelPlugin expected an SDK TracerProvider "
                 "(opentelemetry.sdk.trace.TracerProvider) but got %s. Spans will "
-                "not use deterministic IDs or the configured sampling rate. "
+                "not use deterministic IDs. "
                 "Ensure the OpenTelemetry SDK is configured (e.g. via the ADOT "
                 "Lambda layer) or pass an explicit trace_provider.",
                 type(self._provider).__name__,

@@ -21,7 +21,7 @@ pip install aws-durable-execution-sdk-python-otel
 
 1. Add the [ADOT Lambda Layer](#1-adot-lambda-layer) to your function and set `AWS_LAMBDA_EXEC_WRAPPER=/opt/otel-instrument`
 2. Enable [X-Ray Active Tracing](#2-aws-x-ray-active-tracing) on the function
-3. Pass `DurableExecutionOtelPlugin` to your handler's `plugins` list
+3. Pass `OtelPlugin` to your handler's `plugins` list
 4. Add X-Ray write permissions
 
 ### 1. ADOT Lambda Layer
@@ -31,7 +31,7 @@ This plugin requires the [AWS Distro for OpenTelemetry (ADOT) Lambda layer](http
 The layer ARN follows the format:
 
 ```
-arn:aws:lambda:<region>:901920570463:layer:aws-otel-python-<arch>-ver-<version>
+arn:aws:lambda:<region>:<awsAccountId>:layer:aws-otel-python-<arch>-ver-<version>
 ```
 
 Refer to the [ADOT Lambda Layer ARNs](https://aws-otel.github.io/docs/getting-started/lambda/lambda-python) page for the latest version number, architecture, and supported regions.
@@ -41,7 +41,7 @@ Refer to the [ADOT Lambda Layer ARNs](https://aws-otel.github.io/docs/getting-st
 ```bash
 aws lambda update-function-configuration \
   --function-name your-function-name \
-  --layers "arn:aws:lambda:us-east-1:901920570463:layer:aws-otel-python-amd64-ver-<version>"
+  --layers "arn:aws:lambda:<region>:<awsAccountId>:layer:aws-otel-python-amd64-ver-<version>"
 ```
 
 You must also set the `AWS_LAMBDA_EXEC_WRAPPER` environment variable:
@@ -52,7 +52,7 @@ aws lambda update-function-configuration \
   --environment "Variables={AWS_LAMBDA_EXEC_WRAPPER=/opt/otel-instrument}"
 ```
 
-> **Note:** Replace `us-east-1` with your function's region and `<version>`/`<arch>` with the latest layer version and architecture from the ADOT docs.
+> **Note:** Replace `<region>` with your function's region and `<version>`/`<arch>` with the latest layer version and architecture from the ADOT docs.
 
 **CloudFormation / SAM:**
 
@@ -61,7 +61,7 @@ MyFunction:
   Type: AWS::Serverless::Function
   Properties:
     Layers:
-      - !Sub arn:aws:lambda:${AWS::Region}:901920570463:layer:aws-otel-python-amd64-ver-<version>
+      - !Sub arn:aws:lambda:${AWS::Region}:<awsAccountId>:layer:aws-otel-python-amd64-ver-<version>
     Environment:
       Variables:
         AWS_LAMBDA_EXEC_WRAPPER: /opt/otel-instrument
@@ -75,7 +75,7 @@ from aws_cdk import aws_lambda as lambda_
 adot_layer = lambda_.LayerVersion.from_layer_version_arn(
     self,
     "AdotLayer",
-    f"arn:aws:lambda:{self.region}:901920570463:layer:aws-otel-python-amd64-ver-<version>",
+    f"arn:aws:lambda:<region>:<awsAccountId>:layer:aws-otel-python-amd64-ver-<version>",
 )
 
 fn = lambda_.Function(
@@ -130,10 +130,10 @@ lambda_.Function(
 ```python
 from aws_durable_execution_sdk_python import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
-from aws_durable_execution_sdk_python_otel import DurableExecutionOtelPlugin
+from aws_durable_execution_sdk_python_otel import OtelPlugin
 
 
-@durable_execution(plugins=[DurableExecutionOtelPlugin()])
+@durable_execution(plugins=[OtelPlugin()])
 def handler(event: dict, context: DurableContext) -> dict:
     result = context.step(lambda _: fetch_data(event["id"]), name="fetch-data")
 
@@ -167,18 +167,16 @@ See the [ADOT sampling configuration](https://aws-otel.github.io/docs/getting-st
 
 ```python
 from aws_durable_execution_sdk_python_otel import (
-    DurableExecutionOtelPlugin,
+    OtelPlugin,
     xray_context_extractor,
 )
 
-plugin = DurableExecutionOtelPlugin(
+plugin = OtelPlugin(
     # Provide your own TracerProvider if you already have one configured.
     # Defaults to the globally configured tracer provider.
     trace_provider=None,
     # Use a custom context extractor (default: xray_context_extractor).
     context_extractor=xray_context_extractor,
-    # Ratio used by TraceIdRatioBased sampling (default: 1.0).
-    sampling_rate=1.0,
     # Custom instrumentation scope name
     # (default: "aws-durable-execution-sdk-python").
     instrument_name="my-service",
@@ -194,16 +192,16 @@ The plugin supports multiple strategies for extracting upstream trace context:
 
 ```python
 from aws_durable_execution_sdk_python_otel import (
-    DurableExecutionOtelPlugin,
+    OtelPlugin,
     w3c_client_context_extractor,
     xray_context_extractor,
 )
 
 # Default: X-Ray trace header (recommended for most Lambda deployments)
-DurableExecutionOtelPlugin(context_extractor=xray_context_extractor)
+OtelPlugin(context_extractor=xray_context_extractor)
 
 # W3C Trace Context via clientContext (requires backend propagation support)
-DurableExecutionOtelPlugin(context_extractor=w3c_client_context_extractor)
+OtelPlugin(context_extractor=w3c_client_context_extractor)
 ```
 
 ### Log Correlation
@@ -247,15 +245,14 @@ After deploying your function with the plugin configured:
 
 ## API Reference
 
-### `DurableExecutionOtelPlugin`
+### `OtelPlugin`
 
 The main plugin class. Implements `DurableInstrumentationPlugin` from `aws_durable_execution_sdk_python`.
 
 ```python
-DurableExecutionOtelPlugin(
+OtelPlugin(
     trace_provider=None,
     context_extractor=None,
-    sampling_rate=1.0,
     instrument_name="aws-durable-execution-sdk-python",
     enrich_logger=True,
 )

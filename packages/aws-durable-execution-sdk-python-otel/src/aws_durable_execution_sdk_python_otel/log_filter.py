@@ -25,7 +25,7 @@ from opentelemetry.trace import TraceFlags
 
 
 if TYPE_CHECKING:
-    from aws_durable_execution_sdk_python_otel.plugin import DurableExecutionOtelPlugin
+    from aws_durable_execution_sdk_python_otel.plugin import OtelPlugin
 
 
 class OtelContextLogFilter(logging.Filter):
@@ -45,7 +45,7 @@ class OtelContextLogFilter(logging.Filter):
         plugin: The OTel plugin instance that resolves the current span context.
     """
 
-    def __init__(self, plugin: DurableExecutionOtelPlugin) -> None:
+    def __init__(self, plugin: OtelPlugin) -> None:
         super().__init__()
         self._plugin = plugin
 
@@ -62,7 +62,7 @@ class OtelContextLogFilter(logging.Filter):
 
 
 def install_log_filter(
-    plugin: DurableExecutionOtelPlugin,
+    plugin: OtelPlugin,
     target_logger: logging.Logger | None = None,
 ) -> OtelContextLogFilter | None:
     """Attach an OtelContextLogFilter to a logger's handlers, idempotently.
