@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import datetime
 import functools
@@ -53,7 +55,7 @@ class UserFunctionOutcome(Enum):
     PENDING = "PENDING"
 
     @classmethod
-    def from_error(cls, error: ErrorObject | None) -> "UserFunctionOutcome":
+    def from_error(cls, error: ErrorObject | None) -> UserFunctionOutcome:
         if error is None:
             return cls(cls.SUCCEEDED)
         return cls(cls.FAILED)
@@ -82,7 +84,7 @@ class UserFunctionEndInfo(OperationInfo):
     @classmethod
     def from_start_info(
         cls, start_info: UserFunctionStartInfo, error: ErrorObject | None
-    ) -> "UserFunctionEndInfo":
+    ) -> UserFunctionEndInfo:
         return UserFunctionEndInfo(
             operation_id=start_info.operation_id,
             operation_type=start_info.operation_type,
@@ -100,7 +102,7 @@ class UserFunctionEndInfo(OperationInfo):
     @classmethod
     def from_start_info_suspended(
         cls, start_info: UserFunctionStartInfo
-    ) -> "UserFunctionEndInfo":
+    ) -> UserFunctionEndInfo:
         return cls(
             operation_id=start_info.operation_id,
             operation_type=start_info.operation_type,
