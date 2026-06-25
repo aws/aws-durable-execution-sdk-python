@@ -19,6 +19,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     DurableApiErrorCategory,
     GetExecutionStateError,
     OrphanedChildException,
+    TimedSuspendExecution,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -41,6 +42,8 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     PluginExecutor,
+    UserFunctionEndInfo,
+    UserFunctionOutcome,
 )
 from aws_durable_execution_sdk_python.state import (
     CheckpointBatcherConfig,
@@ -4197,6 +4200,45 @@ def test_plugin_executor_exception_does_not_break_checkpointing():
         finally:
             state.stop_checkpointing()
             executor.shutdown(wait=True)
+
+
+def test_wrap_user_function_suspend_reports_pending_outcome():
+    """A user function that suspends is reported as PENDING with no error.
+
+    Regression: a timed suspend (TimedSuspendExecution) raised inside a wrapped
+    user function (e.g. a child context that waits) must not be surfaced to
+    plugins as a FAILED outcome. It is normal durable control flow.
+    """
+    captured: list[UserFunctionEndInfo] = []
+
+    class _CapturingPlugin(DurableInstrumentationPlugin):
+        def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
+            captured.append(info)
+
+    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
+    with plugin_executor.run():
+        state = ExecutionState(
+            durable_execution_arn="test_arn",
+            initial_checkpoint_token="token123",  # noqa: S106
+            operations={},
+            service_client=create_autospec(spec=LambdaClient),
+            plugin_executor=plugin_executor,
+        )
+
+        def suspends(_: object) -> None:
+            raise TimedSuspendExecution.from_delay("waiting", 5)
+
+        op_id = OperationIdentifier(
+            operation_id="op-1", sub_type=OperationSubType.STEP, name="step"
+        )
+        wrapped = state.wrap_user_function(suspends, op_id, attempt=1)
+
+        with pytest.raises(TimedSuspendExecution):
+            wrapped(None)
+
+    assert len(captured) == 1
+    assert captured[0].outcome is UserFunctionOutcome.PENDING
+    assert captured[0].error is None
 
 
 def test_plugin_executor_not_called_for_pending_operations():

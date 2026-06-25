@@ -783,5 +783,54 @@ class _FailingPlugin(DurableInstrumentationPlugin):
 # endregion Helper Classes
 
 
+# region Suspend Outcome Tests
+class _CapturingPlugin(DurableInstrumentationPlugin):
+    """Captures the UserFunctionEndInfo passed to on_user_function_end."""
+
+    def __init__(self) -> None:
+        self.user_function_end_infos: list[UserFunctionEndInfo] = []
+
+    def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
+        self.user_function_end_infos.append(info)
+
+
+class TestUserFunctionOutcomeFromError(unittest.TestCase):
+    def test_none_error_is_succeeded(self):
+        self.assertEqual(
+            UserFunctionOutcome.from_error(None), UserFunctionOutcome.SUCCEEDED
+        )
+
+    def test_error_is_failed(self):
+        self.assertEqual(
+            UserFunctionOutcome.from_error(ERROR), UserFunctionOutcome.FAILED
+        )
+
+
+class TestUserFunctionEndInfoSuspended(unittest.TestCase):
+    def test_from_start_info_suspended_is_pending_without_error(self):
+        info = UserFunctionEndInfo.from_start_info_suspended(USER_FUNCTION_START_INFO)
+        self.assertEqual(info.outcome, UserFunctionOutcome.PENDING)
+        self.assertIsNone(info.error)
+        self.assertEqual(info.operation_id, USER_FUNCTION_START_INFO.operation_id)
+        self.assertEqual(info.name, USER_FUNCTION_START_INFO.name)
+        self.assertEqual(info.attempt, USER_FUNCTION_START_INFO.attempt)
+
+
+class TestPluginExecutorOnUserFunctionSuspend(unittest.TestCase):
+    def test_suspend_dispatches_pending_outcome(self):
+        plugin = _CapturingPlugin()
+        executor = PluginExecutor(plugins=[plugin])
+        with executor.run():
+            executor.on_user_function_suspend(USER_FUNCTION_START_INFO)
+        self.assertEqual(len(plugin.user_function_end_infos), 1)
+        info = plugin.user_function_end_infos[0]
+        self.assertEqual(info.outcome, UserFunctionOutcome.PENDING)
+        self.assertIsNone(info.error)
+        self.assertEqual(info.operation_id, USER_FUNCTION_START_INFO.operation_id)
+
+
+# endregion Suspend Outcome Tests
+
+
 if __name__ == "__main__":
     unittest.main()
