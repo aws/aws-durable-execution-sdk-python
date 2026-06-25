@@ -952,13 +952,8 @@ class ExecutionState:
                 result = user_function(*args, **kwargs)
                 self._plugin_executor.on_user_function_end(start_info, None)
                 return result
-            except SuspendExecution as e:
-                self._plugin_executor.on_user_function_end(
-                    start_info,
-                    ErrorObject(
-                        type=type(e).__name__, message=None, data=None, stack_trace=None
-                    ),
-                )
+            except SuspendExecution:
+                self._plugin_executor.on_user_function_suspend(start_info)
                 raise
             except Exception as e:
                 self._plugin_executor.on_user_function_end(

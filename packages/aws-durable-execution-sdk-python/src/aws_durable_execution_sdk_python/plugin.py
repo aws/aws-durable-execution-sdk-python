@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import datetime
 import functools
@@ -7,7 +9,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, MutableMapping
 
-from aws_durable_execution_sdk_python.exceptions import SuspendExecution
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     DurableExecutionInvocationOutput,
@@ -54,13 +55,10 @@ class UserFunctionOutcome(Enum):
     PENDING = "PENDING"
 
     @classmethod
-    def from_error(cls, error: ErrorObject | None) -> "UserFunctionOutcome":
+    def from_error(cls, error: ErrorObject | None) -> UserFunctionOutcome:
         if error is None:
             return cls(cls.SUCCEEDED)
-        elif error.type == SuspendExecution.__name__:
-            return cls(cls.PENDING)
-        else:
-            return cls(cls.FAILED)
+        return cls(cls.FAILED)
 
 
 @dataclass(frozen=True)
@@ -86,7 +84,7 @@ class UserFunctionEndInfo(OperationInfo):
     @classmethod
     def from_start_info(
         cls, start_info: UserFunctionStartInfo, error: ErrorObject | None
-    ) -> "UserFunctionEndInfo":
+    ) -> UserFunctionEndInfo:
         return UserFunctionEndInfo(
             operation_id=start_info.operation_id,
             operation_type=start_info.operation_type,
@@ -99,6 +97,24 @@ class UserFunctionEndInfo(OperationInfo):
             outcome=UserFunctionOutcome.from_error(error),
             end_time=datetime.datetime.now(datetime.UTC),
             error=error,
+        )
+
+    @classmethod
+    def from_start_info_suspended(
+        cls, start_info: UserFunctionStartInfo
+    ) -> UserFunctionEndInfo:
+        return cls(
+            operation_id=start_info.operation_id,
+            operation_type=start_info.operation_type,
+            sub_type=start_info.sub_type,
+            name=start_info.name,
+            parent_id=start_info.parent_id,
+            start_time=start_info.start_time,
+            is_replay_children=start_info.is_replay_children,
+            attempt=start_info.attempt,
+            outcome=UserFunctionOutcome.PENDING,
+            end_time=datetime.datetime.now(datetime.UTC),
+            error=None,
         )
 
 
@@ -308,6 +324,16 @@ class PluginExecutor:
         """Execute any registered plugins for the operation when its user function finishes execution."""
         self.execute_plugins(
             UserFunctionEndInfo.from_start_info(start_info, error), sync=True
+        )
+
+    def on_user_function_suspend(self, start_info: UserFunctionStartInfo) -> None:
+        """Execute any registered plugins when an operation's user function suspends.
+
+        A suspension is normal durable control flow, not a failure, so the
+        operation is reported with a PENDING outcome and no error.
+        """
+        self.execute_plugins(
+            UserFunctionEndInfo.from_start_info_suspended(start_info), sync=True
         )
 
     def on_operation_action(self, update: OperationUpdate):
