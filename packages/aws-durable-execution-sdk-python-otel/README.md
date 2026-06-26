@@ -17,6 +17,57 @@ OpenTelemetry instrumentation plugin for the [AWS Durable Execution SDK for Pyth
 pip install aws-durable-execution-sdk-python-otel
 ```
 
+## SDK and OTel Lambda Layer
+
+This package also includes build tooling for a Lambda layer that installs both
+the AWS Durable Execution SDK and this OTel plugin into a Python Lambda function.
+The generated zip uses the standard Lambda layer layout:
+
+```text
+python/
+  aws_durable_execution_sdk_python/
+  aws_durable_execution_sdk_python_otel/
+  ...
+```
+
+Build SDK and OTel wheels from this repository, then build the layer zip:
+
+```bash
+(cd packages/aws-durable-execution-sdk-python && hatch build)
+(cd packages/aws-durable-execution-sdk-python-otel && hatch build)
+
+python .github/scripts/build_lambda_layer.py build \
+  --sdk-distribution packages/aws-durable-execution-sdk-python/dist/aws_durable_execution_sdk_python-*.whl \
+  --otel-distribution packages/aws-durable-execution-sdk-python-otel/dist/aws_durable_execution_sdk_python_otel-*.whl \
+  --target-python 3.12 \
+  --architecture x86_64 \
+  --output dist/aws-durable-execution-sdk-python-layer-python312-x86_64.zip
+```
+
+Use `--architecture arm64` for Lambda functions running on Graviton.
+
+Publish the generated zip as a Lambda layer:
+
+```bash
+VERSION_NUMBER=$(aws lambda publish-layer-version \
+  --layer-name aws-durable-execution-sdk-python-python312-x86_64 \
+  --zip-file fileb://dist/aws-durable-execution-sdk-python-layer-python312-x86_64.zip \
+  --compatible-runtimes python3.12 \
+  --compatible-architectures x86_64 \
+  --license-info Apache-2.0 \
+  --query Version \
+  --output text)
+
+aws lambda add-layer-version-permission \
+  --layer-name aws-durable-execution-sdk-python-python312-x86_64 \
+  --version-number "$VERSION_NUMBER" \
+  --statement-id public-layer-access \
+  --action lambda:GetLayerVersion \
+  --principal "*"
+```
+
+The release workflow publishes public layer versions automatically.
+
 ## Quick Start using X-Ray/CloudWatch Tracing
 
 1. Add the [ADOT Lambda Layer](#1-adot-lambda-layer) to your function and set `AWS_LAMBDA_EXEC_WRAPPER=/opt/otel-instrument`

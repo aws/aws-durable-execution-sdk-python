@@ -65,6 +65,8 @@ The workflow runs on the `release: [published]` event, so it fires whenever a re
 
 > **Note:** The workflow builds and publishes all packages in the matrix. Ensure the version in each package's `__about__.py` is correct before publishing. If only one package has a version bump, PyPI will reject the re-upload of the unchanged package (which is expected and harmless since `fail-fast: false` is set).
 
+Creating a GitHub Release also triggers the [`lambda-layer-publish.yml`](.github/workflows/lambda-layer-publish.yml) workflow. The workflow builds the SDK and OTel wheels from the release tag, packages them into Lambda layer zips for each supported Python runtime and architecture, and publishes public layer versions to the regions configured by the `LAMBDA_LAYER_REGIONS` repository variable. If no regions are configured, it publishes to `us-east-1`.
+
 ## Release Notes Format
 
 Release notes should maintain separate timelines for each package. Use the following structure:
