@@ -1,6 +1,13 @@
 name: Publish Lambda Layer
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/scripts/build_lambda_layer.py"
+      - ".github/workflows/lambda-layer-publish.yml"
+      - "packages/aws-durable-execution-sdk-python/**"
+      - "packages/aws-durable-execution-sdk-python-otel/**"
   release:
     types: [published]
   workflow_dispatch:
@@ -102,6 +109,7 @@ jobs:
           echo "layer_zip=${LAYER_ZIP}" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS Credentials
+        if: github.event_name != 'pull_request'
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.LAMBDA_LAYER_PUBLISH_IAM_ROLE_ARN }}
@@ -109,6 +117,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Publish layer
+        if: github.event_name != 'pull_request'
         run: |
           IFS=',' read -ra REGIONS <<< "${LAYER_REGIONS}"
           for REGION in "${REGIONS[@]}"; do
