@@ -1069,7 +1069,7 @@
         }
       }
     },
-    "FilesystemSerDesBasic": {
+    "FilesystemSerdesBasic": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
         "CodeUri": "build/",
@@ -1092,12 +1092,12 @@
         }
       }
     },
-    "FilesystemSerDesOverflow": {
+    "FilesystemSerdesOverflow": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
         "CodeUri": "build/",
         "Handler": "filesystem_serdes_overflow.handler",
-        "Description": "Filesystem serdes in OVERFLOW mode — inline for small payloads, file for large",
+        "Description": "Filesystem serdes in OVERFLOW mode \u2014 inline for small payloads, file for large",
         "Role": {
           "Fn::GetAtt": [
             "DurableFunctionRole",
@@ -1115,7 +1115,7 @@
         }
       }
     },
-    "FilesystemSerDesPreview": {
+    "FilesystemSerdesPreview": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
         "CodeUri": "build/",
