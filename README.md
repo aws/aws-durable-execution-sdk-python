@@ -25,6 +25,7 @@ Build reliable, long-running AWS Lambda workflows with checkpointed steps, waits
 | Package | Description | Version |
 | --- | --- | --- |
 | `aws-durable-execution-sdk-python` | Execution SDK for Lambda durable functions | [![PyPI - Version](https://img.shields.io/pypi/v/aws-durable-execution-sdk-python.svg)](https://pypi.org/project/aws-durable-execution-sdk-python) |
+| `aws-durable-execution-sdk-python-otel` | OpenTelemetry plugin for durable execution traces | [![PyPI - Version](https://img.shields.io/pypi/v/aws-durable-execution-sdk-python-otel.svg)](https://pypi.org/project/aws-durable-execution-sdk-python-otel) |
 | `aws-durable-execution-sdk-python-testing` | Local/cloud test runner and pytest helpers | [![PyPI - Version](https://img.shields.io/pypi/v/aws-durable-execution-sdk-python-testing.svg)](https://pypi.org/project/aws-durable-execution-sdk-python-testing) |
 
 ## 🚀 Quick Start

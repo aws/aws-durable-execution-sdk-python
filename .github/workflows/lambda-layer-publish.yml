@@ -1,0 +1,152 @@
+name: Publish Lambda Layer
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/scripts/build_lambda_layer.py"
+      - ".github/workflows/lambda-layer-publish.yml"
+      - "packages/aws-durable-execution-sdk-python/**"
+      - "packages/aws-durable-execution-sdk-python-otel/**"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      regions:
+        description: "Comma-separated AWS regions to publish to"
+        required: false
+        default: "us-east-1"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  LAYER_NAME_PREFIX: aws-durable-execution-sdk-python
+  LAYER_REGIONS: ${{ github.event.inputs.regions || vars.LAMBDA_LAYER_REGIONS || 'us-east-1' }}
+
+jobs:
+  publish-layer:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_python: "3.11"
+            runtime: python3.11
+            runtime_slug: python311
+            architecture: x86_64
+          - target_python: "3.11"
+            runtime: python3.11
+            runtime_slug: python311
+            architecture: arm64
+          - target_python: "3.12"
+            runtime: python3.12
+            runtime_slug: python312
+            architecture: x86_64
+          - target_python: "3.12"
+            runtime: python3.12
+            runtime_slug: python312
+            architecture: arm64
+          - target_python: "3.13"
+            runtime: python3.13
+            runtime_slug: python313
+            architecture: x86_64
+          - target_python: "3.13"
+            runtime: python3.13
+            runtime_slug: python313
+            architecture: arm64
+          - target_python: "3.14"
+            runtime: python3.14
+            runtime_slug: python314
+            architecture: x86_64
+          - target_python: "3.14"
+            runtime: python3.14
+            runtime_slug: python314
+            architecture: arm64
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade hatch==1.16.5
+
+      - name: Build SDK and OTel distributions
+        run: |
+          cd packages/aws-durable-execution-sdk-python
+          hatch build
+          cd "$GITHUB_WORKSPACE/packages/aws-durable-execution-sdk-python-otel"
+          hatch build
+
+      - name: Read package versions
+        id: versions
+        run: |
+          SDK_VERSION=$(grep "^__version__" packages/aws-durable-execution-sdk-python/src/aws_durable_execution_sdk_python/__about__.py | cut -d'"' -f2)
+          OTEL_VERSION=$(grep "^__version__" packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel/__about__.py | cut -d'"' -f2)
+          echo "sdk_version=${SDK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "otel_version=${OTEL_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build layer zip
+        id: build-layer
+        run: |
+          SDK_WHEEL=$(ls packages/aws-durable-execution-sdk-python/dist/aws_durable_execution_sdk_python-*.whl | head -n 1)
+          OTEL_WHEEL=$(ls packages/aws-durable-execution-sdk-python-otel/dist/aws_durable_execution_sdk_python_otel-*.whl | head -n 1)
+          LAYER_ZIP="dist/${LAYER_NAME_PREFIX}-${{ matrix.runtime_slug }}-${{ matrix.architecture }}.zip"
+          python .github/scripts/build_lambda_layer.py build \
+            --sdk-distribution "$SDK_WHEEL" \
+            --otel-distribution "$OTEL_WHEEL" \
+            --target-python "${{ matrix.target_python }}" \
+            --architecture "${{ matrix.architecture }}" \
+            --output "$LAYER_ZIP"
+          echo "layer_zip=${LAYER_ZIP}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.LAMBDA_LAYER_PUBLISH_IAM_ROLE_ARN || secrets.ACTIONS_INTEGRATION_ROLE_NAME }}
+          role-session-name: durableExecutionPythonLayerPublish
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Publish layer
+        run: |
+          IFS=',' read -ra REGIONS <<< "${LAYER_REGIONS}"
+          for REGION in "${REGIONS[@]}"; do
+            REGION=$(echo "$REGION" | xargs)
+            if [ -z "$REGION" ]; then
+              continue
+            fi
+
+            LAYER_NAME="${LAYER_NAME_PREFIX}-${{ matrix.runtime_slug }}-${{ matrix.architecture }}"
+            VERSION_NUMBER=$(aws lambda publish-layer-version \
+              --layer-name "$LAYER_NAME" \
+              --description "AWS Durable Execution SDK for Python ${{ steps.versions.outputs.sdk_version }} with OTel plugin ${{ steps.versions.outputs.otel_version }} (${{ matrix.runtime }}/${{ matrix.architecture }})" \
+              --zip-file "fileb://${{ steps.build-layer.outputs.layer_zip }}" \
+              --compatible-runtimes "${{ matrix.runtime }}" \
+              --compatible-architectures "${{ matrix.architecture }}" \
+              --license-info "Apache-2.0" \
+              --region "$REGION" \
+              --query Version \
+              --output text)
+
+            aws lambda add-layer-version-permission \
+              --layer-name "$LAYER_NAME" \
+              --version-number "$VERSION_NUMBER" \
+              --statement-id public-layer-access \
+              --action lambda:GetLayerVersion \
+              --principal "*" \
+              --region "$REGION"
+          done
+
+      - name: Upload layer artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lambda-layer-${{ matrix.runtime_slug }}-${{ matrix.architecture }}
+          path: ${{ steps.build-layer.outputs.layer_zip }}
