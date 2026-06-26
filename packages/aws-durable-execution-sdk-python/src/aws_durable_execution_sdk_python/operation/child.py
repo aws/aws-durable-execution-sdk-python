@@ -16,6 +16,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationSubType,
     OperationUpdate,
 )
+from aws_durable_execution_sdk_python.constants import CHECKPOINT_SIZE_LIMIT_BYTES
 from aws_durable_execution_sdk_python.operation.base import (
     CheckResult,
     OperationExecutor,
@@ -34,9 +35,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
-
-# Checkpoint size limit in bytes (256KB)
-CHECKPOINT_SIZE_LIMIT = 256 * 1024
 
 
 class ChildOperationExecutor(OperationExecutor[T]):
@@ -202,13 +200,13 @@ class ChildOperationExecutor(OperationExecutor[T]):
             # instead of the full BatchResult. During replay, the child context is re-executed
             # to reconstruct the full result rather than deserializing from the checkpoint.
             replay_children: bool = False
-            if len(serialized_result) > CHECKPOINT_SIZE_LIMIT:
+            if len(serialized_result) > CHECKPOINT_SIZE_LIMIT_BYTES:
                 logger.debug(
                     "Large payload detected, using ReplayChildren mode: id: %s, name: %s, payload_size: %d, limit: %d",
                     self.operation_identifier.operation_id,
                     self.operation_identifier.name,
                     len(serialized_result),
-                    CHECKPOINT_SIZE_LIMIT,
+                    CHECKPOINT_SIZE_LIMIT_BYTES,
                 )
                 replay_children = True
                 # Use summary generator if provided, otherwise use empty string (matches TypeScript)

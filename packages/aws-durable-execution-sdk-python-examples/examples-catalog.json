@@ -654,6 +654,48 @@
         "OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED": "true"
       },
       "path": "./src/otel/otel_logger_example.py"
+    },
+    {
+      "name": "Filesystem SerDes Basic",
+      "description": "Basic usage of filesystem serdes in ALWAYS mode to store step results on a mounted filesystem",
+      "handler": "filesystem_serdes_basic.handler",
+      "integration": false,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "environment": {
+        "FILESYSTEM_MOUNT_PATH": "/mnt/s3"
+      },
+      "path": "./src/filesystem_serdes/filesystem_serdes_basic.py"
+    },
+    {
+      "name": "Filesystem SerDes Overflow",
+      "description": "Filesystem serdes in OVERFLOW mode — inline for small payloads, file for large",
+      "handler": "filesystem_serdes_overflow.handler",
+      "integration": false,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "environment": {
+        "FILESYSTEM_MOUNT_PATH": "/mnt/s3"
+      },
+      "path": "./src/filesystem_serdes/filesystem_serdes_overflow.py"
+    },
+    {
+      "name": "Filesystem SerDes Preview",
+      "description": "Filesystem serdes with preview configuration for observability",
+      "handler": "filesystem_serdes_preview.handler",
+      "integration": false,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "environment": {
+        "FILESYSTEM_MOUNT_PATH": "/mnt/s3"
+      },
+      "path": "./src/filesystem_serdes/filesystem_serdes_preview.py"
     }
   ]
 }
