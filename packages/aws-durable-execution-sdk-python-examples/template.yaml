@@ -1068,6 +1068,75 @@
           }
         }
       }
+    },
+    "FilesystemSerdesBasic": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "filesystem_serdes_basic.handler",
+        "Description": "Basic usage of filesystem serdes in ALWAYS mode to store step results on a mounted filesystem",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        },
+        "Environment": {
+          "Variables": {
+            "FILESYSTEM_MOUNT_PATH": "/mnt/s3"
+          }
+        }
+      }
+    },
+    "FilesystemSerdesOverflow": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "filesystem_serdes_overflow.handler",
+        "Description": "Filesystem serdes in OVERFLOW mode \u2014 inline for small payloads, file for large",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        },
+        "Environment": {
+          "Variables": {
+            "FILESYSTEM_MOUNT_PATH": "/mnt/s3"
+          }
+        }
+      }
+    },
+    "FilesystemSerdesPreview": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "filesystem_serdes_preview.handler",
+        "Description": "Filesystem serdes with preview configuration for observability",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        },
+        "Environment": {
+          "Variables": {
+            "FILESYSTEM_MOUNT_PATH": "/mnt/s3"
+          }
+        }
+      }
     }
   }
 }
