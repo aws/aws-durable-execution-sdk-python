@@ -8,12 +8,12 @@ from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
     OperationStatus,
-    OperationType,
     OperationSubType,
+    OperationType,
 )
 from aws_durable_execution_sdk_python.logger import Logger, LoggerInterface, LogInfo
 from aws_durable_execution_sdk_python.plugin import PluginExecutor
-from aws_durable_execution_sdk_python.state import ExecutionState, ReplayStatus
+from aws_durable_execution_sdk_python.state import ExecutionState
 
 
 class PowertoolsLoggerStub:
@@ -375,50 +375,49 @@ def test_logger_replay_no_logging():
         operation_type=OperationType.STEP,
         status=OperationStatus.SUCCEEDED,
     )
-    replay_execution_state = ExecutionState(
+    execution_state = ExecutionState(
         durable_execution_arn="arn:aws:test",
         initial_checkpoint_token="test_token",  # noqa: S106
         operations={"op1": operation},
         service_client=Mock(),
-        replay_status=ReplayStatus.REPLAY,
         plugin_executor=PluginExecutor([]),
     )
-    log_info = LogInfo(replay_execution_state, "parent123", "test_name", 5)
+    log_info = LogInfo(execution_state, "parent123", "test_name", 5)
     mock_logger = Mock()
-    logger = Logger.from_log_info(mock_logger, log_info)
+    # Logger consults its owning context's replay status. While replaying, it
+    # suppresses logs.
+    logger = Logger.from_log_info(mock_logger, log_info, is_replaying=lambda: True)
     logger.info("logging info")
-    replay_execution_state.track_replay(operation_id="op1")
 
     mock_logger.info.assert_not_called()
 
 
 def test_logger_replay_then_new_logging():
-    operation1 = Operation(
+    operation = Operation(
         operation_id="op1",
-        operation_type=OperationType.STEP,
-        status=OperationStatus.SUCCEEDED,
-    )
-    operation2 = Operation(
-        operation_id="op2",
         operation_type=OperationType.STEP,
         status=OperationStatus.SUCCEEDED,
     )
     execution_state = ExecutionState(
         durable_execution_arn="arn:aws:test",
         initial_checkpoint_token="test_token",  # noqa: S106
-        operations={"op1": operation1, "op2": operation2},
+        operations={"op1": operation},
         service_client=Mock(),
-        replay_status=ReplayStatus.REPLAY,
         plugin_executor=PluginExecutor([]),
     )
     log_info = LogInfo(execution_state, "parent123", "test_name", 5)
     mock_logger = Mock()
-    logger = Logger.from_log_info(mock_logger, log_info)
-    execution_state.track_replay(operation_id="op1")
-    logger.info("logging info")
+    # Drive the replay status through a mutable flag standing in for the
+    # owning context's per-context status.
+    replaying = {"value": True}
+    logger = Logger.from_log_info(
+        mock_logger, log_info, is_replaying=lambda: replaying["value"]
+    )
 
+    logger.info("logging info")
     mock_logger.info.assert_not_called()
 
-    execution_state.track_replay(operation_id="op2")
+    # Once the context reaches its replay boundary, logging resumes.
+    replaying["value"] = False
     logger.info("logging info")
     mock_logger.info.assert_called_once()

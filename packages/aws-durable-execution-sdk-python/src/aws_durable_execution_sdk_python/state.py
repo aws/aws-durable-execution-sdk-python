@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
-from typing import TYPE_CHECKING, Callable, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
@@ -29,16 +29,17 @@ from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
     OperationAction,
     OperationStatus,
+    OperationSubType,
     OperationType,
     OperationUpdate,
     StateOutput,
-    OperationSubType,
 )
 from aws_durable_execution_sdk_python.plugin import (
     PluginExecutor,
     UserFunctionStartInfo,
 )
 from aws_durable_execution_sdk_python.threading import CompletionEvent, OrderedLock
+
 
 if TYPE_CHECKING:
     import datetime
@@ -246,7 +247,6 @@ class ExecutionState:
         service_client: DurableServiceClient,
         plugin_executor: PluginExecutor,
         batcher_config: CheckpointBatcherConfig | None = None,
-        replay_status: ReplayStatus = ReplayStatus.NEW,
     ):
         self.durable_execution_arn: str = durable_execution_arn
         self._current_checkpoint_token: str = initial_checkpoint_token
@@ -275,9 +275,6 @@ class ExecutionState:
 
         # Protects parent_to_children and parent_done
         self._parent_done_lock: Lock = Lock()
-        self._replay_status: ReplayStatus = replay_status
-        self._replay_status_lock: Lock = Lock()
-        self._visited_operations: set[str] = set()
 
     @property
     def operations(self) -> dict[str, Operation]:
@@ -367,62 +364,19 @@ class ExecutionState:
 
         return candidate
 
-    def track_replay(self, operation_id: str) -> None:
-        """Check if operation exists with completed status; if not, transition to NEW status.
+    def has_prior_operations(self) -> bool:
+        """Return True if any non-execution operation already exists.
 
-        This method is called before each operation (step, wait, invoke, etc.) to determine
-        if we've reached the replay boundary. Once we encounter an operation that doesn't
-        exist or isn't completed, we transition from REPLAY to NEW status, which enables
-        logging for all subsequent code.
-
-        Args:
-            operation_id: The operation ID to check
+        Used at execution setup to decide whether this invocation is a replay
+        (prior operations were checkpointed in an earlier invocation) versus a
+        first invocation. Per-operation replay status is tracked per-context on
+        DurableContext, not here.
         """
-        with self._replay_status_lock:
-            if self._replay_status == ReplayStatus.REPLAY:
-                self._visited_operations.add(operation_id)
-                # Lock order: _replay_status_lock then _operations_lock.
-                with self._operations_lock:
-                    completed_ops = {
-                        op_id
-                        for op_id, op in self._operations.items()
-                        if op.operation_type != OperationType.EXECUTION
-                        and op.status
-                        in {
-                            OperationStatus.SUCCEEDED,
-                            OperationStatus.FAILED,
-                            OperationStatus.CANCELLED,
-                            OperationStatus.STOPPED,
-                            OperationStatus.TIMED_OUT,
-                        }
-                    }
-                if completed_ops.issubset(self._visited_operations):
-                    logger.debug(
-                        "Transitioning from REPLAY to NEW status at operation %s",
-                        operation_id,
-                    )
-                    self._replay_status = ReplayStatus.NEW
-
-    def is_replaying(self) -> bool:
-        """Check if execution is currently in replay mode.
-
-        Returns:
-            True if in REPLAY status, False if in NEW status
-        """
-        with self._replay_status_lock:
-            return self._replay_status is ReplayStatus.REPLAY
-
-    def mark_replaying_if_prior_operations_exist(self) -> None:
-        """Mark execution state as replaying when non-execution operations exist."""
         with self._operations_lock:
-            has_prior_operations: bool = any(
+            return any(
                 op.operation_type is not OperationType.EXECUTION
                 for op in self._operations.values()
             )
-
-        if has_prior_operations:
-            with self._replay_status_lock:
-                self._replay_status = ReplayStatus.REPLAY
 
     def get_checkpoint_result(self, checkpoint_id: str) -> CheckpointedResult:
         """Get checkpoint result.

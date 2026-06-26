@@ -35,10 +35,15 @@ from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     Operation,
     OperationStatus,
-    OperationType,
     OperationSubType,
+    OperationType,
 )
-from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
+from aws_durable_execution_sdk_python.plugin import PluginExecutor
+from aws_durable_execution_sdk_python.state import (
+    CheckpointedResult,
+    ExecutionState,
+    ReplayStatus,
+)
 from aws_durable_execution_sdk_python.waits import (
     WaitForConditionConfig,
     WaitForConditionDecision,
@@ -2320,3 +2325,284 @@ def test_durable_parallel_branch_is_compatible_with_parallel_functions_arg():
 
 
 # endregion durable_parallel_branch
+
+
+# region per-context replay status
+
+
+def _replay_state(operations: dict[str, Operation]) -> ExecutionState:
+    """Build a real ExecutionState seeded with the given operations."""
+    return ExecutionState(
+        durable_execution_arn="arn:aws:durable:us-east-1:123456789012:execution/test",
+        initial_checkpoint_token="token",  # noqa: S106
+        operations=operations,
+        service_client=Mock(),
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+
+
+def _step_op(operation_id: str, status: OperationStatus) -> Operation:
+    return Operation(
+        operation_id=operation_id,
+        operation_type=OperationType.STEP,
+        status=status,
+    )
+
+
+def _wait_op(operation_id: str, status: OperationStatus) -> Operation:
+    return Operation(
+        operation_id=operation_id,
+        operation_type=OperationType.WAIT,
+        status=status,
+    )
+
+
+def test_is_replaying_defaults_to_new_for_fresh_context():
+    """A context created without a replay seed is not replaying."""
+    ctx = create_test_context(state=_replay_state({}))
+    assert ctx.is_replaying() is False
+
+
+def test_replay_aware_flips_before_brand_new_operation():
+    """When replaying and the next op has no checkpoint, flip to NEW before it runs."""
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    assert ctx.is_replaying() is True
+
+    inside_status: list[bool] = []
+    with ctx._replay_aware():  # noqa: SLF001
+        inside_status.append(ctx.is_replaying())
+
+    # Brand-new op (no checkpoint) flips before the body runs.
+    assert inside_status == [False]
+    assert ctx.is_replaying() is False
+
+
+def test_replay_aware_flips_after_completed_op_when_nothing_follows():
+    """A completed op with no following checkpoint crosses the boundary after the op.
+
+    The op stays replaying through its own execution (so its logs de-dup), then
+    flips to NEW afterwards because the next operation is brand-new.
+    """
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    # The next op id this context will allocate.
+    next_id = ctx._peek_next_operation_id()  # noqa: SLF001
+    ctx.state._operations[next_id] = _step_op(  # noqa: SLF001
+        next_id, OperationStatus.SUCCEEDED
+    )
+
+    inside_status: list[bool] = []
+    with ctx._replay_aware():  # noqa: SLF001
+        # consume the id so the counter advances like a real operation
+        ctx._create_step_id()  # noqa: SLF001
+        inside_status.append(ctx.is_replaying())
+
+    # Still replaying THROUGH the completed op, then flips because nothing follows.
+    assert inside_status == [True]
+    assert ctx.is_replaying() is False
+
+
+def test_replay_aware_defers_flip_until_after_resume_point():
+    """A non-step op that exists but is NOT terminal is the resume point.
+
+    The context stays replaying through the op's execution (so its logs are still
+    de-duplicated) and flips to NEW only afterwards.
+    """
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    next_id = ctx._peek_next_operation_id()  # noqa: SLF001
+    # STARTED WAIT is non-terminal: a wait whose timer just fired. It runs no
+    # user body, so it is a pure resume point.
+    ctx.state._operations[next_id] = _wait_op(  # noqa: SLF001
+        next_id, OperationStatus.STARTED
+    )
+
+    inside_status: list[bool] = []
+    with ctx._replay_aware():  # noqa: SLF001
+        ctx._create_step_id()  # noqa: SLF001
+        inside_status.append(ctx.is_replaying())
+
+    # Still replaying THROUGH the resume op, then flipped afterwards.
+    assert inside_status == [True]
+    assert ctx.is_replaying() is False
+
+
+def test_child_context_inherits_replaying_status():
+    """A child context inherits the parent's current replay status at creation."""
+    state = _replay_state({})
+    parent = DurableContext(
+        state=state,
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    child = parent.create_child_context(operation_id="op-1")
+    assert child.is_replaying() is True
+
+    parent._set_replay_status_new()  # noqa: SLF001
+    child_after = parent.create_child_context(operation_id="op-2")
+    assert child_after.is_replaying() is False
+
+
+def test_child_context_replay_status_is_independent_of_parent():
+    """Refining a child's status does not mutate the parent's, and vice versa."""
+    state = _replay_state({})
+    parent = DurableContext(
+        state=state,
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    child = parent.create_child_context(operation_id="op-1")
+
+    child._set_replay_status_new()  # noqa: SLF001
+
+    assert child.is_replaying() is False
+    assert parent.is_replaying() is True
+
+
+def test_replay_aware_flips_after_completed_op_when_next_is_brand_new():
+    """A completed op followed by a brand-new op crosses the boundary after the op.
+
+    This covers logs emitted between a completed operation (e.g. a `wait` that
+    already fired) and the next, not-yet-existing operation. Such logs must be
+    treated as new work rather than suppressed.
+    """
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    # Next op (the one this _replay_aware wraps) already completed; the op AFTER
+    # it has no checkpoint yet.
+    next_id = ctx._peek_next_operation_id()  # noqa: SLF001
+    ctx.state._operations[next_id] = _step_op(  # noqa: SLF001
+        next_id, OperationStatus.SUCCEEDED
+    )
+
+    inside_status: list[bool] = []
+    with ctx._replay_aware():  # noqa: SLF001
+        ctx._create_step_id()  # noqa: SLF001 - consume the completed op's id
+        inside_status.append(ctx.is_replaying())
+
+    # Still replaying THROUGH the completed op, then flipped because the next
+    # operation is brand-new.
+    assert inside_status == [True]
+    assert ctx.is_replaying() is False
+
+
+def test_replay_aware_stays_replaying_between_two_completed_ops():
+    """Logs between two completed ops stay suppressed (still replaying)."""
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    # Both the wrapped op and the following op already completed.
+    first_id = ctx._create_step_id_for_logical_step(1)  # noqa: SLF001
+    second_id = ctx._create_step_id_for_logical_step(2)  # noqa: SLF001
+    ctx.state._operations[first_id] = _step_op(  # noqa: SLF001
+        first_id, OperationStatus.SUCCEEDED
+    )
+    ctx.state._operations[second_id] = _step_op(  # noqa: SLF001
+        second_id, OperationStatus.SUCCEEDED
+    )
+
+    with ctx._replay_aware():  # noqa: SLF001
+        ctx._create_step_id()  # noqa: SLF001 - consume first completed op
+        assert ctx.is_replaying() is True
+
+    # Next op also completed, so we remain replaying.
+    assert ctx.is_replaying() is True
+
+
+def test_replay_aware_step_flips_before_retrying_op():
+    """A retrying/re-executing STEP op flips to NEW BEFORE the body runs.
+
+    A step whose checkpoint is non-terminal (e.g. STARTED from a retry) is about
+    to re-run the user function, which is real new work. The context infers this
+    from the checkpoint's STEP type and flips to NEW before the body so the
+    step's logs (and future plugin state) reflect an executing attempt.
+    """
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    next_id = ctx._peek_next_operation_id()  # noqa: SLF001
+    # STARTED STEP == non-terminal: a retry attempt about to re-execute.
+    ctx.state._operations[next_id] = _step_op(  # noqa: SLF001
+        next_id, OperationStatus.STARTED
+    )
+
+    inside_status: list[bool] = []
+    with ctx._replay_aware():  # noqa: SLF001
+        ctx._create_step_id()  # noqa: SLF001
+        inside_status.append(ctx.is_replaying())
+
+    # Flipped BEFORE the body (contrast with the non-step resume point, which
+    # stays replaying through the op).
+    assert inside_status == [False]
+    assert ctx.is_replaying() is False
+
+
+def test_replay_aware_step_stays_replaying_for_completed_op():
+    """A cached SUCCEEDED step does not run its body, so stays replaying."""
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    # Wrapped op completed; a following op also completed so nothing flips.
+    first_id = ctx._create_step_id_for_logical_step(1)  # noqa: SLF001
+    second_id = ctx._create_step_id_for_logical_step(2)  # noqa: SLF001
+    ctx.state._operations[first_id] = _step_op(  # noqa: SLF001
+        first_id, OperationStatus.SUCCEEDED
+    )
+    ctx.state._operations[second_id] = _step_op(  # noqa: SLF001
+        second_id, OperationStatus.SUCCEEDED
+    )
+
+    with ctx._replay_aware():  # noqa: SLF001
+        ctx._create_step_id()  # noqa: SLF001
+        assert ctx.is_replaying() is True
+
+    assert ctx.is_replaying() is True
+
+
+def test_replay_aware_non_step_stays_replaying_through_resume_point():
+    """A non-step resume point (e.g. wait) stays replaying through the op.
+
+    Contrast with the step case: a non-terminal wait is a pure resume point with
+    no user body, so logs emitted by the resuming op stay de-duplicated and the
+    flip is deferred until after.
+    """
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    next_id = ctx._peek_next_operation_id()  # noqa: SLF001
+    ctx.state._operations[next_id] = _wait_op(  # noqa: SLF001
+        next_id, OperationStatus.STARTED
+    )
+
+    inside_status: list[bool] = []
+    with ctx._replay_aware():  # noqa: SLF001
+        ctx._create_step_id()  # noqa: SLF001
+        inside_status.append(ctx.is_replaying())
+
+    # Stayed replaying THROUGH the op, flipped after.
+    assert inside_status == [True]
+    assert ctx.is_replaying() is False
+
+
+# endregion per-context replay status

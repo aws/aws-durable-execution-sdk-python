@@ -9,7 +9,7 @@ import threading
 import time
 import unittest.mock
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import Mock, call, patch, create_autospec
+from unittest.mock import Mock, call, create_autospec, patch
 
 import pytest
 
@@ -32,11 +32,11 @@ from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
     OperationAction,
     OperationStatus,
+    OperationSubType,
     OperationType,
     OperationUpdate,
     StateOutput,
     StepDetails,
-    OperationSubType,
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -47,7 +47,6 @@ from aws_durable_execution_sdk_python.state import (
     CheckpointedResult,
     ExecutionState,
     QueuedOperation,
-    ReplayStatus,
 )
 from aws_durable_execution_sdk_python.threading import CompletionEvent
 
@@ -3452,64 +3451,47 @@ def test_create_checkpoint_sync_always_synchronous():
         executor.shutdown(wait=True)
 
 
-def test_state_replay_mode():
+def test_state_has_prior_operations_true_when_non_execution_op_exists():
     operation1 = Operation(
         operation_id="op1",
-        operation_type=OperationType.STEP,
-        status=OperationStatus.SUCCEEDED,
-    )
-    operation2 = Operation(
-        operation_id="op2",
         operation_type=OperationType.STEP,
         status=OperationStatus.SUCCEEDED,
     )
     execution_state = ExecutionState(
         durable_execution_arn="arn:aws:test",
         initial_checkpoint_token="test_token",  # noqa: S106
-        operations={"op1": operation1, "op2": operation2},
+        operations={"op1": operation1},
         service_client=Mock(),
         plugin_executor=PluginExecutor(plugins=None),
-        replay_status=ReplayStatus.REPLAY,
     )
-    assert execution_state.is_replaying() is True
-    execution_state.track_replay(operation_id="op1")
-    assert execution_state.is_replaying() is True
-    execution_state.track_replay(operation_id="op2")
-    assert execution_state.is_replaying() is False
+    assert execution_state.has_prior_operations() is True
 
 
-def test_state_replay_mode_with_timed_out():
-    """Test that TIMED_OUT operations are treated as terminal states for replay tracking.
-
-    This test verifies that when an operation has TIMED_OUT status, it is correctly
-    recognized as a completed/terminal state, allowing the replay status to transition
-    from REPLAY to NEW once all completed operations have been visited.
-
-    Regression test for: https://github.com/aws/aws-durable-execution-sdk-python/issues/262
-    """
-    operation1 = Operation(
-        operation_id="op1",
-        operation_type=OperationType.STEP,
-        status=OperationStatus.TIMED_OUT,
-    )
-    operation2 = Operation(
-        operation_id="op2",
-        operation_type=OperationType.STEP,
-        status=OperationStatus.SUCCEEDED,
+def test_state_has_prior_operations_false_when_only_execution_op_exists():
+    execution_op = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
     )
     execution_state = ExecutionState(
         durable_execution_arn="arn:aws:test",
         initial_checkpoint_token="test_token",  # noqa: S106
-        operations={"op1": operation1, "op2": operation2},
+        operations={"exec1": execution_op},
         service_client=Mock(),
         plugin_executor=PluginExecutor(plugins=None),
-        replay_status=ReplayStatus.REPLAY,
     )
-    assert execution_state.is_replaying() is True
-    execution_state.track_replay(operation_id="op1")
-    assert execution_state.is_replaying() is True
-    execution_state.track_replay(operation_id="op2")
-    assert execution_state.is_replaying() is False
+    assert execution_state.has_prior_operations() is False
+
+
+def test_state_has_prior_operations_false_when_empty():
+    execution_state = ExecutionState(
+        durable_execution_arn="arn:aws:test",
+        initial_checkpoint_token="test_token",  # noqa: S106
+        operations={},
+        service_client=Mock(),
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+    assert execution_state.has_prior_operations() is False
 
 
 # Tests for empty checkpoint coalescing (issue #325)
@@ -4262,16 +4244,13 @@ def test_plugin_executor_not_called_for_pending_operations():
 # endregion Plugin Executor Integration Tests
 
 
-def _make_execution_state_for_operations(
-    mock_lambda_client, *, replay_status=ReplayStatus.NEW, operations=None
-):
+def _make_execution_state_for_operations(mock_lambda_client, *, operations=None):
     return ExecutionState(
         durable_execution_arn="test_arn",
         initial_checkpoint_token="token123",  # noqa: S106
         operations=operations or {},
         service_client=mock_lambda_client,
         plugin_executor=PluginExecutor(plugins=None),
-        replay_status=replay_status,
     )
 
 
@@ -4295,18 +4274,16 @@ def test_operations_property_returns_snapshot_copy():
     assert len(state.operations) == 1
 
 
-def test_track_replay_iteration_safe_under_concurrent_update():
-    """track_replay must not raise when operations are updated concurrently.
+def test_has_prior_operations_iteration_safe_under_concurrent_update():
+    """has_prior_operations must not raise when operations are updated concurrently.
 
-    A worker thread iterates operations inside track_replay while the checkpoint
-    path updates the same map. Without consistent locking this raises
+    A worker thread iterates operations inside has_prior_operations while the
+    checkpoint path updates the same map. Without consistent locking this raises
     "dictionary changed size during iteration".
     """
     mock_lambda_client = Mock(spec=LambdaClient)
-    state = _make_execution_state_for_operations(
-        mock_lambda_client, replay_status=ReplayStatus.REPLAY
-    )
-    # Seed completed operations so track_replay keeps iterating (stays REPLAY).
+    state = _make_execution_state_for_operations(mock_lambda_client)
+    # Seed completed operations so iteration has work to do.
     for i in range(50):
         state._operations[f"seed{i}"] = Operation(
             operation_id=f"seed{i}",
@@ -4331,7 +4308,7 @@ def test_track_replay_iteration_safe_under_concurrent_update():
     def reader():
         try:
             for _ in range(2000):
-                state.track_replay(operation_id="probe")
+                state.has_prior_operations()
         except Exception as e:  # noqa: BLE001
             errors.append(e)
 
@@ -4343,4 +4320,4 @@ def test_track_replay_iteration_safe_under_concurrent_update():
     stop.set()
     writer_t.join(timeout=5)
 
-    assert not errors, f"track_replay raced with concurrent update: {errors}"
+    assert not errors, f"has_prior_operations raced with concurrent update: {errors}"

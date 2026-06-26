@@ -34,6 +34,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
     ContextDetails,
+    DurableExecutionInvocationOutput,
     DurableServiceClient,
     ErrorObject,
     ExecutionDetails,
@@ -45,9 +46,9 @@ from aws_durable_execution_sdk_python.lambda_service import (
     StateOutput,
     StepDetails,
     WaitDetails,
-    DurableExecutionInvocationOutput,
 )
 from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
+
 
 LARGE_RESULT = "large_success" * 1024 * 1024
 
@@ -2708,7 +2709,7 @@ def test_durable_execution_replays_when_paginated_state_has_prior_operations():
 
     @durable_execution
     def test_handler(event: Any, context: DurableContext) -> dict:
-        return {"is_replaying": context.state.is_replaying()}
+        return {"is_replaying": context.is_replaying()}
 
     result = test_handler(invocation_input, _make_lambda_context())
 
