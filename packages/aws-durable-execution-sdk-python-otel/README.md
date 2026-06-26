@@ -68,12 +68,18 @@ aws lambda add-layer-version-permission \
 
 The release workflow publishes public layer versions automatically.
 
+This SDK layer does not include the ADOT Lambda wrapper executable. Only set
+`AWS_LAMBDA_EXEC_WRAPPER=/opt/otel-instrument` when your function also includes
+the ADOT Lambda layer described below; otherwise Lambda fails during init because
+`/opt/otel-instrument` does not exist.
+
 ## Quick Start using X-Ray/CloudWatch Tracing
 
-1. Add the [ADOT Lambda Layer](#1-adot-lambda-layer) to your function and set `AWS_LAMBDA_EXEC_WRAPPER=/opt/otel-instrument`
-2. Enable [X-Ray Active Tracing](#2-aws-x-ray-active-tracing) on the function
-3. Pass `OtelPlugin` to your handler's `plugins` list
-4. Add X-Ray write permissions
+1. Add the SDK+OTel layer for this package
+2. Add the [ADOT Lambda Layer](#1-adot-lambda-layer) to your function and set `AWS_LAMBDA_EXEC_WRAPPER=/opt/otel-instrument`
+3. Enable [X-Ray Active Tracing](#2-aws-x-ray-active-tracing) on the function
+4. Pass `OtelPlugin` to your handler's `plugins` list
+5. Add X-Ray write permissions
 
 ### 1. ADOT Lambda Layer
 
