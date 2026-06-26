@@ -109,7 +109,6 @@ jobs:
           echo "layer_zip=${LAYER_ZIP}" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS Credentials
-        if: github.event_name != 'pull_request'
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.LAMBDA_LAYER_PUBLISH_IAM_ROLE_ARN }}
@@ -117,7 +116,6 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Publish layer
-        if: github.event_name != 'pull_request'
         run: |
           IFS=',' read -ra REGIONS <<< "${LAYER_REGIONS}"
           for REGION in "${REGIONS[@]}"; do
