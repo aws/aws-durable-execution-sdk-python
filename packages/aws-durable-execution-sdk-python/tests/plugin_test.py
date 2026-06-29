@@ -783,5 +783,29 @@ class _FailingPlugin(DurableInstrumentationPlugin):
 # endregion Helper Classes
 
 
+# region Suspend Outcome Tests
+class TestUserFunctionOutcomeValues(unittest.TestCase):
+    def test_outcome_values(self):
+        self.assertEqual(
+            {o.value for o in UserFunctionOutcome},
+            {"SUCCEEDED", "FAILED"},
+        )
+
+
+class TestUserFunctionOutcomeFromError(unittest.TestCase):
+    def test_none_error_is_succeeded(self):
+        self.assertEqual(
+            UserFunctionOutcome.from_error(None), UserFunctionOutcome.SUCCEEDED
+        )
+
+    def test_error_is_failed(self):
+        self.assertEqual(
+            UserFunctionOutcome.from_error(ERROR), UserFunctionOutcome.FAILED
+        )
+
+
+# endregion Suspend Outcome Tests
+
+
 if __name__ == "__main__":
     unittest.main()

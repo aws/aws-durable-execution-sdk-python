@@ -453,11 +453,8 @@ class OtelPlugin(DurableInstrumentationPlugin):
                     else "Unknown error"
                 )
             )
-        elif info.outcome is UserFunctionOutcome.SUCCEEDED:
-            span.set_status(StatusCode.OK)
         else:
-            # PENDING
-            span.set_status(StatusCode.UNSET, "PENDING")
+            span.set_status(StatusCode.OK)
 
         end_timestamp = info.end_time
         if end_timestamp is not None and end_timestamp == info.start_time:
@@ -493,9 +490,13 @@ class OtelPlugin(DurableInstrumentationPlugin):
             attributes["durable.operation.type"] = info.operation_type.value
         if hasattr(info, "name") and info.name is not None:
             attributes["durable.operation.name"] = info.name
-        if hasattr(info, "attempt") and info.attempt is not None:
-            attributes["durable.attempt.number"] = info.attempt
-        if hasattr(info, "outcome") and info.outcome is not None:
-            attributes["durable.attempt.outcome"] = info.outcome.value
+        # Per-attempt fields are meaningful for STEP (each attempt is retried)
+        # but not for CONTEXT (a context is entered once per invocation, not
+        # retried). Omit them on CONTEXT spans for cross-SDK consistency.
+        if getattr(info, "operation_type", None) is not OperationType.CONTEXT:
+            if hasattr(info, "attempt") and info.attempt is not None:
+                attributes["durable.attempt.number"] = info.attempt
+            if hasattr(info, "outcome") and info.outcome is not None:
+                attributes["durable.attempt.outcome"] = info.outcome.value
 
         return attributes

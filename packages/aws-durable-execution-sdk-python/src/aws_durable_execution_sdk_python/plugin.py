@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import datetime
 import functools
@@ -7,7 +9,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, MutableMapping
 
-from aws_durable_execution_sdk_python.exceptions import SuspendExecution
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     DurableExecutionInvocationOutput,
@@ -51,16 +52,12 @@ class OperationEndInfo(OperationInfo):
 class UserFunctionOutcome(Enum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
-    PENDING = "PENDING"
 
     @classmethod
-    def from_error(cls, error: ErrorObject | None) -> "UserFunctionOutcome":
+    def from_error(cls, error: ErrorObject | None) -> UserFunctionOutcome:
         if error is None:
             return cls(cls.SUCCEEDED)
-        elif error.type == SuspendExecution.__name__:
-            return cls(cls.PENDING)
-        else:
-            return cls(cls.FAILED)
+        return cls(cls.FAILED)
 
 
 @dataclass(frozen=True)
@@ -86,7 +83,7 @@ class UserFunctionEndInfo(OperationInfo):
     @classmethod
     def from_start_info(
         cls, start_info: UserFunctionStartInfo, error: ErrorObject | None
-    ) -> "UserFunctionEndInfo":
+    ) -> UserFunctionEndInfo:
         return UserFunctionEndInfo(
             operation_id=start_info.operation_id,
             operation_type=start_info.operation_type,
