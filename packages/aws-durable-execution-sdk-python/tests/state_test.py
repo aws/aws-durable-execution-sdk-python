@@ -643,6 +643,46 @@ def test_checkpointed_result_is_timed_out_false_for_other_statuses():
         )
 
 
+def test_checkpointed_result_is_terminal():
+    """Test CheckpointedResult.is_terminal for terminal vs non-terminal statuses."""
+    terminal_statuses = [
+        OperationStatus.SUCCEEDED,
+        OperationStatus.FAILED,
+        OperationStatus.CANCELLED,
+        OperationStatus.TIMED_OUT,
+        OperationStatus.STOPPED,
+    ]
+    for status in terminal_statuses:
+        operation = Operation(
+            operation_id="op1",
+            operation_type=OperationType.STEP,
+            status=status,
+        )
+        result = CheckpointedResult.create_from_operation(operation)
+        assert result.is_terminal() is True, (
+            f"is_terminal should be True for status {status}"
+        )
+
+    non_terminal_statuses = [
+        OperationStatus.STARTED,
+        OperationStatus.PENDING,
+        OperationStatus.READY,
+    ]
+    for status in non_terminal_statuses:
+        operation = Operation(
+            operation_id="op1",
+            operation_type=OperationType.STEP,
+            status=status,
+        )
+        result = CheckpointedResult.create_from_operation(operation)
+        assert result.is_terminal() is False, (
+            f"is_terminal should be False for status {status}"
+        )
+
+    # Test with no operation
+    assert CheckpointedResult.create_not_found().is_terminal() is False
+
+
 def test_fetch_paginated_operations_with_marker():
     mock_lambda_client = Mock(spec=LambdaClient)
 

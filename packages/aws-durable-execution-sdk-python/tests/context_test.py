@@ -2524,6 +2524,50 @@ def test_replay_aware_stays_replaying_between_two_completed_ops():
     assert ctx.is_replaying() is True
 
 
+@pytest.mark.parametrize(
+    "terminal_status",
+    [
+        OperationStatus.TIMED_OUT,
+        OperationStatus.CANCELLED,
+        OperationStatus.STOPPED,
+        OperationStatus.SUCCEEDED,
+        OperationStatus.FAILED,
+    ],
+)
+def test_replay_aware_terminal_non_success_op_stays_replaying(terminal_status):
+    """TIMED_OUT/CANCELLED/STOPPED ops are terminal, so we stay replaying after them.
+
+    Regression test for issue #262: a handled timeout/cancel/stop is done, and
+    operations after it may also be completed replayed work. The context must
+    NOT flip to NEW after such an op (which would wrongly re-enable logging for
+    subsequent replayed operations).
+    """
+    ctx = DurableContext(
+        state=_replay_state({}),
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    # op1: terminal-but-not-succeeded/failed (e.g. a handled invoke/callback timeout).
+    # op2: a completed step that ran after it.
+    first_id = ctx._create_step_id_for_logical_step(1)  # noqa: SLF001
+    second_id = ctx._create_step_id_for_logical_step(2)  # noqa: SLF001
+    ctx.state._operations[first_id] = Operation(  # noqa: SLF001
+        operation_id=first_id,
+        operation_type=OperationType.CHAINED_INVOKE,
+        status=terminal_status,
+    )
+    ctx.state._operations[second_id] = _step_op(  # noqa: SLF001
+        second_id, OperationStatus.SUCCEEDED
+    )
+
+    with ctx._replay_aware():  # noqa: SLF001
+        ctx._create_step_id()  # noqa: SLF001 - consume the terminal op
+        assert ctx.is_replaying() is True
+
+    # Terminal op + completed next op => still replaying (no spurious flip).
+    assert ctx.is_replaying() is True
+
+
 def test_replay_aware_step_flips_before_retrying_op():
     """A retrying/re-executing STEP op flips to NEW BEFORE the body runs.
 

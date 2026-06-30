@@ -486,8 +486,8 @@ class DurableContext(DurableContextProtocol):
         - Existence flip (before the op): if we are replaying and the next
           operation has no checkpoint at all, it is brand-new code, so flip to
           NEW immediately so the operation and its logs count as new.
-        - Deferred status flip (after the op): a non-terminal next operation is a pure
-          resume point with no user body. We keep replay status through the
+        - Deferred status flip (after the op): a non-terminal next operation is
+          a pure resume point with no user body. We keep replay status through the
           operation and flip to NEW afterwards, so the resuming operation's own
           logs stay de-duplicated but subsequent code counts as new.
         - Post-op existence flip (after the op): if we are still replaying once
@@ -503,8 +503,8 @@ class DurableContext(DurableContextProtocol):
         next_exists: bool = (
             next_checkpoint.is_existent() if next_checkpoint is not None else False
         )
-        next_terminal: bool = next_checkpoint is not None and (
-            next_checkpoint.is_succeeded() or next_checkpoint.is_failed()
+        next_terminal: bool = (
+            next_checkpoint is not None and next_checkpoint.is_terminal()
         )
 
         next_is_step: bool = (

@@ -76,6 +76,19 @@ class QueuedOperation:
     completion_event: CompletionEvent | None = None
 
 
+# Statuses indicating an operation has finished and will not change on a later
+# replay. Includes TIMED_OUT/CANCELLED/STOPPED in addition to SUCCEEDED/FAILED
+_TERMINAL_OPERATION_STATUSES: frozenset[OperationStatus] = frozenset(
+    {
+        OperationStatus.SUCCEEDED,
+        OperationStatus.FAILED,
+        OperationStatus.CANCELLED,
+        OperationStatus.TIMED_OUT,
+        OperationStatus.STOPPED,
+    }
+)
+
+
 @dataclass(frozen=True)
 class CheckpointedResult:
     """Result of a checkpointed operation.
@@ -197,6 +210,13 @@ class CheckpointedResult:
         if not op:
             return False
         return op.status is OperationStatus.TIMED_OUT
+
+    def is_terminal(self) -> bool:
+        """Return True if the checkpointed operation is in any terminal status."""
+        op = self.operation
+        if not op:
+            return False
+        return op.status in _TERMINAL_OPERATION_STATUSES
 
     def is_replay_children(self) -> bool:
         op = self.operation
