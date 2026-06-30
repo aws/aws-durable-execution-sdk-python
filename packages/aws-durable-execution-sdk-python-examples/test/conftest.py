@@ -221,7 +221,9 @@ def durable_runner(request, monkeypatch):
     else:
         if not handler:
             pytest.fail("handler is required for local mode tests")
-        time_scale = os.environ.get("DURABLE_EXECUTION_TIME_SCALE", "0.05")
+        time_scale = marker.kwargs.get(
+            "time_scale", os.environ.get("DURABLE_EXECUTION_TIME_SCALE", "0.05")
+        )
         monkeypatch.setenv("DURABLE_EXECUTION_TIME_SCALE", time_scale)
         try:
             poll_interval = min(0.05, max(0.001, float(time_scale)))
