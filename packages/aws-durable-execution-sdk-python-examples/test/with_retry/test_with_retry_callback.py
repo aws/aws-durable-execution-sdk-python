@@ -10,7 +10,15 @@ from src.with_retry import with_retry_callback
 from test.conftest import deserialize_operation_payload
 
 from aws_durable_execution_sdk_python.execution import InvocationStatus
-from aws_durable_execution_sdk_python.lambda_service import ErrorObject
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject, OperationStatus
+
+
+def get_callback_status(result, name: str) -> OperationStatus:
+    callbacks = [
+        operation for operation in result.get_all_operations() if operation.name == name
+    ]
+    assert len(callbacks) == 1
+    return callbacks[0].status
 
 
 @pytest.mark.example
@@ -67,3 +75,16 @@ def test_with_retry_callback_fails_twice_then_succeeds(durable_runner):
         "success": True,
         "result": "approval granted",
     }
+
+    assert (
+        get_callback_status(result, "external-call-attempt-1 create callback id")
+        is OperationStatus.FAILED
+    )
+    assert (
+        get_callback_status(result, "external-call-attempt-2 create callback id")
+        is OperationStatus.FAILED
+    )
+    assert (
+        get_callback_status(result, "external-call-attempt-3 create callback id")
+        is OperationStatus.SUCCEEDED
+    )
