@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
@@ -180,3 +181,48 @@ class SummaryGenerator(Protocol[C_contra]):
 
 
 # endregion Summary
+
+
+# Matches a durable execution ARN of the form:
+# arn:<partition>:lambda:<region>:<account>:function:<functionName>:<version>/durable-execution/<executionName>/<invocationId>
+_DURABLE_EXECUTION_ARN_PATTERN = re.compile(
+    r"^arn:[^:]*:lambda:[^:]*:[^:]*:function:([^:/]+):[^:/]+/durable-execution/([^/]+)/([^/]+)$"
+)
+
+
+@dataclass(frozen=True)
+class DurableExecutionArn:
+    """Parsed components of a durable execution ARN.
+
+    A durable execution ARN has the form:
+        arn:<partition>:lambda:<region>:<account>:function:<functionName>:<version>/durable-execution/<executionName>/<invocationId>
+
+    Attributes:
+        function_name: The Lambda function name.
+        execution_name: The durable execution name (unique per execution).
+        invocation_id: The invocation ID (unique per invocation within an execution).
+    """
+
+    function_name: str
+    execution_name: str
+    invocation_id: str
+
+    @classmethod
+    def from_arn(cls, arn: str) -> DurableExecutionArn | None:
+        """Parse a durable execution ARN string into its components.
+
+        Args:
+            arn: The full ARN string.
+
+        Returns:
+            A DurableExecutionArn instance, or None if the ARN doesn't match
+            the expected durable execution format.
+        """
+        match = _DURABLE_EXECUTION_ARN_PATTERN.match(arn)
+        if not match:
+            return None
+        return cls(
+            function_name=match.group(1),
+            execution_name=match.group(2),
+            invocation_id=match.group(3),
+        )

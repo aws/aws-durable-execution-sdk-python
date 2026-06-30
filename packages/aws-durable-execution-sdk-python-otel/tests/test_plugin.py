@@ -269,6 +269,51 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
     )
 
 
+def test_context_span_omits_attempt_attributes():
+    """CONTEXT operations do not carry per-attempt attributes.
+
+    durable.attempt.number and durable.attempt.outcome are meaningful for
+    STEP operations (each retry is an attempt) but not for CONTEXT, so the
+    plugin omits them on CONTEXT spans for cross-SDK consistency.
+    """
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    operation_id = "ctx-1"
+
+    plugin.on_user_function_start(
+        UserFunctionStartInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=None,
+            name="book-trip",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replay_children=False,
+            attempt=1,
+        )
+    )
+    plugin.on_user_function_end(
+        UserFunctionEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=None,
+            name="book-trip",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replay_children=False,
+            attempt=1,
+            outcome=UserFunctionOutcome.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+
+    span = exporter.get_finished_spans()[0]
+    assert span.attributes["durable.operation.type"] == OperationType.CONTEXT.value
+    assert "durable.attempt.number" not in span.attributes
+    assert "durable.attempt.outcome" not in span.attributes
+
+
 def test_span_registry_helpers_can_be_called_from_multiple_threads():
     """Verify active span registry helpers are safe under concurrent access."""
     plugin, _ = _create_plugin()
