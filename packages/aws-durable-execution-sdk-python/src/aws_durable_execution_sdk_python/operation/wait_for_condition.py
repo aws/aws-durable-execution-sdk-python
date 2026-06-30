@@ -11,8 +11,6 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationUpdate,
-    OperationType,
-    OperationSubType,
 )
 from aws_durable_execution_sdk_python.logger import LogInfo
 from aws_durable_execution_sdk_python.operation.base import (

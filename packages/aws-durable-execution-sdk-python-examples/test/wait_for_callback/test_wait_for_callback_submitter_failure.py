@@ -1,7 +1,5 @@
 """Tests for wait_for_callback_submitter_retry_success."""
 
-import json
-
 import pytest
 from aws_durable_execution_sdk_python.execution import InvocationStatus
 

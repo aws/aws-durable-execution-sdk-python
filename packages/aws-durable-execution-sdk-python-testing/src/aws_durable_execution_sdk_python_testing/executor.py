@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -24,7 +23,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 
 from aws_durable_execution_sdk_python_testing.exceptions import (
-    ExecutionAlreadyStartedException,
     IllegalStateException,
     InvalidParameterValueException,
     ResourceNotFoundException,
@@ -34,7 +32,6 @@ from aws_durable_execution_sdk_python_testing.model import (
     CheckpointDurableExecutionResponse,
     CheckpointUpdatedExecutionState,
     EventCreationContext,
-    EventType,
     GetDurableExecutionHistoryResponse,
     GetDurableExecutionResponse,
     GetDurableExecutionStateResponse,

@@ -1,7 +1,6 @@
 """Tests for wait_for_callback_multiple_invocations."""
 
 import json
-import time
 
 import pytest
 from aws_durable_execution_sdk_python.execution import InvocationStatus

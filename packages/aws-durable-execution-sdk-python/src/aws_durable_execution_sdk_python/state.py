@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
-from typing import TYPE_CHECKING, Callable, Any
+from typing import TYPE_CHECKING, Callable
 
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
@@ -32,11 +32,9 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     OperationUpdate,
     StateOutput,
-    OperationSubType,
 )
 from aws_durable_execution_sdk_python.plugin import (
     PluginExecutor,
-    UserFunctionStartInfo,
 )
 from aws_durable_execution_sdk_python.threading import CompletionEvent, OrderedLock
 

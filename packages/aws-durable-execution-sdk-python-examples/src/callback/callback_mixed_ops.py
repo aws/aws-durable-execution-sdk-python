@@ -1,6 +1,5 @@
 """Demonstrates createCallback mixed with steps, waits, and other operations."""
 
-import time
 from typing import Any
 
 from aws_durable_execution_sdk_python.config import CallbackConfig, Duration

@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 try:
     import boto3
 
-    from aws_durable_execution_sdk_python.lambda_service import LambdaClient
+    from aws_durable_execution_sdk_python.lambda_service import LambdaClient  # noqa: F401
 except ImportError:
     sys.exit(1)
 

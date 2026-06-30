@@ -25,7 +25,6 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     OperationSubType,
-    OperationType,
 )
 from aws_durable_execution_sdk_python.logger import Logger, LogInfo
 from aws_durable_execution_sdk_python.operation.callback import (

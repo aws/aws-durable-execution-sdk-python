@@ -26,7 +26,6 @@ from aws_durable_execution_sdk_python_testing.invoker import (
     InProcessInvoker,
     LambdaInvoker,
     _LAMBDA_CLIENT_CONFIG,
-    create_lambda_client,
     create_test_lambda_context,
 )
 from aws_durable_execution_sdk_python_testing.model import (

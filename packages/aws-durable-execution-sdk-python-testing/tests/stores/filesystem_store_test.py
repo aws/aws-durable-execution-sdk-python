@@ -14,8 +14,6 @@ from aws_durable_execution_sdk_python_testing.stores.filesystem import (
     FileSystemExecutionStore,
 )
 
-from datetime import datetime, timezone
-
 
 @pytest.fixture
 def temp_storage_dir():

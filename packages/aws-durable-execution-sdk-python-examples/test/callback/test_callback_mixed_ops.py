@@ -1,7 +1,6 @@
 """Tests for create_callback_mixed_ops."""
 
 import json
-import time
 
 import pytest
 from aws_durable_execution_sdk_python.execution import InvocationStatus
