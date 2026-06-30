@@ -457,6 +457,8 @@ class ExecutionState:
         """Emit operation hooks once for each checkpointed operation during replay."""
         if operation.operation_type is OperationType.EXECUTION:
             return
+        if operation.status is OperationStatus.READY:
+            return
 
         with self._replay_status_lock:
             if self._replay_status is not ReplayStatus.REPLAY:

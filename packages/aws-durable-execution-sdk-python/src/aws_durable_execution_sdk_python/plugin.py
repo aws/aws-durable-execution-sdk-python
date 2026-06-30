@@ -337,9 +337,6 @@ class PluginExecutor:
 
     def on_operation_replay(self, operation: Operation) -> None:
         """Execute plugins for a checkpointed operation observed during replay."""
-        if operation.status is OperationStatus.READY:
-            return
-
         start_info = OperationStartInfo(
             operation_id=operation.operation_id,
             operation_type=operation.operation_type,
