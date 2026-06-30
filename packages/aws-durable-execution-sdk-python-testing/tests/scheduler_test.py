@@ -456,24 +456,49 @@ def test_scheduler_cleanup_on_stop():
     assert not scheduler.is_started()
 
 
+def test_scheduler_stop_shuts_down_default_executor_threads():
+    """Scheduler stop joins threads created for sync scheduled functions."""
+    existing_thread_ids = {thread.ident for thread in threading.enumerate()}
+    scheduler = Scheduler()
+    scheduler.start()
+
+    future = scheduler.call_later(lambda: None, delay=0)
+    future.result(timeout=1.0)
+
+    def new_scheduler_threads():
+        return [
+            thread
+            for thread in threading.enumerate()
+            if thread.ident not in existing_thread_ids
+            and thread.name.startswith("durable-scheduler")
+        ]
+
+    assert wait_for_condition(lambda: len(new_scheduler_threads()) >= 1)
+
+    scheduler.stop()
+
+    assert wait_for_condition(lambda: len(new_scheduler_threads()) == 0)
+
+
 def test_scheduler_multiple_events():
     """Test scheduler with multiple events."""
     scheduler = Scheduler()
     scheduler.start()
 
-    event1 = scheduler.create_event()
-    event2 = scheduler.create_event()
+    try:
+        event1 = scheduler.create_event()
+        event2 = scheduler.create_event()
 
-    assert scheduler.event_count() == 2
+        assert scheduler.event_count() == 2
 
-    event1.set()
-    result1 = event1.wait(timeout=0.01)
-    assert result1 is True
+        event1.set()
+        result1 = event1.wait(timeout=1.0)
+        assert result1 is True
 
-    result2 = event2.wait(timeout=0.01)
-    assert result2 is False
-
-    scheduler.stop()
+        result2 = event2.wait(timeout=0.01)
+        assert result2 is False
+    finally:
+        scheduler.stop()
 
 
 def test_task_properties_after_scheduler_stop():
@@ -509,6 +534,31 @@ def test_event_timeout_handling():
         assert 0.04 <= (end_time - start_time) <= 0.25
     finally:
         scheduler.stop()
+
+
+def test_event_timeout_when_scheduler_loop_is_blocked():
+    """Event wait timeout is enforced even if the scheduler loop is blocked."""
+    scheduler = Scheduler()
+    scheduler.start()
+
+    event = scheduler.create_event()
+    blocker_started = threading.Event()
+
+    async def block_scheduler_loop():
+        blocker_started.set()
+        time.sleep(0.2)
+
+    scheduler.call_later(block_scheduler_loop, delay=0)
+    assert blocker_started.wait(timeout=1.0)
+
+    start_time = time.time()
+    result = event.wait(timeout=0.02)
+    elapsed = time.time() - start_time
+
+    assert result is False
+    assert elapsed < 0.15
+
+    scheduler.stop()
 
 
 def test_scheduler_call_later_zero_delay():

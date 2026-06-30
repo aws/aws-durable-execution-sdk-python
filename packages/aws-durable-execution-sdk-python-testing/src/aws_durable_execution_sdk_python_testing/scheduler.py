@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import itertools
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import TYPE_CHECKING, Any
 
 
@@ -64,6 +67,10 @@ class Scheduler:
 
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+        self._thread_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="durable-scheduler"
+        )
+        self._loop.set_default_executor(self._thread_executor)
         self._ready_event: threading.Event = threading.Event()
         self._thread: threading.Thread = threading.Thread(
             target=self._start_loop, daemon=True
@@ -99,7 +106,8 @@ class Scheduler:
             return
 
         self._running = False
-        self._loop.call_soon_threadsafe(self._cleanup_and_stop)
+        future = asyncio.run_coroutine_threadsafe(self._cleanup_and_stop(), self._loop)
+        future.result()
         self._thread.join()
 
     def is_started(self) -> bool:
@@ -116,16 +124,24 @@ class Scheduler:
             return 0
         return len(asyncio.all_tasks(self._loop))
 
-    def _cleanup_and_stop(self):
-        """Cancel all tasks and clear all events. Stop the event-loop."""
-        # Cancel all tasks
-        for task in asyncio.all_tasks(self._loop):
+    async def _cleanup_and_stop(self):
+        """Cancel all tasks, clear events, and stop the event loop."""
+        current_task = asyncio.current_task(self._loop)
+        tasks = [
+            task for task in asyncio.all_tasks(self._loop) if task is not current_task
+        ]
+
+        for task in tasks:
             task.cancel()
 
-        # Clear events (don't set them)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        await self._loop.shutdown_default_executor()
+
         self._events.clear()
 
-        self._loop.stop()
+        self._loop.call_soon(self._loop.stop)
 
     def _start_loop(self):
         """Initialize the event-loop. The ready event notifies that the loop is started."""
@@ -146,8 +162,8 @@ class Scheduler:
     ) -> Future[Any]:
         """Call func after the delay.
 
-        If func is async it runs inside a thread-safe coroutine. If func is sync it runs in its own
-        threadpool, so it won't block the event loop.
+        If func is async it runs inside a thread-safe coroutine. If func is sync it runs in the
+        scheduler worker thread, so it won't block the event loop.
 
         Args:
             func (Callable[[], Any]): The function to call later. This can be an async or a standard
@@ -170,7 +186,7 @@ class Scheduler:
                     await asyncio.sleep(delay)
 
                     try:
-                        if asyncio.iscoroutinefunction(func):
+                        if inspect.iscoroutinefunction(func):
                             result = await func()
                         else:
                             result = await asyncio.to_thread(func)
@@ -215,13 +231,22 @@ class Scheduler:
         if event not in self._events:
             return False
 
+        async def wait_for_event_with_timeout() -> bool:
+            return await asyncio.wait_for(event.wait(), timeout)
+
         future: Future[bool] = asyncio.run_coroutine_threadsafe(
-            asyncio.wait_for(event.wait(), timeout), self._loop
+            wait_for_event_with_timeout(), self._loop
         )
 
         try:
-            return future.result()
-        except TimeoutError:
+            if timeout is None:
+                return future.result()
+            # Enforce the timeout from the waiting thread too. If the scheduler
+            # loop is blocked, the inner asyncio.wait_for timeout cannot fire.
+            margin = min(1.0, max(0.01, timeout * 0.1))
+            return future.result(timeout=timeout + margin)
+        except (TimeoutError, FutureTimeoutError):
+            future.cancel()
             return False
 
     def set_event(self, event: asyncio.Event):

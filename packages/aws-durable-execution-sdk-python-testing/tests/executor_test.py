@@ -1,6 +1,5 @@
 """Unit tests for executor module."""
 
-import asyncio
 from datetime import UTC, datetime
 from unittest.mock import Mock, patch
 
@@ -315,9 +314,8 @@ def test_should_complete_workflow_with_error_when_invocation_fails(
             handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
             # Execute the handler to trigger the invocation logic
-            import asyncio
 
-            asyncio.run(handler())
+            handler()
 
         # Assert - verify workflow was completed with error
         mock_fail.assert_called_once_with("test-arn", failed_response.error)
@@ -361,9 +359,8 @@ def test_should_complete_workflow_with_result_when_invocation_succeeds(
             handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
             # Execute the handler to trigger the invocation logic
-            import asyncio
 
-            asyncio.run(handler())
+            handler()
 
         # Assert - verify workflow was completed with result
         mock_complete.assert_called_once_with("test-arn", "success result")
@@ -404,9 +401,8 @@ def test_should_handle_pending_status_when_operations_exist(
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
         # Execute the handler to trigger the invocation logic
-        import asyncio
 
-        asyncio.run(handler())
+        handler()
 
     # Assert - verify pending operations were checked
     mock_execution.has_pending_operations.assert_called_once_with(mock_execution)
@@ -444,9 +440,8 @@ def test_should_ignore_response_when_execution_already_complete(
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
         # Execute the handler to trigger the invocation logic
-        import asyncio
 
-        asyncio.run(handler())
+        handler()
 
     # Assert - verify invoker was not called since execution was already complete
     mock_invoker.create_invocation_input.assert_not_called()
@@ -487,7 +482,7 @@ def test_should_retry_when_response_has_no_status(
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
         # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+        handler()
 
         # Assert - verify retry was triggered due to validation error
         assert mock_execution.consecutive_failed_invocation_attempts == 1
@@ -532,7 +527,7 @@ def test_should_retry_when_failed_response_has_result(
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
         # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+        handler()
 
         # Assert - verify retry was triggered due to validation error
         assert mock_execution.consecutive_failed_invocation_attempts == 1
@@ -578,7 +573,7 @@ def test_should_retry_when_success_response_has_error(
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
         # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+        handler()
 
         # Assert - verify retry was triggered due to validation error
         assert mock_execution.consecutive_failed_invocation_attempts == 1
@@ -622,7 +617,7 @@ def test_should_retry_when_pending_response_has_no_operations(
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
         # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+        handler()
 
         # Assert - verify retry was triggered due to validation error
         assert mock_execution.consecutive_failed_invocation_attempts == 1
@@ -665,7 +660,7 @@ def test_invoke_handler_success(
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
         # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+        handler()
 
     # Verify the invocation process was executed
     mock_invoker.create_invocation_input.assert_called_once_with(
@@ -701,7 +696,7 @@ def test_invoke_handler_execution_already_complete(
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
         # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+        handler()
 
     # Verify store was accessed to check execution status
     mock_store.load.assert_called_with("test-arn")
@@ -747,7 +742,7 @@ def test_invoke_handler_execution_completed_during_invocation(
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
         # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+        handler()
 
     # Verify the execution was checked for completion
     assert mock_store.load.call_count >= 2
@@ -784,7 +779,7 @@ def test_invoke_handler_resource_not_found(
             handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
             # Execute the handler to trigger the invocation logic
-            asyncio.run(handler())
+            handler()
 
         # Assert - verify workflow failure was triggered through public API
         mock_fail.assert_called_once()
@@ -825,7 +820,7 @@ def test_invoke_handler_general_exception(
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
         # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+        handler()
 
         # Assert - verify retry was scheduled through observable behavior
         assert mock_execution.consecutive_failed_invocation_attempts == 1
@@ -948,9 +943,8 @@ def test_should_fail_execution_when_function_not_found(
             handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
             # Execute the handler to trigger the invocation logic
-            import asyncio
 
-            asyncio.run(handler())
+            handler()
 
         # Assert - verify failure was triggered with correct error
         mock_fail.assert_called_once()
@@ -992,9 +986,8 @@ def test_should_fail_execution_when_retries_exhausted(
             handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
             # Execute the handler to trigger the invocation logic
-            import asyncio
 
-            asyncio.run(handler())
+            handler()
 
         # Assert - verify failure was triggered when retries exhausted
         mock_fail.assert_called_once()
@@ -1038,7 +1031,7 @@ def test_should_prevent_multiple_workflow_failures_on_complete_execution(
         with pytest.raises(
             IllegalStateException, match="Cannot make multiple close workflow decisions"
         ):
-            asyncio.run(handler())
+            handler()
 
 
 def test_should_retry_invocation_when_under_limit_through_public_api(
@@ -1086,9 +1079,8 @@ def test_should_retry_invocation_when_under_limit_through_public_api(
 
         # Simulate scheduler executing the initial invocation handler
         initial_handler = mock_scheduler.call_later.call_args_list[-1][0][0]
-        import asyncio
 
-        asyncio.run(initial_handler())
+        initial_handler()
 
         # Verify retry was scheduled due to validation error
         assert mock_scheduler.call_later.call_count == 3  # timeout + initial + retry
@@ -1099,7 +1091,7 @@ def test_should_retry_invocation_when_under_limit_through_public_api(
         retry_delay = retry_call[1]["delay"]
 
         # Execute the retry handler to complete the scenario
-        asyncio.run(retry_handler())
+        retry_handler()
 
     # Assert - verify final outcome after retry sequence
     assert (
@@ -1141,7 +1133,7 @@ def test_should_fail_workflow_when_retry_limit_exceeded(
             handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
             # Execute the handler to trigger the invocation logic
-            asyncio.run(handler())
+            handler()
 
         # Assert - verify workflow failed due to retry limit exceeded
         mock_fail.assert_called_once()
@@ -1501,7 +1493,7 @@ def test_should_retry_when_response_has_unexpected_status(
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
         # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+        handler()
 
         # Assert - verify retry was triggered due to validation error
         assert mock_execution.consecutive_failed_invocation_attempts == 1
@@ -1547,7 +1539,7 @@ def test_invoke_handler_execution_completed_during_invocation_async(
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
         # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+        handler()
 
     # Verify the execution was loaded multiple times (before and after invocation)
     assert mock_store.load.call_count >= 2
@@ -1584,7 +1576,7 @@ def test_invoke_handler_resource_not_found_async(
             handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
             # Execute the handler to trigger the invocation logic
-            asyncio.run(handler())
+            handler()
 
         # Assert - verify workflow failure was triggered through public API
         mock_fail.assert_called_once()
@@ -1636,7 +1628,7 @@ def test_invoke_handler_general_exception_async(
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
         # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+        handler()
 
         # Assert - verify retry was scheduled through observable behavior
         assert mock_execution.consecutive_failed_invocation_attempts == 1
