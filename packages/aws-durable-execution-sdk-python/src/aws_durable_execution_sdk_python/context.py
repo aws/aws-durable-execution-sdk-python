@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Concatenate, Generic, ParamSpec, TypeVar
 
 from aws_durable_execution_sdk_python.config import (
@@ -46,7 +48,10 @@ from aws_durable_execution_sdk_python.serdes import (
     SerDes,
     deserialize,
 )
-from aws_durable_execution_sdk_python.state import ExecutionState  # noqa: TCH001
+from aws_durable_execution_sdk_python.state import (  # noqa: TCH001
+    ExecutionState,
+    ReplayStatus,
+)
 from aws_durable_execution_sdk_python.threading import OrderedCounter
 from aws_durable_execution_sdk_python.types import Callback as CallbackProtocol
 from aws_durable_execution_sdk_python.types import (
@@ -289,6 +294,7 @@ class DurableContext(DurableContextProtocol):
         parent_id: str | None = None,
         logger: Logger | None = None,
         step_id_prefix: str | None = None,
+        replay_status: ReplayStatus = ReplayStatus.NEW,
     ) -> None:
         self.state: ExecutionState = state
         self.execution_context: ExecutionContext = execution_context
@@ -304,15 +310,30 @@ class DurableContext(DurableContextProtocol):
         self._is_virtual: bool = self._parent_id != self._step_id_prefix
         self._step_counter: OrderedCounter = OrderedCounter()
 
+        # Replay status is tracked per-context.
+        # A context starts in the status inherited from its creator and refines
+        # itself to NEW via look-ahead as it reaches its own replay boundary.
+        # Concurrent branches each get their own child context, so the lock
+        # guards refinement when branches share a context reference.
+        self._replay_status: ReplayStatus = replay_status
+        self._replay_status_lock: Lock = Lock()
+
         log_info = LogInfo(
             execution_state=state,
             parent_id=parent_id,
         )
         self._log_info = log_info
-        self.logger: Logger = logger or Logger.from_log_info(
-            logger=logging.getLogger(),
-            info=log_info,
-        )
+        # The logger consults THIS context's replay status for de-duplication.
+        # A child inherits the parent's underlying logger/extra but must report
+        # its own status, so rebind the replay source onto self.
+        if logger is not None:
+            self.logger: Logger = logger.with_is_replaying(self.is_replaying)
+        else:
+            self.logger = Logger.from_log_info(
+                logger=logging.getLogger(),
+                info=log_info,
+                is_replaying=self.is_replaying,
+            )
 
     @property
     def is_virtual(self) -> bool:
@@ -331,6 +352,7 @@ class DurableContext(DurableContextProtocol):
     def from_lambda_context(
         state: ExecutionState,
         lambda_context: LambdaContext,
+        replay_status: ReplayStatus = ReplayStatus.NEW,
     ):
         return DurableContext(
             state=state,
@@ -339,6 +361,7 @@ class DurableContext(DurableContextProtocol):
             ),
             lambda_context=lambda_context,
             parent_id=None,
+            replay_status=replay_status,
         )
 
     def create_child_context(
@@ -374,6 +397,11 @@ class DurableContext(DurableContextProtocol):
             lambda_context=self.lambda_context,
             parent_id=child_parent_id,
             step_id_prefix=operation_id,
+            # Inherit the creator's current replay status; the child refines
+            # itself to NEW via look-ahead against its own step ids.
+            replay_status=(
+                ReplayStatus.REPLAY if self.is_replaying() else ReplayStatus.NEW
+            ),
             logger=self.logger.with_log_info(
                 LogInfo(
                     execution_state=self.state,
@@ -399,6 +427,7 @@ class DurableContext(DurableContextProtocol):
         self.logger = Logger.from_log_info(
             logger=new_logger,
             info=self._log_info,
+            is_replaying=self.is_replaying,
         )
 
     def _create_step_id_for_logical_step(self, step: int) -> str:
@@ -419,6 +448,93 @@ class DurableContext(DurableContextProtocol):
         """
         new_counter: int = self._step_counter.increment()
         return self._create_step_id_for_logical_step(new_counter)
+
+    # region replay status
+
+    def is_replaying(self) -> bool:
+        """Return True if this context is currently replaying prior operations."""
+        with self._replay_status_lock:
+            return self._replay_status is ReplayStatus.REPLAY
+
+    def _set_replay_status_new(self) -> None:
+        with self._replay_status_lock:
+            self._replay_status = ReplayStatus.NEW
+
+    def _peek_next_operation_id(self) -> str:
+        """Return the operation id the next operation will take, without consuming it."""
+        return self._create_step_id_for_logical_step(
+            self._step_counter.get_current() + 1
+        )
+
+    def _peek_next_checkpoint(self) -> CheckpointedResult:
+        """Return the checkpoint for this context's next operation, without consuming it."""
+        return self.state.get_checkpoint_result(self._peek_next_operation_id())
+
+    def _next_operation_exists(self) -> bool:
+        """True if a checkpoint exists for this context's next operation."""
+        return self._peek_next_checkpoint().is_existent()
+
+    @contextmanager
+    def _replay_aware(self):
+        """Wrap a single operation with replay-boundary detection.
+
+        The operation kind is inferred from its own checkpoint (when one
+        exists), so no per-call-site flag is needed.
+
+        The boundary has these parts:
+
+        - Existence flip (before the op): if we are replaying and the next
+          operation has no checkpoint at all, it is brand-new code, so flip to
+          NEW immediately so the operation and its logs count as new.
+        - Deferred status flip (after the op): a non-terminal next operation is
+          a pure resume point with no user body. We keep replay status through the
+          operation and flip to NEW afterwards, so the resuming operation's own
+          logs stay de-duplicated but subsequent code counts as new.
+        - Post-op existence flip (after the op): if we are still replaying once
+          the operation completes and the *following* operation does not exist
+          yet, we have reached the replay boundary.
+        """
+        was_replaying: bool = self.is_replaying()
+        # Only peek when replaying; avoids unnecessary checkpoint lookups (and
+        # any step-id side effects) on the common non-replay path.
+        next_checkpoint: CheckpointedResult | None = (
+            self._peek_next_checkpoint() if was_replaying else None
+        )
+        next_exists: bool = (
+            next_checkpoint.is_existent() if next_checkpoint is not None else False
+        )
+        next_terminal: bool = next_exists and next_checkpoint.is_terminal()
+
+        next_is_step: bool = (
+            next_exists
+            and next_checkpoint.operation.operation_type is OperationType.STEP
+        )
+
+        # While replaying, an operation that already has a checkpoint was
+        # observed in a prior invocation — notify plugins (once per op). State
+        # owns the dedup; the context owns the "only while replaying" gate.
+        if was_replaying and next_exists:
+            self.state.emit_operation_replay_hook(next_checkpoint.operation)
+        # Deferred flip applies only to non-step resume points. For step ops we
+        # flip before instead, so don't defer.
+        flip_after: bool = (
+            was_replaying and next_exists and not next_terminal and not next_is_step
+        )
+        # Before-the-op flips:
+        # - brand-new next op (no checkpoint): always flip to NEW.
+        # - non-terminal STEP-type op (brand-new or retrying): the user function
+        #   is about to run real work, so flip to NEW before it.
+        if was_replaying and (not next_exists or (next_is_step and not next_terminal)):
+            self._set_replay_status_new()
+        try:
+            yield
+        finally:
+            if flip_after:
+                self._set_replay_status_new()
+            elif self.is_replaying() and not self._next_operation_exists():
+                self._set_replay_status_new()
+
+    # endregion replay status
 
     # region Operations
 
@@ -441,26 +557,25 @@ class DurableContext(DurableContextProtocol):
         """
         if not config:
             config = CallbackConfig()
-        operation_id: str = self._create_step_id()
-        executor: CallbackOperationExecutor = CallbackOperationExecutor(
-            state=self.state,
-            operation_identifier=OperationIdentifier(
+        with self._replay_aware():
+            operation_id: str = self._create_step_id()
+            executor: CallbackOperationExecutor = CallbackOperationExecutor(
+                state=self.state,
+                operation_identifier=OperationIdentifier(
+                    operation_id=operation_id,
+                    sub_type=OperationSubType.CALLBACK,
+                    parent_id=self._parent_id,
+                    name=name,
+                ),
+                config=config,
+            )
+            callback_id: str = executor.process()
+            return Callback(
+                callback_id=callback_id,
                 operation_id=operation_id,
-                sub_type=OperationSubType.CALLBACK,
-                parent_id=self._parent_id,
-                name=name,
-            ),
-            config=config,
-        )
-        callback_id: str = executor.process()
-        result: Callback = Callback(
-            callback_id=callback_id,
-            operation_id=operation_id,
-            state=self.state,
-            serdes=config.serdes,
-        )
-        self.state.track_replay(operation_id=operation_id)
-        return result
+                state=self.state,
+                serdes=config.serdes,
+            )
 
     def invoke(
         self,
@@ -482,22 +597,21 @@ class DurableContext(DurableContextProtocol):
         """
         if not config:
             config = InvokeConfig[P, R]()
-        operation_id = self._create_step_id()
-        executor: InvokeOperationExecutor[R] = InvokeOperationExecutor(
-            function_name=function_name,
-            payload=payload,
-            state=self.state,
-            operation_identifier=OperationIdentifier(
-                operation_id=operation_id,
-                sub_type=OperationSubType.CHAINED_INVOKE,
-                parent_id=self._parent_id,
-                name=name,
-            ),
-            config=config,
-        )
-        result: R = executor.process()
-        self.state.track_replay(operation_id=operation_id)
-        return result
+        with self._replay_aware():
+            operation_id = self._create_step_id()
+            executor: InvokeOperationExecutor[R] = InvokeOperationExecutor(
+                function_name=function_name,
+                payload=payload,
+                state=self.state,
+                operation_identifier=OperationIdentifier(
+                    operation_id=operation_id,
+                    sub_type=OperationSubType.CHAINED_INVOKE,
+                    parent_id=self._parent_id,
+                    name=name,
+                ),
+                config=config,
+            )
+            return executor.process()
 
     def map(
         self,
@@ -509,44 +623,43 @@ class DurableContext(DurableContextProtocol):
         """Execute a callable for each item in parallel."""
         map_name: str | None = self._resolve_step_name(name, func)
 
-        operation_id = self._create_step_id()
-        operation_identifier = OperationIdentifier(
-            operation_id=operation_id,
-            sub_type=OperationSubType.MAP,
-            parent_id=self._parent_id,
-            name=map_name,
-        )
-        map_context = self.create_child_context(operation_id=operation_id)
-
-        def map_in_child_context() -> BatchResult[R]:
-            # map_context is a child_context of the context upon which `.map`
-            # was called. We are calling it `map_context` to make it explicit
-            # that any operations happening from hereon are done on the context
-            # that owns the branches
-            return map_handler(
-                items=inputs,
-                func=func,
-                config=config,
-                execution_state=self.state,
-                map_context=map_context,
-                operation_identifier=operation_identifier,
-            )
-
-        result: BatchResult[R] = child_handler(
-            func=map_in_child_context,
-            state=self.state,
-            operation_identifier=operation_identifier,
-            config=ChildConfig(
+        with self._replay_aware():
+            operation_id = self._create_step_id()
+            operation_identifier = OperationIdentifier(
+                operation_id=operation_id,
                 sub_type=OperationSubType.MAP,
-                serdes=getattr(config, "serdes", None),
-                # child_handler should only know the serdes of the parent serdes,
-                # the item serdes will be passed when we are actually executing
-                # the branch within its own child_handler.
-                item_serdes=None,
-            ),
-        )
-        self.state.track_replay(operation_id=operation_id)
-        return result
+                parent_id=self._parent_id,
+                name=map_name,
+            )
+            map_context = self.create_child_context(operation_id=operation_id)
+
+            def map_in_child_context() -> BatchResult[R]:
+                # map_context is a child_context of the context upon which `.map`
+                # was called. We are calling it `map_context` to make it explicit
+                # that any operations happening from hereon are done on the context
+                # that owns the branches
+                return map_handler(
+                    items=inputs,
+                    func=func,
+                    config=config,
+                    execution_state=self.state,
+                    map_context=map_context,
+                    operation_identifier=operation_identifier,
+                )
+
+            return child_handler(
+                func=map_in_child_context,
+                state=self.state,
+                operation_identifier=operation_identifier,
+                config=ChildConfig(
+                    sub_type=OperationSubType.MAP,
+                    serdes=getattr(config, "serdes", None),
+                    # child_handler should only know the serdes of the parent serdes,
+                    # the item serdes will be passed when we are actually executing
+                    # the branch within its own child_handler.
+                    item_serdes=None,
+                ),
+            )
 
     def parallel(
         self,
@@ -555,44 +668,43 @@ class DurableContext(DurableContextProtocol):
         config: ParallelConfig | None = None,
     ) -> BatchResult[T]:
         """Execute multiple callables in parallel."""
-        # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
-        operation_id = self._create_step_id()
-        parallel_context = self.create_child_context(operation_id=operation_id)
-        operation_identifier = OperationIdentifier(
-            operation_id=operation_id,
-            sub_type=OperationSubType.PARALLEL,
-            parent_id=self._parent_id,
-            name=name,
-        )
-
-        def parallel_in_child_context() -> BatchResult[T]:
-            # parallel_context is a child_context of the context upon which `.map`
-            # was called. We are calling it `parallel_context` to make it explicit
-            # that any operations happening from hereon are done on the context
-            # that owns the branches
-            return parallel_handler(
-                callables=functions,
-                config=config,
-                execution_state=self.state,
-                parallel_context=parallel_context,
-                operation_identifier=operation_identifier,
+        with self._replay_aware():
+            # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
+            operation_id = self._create_step_id()
+            parallel_context = self.create_child_context(operation_id=operation_id)
+            operation_identifier = OperationIdentifier(
+                operation_id=operation_id,
+                sub_type=OperationSubType.PARALLEL,
+                parent_id=self._parent_id,
+                name=name,
             )
 
-        result: BatchResult[T] = child_handler(
-            func=parallel_in_child_context,
-            state=self.state,
-            operation_identifier=operation_identifier,
-            config=ChildConfig(
-                sub_type=OperationSubType.PARALLEL,
-                serdes=getattr(config, "serdes", None),
-                # child_handler should only know the serdes of the parent serdes,
-                # the item serdes will be passed when we are actually executing
-                # the branch within its own child_handler.
-                item_serdes=None,
-            ),
-        )
-        self.state.track_replay(operation_id=operation_id)
-        return result
+            def parallel_in_child_context() -> BatchResult[T]:
+                # parallel_context is a child_context of the context upon which `.map`
+                # was called. We are calling it `parallel_context` to make it explicit
+                # that any operations happening from hereon are done on the context
+                # that owns the branches
+                return parallel_handler(
+                    callables=functions,
+                    config=config,
+                    execution_state=self.state,
+                    parallel_context=parallel_context,
+                    operation_identifier=operation_identifier,
+                )
+
+            return child_handler(
+                func=parallel_in_child_context,
+                state=self.state,
+                operation_identifier=operation_identifier,
+                config=ChildConfig(
+                    sub_type=OperationSubType.PARALLEL,
+                    serdes=getattr(config, "serdes", None),
+                    # child_handler should only know the serdes of the parent serdes,
+                    # the item serdes will be passed when we are actually executing
+                    # the branch within its own child_handler.
+                    item_serdes=None,
+                ),
+            )
 
     def run_in_child_context(
         self,
@@ -613,36 +725,35 @@ class DurableContext(DurableContextProtocol):
             T: The result of the callable.
         """
         step_name: str | None = self._resolve_step_name(name, func)
-        # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
-        operation_id = self._create_step_id()
-        sub_type = (
-            config.sub_type
-            if config and config.sub_type
-            else OperationSubType.RUN_IN_CHILD_CONTEXT
-        )
-
-        is_virtual: bool = config.is_virtual if config else False
-
-        def callable_with_child_context():
-            return func(
-                self.create_child_context(
-                    operation_id=operation_id, is_virtual=is_virtual
-                )
+        with self._replay_aware():
+            # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
+            operation_id = self._create_step_id()
+            sub_type = (
+                config.sub_type
+                if config and config.sub_type
+                else OperationSubType.RUN_IN_CHILD_CONTEXT
             )
 
-        result: T = child_handler(
-            func=callable_with_child_context,
-            state=self.state,
-            operation_identifier=OperationIdentifier(
-                operation_id=operation_id,
-                sub_type=sub_type,
-                parent_id=self._parent_id,
-                name=step_name,
-            ),
-            config=config,
-        )
-        self.state.track_replay(operation_id=operation_id)
-        return result
+            is_virtual: bool = config.is_virtual if config else False
+
+            def callable_with_child_context():
+                return func(
+                    self.create_child_context(
+                        operation_id=operation_id, is_virtual=is_virtual
+                    )
+                )
+
+            return child_handler(
+                func=callable_with_child_context,
+                state=self.state,
+                operation_identifier=OperationIdentifier(
+                    operation_id=operation_id,
+                    sub_type=sub_type,
+                    parent_id=self._parent_id,
+                    name=step_name,
+                ),
+                config=config,
+            )
 
     def step(
         self,
@@ -654,22 +765,21 @@ class DurableContext(DurableContextProtocol):
         logger.debug("Step name: %s", step_name)
         if not config:
             config = StepConfig()
-        operation_id = self._create_step_id()
-        executor: StepOperationExecutor[T] = StepOperationExecutor(
-            func=func,
-            config=config,
-            state=self.state,
-            operation_identifier=OperationIdentifier(
-                operation_id=operation_id,
-                sub_type=OperationSubType.STEP,
-                parent_id=self._parent_id,
-                name=step_name,
-            ),
-            context_logger=self.logger,
-        )
-        result: T = executor.process()
-        self.state.track_replay(operation_id=operation_id)
-        return result
+        with self._replay_aware():
+            operation_id = self._create_step_id()
+            executor: StepOperationExecutor[T] = StepOperationExecutor(
+                func=func,
+                config=config,
+                state=self.state,
+                operation_identifier=OperationIdentifier(
+                    operation_id=operation_id,
+                    sub_type=OperationSubType.STEP,
+                    parent_id=self._parent_id,
+                    name=step_name,
+                ),
+                context_logger=self.logger,
+            )
+            return executor.process()
 
     def wait(self, duration: Duration, name: str | None = None) -> None:
         """Wait for a specified amount of time.
@@ -682,20 +792,20 @@ class DurableContext(DurableContextProtocol):
         if seconds < 1:
             msg = "duration must be at least 1 second"
             raise ValidationError(msg)
-        operation_id = self._create_step_id()
-        wait_seconds = duration.seconds
-        executor: WaitOperationExecutor = WaitOperationExecutor(
-            seconds=wait_seconds,
-            state=self.state,
-            operation_identifier=OperationIdentifier(
-                operation_id=operation_id,
-                sub_type=OperationSubType.WAIT,
-                parent_id=self._parent_id,
-                name=name,
-            ),
-        )
-        executor.process()
-        self.state.track_replay(operation_id=operation_id)
+        with self._replay_aware():
+            operation_id = self._create_step_id()
+            wait_seconds = duration.seconds
+            executor: WaitOperationExecutor = WaitOperationExecutor(
+                seconds=wait_seconds,
+                state=self.state,
+                operation_identifier=OperationIdentifier(
+                    operation_id=operation_id,
+                    sub_type=OperationSubType.WAIT,
+                    parent_id=self._parent_id,
+                    name=name,
+                ),
+            )
+            executor.process()
 
     def wait_for_callback(
         self,
@@ -738,24 +848,23 @@ class DurableContext(DurableContextProtocol):
             msg = "`config` is required for wait_for_condition"
             raise ValidationError(msg)
 
-        operation_id = self._create_step_id()
-        executor: WaitForConditionOperationExecutor[T] = (
-            WaitForConditionOperationExecutor(
-                check=check,
-                config=config,
-                state=self.state,
-                operation_identifier=OperationIdentifier(
-                    operation_id=operation_id,
-                    sub_type=OperationSubType.WAIT_FOR_CONDITION,
-                    parent_id=self._parent_id,
-                    name=name,
-                ),
-                context_logger=self.logger,
+        with self._replay_aware():
+            operation_id = self._create_step_id()
+            executor: WaitForConditionOperationExecutor[T] = (
+                WaitForConditionOperationExecutor(
+                    check=check,
+                    config=config,
+                    state=self.state,
+                    operation_identifier=OperationIdentifier(
+                        operation_id=operation_id,
+                        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+                        parent_id=self._parent_id,
+                        name=name,
+                    ),
+                    context_logger=self.logger,
+                )
             )
-        )
-        result: T = executor.process()
-        self.state.track_replay(operation_id=operation_id)
-        return result
+            return executor.process()
 
 
 # endregion Operations

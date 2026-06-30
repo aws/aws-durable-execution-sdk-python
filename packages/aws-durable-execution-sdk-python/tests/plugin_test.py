@@ -41,6 +41,7 @@ OPERATION_START_INFO = OperationStartInfo(
     parent_id="parent-1",
     start_time=START_TS,
     is_replayed=False,
+    status=OperationStatus.STARTED,
 )
 OPERATION_END_INFO = OperationEndInfo(
     operation_id="op-1",
@@ -79,6 +80,7 @@ USER_FUNCTION_START_INFO = UserFunctionStartInfo(
     parent_id="parent-1",
     start_time=START_TS,
     is_replayed=False,
+    status=OperationStatus.STARTED,
 )
 
 USER_FUNCTION_END_INFO = UserFunctionEndInfo(
@@ -89,6 +91,7 @@ USER_FUNCTION_END_INFO = UserFunctionEndInfo(
     parent_id="parent-1",
     start_time=START_TS,
     is_replayed=False,
+    status=OperationStatus.STARTED,
     is_replay_children=False,
     attempt=1,
     outcome=UserFunctionOutcome.FAILED,
@@ -104,6 +107,7 @@ class TestDataClasses(unittest.TestCase):
         self.assertEqual(OPERATION_START_INFO.parent_id, "parent-1")
         self.assertEqual(OPERATION_START_INFO.start_time, START_TS)
         self.assertFalse(OPERATION_START_INFO.is_replayed)
+        self.assertEqual(OPERATION_START_INFO.status, OperationStatus.STARTED)
 
     def test_operation_end_info(self):
         self.assertEqual(OPERATION_END_INFO.status, OperationStatus.FAILED)
@@ -143,6 +147,7 @@ class TestDataClasses(unittest.TestCase):
         self.assertEqual(USER_FUNCTION_START_INFO.name, "func")
         self.assertEqual(USER_FUNCTION_START_INFO.parent_id, "parent-1")
         self.assertEqual(USER_FUNCTION_START_INFO.start_time, START_TS)
+        self.assertEqual(USER_FUNCTION_START_INFO.status, OperationStatus.STARTED)
 
     def test_user_function_end_info(self):
         self.assertEqual(USER_FUNCTION_END_INFO.operation_id, "op-1")
@@ -511,6 +516,15 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
         self.executor = PluginExecutor(plugins=[self.plugin])
 
     def test_start_action_fires_operation_start(self):
+        captured: list[OperationStartInfo] = []
+
+        class _CapturingPlugin(_TrackingPlugin):
+            def on_operation_start(self, info: OperationStartInfo) -> None:
+                super().on_operation_start(info)
+                captured.append(info)
+
+        self.plugin = _CapturingPlugin()
+        self.executor = PluginExecutor(plugins=[self.plugin])
         update = MagicMock()
         update.action = OperationAction.START
         update.operation_id = "op-1"
@@ -523,6 +537,7 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
             self.executor.on_operation_action(update)
 
         self.assertIn("operation_start:op-1", self.plugin.calls)
+        self.assertEqual(captured[0].status, OperationStatus.STARTED)
 
     def test_non_start_action_does_not_fire(self):
         update = MagicMock()

@@ -475,6 +475,27 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
             name=name,
         )
 
+        # The branch/iteration container op is resolved here via child_handler,
+        # bypassing context.run_in_child_context and therefore the parent's
+        # `_replay_aware`. Replicate the two things `_replay_aware` would have
+        # done for this container op while replaying:
+        #   1. Existence flip: a brand-new branch (no checkpoint) is new work,
+        #      so the child must start in NEW rather than inheriting REPLAY —
+        #      otherwise logs before the branch's first inner op are wrongly
+        #      de-duplicated during a map/parallel replay.
+        #   2. Replay hook: a branch that already has a checkpoint was observed
+        #      in a prior invocation, so emit the plugin replay hook (once).
+        # Virtual (FLAT) branches do not checkpoint themselves, so neither
+        # applies; their inner operations still self-correct via `_replay_aware`.
+        if not is_virtual and child_context.is_replaying():
+            branch_checkpoint = child_context.state.get_checkpoint_result(operation_id)
+            if not branch_checkpoint.is_existent():
+                child_context._set_replay_status_new()  # noqa: SLF001
+            elif branch_checkpoint.operation is not None:
+                child_context.state.emit_operation_replay_hook(
+                    branch_checkpoint.operation
+                )
+
         def run_in_child_handler() -> ResultType:
             return self.execute_item(child_context, executable)
 
@@ -489,7 +510,6 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
                 is_virtual=is_virtual,
             ),
         )
-        child_context.state.track_replay(operation_id=operation_id)
         return result
 
     def replay(self, execution_state: ExecutionState, executor_context: DurableContext):

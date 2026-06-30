@@ -492,6 +492,42 @@
         }
       }
     },
+    "ReplayLogging": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "replay_logging.handler",
+        "Description": "Demonstrating replay-aware logger de-duplication across a wait/replay boundary",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
+    "ReplayLoggingConcurrent": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "replay_logging_concurrent.handler",
+        "Description": "Demonstrating per-branch replay-aware logger de-duplication across concurrent parallel branch waits",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
     "StepsWithRetry": {
       "Type": "AWS::Serverless::Function",
       "Properties": {

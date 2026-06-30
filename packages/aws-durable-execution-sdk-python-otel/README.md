@@ -210,9 +210,9 @@ When `enrich_logger=True` (the default), the plugin installs a logging filter on
 the root logger at invocation start. The filter stamps the active OTel trace
 context onto every emitted log record using these attributes:
 
-- `otel_trace_id`: 32-char hex trace identifier
-- `otel_span_id`: 16-char hex span identifier
-- `otel_trace_sampled`: boolean indicating if the trace is sampled
+- `traceId`: 32-char hex trace identifier
+- `spanId`: 16-char hex span identifier
+- `otelTraceSampled`: boolean indicating if the trace is sampled
 
 These attributes are only set when a valid span context is active, so any log
 formatter or schema must treat the fields as optional.
@@ -228,7 +228,7 @@ After deploying your function with the plugin configured:
    - Child spans for each durable operation (named after your step names)
    - All invocations of the same execution grouped under one trace ID
 
-3. **Check log correlation** — verify that your logs include `otel_trace_id` and `otel_span_id` fields matching the spans in X-Ray.
+3. **Check log correlation** — verify that your logs include `traceId` and `spanId` fields matching the spans in X-Ray.
 
 4. **Confirm sampling** — If you set `OTEL_TRACES_SAMPLER=traceidratio` and `OTEL_TRACES_SAMPLER_ARG` to a value less than 1.0, verify that only the expected proportion of traces appear.
 

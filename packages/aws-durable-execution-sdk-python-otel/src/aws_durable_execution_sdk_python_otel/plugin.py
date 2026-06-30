@@ -378,6 +378,8 @@ class OtelPlugin(DurableInstrumentationPlugin):
                 parent_span=parent_span,
                 existed=True,
             )
+        else:
+            span.set_attributes(self._extract_attributes(info))
 
         if info.error:
             span.set_status(StatusCode.ERROR, info.error.message or "")
@@ -411,9 +413,12 @@ class OtelPlugin(DurableInstrumentationPlugin):
             )
         parent_span = self._resolve_parent_span(info.parent_id)
         attributes = self._extract_attributes(info)
+        span_name = info.name or info.operation_id
+        if info.operation_type is OperationType.STEP:
+            span_name = f"{span_name} attempt {info.attempt or 1}"
         span = self._start_span(
             operation_id=info.operation_id,
-            name=info.name or info.operation_id,
+            name=span_name,
             attributes=attributes,
             start_time=info.start_time,
             parent_span=parent_span,
@@ -488,6 +493,10 @@ class OtelPlugin(DurableInstrumentationPlugin):
             attributes["durable.operation.id"] = info.operation_id
         if hasattr(info, "operation_type") and info.operation_type is not None:
             attributes["durable.operation.type"] = info.operation_type.value
+        if hasattr(info, "sub_type") and info.sub_type is not None:
+            attributes["durable.operation.subtype"] = info.sub_type.value
+        if hasattr(info, "status") and info.status is not None:
+            attributes["durable.operation.status"] = info.status.value
         if hasattr(info, "name") and info.name is not None:
             attributes["durable.operation.name"] = info.name
         # Per-attempt fields are meaningful for STEP (each attempt is retried)

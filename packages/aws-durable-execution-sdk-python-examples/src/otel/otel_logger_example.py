@@ -2,8 +2,8 @@
 
 The OtelPlugin installs a logging filter on the root logger
 (enrich_logger=True by default) when the plugin is constructed. The filter
-stamps the active OpenTelemetry trace context (otel_trace_id, otel_span_id,
-otel_trace_sampled) onto every log record that flows through the root handler.
+stamps the active OpenTelemetry trace context (traceId, spanId,
+otelTraceSampled) onto every log record that flows through the root handler.
 This includes logs emitted via context.logger / step_context.logger as well as
 direct logging.getLogger() calls and third-party library logs, so logs
 correlate to the spans the plugin emits without any user code changes.

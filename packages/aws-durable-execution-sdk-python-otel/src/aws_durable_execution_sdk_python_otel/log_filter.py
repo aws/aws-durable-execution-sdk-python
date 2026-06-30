@@ -4,12 +4,11 @@ The filter attaches to a stdlib logging handler and enriches *every* record
 that flows through it: direct ``logging.getLogger().info(...)`` calls,
 child-logger records that propagate to root, and third-party library logs.
 
-The span/trace identifiers are added as ``LogRecord`` attributes (using
-underscore names, since dotted names are not valid record attributes):
+The span/trace identifiers are added as ``LogRecord`` attributes:
 
-    - ``otel_trace_id``: 32-char hex trace identifier
-    - ``otel_span_id``: 16-char hex span identifier
-    - ``otel_trace_sampled``: boolean indicating if the trace is sampled
+    - ``traceId``: 32-char hex trace identifier
+    - ``spanId``: 16-char hex span identifier
+    - ``otelTraceSampled``: boolean indicating if the trace is sampled
 
 These attributes are only set when a valid span context is active. Records
 emitted outside an active invocation (e.g. during Lambda teardown) pass through
@@ -53,9 +52,9 @@ class OtelContextLogFilter(logging.Filter):
         """Stamp the active span context onto the record, then allow it through."""
         span_context = self._plugin.get_current_span_context()
         if span_context and span_context.is_valid:
-            record.otel_trace_id = format(span_context.trace_id, "032x")
-            record.otel_span_id = format(span_context.span_id, "016x")
-            record.otel_trace_sampled = bool(
+            record.traceId = format(span_context.trace_id, "032x")
+            record.spanId = format(span_context.span_id, "016x")
+            record.otelTraceSampled = bool(
                 span_context.trace_flags & TraceFlags.SAMPLED
             )
         return True

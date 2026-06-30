@@ -26,10 +26,10 @@ from aws_durable_execution_sdk_python.concurrency.models import (
     ExecutionCounters,
 )
 from aws_durable_execution_sdk_python.config import (
+    ChildConfig,
     CompletionConfig,
     MapConfig,
     NestingType,
-    ChildConfig,
 )
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
@@ -44,9 +44,13 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
+    Operation,
+    OperationStatus,
     OperationSubType,
+    OperationType,
 )
 from aws_durable_execution_sdk_python.operation.map import MapExecutor
+from aws_durable_execution_sdk_python.state import CheckpointedResult
 
 
 def test_batch_item_status_enum():
@@ -1182,6 +1186,139 @@ def test_concurrent_executor_execute_item_in_child_context():
         executor_context, executables[0]
     )
     assert result == "result_0"
+
+
+def test_execute_item_brand_new_branch_during_replay_starts_new():
+    """A brand-new branch during a map/parallel replay must start in NEW status.
+
+    The branch container op is resolved via child_handler, bypassing the
+    parent's _replay_aware existence flip. _execute_item_in_child_context must
+    replicate that flip so logs before the branch's first inner op are not
+    wrongly de-duplicated.
+    """
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [Executable(0, lambda: "test")]
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=CompletionConfig(
+            min_successful=1,
+            tolerated_failure_count=None,
+            tolerated_failure_percentage=None,
+        ),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        nesting_type=NestingType.NESTED,
+    )
+
+    # Parent (executor) context is replaying.
+    executor_context = Mock()
+    executor_context.is_replaying = lambda: True
+    executor_context._create_step_id_for_logical_step = lambda *args: "branch-1"  # noqa: SLF001
+    executor_context._parent_id = "parent"  # noqa: SLF001
+
+    # Brand-new branch: no checkpoint for the branch op.
+    not_found = CheckpointedResult.create_not_found()
+    child_context = Mock()
+    child_context.state.get_checkpoint_result = lambda _id: not_found
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    executor._execute_item_in_child_context(executor_context, executables[0])  # noqa: SLF001
+
+    # The brand-new branch's child context was flipped to NEW.
+    child_context._set_replay_status_new.assert_called_once()  # noqa: SLF001
+
+
+def test_execute_item_replayed_branch_emits_replay_hook():
+    """A branch that already has a checkpoint emits the replay hook (once)."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [Executable(0, lambda: "test")]
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=CompletionConfig(
+            min_successful=1,
+            tolerated_failure_count=None,
+            tolerated_failure_percentage=None,
+        ),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        nesting_type=NestingType.NESTED,
+    )
+
+    executor_context = Mock()
+    executor_context.is_replaying = lambda: True
+    executor_context._create_step_id_for_logical_step = lambda *args: "branch-1"  # noqa: SLF001
+    executor_context._parent_id = "parent"  # noqa: SLF001
+
+    # Replayed branch: a terminal checkpoint exists for the branch op.
+    branch_op = Operation(
+        operation_id="branch-1",
+        operation_type=OperationType.CONTEXT,
+        status=OperationStatus.SUCCEEDED,
+        sub_type=OperationSubType.PARALLEL_BRANCH,
+    )
+    existing = CheckpointedResult.create_from_operation(branch_op)
+    child_context = Mock()
+    child_context.state.get_checkpoint_result = lambda _id: existing
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    executor._execute_item_in_child_context(executor_context, executables[0])  # noqa: SLF001
+
+    child_context.state.emit_operation_replay_hook.assert_called_once_with(branch_op)
+    child_context._set_replay_status_new.assert_not_called()  # noqa: SLF001
+
+
+def test_execute_item_virtual_branch_skips_replay_status_handling():
+    """FLAT (virtual) branches don't checkpoint, so no flip or hook is attempted."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables = [Executable(0, lambda: "test")]
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=CompletionConfig(
+            min_successful=1,
+            tolerated_failure_count=None,
+            tolerated_failure_percentage=None,
+        ),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        nesting_type=NestingType.FLAT,
+    )
+
+    executor_context = Mock()
+    executor_context.is_replaying = lambda: True
+    executor_context._create_step_id_for_logical_step = lambda *args: "branch-1"  # noqa: SLF001
+    executor_context._parent_id = "parent"  # noqa: SLF001
+
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    executor._execute_item_in_child_context(executor_context, executables[0])  # noqa: SLF001
+
+    child_context.state.emit_operation_replay_hook.assert_not_called()
+    child_context._set_replay_status_new.assert_not_called()  # noqa: SLF001
 
 
 def test_execution_counters_impossible_to_succeed():

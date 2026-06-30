@@ -227,7 +227,6 @@ def durable_execution(
             initial_checkpoint_token=invocation_input.checkpoint_token,
             operations={},
             service_client=service_client,
-            replay_status=ReplayStatus.NEW,
             plugin_executor=plugin_executor,
         )
 
@@ -252,7 +251,11 @@ def durable_execution(
                 ).to_dict()
             raise
 
-        execution_state.mark_replaying_if_prior_operations_exist()
+        # Determine whether this is a replay (prior operations exist) at the
+        # execution level. This seeds the root context's replay status and the
+        # plugin's is_first_invocation flag. Replay status itself is then
+        # tracked per-context as execution proceeds.
+        has_prior_operations: bool = execution_state.has_prior_operations()
 
         raw_input_payload: str | None = execution_state.get_input_payload()
 
@@ -270,7 +273,11 @@ def durable_execution(
                 raise
 
         durable_context: DurableContext = DurableContext.from_lambda_context(
-            state=execution_state, lambda_context=context
+            state=execution_state,
+            lambda_context=context,
+            replay_status=(
+                ReplayStatus.REPLAY if has_prior_operations else ReplayStatus.NEW
+            ),
         )
 
         # Use ThreadPoolExecutor for concurrent execution of user code and background checkpoint processing
@@ -291,7 +298,7 @@ def durable_execution(
                     if execution_operation is not None
                     else None
                 ),
-                is_first_invocation=not execution_state.is_replaying(),
+                is_first_invocation=not has_prior_operations,
             )
             # Thread 1: Run background checkpoint processing
             executor.submit(execution_state.checkpoint_batches_forever)
