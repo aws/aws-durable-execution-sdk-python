@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from aws_durable_execution_sdk_python.lambda_service import OperationType
+from aws_durable_execution_sdk_python.lambda_service import (
+    OperationStatus,
+    OperationType,
+)
 from aws_durable_execution_sdk_python.plugin import (
     InvocationStartInfo,
     UserFunctionStartInfo,
@@ -61,6 +64,7 @@ def _user_function_start_info(operation_id: str) -> UserFunctionStartInfo:
         parent_id=None,
         start_time=START_TIME,
         is_replayed=False,
+        status=OperationStatus.STARTED,
         is_replay_children=False,
         attempt=1,
     )

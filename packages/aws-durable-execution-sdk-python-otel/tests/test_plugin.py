@@ -102,6 +102,7 @@ def _user_function_start_info(
         parent_id=parent_id,
         start_time=START_TIME,
         is_replayed=False,
+        status=OperationStatus.STARTED,
         is_replay_children=False,
         attempt=attempt,
     )
@@ -123,6 +124,7 @@ def _user_function_end_info(
         parent_id=parent_id,
         start_time=START_TIME,
         is_replayed=False,
+        status=OperationStatus.STARTED,
         is_replay_children=False,
         attempt=attempt,
         outcome=outcome,
@@ -161,7 +163,14 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
             parent_id=None,
             start_time=START_TIME,
             is_replayed=False,
+            status=OperationStatus.STARTED,
         )
+    )
+    active_wait_span = plugin._get_span(operation_id)
+    assert active_wait_span is not None
+    assert (
+        active_wait_span.attributes["durable.operation.status"]
+        == OperationStatus.STARTED.value
     )
     plugin.on_operation_end(
         OperationEndInfo(
@@ -186,6 +195,10 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
     assert wait_span.parent.span_id == invocation_span.context.span_id
     assert wait_span.attributes["durable.operation.id"] == operation_id
     assert wait_span.attributes["durable.operation.type"] == OperationType.WAIT.value
+    assert (
+        wait_span.attributes["durable.operation.status"]
+        == OperationStatus.SUCCEEDED.value
+    )
 
 
 def test_operation_end_without_start_emits_continuation_span_with_link():
@@ -217,6 +230,9 @@ def test_operation_end_without_start_emits_continuation_span_with_link():
     assert span.name == "existing-wait"
     assert span.context.span_id == random_span_id
     assert span.links[0].context.span_id == operation_id_to_span_id(operation_id)
+    assert (
+        span.attributes["durable.operation.status"] == OperationStatus.SUCCEEDED.value
+    )
 
 
 def test_user_function_callbacks_emit_attempt_span_attributes():
@@ -233,6 +249,7 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
         parent_id=None,
         start_time=START_TIME,
         is_replayed=False,
+        status=OperationStatus.STARTED,
         is_replay_children=False,
         attempt=1,
     )
@@ -254,6 +271,7 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
             parent_id=None,
             start_time=START_TIME,
             is_replayed=False,
+            status=OperationStatus.STARTED,
             is_replay_children=False,
             attempt=1,
             outcome=UserFunctionOutcome.SUCCEEDED,
@@ -296,6 +314,7 @@ def test_context_span_omits_attempt_attributes():
             parent_id=None,
             start_time=START_TIME,
             is_replayed=False,
+            status=OperationStatus.STARTED,
             is_replay_children=False,
             attempt=1,
         )
@@ -309,6 +328,7 @@ def test_context_span_omits_attempt_attributes():
             parent_id=None,
             start_time=START_TIME,
             is_replayed=False,
+            status=OperationStatus.STARTED,
             is_replay_children=False,
             attempt=1,
             outcome=UserFunctionOutcome.SUCCEEDED,

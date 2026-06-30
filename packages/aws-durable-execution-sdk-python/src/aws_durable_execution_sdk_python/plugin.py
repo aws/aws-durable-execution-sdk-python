@@ -36,6 +36,7 @@ class OperationInfo:
     parent_id: str | None
     start_time: datetime.datetime | None
     is_replayed: bool
+    status: OperationStatus
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,6 @@ class OperationStartInfo(OperationInfo):
 
 @dataclass(frozen=True)
 class OperationEndInfo(OperationInfo):
-    status: OperationStatus
     end_time: datetime.datetime | None
     error: ErrorObject | None
 
@@ -93,6 +93,7 @@ class UserFunctionEndInfo(OperationInfo):
             parent_id=start_info.parent_id,
             start_time=start_info.start_time,
             is_replayed=start_info.is_replayed,
+            status=start_info.status,
             is_replay_children=start_info.is_replay_children,
             attempt=start_info.attempt,
             outcome=UserFunctionOutcome.from_error(error),
@@ -300,6 +301,7 @@ class PluginExecutor:
             parent_id=operation_identifier.parent_id,
             start_time=datetime.datetime.now(datetime.UTC),
             is_replayed=False,
+            status=OperationStatus.STARTED,
             is_replay_children=is_replay_children,
             attempt=attempt,
         )
@@ -331,6 +333,7 @@ class PluginExecutor:
                     parent_id=update.parent_id,
                     start_time=datetime.datetime.now(datetime.UTC),
                     is_replayed=False,
+                    status=OperationStatus.STARTED,
                 ),
                 sync=True,
             )
@@ -345,6 +348,7 @@ class PluginExecutor:
             parent_id=operation.parent_id,
             start_time=operation.start_timestamp,
             is_replayed=True,
+            status=operation.status,
         )
         self.execute_plugins(start_info, sync=True)
 

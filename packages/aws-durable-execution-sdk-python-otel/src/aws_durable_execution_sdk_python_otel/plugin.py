@@ -378,6 +378,8 @@ class OtelPlugin(DurableInstrumentationPlugin):
                 parent_span=parent_span,
                 existed=True,
             )
+        else:
+            span.set_attributes(self._extract_attributes(info))
 
         if info.error:
             span.set_status(StatusCode.ERROR, info.error.message or "")
@@ -488,6 +490,8 @@ class OtelPlugin(DurableInstrumentationPlugin):
             attributes["durable.operation.id"] = info.operation_id
         if hasattr(info, "operation_type") and info.operation_type is not None:
             attributes["durable.operation.type"] = info.operation_type.value
+        if hasattr(info, "status") and info.status is not None:
+            attributes["durable.operation.status"] = info.status.value
         if hasattr(info, "name") and info.name is not None:
             attributes["durable.operation.name"] = info.name
         # Per-attempt fields are meaningful for STEP (each attempt is retried)

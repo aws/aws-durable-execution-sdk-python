@@ -4316,14 +4316,14 @@ def test_plugin_executor_emits_start_and_end_for_replayed_terminal_operation():
         sub_type=OperationSubType.STEP,
         step_details=StepDetails(attempt=1, result='"done"'),
     )
-    captured: list[tuple[str, str, bool]] = []
+    captured: list[tuple[str, str, bool, OperationStatus]] = []
 
     class _CapturingPlugin(DurableInstrumentationPlugin):
         def on_operation_start(self, info):
-            captured.append(("start", info.operation_id, info.is_replayed))
+            captured.append(("start", info.operation_id, info.is_replayed, info.status))
 
         def on_operation_end(self, info):
-            captured.append(("end", info.operation_id, info.is_replayed))
+            captured.append(("end", info.operation_id, info.is_replayed, info.status))
 
     plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
     with plugin_executor.run():
@@ -4340,8 +4340,8 @@ def test_plugin_executor_emits_start_and_end_for_replayed_terminal_operation():
         assert state.get_checkpoint_result("step-1").is_succeeded()
 
     assert captured == [
-        ("start", "step-1", True),
-        ("end", "step-1", True),
+        ("start", "step-1", True, OperationStatus.SUCCEEDED),
+        ("end", "step-1", True, OperationStatus.SUCCEEDED),
     ]
 
 
@@ -4354,14 +4354,14 @@ def test_plugin_executor_emits_only_start_for_replayed_non_terminal_operation():
         name="my-wait",
         sub_type=OperationSubType.WAIT,
     )
-    captured: list[tuple[str, str, bool]] = []
+    captured: list[tuple[str, str, bool, OperationStatus]] = []
 
     class _CapturingPlugin(DurableInstrumentationPlugin):
         def on_operation_start(self, info):
-            captured.append(("start", info.operation_id, info.is_replayed))
+            captured.append(("start", info.operation_id, info.is_replayed, info.status))
 
         def on_operation_end(self, info):
-            captured.append(("end", info.operation_id, info.is_replayed))
+            captured.append(("end", info.operation_id, info.is_replayed, info.status))
 
     plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
     with plugin_executor.run():
@@ -4376,7 +4376,7 @@ def test_plugin_executor_emits_only_start_for_replayed_non_terminal_operation():
 
         assert state.get_checkpoint_result("wait-1").is_started()
 
-    assert captured == [("start", "wait-1", True)]
+    assert captured == [("start", "wait-1", True, OperationStatus.STARTED)]
 
 
 # endregion Plugin Executor Integration Tests
