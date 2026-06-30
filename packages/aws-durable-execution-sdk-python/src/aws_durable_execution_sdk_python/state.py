@@ -278,6 +278,7 @@ class ExecutionState:
         self._replay_status: ReplayStatus = replay_status
         self._replay_status_lock: Lock = Lock()
         self._visited_operations: set[str] = set()
+        self._replayed_operation_hooks: set[str] = set()
 
     @property
     def operations(self) -> dict[str, Operation]:
@@ -444,10 +445,27 @@ class ExecutionState:
         """
         # checking status are deliberately under a lighter non-serialized lock
         with self._operations_lock:
-            if checkpoint := self._operations.get(checkpoint_id):
-                return CheckpointedResult.create_from_operation(checkpoint)
+            checkpoint = self._operations.get(checkpoint_id)
+
+        if checkpoint:
+            self._emit_operation_replay_hooks(checkpoint)
+            return CheckpointedResult.create_from_operation(checkpoint)
 
         return CHECKPOINT_NOT_FOUND
+
+    def _emit_operation_replay_hooks(self, operation: Operation) -> None:
+        """Emit operation hooks once for each checkpointed operation during replay."""
+        if operation.operation_type is OperationType.EXECUTION:
+            return
+
+        with self._replay_status_lock:
+            if self._replay_status is not ReplayStatus.REPLAY:
+                return
+            if operation.operation_id in self._replayed_operation_hooks:
+                return
+            self._replayed_operation_hooks.add(operation.operation_id)
+
+        self._plugin_executor.on_operation_replay(operation)
 
     def create_checkpoint(
         self,

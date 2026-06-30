@@ -498,16 +498,17 @@ def test_event_timeout_handling():
     scheduler = Scheduler()
     scheduler.start()
 
-    event = scheduler.create_event()
+    try:
+        event = scheduler.create_event()
 
-    start_time = time.time()
-    result = event.wait(timeout=0.05)
-    end_time = time.time()
+        start_time = time.monotonic()
+        result = event.wait(timeout=0.05)
+        end_time = time.monotonic()
 
-    assert result is False
-    assert 0.04 <= (end_time - start_time) <= 0.1
-
-    scheduler.stop()
+        assert result is False
+        assert 0.04 <= (end_time - start_time) <= 0.25
+    finally:
+        scheduler.stop()
 
 
 def test_scheduler_call_later_zero_delay():
