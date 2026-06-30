@@ -2649,4 +2649,48 @@ def test_replay_aware_non_step_stays_replaying_through_resume_point():
     assert ctx.is_replaying() is False
 
 
+def test_replay_aware_emits_replay_hook_only_while_replaying():
+    """The context fires the state replay hook for a checkpointed op while replaying.
+
+    When NOT replaying, no hook fires. The state dedups, so the hook fires once
+    even across repeated operations.
+    """
+    state = _replay_state({})
+    ctx = DurableContext(
+        state=state,
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    next_id = ctx._peek_next_operation_id()  # noqa: SLF001
+    state._operations[next_id] = _step_op(  # noqa: SLF001
+        next_id, OperationStatus.SUCCEEDED
+    )
+
+    emitted: list[str] = []
+    state.emit_operation_replay_hook = lambda op: emitted.append(op.operation_id)  # type: ignore[method-assign]
+
+    with ctx._replay_aware():  # noqa: SLF001
+        ctx._create_step_id()  # noqa: SLF001
+
+    assert emitted == [next_id]
+
+
+def test_replay_aware_does_not_emit_replay_hook_when_not_replaying():
+    """A context that is not replaying never fires the replay hook."""
+    state = _replay_state({})
+    ctx = DurableContext(
+        state=state,
+        execution_context=ExecutionContext(durable_execution_arn="arn"),
+        replay_status=ReplayStatus.NEW,
+    )
+
+    emitted: list[str] = []
+    state.emit_operation_replay_hook = lambda op: emitted.append(op.operation_id)  # type: ignore[method-assign]
+
+    with ctx._replay_aware():  # noqa: SLF001
+        ctx._create_step_id()  # noqa: SLF001
+
+    assert emitted == []
+
+
 # endregion per-context replay status

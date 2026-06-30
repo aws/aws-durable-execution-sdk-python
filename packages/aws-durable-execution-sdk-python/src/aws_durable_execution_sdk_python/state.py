@@ -296,6 +296,13 @@ class ExecutionState:
         # Protects parent_to_children and parent_done
         self._parent_done_lock: Lock = Lock()
 
+        # Dedup set so each operation's replay plugin hook fires at most once.
+        # Replay status itself is tracked per-context on DurableContext; the
+        # context decides WHEN to emit (only while replaying) and calls
+        # emit_operation_replay_hook. This set is the firing mechanism only.
+        self._replayed_operation_hooks: set[str] = set()
+        self._replayed_operation_hooks_lock: Lock = Lock()
+
     @property
     def operations(self) -> dict[str, Operation]:
         """Return a point-in-time snapshot copy of the operations map.
@@ -418,10 +425,34 @@ class ExecutionState:
         """
         # checking status are deliberately under a lighter non-serialized lock
         with self._operations_lock:
-            if checkpoint := self._operations.get(checkpoint_id):
-                return CheckpointedResult.create_from_operation(checkpoint)
+            checkpoint = self._operations.get(checkpoint_id)
+
+        if checkpoint:
+            return CheckpointedResult.create_from_operation(checkpoint)
 
         return CHECKPOINT_NOT_FOUND
+
+    def emit_operation_replay_hook(self, operation: Operation) -> None:
+        """Fire the replay plugin hook at most once for an operation.
+
+        This is the firing *mechanism* only. The caller (DurableContext) decides
+        *when* to call it — i.e. only while that context is replaying — since
+        replay status is tracked per-context, not globally on ExecutionState.
+
+        EXECUTION and READY operations never emit. The first call for a given
+        operation id fires `on_operation_replay`; subsequent calls are no-ops.
+        """
+        if operation.operation_type is OperationType.EXECUTION:
+            return
+        if operation.status is OperationStatus.READY:
+            return
+
+        with self._replayed_operation_hooks_lock:
+            if operation.operation_id in self._replayed_operation_hooks:
+                return
+            self._replayed_operation_hooks.add(operation.operation_id)
+
+        self._plugin_executor.on_operation_replay(operation)
 
     def create_checkpoint(
         self,

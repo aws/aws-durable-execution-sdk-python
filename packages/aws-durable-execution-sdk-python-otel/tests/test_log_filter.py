@@ -60,6 +60,7 @@ def _user_function_start_info(operation_id: str) -> UserFunctionStartInfo:
         name="fetch-user",
         parent_id=None,
         start_time=START_TIME,
+        is_replayed=False,
         is_replay_children=False,
         attempt=1,
     )

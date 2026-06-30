@@ -35,6 +35,7 @@ class OperationInfo:
     name: str | None
     parent_id: str | None
     start_time: datetime.datetime | None
+    is_replayed: bool
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ class UserFunctionEndInfo(OperationInfo):
             name=start_info.name,
             parent_id=start_info.parent_id,
             start_time=start_info.start_time,
+            is_replayed=start_info.is_replayed,
             is_replay_children=start_info.is_replay_children,
             attempt=start_info.attempt,
             outcome=UserFunctionOutcome.from_error(error),
@@ -156,7 +158,8 @@ class DurableInstrumentationPlugin:
 
     def on_operation_start(self, info: OperationStartInfo) -> None:
         """
-        Called when an operation checkpoints STARTED status. This is called NOT within the thread that runs operation.
+        Called when an operation checkpoints STARTED status, or when a prior
+        operation is replayed. This is called NOT within the thread that runs operation.
 
         Args:
             info: Information about the operation.
@@ -166,7 +169,8 @@ class DurableInstrumentationPlugin:
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
         """
-        Called when an operation checkpoints a terminal status. This is called NOT within the thread that runs operation.
+        Called when an operation checkpoints a terminal status, or when a prior
+        terminal operation is replayed. This is called NOT within the thread that runs operation.
 
         Args:
             info: Information about the operation.
@@ -295,6 +299,7 @@ class PluginExecutor:
             name=operation_identifier.name,
             parent_id=operation_identifier.parent_id,
             start_time=datetime.datetime.now(datetime.UTC),
+            is_replayed=False,
             is_replay_children=is_replay_children,
             attempt=attempt,
         )
@@ -325,6 +330,37 @@ class PluginExecutor:
                     name=update.name,
                     parent_id=update.parent_id,
                     start_time=datetime.datetime.now(datetime.UTC),
+                    is_replayed=False,
+                ),
+                sync=True,
+            )
+
+    def on_operation_replay(self, operation: Operation) -> None:
+        """Execute plugins for a checkpointed operation observed during replay."""
+        start_info = OperationStartInfo(
+            operation_id=operation.operation_id,
+            operation_type=operation.operation_type,
+            sub_type=operation.sub_type,
+            name=operation.name,
+            parent_id=operation.parent_id,
+            start_time=operation.start_timestamp,
+            is_replayed=True,
+        )
+        self.execute_plugins(start_info, sync=True)
+
+        if self._is_terminal_status(operation.status):
+            self.execute_plugins(
+                OperationEndInfo(
+                    operation_id=operation.operation_id,
+                    operation_type=operation.operation_type,
+                    sub_type=operation.sub_type,
+                    name=operation.name,
+                    parent_id=operation.parent_id,
+                    start_time=operation.start_timestamp,
+                    end_time=operation.end_timestamp,
+                    status=operation.status,
+                    error=self._extract_error(operation),
+                    is_replayed=True,
                 ),
                 sync=True,
             )
@@ -352,6 +388,7 @@ class PluginExecutor:
                     end_time=operation.end_timestamp,
                     status=operation.status,
                     error=self._extract_error(operation),
+                    is_replayed=False,
                 ),
                 sync=True,
             )

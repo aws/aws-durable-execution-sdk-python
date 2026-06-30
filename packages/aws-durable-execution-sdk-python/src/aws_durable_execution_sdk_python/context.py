@@ -503,16 +503,18 @@ class DurableContext(DurableContextProtocol):
         next_exists: bool = (
             next_checkpoint.is_existent() if next_checkpoint is not None else False
         )
-        next_terminal: bool = (
-            next_checkpoint is not None and next_checkpoint.is_terminal()
-        )
+        next_terminal: bool = next_exists and next_checkpoint.is_terminal()
 
         next_is_step: bool = (
-            next_checkpoint is not None
-            and next_checkpoint.operation is not None
+            next_exists
             and next_checkpoint.operation.operation_type is OperationType.STEP
         )
 
+        # While replaying, an operation that already has a checkpoint was
+        # observed in a prior invocation — notify plugins (once per op). State
+        # owns the dedup; the context owns the "only while replaying" gate.
+        if was_replaying and next_exists:
+            self.state.emit_operation_replay_hook(next_checkpoint.operation)
         # Deferred flip applies only to non-step resume points. For step ops we
         # flip before instead, so don't defer.
         flip_after: bool = (
