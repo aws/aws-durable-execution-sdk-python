@@ -72,7 +72,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 preview = true
-select = ["TID252"]
+select = ["F", "TID252"]  # Pyflakes (unused imports, undefined names, etc.) + absolute imports
 
 [tool.ruff.lint.isort]
 known-first-party = ["aws_durable_execution_sdk_python_otel"]

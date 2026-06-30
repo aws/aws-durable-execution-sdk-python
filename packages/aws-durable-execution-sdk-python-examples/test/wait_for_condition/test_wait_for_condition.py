@@ -1,10 +1,8 @@
 """Tests for wait_for_condition."""
 
 import pytest
-from aws_durable_execution_sdk_python.execution import InvocationStatus
 
 from src.wait_for_condition import wait_for_condition
-from test.conftest import deserialize_operation_payload
 
 
 @pytest.mark.example

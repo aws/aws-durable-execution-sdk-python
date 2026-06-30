@@ -5,17 +5,13 @@ Tests the full execution flow with filesystem serdes:
 - Replay: step deserializes from checkpointed envelope, reads from filesystem
 """
 
-from __future__ import annotations
-
 import json
 import os
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest.mock import Mock, patch
 
-import pytest
-
 from aws_durable_execution_sdk_python.config import StepConfig
-from aws_durable_execution_sdk_python.context import DurableContext, durable_step
+from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
     durable_execution,
@@ -36,15 +32,8 @@ from aws_durable_execution_sdk_python.serdes import EXTENDED_TYPES_SERDES
 from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
-    Operation,
     OperationAction,
-    OperationStatus,
-    OperationType,
-    StepDetails,
 )
-
-if TYPE_CHECKING:
-    from aws_durable_execution_sdk_python.types import StepContext
 
 
 def _create_lambda_context():
@@ -185,7 +174,6 @@ def test_filesystem_serdes_replay_from_checkpoint(tmp_path):
     step_id = next(operation_id_sequence())
 
     # Pre-create the file that would have been written in the first invocation
-    arn = "arn:aws:lambda:us-east-1:123456789012:function:test-func:1/durable-execution/exec-001/inv-001"
     dir_path = os.path.join(mount_path, "test-func", "exec-001", "inv-001")
     os.makedirs(dir_path, exist_ok=True)
 

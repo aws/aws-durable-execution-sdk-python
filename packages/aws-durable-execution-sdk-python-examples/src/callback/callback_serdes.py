@@ -1,7 +1,7 @@
 """Demonstrates createCallback with custom serialization/deserialization for Date objects."""
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Optional
 
 from aws_durable_execution_sdk_python.config import CallbackConfig, Duration

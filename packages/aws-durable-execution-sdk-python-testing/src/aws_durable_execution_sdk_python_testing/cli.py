@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin
 
-import aws_durable_execution_sdk_python
 import boto3  # type: ignore
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen

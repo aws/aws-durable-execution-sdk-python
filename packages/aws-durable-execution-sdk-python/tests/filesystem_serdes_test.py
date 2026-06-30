@@ -10,7 +10,6 @@ from aws_durable_execution_sdk_python.filesystem_serdes import (
     FileSystemPathEncoding,
     FileSystemSerDesConfig,
     FileSystemSerDesMode,
-    _OVERFLOW_THRESHOLD_BYTES,
     _encode_segment,
     _resolve_execution_dir,
     _write_to_file,

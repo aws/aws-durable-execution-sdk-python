@@ -1,7 +1,6 @@
 """Tests for wait_for_callback_failing_submitter."""
 
 import pytest
-from aws_durable_execution_sdk_python.execution import InvocationStatus
 
 from src.wait_for_callback import wait_for_callback_submitter_failure_catchable
 from test.conftest import deserialize_operation_payload

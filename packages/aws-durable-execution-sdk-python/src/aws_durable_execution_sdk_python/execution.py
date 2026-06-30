@@ -14,7 +14,6 @@ from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     BotoClientError,
     CheckpointError,
-    DurableExecutionsError,
     ExecutionError,
     InvocationError,
     SuspendExecution,
@@ -26,7 +25,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
     InvocationStatus,
     LambdaClient,
     Operation,
-    OperationType,
     OperationUpdate,
 )
 from aws_durable_execution_sdk_python.plugin import (

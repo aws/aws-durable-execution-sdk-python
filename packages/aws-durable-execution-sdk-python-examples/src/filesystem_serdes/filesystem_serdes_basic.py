@@ -18,8 +18,6 @@ from aws_durable_execution_sdk_python.config import StepConfig
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
 from aws_durable_execution_sdk_python.filesystem_serdes import (
-    FileSystemSerDesConfig,
-    FileSystemSerDesMode,
     FileSystemSerDes,
 )
 

@@ -35,7 +35,7 @@ def handler(_event: Any, context: DurableContext) -> dict[str, Any]:
     )
 
     context.logger.info(
-        f"Starting map with config: min_successful=2, tolerated_failure_percentage=50"
+        "Starting map with config: min_successful=2, tolerated_failure_percentage=50"
     )
     context.logger.info(
         f"Items pattern: {', '.join(['FAIL' if i['shouldFail'] else 'SUCCESS' for i in items])}"

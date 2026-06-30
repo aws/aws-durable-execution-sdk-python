@@ -24,7 +24,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
     ExecutionDetails,
 )
 from aws_durable_execution_sdk_python_testing.exceptions import (
-    ExecutionAlreadyStartedException,
     IllegalStateException,
     InvalidParameterValueException,
     ResourceNotFoundException,

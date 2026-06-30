@@ -4,7 +4,6 @@ import pytest
 from aws_durable_execution_sdk_python.execution import InvocationStatus
 from aws_durable_execution_sdk_python.lambda_service import (
     OperationStatus,
-    OperationType,
 )
 
 from src.map import map_operations
