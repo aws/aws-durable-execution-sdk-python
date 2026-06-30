@@ -281,7 +281,7 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
     )
 
     span = exporter.get_finished_spans()[0]
-    assert span.name == "fetch-user"
+    assert span.name == "fetch-user attempt 1"
     assert span.context.span_id == operation_id_to_span_id(operation_id)
     assert span.attributes["durable.execution.arn"] == EXECUTION_ARN
     assert span.attributes["durable.operation.id"] == operation_id
@@ -292,6 +292,48 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
         span.attributes["durable.attempt.outcome"]
         == UserFunctionOutcome.SUCCEEDED.value
     )
+
+
+def test_step_attempt_span_name_includes_attempt_number():
+    """Step attempt spans include the attempt number in the display name."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    operation_id = "step-retry"
+
+    plugin.on_user_function_start(
+        UserFunctionStartInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.STEP,
+            sub_type=None,
+            name="fetch-user",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+            attempt=2,
+        )
+    )
+    plugin.on_user_function_end(
+        UserFunctionEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.STEP,
+            sub_type=None,
+            name="fetch-user",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+            attempt=2,
+            outcome=UserFunctionOutcome.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+
+    span = exporter.get_finished_spans()[0]
+    assert span.name == "fetch-user attempt 2"
 
 
 def test_context_span_omits_attempt_attributes():

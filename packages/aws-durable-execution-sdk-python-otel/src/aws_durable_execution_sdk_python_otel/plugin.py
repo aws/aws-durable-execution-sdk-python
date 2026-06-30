@@ -413,9 +413,12 @@ class OtelPlugin(DurableInstrumentationPlugin):
             )
         parent_span = self._resolve_parent_span(info.parent_id)
         attributes = self._extract_attributes(info)
+        span_name = info.name or info.operation_id
+        if info.operation_type is OperationType.STEP and info.attempt is not None:
+            span_name = f"{span_name} attempt {info.attempt}"
         span = self._start_span(
             operation_id=info.operation_id,
-            name=info.name or info.operation_id,
+            name=span_name,
             attributes=attributes,
             start_time=info.start_time,
             parent_span=parent_span,
