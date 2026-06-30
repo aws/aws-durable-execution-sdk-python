@@ -344,6 +344,48 @@ def test_step_attempt_span_name_includes_attempt_number():
     assert span.name == "fetch-user attempt 2"
 
 
+def test_step_attempt_span_name_defaults_to_first_attempt():
+    """Step attempt spans default to attempt 1 when no attempt is provided."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    operation_id = "step-no-attempt"
+
+    plugin.on_user_function_start(
+        UserFunctionStartInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.STEP,
+            sub_type=None,
+            name="fetch-user",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+            attempt=None,
+        )
+    )
+    plugin.on_user_function_end(
+        UserFunctionEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.STEP,
+            sub_type=None,
+            name="fetch-user",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+            attempt=None,
+            outcome=UserFunctionOutcome.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+
+    span = exporter.get_finished_spans()[0]
+    assert span.name == "fetch-user attempt 1"
+
+
 def test_context_span_omits_attempt_attributes():
     """CONTEXT operations do not carry per-attempt attributes.
 
