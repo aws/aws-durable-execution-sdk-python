@@ -10,6 +10,7 @@ import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
     InvocationStatus,
     OperationStatus,
+    OperationSubType,
     OperationType,
 )
 from aws_durable_execution_sdk_python.plugin import (
@@ -158,7 +159,7 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
         OperationStartInfo(
             operation_id=operation_id,
             operation_type=OperationType.WAIT,
-            sub_type=None,
+            sub_type=OperationSubType.WAIT,
             name="wait-for-signal",
             parent_id=None,
             start_time=START_TIME,
@@ -172,11 +173,15 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
         active_wait_span.attributes["durable.operation.status"]
         == OperationStatus.STARTED.value
     )
+    assert (
+        active_wait_span.attributes["durable.operation.subtype"]
+        == OperationSubType.WAIT.value
+    )
     plugin.on_operation_end(
         OperationEndInfo(
             operation_id=operation_id,
             operation_type=OperationType.WAIT,
-            sub_type=None,
+            sub_type=OperationSubType.WAIT,
             name="wait-for-signal",
             parent_id=None,
             start_time=START_TIME,
@@ -195,6 +200,9 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
     assert wait_span.parent.span_id == invocation_span.context.span_id
     assert wait_span.attributes["durable.operation.id"] == operation_id
     assert wait_span.attributes["durable.operation.type"] == OperationType.WAIT.value
+    assert (
+        wait_span.attributes["durable.operation.subtype"] == OperationSubType.WAIT.value
+    )
     assert (
         wait_span.attributes["durable.operation.status"]
         == OperationStatus.SUCCEEDED.value

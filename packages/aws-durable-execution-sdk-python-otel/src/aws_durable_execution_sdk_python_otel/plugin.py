@@ -493,6 +493,8 @@ class OtelPlugin(DurableInstrumentationPlugin):
             attributes["durable.operation.id"] = info.operation_id
         if hasattr(info, "operation_type") and info.operation_type is not None:
             attributes["durable.operation.type"] = info.operation_type.value
+        if hasattr(info, "sub_type") and info.sub_type is not None:
+            attributes["durable.operation.subtype"] = info.sub_type.value
         if hasattr(info, "status") and info.status is not None:
             attributes["durable.operation.status"] = info.status.value
         if hasattr(info, "name") and info.name is not None:
