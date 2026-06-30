@@ -162,7 +162,7 @@ class TestRunnerAdapter:
 
 
 @pytest.fixture
-def durable_runner(request):
+def durable_runner(request, monkeypatch):
     """Pytest fixture that provides a test runner based on configuration.
 
     Configuration for cloud mode:
@@ -221,8 +221,14 @@ def durable_runner(request):
     else:
         if not handler:
             pytest.fail("handler is required for local mode tests")
+        time_scale = os.environ.get("DURABLE_EXECUTION_TIME_SCALE", "0.05")
+        monkeypatch.setenv("DURABLE_EXECUTION_TIME_SCALE", time_scale)
+        try:
+            poll_interval = min(0.05, max(0.001, float(time_scale)))
+        except ValueError:
+            poll_interval = 0.05
         # Create local runner (needs cleanup via context manager)
-        runner = DurableFunctionTestRunner(handler=handler)
+        runner = DurableFunctionTestRunner(handler=handler, poll_interval=poll_interval)
 
     # Wrap in adapter and use context manager for proper cleanup
     with TestRunnerAdapter(runner, runner_mode) as adapter:

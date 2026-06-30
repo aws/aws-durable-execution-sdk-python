@@ -19,6 +19,7 @@ from aws_durable_execution_sdk_python_testing.checkpoint.processors.base import 
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
 )
+from aws_durable_execution_sdk_python_testing.time_scale import scale_delay
 
 
 if TYPE_CHECKING:
@@ -50,7 +51,8 @@ class StepProcessor(OperationProcessor):
                     if update.step_options
                     else 0
                 )
-                next_attempt_time = datetime.now(UTC) + timedelta(seconds=delay)
+                scaled_delay = scale_delay(delay)
+                next_attempt_time = datetime.now(UTC) + timedelta(seconds=scaled_delay)
 
                 # Build new step_details with incremented attempt
                 current_attempt = (
@@ -103,7 +105,7 @@ class StepProcessor(OperationProcessor):
                 notifier.notify_step_retry_scheduled(
                     execution_arn=execution_arn,
                     operation_id=update.operation_id,
-                    delay=delay,
+                    delay=scaled_delay,
                 )
                 return retry_operation
             case OperationAction.SUCCEED:
