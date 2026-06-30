@@ -107,9 +107,9 @@ def test_filter_does_not_set_fields_without_active_span():
     record = _make_record()
     log_filter.filter(record)
 
-    assert not hasattr(record, "otel_trace_id")
-    assert not hasattr(record, "otel_span_id")
-    assert not hasattr(record, "otel_trace_sampled")
+    assert not hasattr(record, "traceId")
+    assert not hasattr(record, "spanId")
+    assert not hasattr(record, "otelTraceSampled")
 
 
 def test_filter_injects_trace_context_from_invocation_span():
@@ -121,9 +121,9 @@ def test_filter_injects_trace_context_from_invocation_span():
     record = _make_record()
     log_filter.filter(record)
 
-    assert len(record.otel_trace_id) == 32
-    assert len(record.otel_span_id) == 16
-    assert isinstance(record.otel_trace_sampled, bool)
+    assert len(record.traceId) == 32
+    assert len(record.spanId) == 16
+    assert isinstance(record.otelTraceSampled, bool)
 
 
 def test_filter_uses_operation_span_inside_user_function():
@@ -138,7 +138,7 @@ def test_filter_uses_operation_span_inside_user_function():
 
     operation_span = plugin._get_span(operation_id)
     expected_span_id = format(operation_span.get_span_context().span_id, "016x")
-    assert record.otel_span_id == expected_span_id
+    assert record.spanId == expected_span_id
 
 
 def test_install_log_filter_attaches_to_handlers():
