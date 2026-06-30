@@ -73,6 +73,24 @@ def test_process_start_action():
     assert notifier.wait_timer_calls[0] == (execution_arn, "wait-123", 30)
 
 
+def test_process_start_action_scales_wait_delay(monkeypatch):
+    monkeypatch.setenv("DURABLE_EXECUTION_TIME_SCALE", "0.5")
+    processor = WaitProcessor()
+    notifier = MockNotifier()
+    execution_arn = "arn:aws:states:us-east-1:123456789012:execution:test"
+
+    update = OperationUpdate(
+        operation_id="wait-123",
+        operation_type=OperationType.WAIT,
+        action=OperationAction.START,
+        wait_options=WaitOptions(wait_seconds=30),
+    )
+
+    processor.process(update, None, notifier, execution_arn)
+
+    assert notifier.wait_timer_calls[0] == (execution_arn, "wait-123", 15)
+
+
 def test_process_start_action_without_wait_options():
     processor = WaitProcessor()
     notifier = MockNotifier()

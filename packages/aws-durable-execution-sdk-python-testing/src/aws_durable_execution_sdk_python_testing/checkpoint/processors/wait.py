@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-import os
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -21,6 +19,7 @@ from aws_durable_execution_sdk_python_testing.checkpoint.processors.base import 
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
 )
+from aws_durable_execution_sdk_python_testing.time_scale import scale_delay
 
 
 if TYPE_CHECKING:
@@ -43,9 +42,7 @@ class WaitProcessor(OperationProcessor):
                 wait_seconds = (
                     update.wait_options.wait_seconds if update.wait_options else 0
                 )
-                time_scale = float(os.getenv("DURABLE_EXECUTION_TIME_SCALE", "1.0"))
-                logging.info("Using DURABLE_EXECUTION_TIME_SCALE: %f", time_scale)
-                scaled_wait_seconds = wait_seconds * time_scale
+                scaled_wait_seconds = scale_delay(wait_seconds)
 
                 scheduled_end_timestamp = datetime.now(UTC) + timedelta(
                     seconds=scaled_wait_seconds
