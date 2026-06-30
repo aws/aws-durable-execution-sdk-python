@@ -12,6 +12,7 @@ from test.conftest import deserialize_operation_payload
 @pytest.mark.durable_execution(
     handler=callback_heartbeat.handler,
     lambda_function_name="Create Callback Heartbeat",
+    time_scale="1.0",
 )
 def test_handle_callback_operations_with_failure_uncaught(durable_runner):
     """Test handling callback operations with failure."""
