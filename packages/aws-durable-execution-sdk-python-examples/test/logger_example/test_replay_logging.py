@@ -1,10 +1,13 @@
 """Tests for the replay_logging example.
 
-These tests do not assert on emitted log lines (the replay-aware
-de-duplication is best observed in CloudWatch after deploying). They verify the
-workflow runs end-to-end across the wait/replay boundary and produces the
-expected operations and result.
+Most assertions here verify the workflow runs end-to-end across the
+wait/replay boundary and produces the expected operations and result. One test
+additionally asserts on the replay-aware logger: messages emitted before the
+wait are de-duplicated on replay, so each appears exactly once despite the
+handler replaying from the top after the wait resumes.
 """
+
+import logging
 
 import pytest
 
@@ -50,3 +53,42 @@ def test_replay_logging(durable_runner):
         op for op in result.operations if op.operation_type.value == "CONTEXT"
     ]
     assert len(context_ops) >= 1
+
+
+@pytest.mark.example
+@pytest.mark.durable_execution(
+    handler=replay_logging.handler,
+    lambda_function_name="Replay Logging",
+)
+def test_replay_logging_dedupes_logs_across_wait(durable_runner, caplog):
+    """Verify the replay-aware logger de-duplicates messages across the wait.
+
+    The handler logs before the wait, suspends, then replays from the top when
+    the wait resumes. The replay-aware logger suppresses logs while the context
+    is replaying, so a message emitted before the wait must appear exactly once
+    even though the code that produces it runs again on replay. Messages emitted
+    after the wait are new work and also appear exactly once.
+
+    This only holds in local mode, where every invocation runs in-process and is
+    captured by a single ``caplog``; cloud mode spreads invocations across
+    separate Lambda executions, so the test is skipped there.
+    """
+    if durable_runner.mode != "local":
+        pytest.skip("Log capture is only available in local (in-process) mode")
+
+    with caplog.at_level(logging.INFO):
+        with durable_runner:
+            result = durable_runner.run(input={"item": "widget"}, timeout=30)
+
+    assert result.status is InvocationStatus.SUCCEEDED
+
+    messages = [record.getMessage() for record in caplog.records]
+
+    # Emitted before the wait: the handler replays past this line, but the
+    # replay-aware logger suppresses the duplicate, so it appears exactly once.
+    assert messages.count("Workflow started (before wait)") == 1
+    assert messages.count("Prepared, about to wait") == 1
+
+    # Emitted after the wait as new work: also exactly once.
+    assert messages.count("Resumed after wait") == 1
+    assert messages.count("Workflow completed") == 1
