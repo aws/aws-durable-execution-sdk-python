@@ -27,6 +27,10 @@ def get_time_scale() -> float:
     return scale
 
 
-def scale_delay(delay: float | int) -> float:
+def scale_delay(delay: float | int, *, minimum: float = 0) -> float:
     """Scale a durable timer delay for local testing."""
-    return float(delay) * get_time_scale()
+    scaled_delay = float(delay) * get_time_scale()
+    if minimum <= 0:
+        return scaled_delay
+
+    return max(scaled_delay, min(float(delay), minimum))
