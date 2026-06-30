@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -43,10 +45,20 @@ class SQLiteExecutionStore(ExecutionStore):
         conn.execute("PRAGMA synchronous=NORMAL;")
         return conn
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        """Open a connection, preserve transaction handling, and always close it."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _init_db(self) -> None:
         """Initialize database schema."""
         try:
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS executions (
                         durable_execution_arn TEXT PRIMARY KEY,
@@ -80,7 +92,7 @@ class SQLiteExecutionStore(ExecutionStore):
             execution_op = execution.get_operation_execution_started()
             status: str = execution.current_status().value
 
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO executions
@@ -111,7 +123,7 @@ class SQLiteExecutionStore(ExecutionStore):
     def load(self, execution_arn: str) -> Execution:
         """Load execution from SQLite."""
         try:
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 cursor: sqlite3.Cursor = conn.execute(
                     "SELECT data FROM executions WHERE durable_execution_arn = ?",
                     (execution_arn,),
@@ -204,7 +216,7 @@ class SQLiteExecutionStore(ExecutionStore):
                 )
                 params_with_limit = params
 
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 # Get total count for pagination
                 total_count: int = int(conn.execute(count_query, params).fetchone()[0])
 
@@ -247,7 +259,7 @@ class SQLiteExecutionStore(ExecutionStore):
     def get_execution_metadata(self, execution_arn: str) -> dict[str, Any] | None:
         """Get just the metadata without full deserialization for performance."""
         try:
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 cursor: sqlite3.Cursor = conn.execute(
                     "SELECT function_name, execution_name, status, start_timestamp, end_timestamp FROM executions WHERE durable_execution_arn = ?",
                     (execution_arn,),
