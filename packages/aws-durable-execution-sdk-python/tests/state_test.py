@@ -4301,6 +4301,84 @@ def test_plugin_executor_not_called_for_pending_operations():
     assert len(operation_end_calls) == 0
 
 
+def test_plugin_executor_emits_start_and_end_for_replayed_terminal_operation():
+    """Replay reads emit operation lifecycle hooks with is_replayed=True."""
+    start_time = datetime.datetime(2025, 1, 1, tzinfo=datetime.UTC)
+    end_time = datetime.datetime(2025, 1, 2, tzinfo=datetime.UTC)
+    operation = Operation(
+        operation_id="step-1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        parent_id="parent-1",
+        name="my-step",
+        start_timestamp=start_time,
+        end_timestamp=end_time,
+        sub_type=OperationSubType.STEP,
+        step_details=StepDetails(attempt=1, result='"done"'),
+    )
+    captured: list[tuple[str, str, bool]] = []
+
+    class _CapturingPlugin(DurableInstrumentationPlugin):
+        def on_operation_start(self, info):
+            captured.append(("start", info.operation_id, info.is_replayed))
+
+        def on_operation_end(self, info):
+            captured.append(("end", info.operation_id, info.is_replayed))
+
+    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
+    with plugin_executor.run():
+        state = ExecutionState(
+            durable_execution_arn="test_arn",
+            initial_checkpoint_token="token123",  # noqa: S106
+            operations={"step-1": operation},
+            service_client=create_autospec(spec=LambdaClient),
+            plugin_executor=plugin_executor,
+            replay_status=ReplayStatus.REPLAY,
+        )
+
+        assert state.get_checkpoint_result("step-1").is_succeeded()
+        assert state.get_checkpoint_result("step-1").is_succeeded()
+
+    assert captured == [
+        ("start", "step-1", True),
+        ("end", "step-1", True),
+    ]
+
+
+def test_plugin_executor_emits_only_start_for_replayed_non_terminal_operation():
+    """Replay reads for in-flight operations emit start but not end."""
+    operation = Operation(
+        operation_id="wait-1",
+        operation_type=OperationType.WAIT,
+        status=OperationStatus.STARTED,
+        name="my-wait",
+        sub_type=OperationSubType.WAIT,
+    )
+    captured: list[tuple[str, str, bool]] = []
+
+    class _CapturingPlugin(DurableInstrumentationPlugin):
+        def on_operation_start(self, info):
+            captured.append(("start", info.operation_id, info.is_replayed))
+
+        def on_operation_end(self, info):
+            captured.append(("end", info.operation_id, info.is_replayed))
+
+    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
+    with plugin_executor.run():
+        state = ExecutionState(
+            durable_execution_arn="test_arn",
+            initial_checkpoint_token="token123",  # noqa: S106
+            operations={"wait-1": operation},
+            service_client=create_autospec(spec=LambdaClient),
+            plugin_executor=plugin_executor,
+            replay_status=ReplayStatus.REPLAY,
+        )
+
+        assert state.get_checkpoint_result("wait-1").is_started()
+
+    assert captured == [("start", "wait-1", True)]
+
+
 # endregion Plugin Executor Integration Tests
 
 

@@ -40,6 +40,7 @@ OPERATION_START_INFO = OperationStartInfo(
     name="my-op",
     parent_id="parent-1",
     start_time=START_TS,
+    is_replayed=False,
 )
 OPERATION_END_INFO = OperationEndInfo(
     operation_id="op-1",
@@ -48,6 +49,7 @@ OPERATION_END_INFO = OperationEndInfo(
     name="my-op",
     parent_id="parent-1",
     start_time=START_TS,
+    is_replayed=False,
     status=OperationStatus.FAILED,
     end_time=END_TS,
     error=ERROR,
@@ -76,6 +78,7 @@ USER_FUNCTION_START_INFO = UserFunctionStartInfo(
     name="func",
     parent_id="parent-1",
     start_time=START_TS,
+    is_replayed=False,
 )
 
 USER_FUNCTION_END_INFO = UserFunctionEndInfo(
@@ -85,6 +88,7 @@ USER_FUNCTION_END_INFO = UserFunctionEndInfo(
     name="func",
     parent_id="parent-1",
     start_time=START_TS,
+    is_replayed=False,
     is_replay_children=False,
     attempt=1,
     outcome=UserFunctionOutcome.FAILED,
@@ -99,6 +103,7 @@ class TestDataClasses(unittest.TestCase):
         self.assertEqual(OPERATION_START_INFO.name, "my-op")
         self.assertEqual(OPERATION_START_INFO.parent_id, "parent-1")
         self.assertEqual(OPERATION_START_INFO.start_time, START_TS)
+        self.assertFalse(OPERATION_START_INFO.is_replayed)
 
     def test_operation_end_info(self):
         self.assertEqual(OPERATION_END_INFO.status, OperationStatus.FAILED)
@@ -111,6 +116,7 @@ class TestDataClasses(unittest.TestCase):
         self.assertEqual(OPERATION_END_INFO.operation_id, "op-1")
         self.assertEqual(OPERATION_END_INFO.status, OperationStatus.FAILED)
         self.assertEqual(OPERATION_END_INFO.operation_id, "op-1")
+        self.assertFalse(OPERATION_END_INFO.is_replayed)
 
     def test_invocation_start_info(self):
         self.assertEqual(INVOCATION_START_INFO.request_id, "req-1")

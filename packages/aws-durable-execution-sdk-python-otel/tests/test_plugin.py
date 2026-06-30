@@ -101,6 +101,7 @@ def _user_function_start_info(
         name=f"step-{operation_id}",
         parent_id=parent_id,
         start_time=START_TIME,
+        is_replayed=False,
         is_replay_children=False,
         attempt=attempt,
     )
@@ -121,6 +122,7 @@ def _user_function_end_info(
         name=f"step-{operation_id}",
         parent_id=parent_id,
         start_time=START_TIME,
+        is_replayed=False,
         is_replay_children=False,
         attempt=attempt,
         outcome=outcome,
@@ -158,6 +160,7 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
             name="wait-for-signal",
             parent_id=None,
             start_time=START_TIME,
+            is_replayed=False,
         )
     )
     plugin.on_operation_end(
@@ -168,6 +171,7 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
             name="wait-for-signal",
             parent_id=None,
             start_time=START_TIME,
+            is_replayed=False,
             status=OperationStatus.SUCCEEDED,
             end_time=END_TIME,
             error=None,
@@ -202,6 +206,7 @@ def test_operation_end_without_start_emits_continuation_span_with_link():
             name="existing-wait",
             parent_id=None,
             start_time=START_TIME,
+            is_replayed=False,
             status=OperationStatus.SUCCEEDED,
             end_time=END_TIME,
             error=None,
@@ -227,6 +232,7 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
         name="fetch-user",
         parent_id=None,
         start_time=START_TIME,
+        is_replayed=False,
         is_replay_children=False,
         attempt=1,
     )
@@ -247,6 +253,7 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
             name="fetch-user",
             parent_id=None,
             start_time=START_TIME,
+            is_replayed=False,
             is_replay_children=False,
             attempt=1,
             outcome=UserFunctionOutcome.SUCCEEDED,
@@ -288,6 +295,7 @@ def test_context_span_omits_attempt_attributes():
             name="book-trip",
             parent_id=None,
             start_time=START_TIME,
+            is_replayed=False,
             is_replay_children=False,
             attempt=1,
         )
@@ -300,6 +308,7 @@ def test_context_span_omits_attempt_attributes():
             name="book-trip",
             parent_id=None,
             start_time=START_TIME,
+            is_replayed=False,
             is_replay_children=False,
             attempt=1,
             outcome=UserFunctionOutcome.SUCCEEDED,
