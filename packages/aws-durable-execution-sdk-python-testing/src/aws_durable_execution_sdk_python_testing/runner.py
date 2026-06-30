@@ -398,6 +398,16 @@ def create_operation(
     return operation_class.from_svc_operation(svc_operation, all_operations)
 
 
+def _is_callback_ready_for_response(
+    events: list[Event], callback_started_event: Event
+) -> bool:
+    """Return True once the invocation that created the callback has settled."""
+    for event in events[events.index(callback_started_event) + 1 :]:
+        if event.event_type == "InvocationCompleted":
+            return True
+    return False
+
+
 def _get_callback_id_from_events(
     events: list[Event], name: str | None = None
 ) -> str | None:
@@ -409,7 +419,8 @@ def _get_callback_id_from_events(
         name: Optional callback name to search for. If not provided, returns the latest callback.
 
     Returns:
-        The callback ID string for a non-completed callback, or None if not found.
+        The callback ID string for a non-completed callback whose creating
+        invocation has completed, or None if not found.
 
     Raises:
         DurableFunctionsTestError: If the named callback has already succeeded/failed/timed out.
@@ -436,6 +447,8 @@ def _get_callback_id_from_events(
                     raise DurableFunctionsTestError(
                         f"Callback {name} has already completed (succeeded/failed/timed out)"
                     )
+                if not _is_callback_ready_for_response(events, event):
+                    return None
                 return (
                     event.callback_started_details.callback_id
                     if event.callback_started_details
@@ -448,6 +461,7 @@ def _get_callback_id_from_events(
         event
         for event in callback_started_events
         if event.event_id not in completed_callback_ids
+        and _is_callback_ready_for_response(events, event)
     ]
 
     if not active_callbacks:
