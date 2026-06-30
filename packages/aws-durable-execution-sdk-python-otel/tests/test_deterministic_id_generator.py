@@ -90,8 +90,12 @@ def test_to_otel_trace_id_falls_back_to_timestamp_and_execution_arn(monkeypatch)
 
 
 def test_operation_id_to_span_id_returns_deterministic_64_bit_id():
-    """Verify operation IDs map to stable 64-bit span IDs."""
-    assert operation_id_to_span_id("my-operation") == int("ab1f94a6d3c668f3", 16)
+    """Verify execution and operation IDs map to stable 64-bit span IDs."""
+    execution_arn = "arn:aws:lambda:us-west-2:123456789012:function:workflow:$LATEST"
+
+    assert operation_id_to_span_id(execution_arn, "my-operation") == int(
+        "7495b798d83a363a", 16
+    )
 
 
 def test_deterministic_id_generator_returns_cached_trace_id(monkeypatch):

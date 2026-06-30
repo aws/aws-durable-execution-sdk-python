@@ -237,7 +237,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
             if existed:
                 if not operation_id:
                     raise ValueError("operation id is required")
-                span_id = operation_id_to_span_id(operation_id)
+                span_id = operation_id_to_span_id(self._execution_arn, operation_id)
                 links = [
                     Link(
                         context=SpanContext(
@@ -253,7 +253,9 @@ class OtelPlugin(DurableInstrumentationPlugin):
                 links = []
 
                 self._id_generator.set_next_span_id(
-                    operation_id_to_span_id(operation_id) if operation_id else None
+                    operation_id_to_span_id(self._execution_arn, operation_id)
+                    if operation_id
+                    else None
                 )
             if parent_span is None:
                 # root span

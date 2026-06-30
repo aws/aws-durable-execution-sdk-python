@@ -196,7 +196,9 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
     spans_by_name = {span.name: span for span in exporter.get_finished_spans()}
     wait_span = spans_by_name["wait-for-signal"]
     invocation_span = spans_by_name["invocation"]
-    assert wait_span.context.span_id == operation_id_to_span_id(operation_id)
+    assert wait_span.context.span_id == operation_id_to_span_id(
+        EXECUTION_ARN, operation_id
+    )
     assert wait_span.parent.span_id == invocation_span.context.span_id
     assert wait_span.attributes["durable.operation.id"] == operation_id
     assert wait_span.attributes["durable.operation.type"] == OperationType.WAIT.value
@@ -237,7 +239,9 @@ def test_operation_end_without_start_emits_continuation_span_with_link():
     span = exporter.get_finished_spans()[0]
     assert span.name == "existing-wait"
     assert span.context.span_id == random_span_id
-    assert span.links[0].context.span_id == operation_id_to_span_id(operation_id)
+    assert span.links[0].context.span_id == operation_id_to_span_id(
+        EXECUTION_ARN, operation_id
+    )
     assert (
         span.attributes["durable.operation.status"] == OperationStatus.SUCCEEDED.value
     )
@@ -290,7 +294,7 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
 
     span = exporter.get_finished_spans()[0]
     assert span.name == "fetch-user attempt 1"
-    assert span.context.span_id == operation_id_to_span_id(operation_id)
+    assert span.context.span_id == operation_id_to_span_id(EXECUTION_ARN, operation_id)
     assert span.attributes["durable.execution.arn"] == EXECUTION_ARN
     assert span.attributes["durable.operation.id"] == operation_id
     assert span.attributes["durable.operation.type"] == OperationType.STEP.value
@@ -466,7 +470,7 @@ def test_user_function_end_restores_invocation_span():
     # Inside the step, the current span is the operation span.
     assert (
         trace.get_current_span().get_span_context().span_id
-        == operation_id_to_span_id(operation_id)
+        == operation_id_to_span_id(EXECUTION_ARN, operation_id)
     )
 
     plugin.on_user_function_end(_user_function_end_info(operation_id))
@@ -534,7 +538,7 @@ def test_get_current_span_context_returns_operation_span_inside_step():
 
     span_context = plugin.get_current_span_context()
     assert span_context is not None
-    assert span_context.span_id == operation_id_to_span_id(operation_id)
+    assert span_context.span_id == operation_id_to_span_id(EXECUTION_ARN, operation_id)
 
 
 def test_get_current_span_context_returns_invocation_span_between_steps():
@@ -577,7 +581,7 @@ def test_user_function_end_restores_parent_context_span_for_nested_step():
     )
     assert (
         trace.get_current_span().get_span_context().span_id
-        == operation_id_to_span_id(inner_step_id)
+        == operation_id_to_span_id(EXECUTION_ARN, inner_step_id)
     )
 
     plugin.on_user_function_end(

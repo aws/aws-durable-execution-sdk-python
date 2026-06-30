@@ -66,9 +66,10 @@ def _to_otel_trace_id(execution_arn: str, start_timestamp: datetime | None) -> i
     return int(f"{time_part}{hash_part}", 16)
 
 
-def operation_id_to_span_id(operation_id: str) -> int:
-    """Derive a deterministic span ID (64 bits) from an operation ID."""
-    hashed_operation_id = hashlib.blake2b(operation_id.encode()).hexdigest()[:16]
+def operation_id_to_span_id(durable_execution_arn: str, operation_id: str) -> int:
+    """Derive a deterministic span ID (64 bits) from an execution and operation."""
+    plain_value = f"{durable_execution_arn}:{operation_id}"
+    hashed_operation_id = hashlib.blake2b(plain_value.encode()).hexdigest()[:16]
     return int(hashed_operation_id, 16)
 
 
