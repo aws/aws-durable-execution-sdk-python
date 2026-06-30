@@ -165,7 +165,7 @@ exclude = [".github/scripts/*.sh", ".github/workflows"]
 
 [tool.ruff.lint]
 preview = true
-select = ["TID252"]  # Enforce absolute imports (ban relative imports)
+select = ["E4", "E7", "E9", "F", "TID252"]  # pycodestyle (E4/E7/E9) + Pyflakes + absolute imports
 
 [tool.ruff.lint.isort]
 known-first-party = [

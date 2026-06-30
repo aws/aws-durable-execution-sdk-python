@@ -213,7 +213,7 @@ def test_create_context_details_with_replay_children():
 
     assert isinstance(result, ContextDetails)
     assert result.result == "test-payload"
-    assert result.replay_children == True
+    assert result.replay_children is True
 
 
 def test_create_step_details_non_step_type():

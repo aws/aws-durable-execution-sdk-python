@@ -2,7 +2,7 @@
 
 import json
 from datetime import datetime
-from typing import Any, Optional, TypedDict
+from typing import Any, TypedDict
 
 from aws_durable_execution_sdk_python.config import Duration, WaitForCallbackConfig
 from aws_durable_execution_sdk_python.context import DurableContext

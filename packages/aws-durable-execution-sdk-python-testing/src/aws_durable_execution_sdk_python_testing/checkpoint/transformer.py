@@ -40,7 +40,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, MutableMapping
 
     from aws_durable_execution_sdk_python.lambda_service import (
-        Operation,
         OperationUpdate,
     )
 

@@ -368,7 +368,7 @@ def test_invariant_token_sequence_never_retreats():
     )
     history.append(store.load(arn).token_sequence)
     # Accepted
-    r2 = executor.checkpoint_execution(
+    executor.checkpoint_execution(
         execution_arn=arn,
         checkpoint_token=r1.checkpoint_token,
         updates=[],

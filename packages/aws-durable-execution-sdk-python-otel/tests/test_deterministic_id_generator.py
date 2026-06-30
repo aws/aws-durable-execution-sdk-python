@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from opentelemetry.sdk.trace import IdGenerator, RandomIdGenerator
 
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
-    HASHED_ID_PATTERN,
     DeterministicIdGenerator,
     _parse_xray_root_trace_id,
     _to_otel_trace_id,

@@ -7,11 +7,10 @@ along with AWS-compatible implementations using boto's rest-json serializers.
 from __future__ import annotations
 
 import json
-import os
+import os  # noqa: F401 - accessed via module namespace in tests (mock.patch)
 from typing import Any, Protocol
 from datetime import datetime
 
-import aws_durable_execution_sdk_python
 import botocore.loaders  # type: ignore
 from botocore.model import ServiceModel  # type: ignore
 from botocore.parsers import create_parser  # type: ignore

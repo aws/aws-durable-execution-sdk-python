@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -26,7 +25,6 @@ from aws_durable_execution_sdk_python_testing.model import (
     ListDurableExecutionsResponse,
     SendDurableExecutionCallbackFailureRequest,
     SendDurableExecutionCallbackFailureResponse,
-    SendDurableExecutionCallbackHeartbeatRequest,
     SendDurableExecutionCallbackHeartbeatResponse,
     SendDurableExecutionCallbackSuccessResponse,
     StartDurableExecutionInput,

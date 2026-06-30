@@ -28,7 +28,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 
 if TYPE_CHECKING:
-    from aws_durable_execution_sdk_python.types import StepContext, LambdaContext
+    from aws_durable_execution_sdk_python.types import StepContext
 
 
 def create_mock_checkpoint_with_operations():

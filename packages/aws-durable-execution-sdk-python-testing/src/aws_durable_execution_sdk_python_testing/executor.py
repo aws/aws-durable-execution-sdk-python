@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-import time
 import uuid
 from datetime import UTC, datetime
 from enum import Enum
@@ -26,7 +25,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
     CallbackOptions,
     CallbackTimeoutType,
     StepDetails,
-    StepOptions,
 )
 
 from aws_durable_execution_sdk_python_testing.checkpoint.core import CheckpointCore
@@ -40,7 +38,6 @@ from aws_durable_execution_sdk_python_testing.checkpoint.validators.checkpoint i
     CheckpointValidator,
 )
 from aws_durable_execution_sdk_python_testing.exceptions import (
-    ExecutionAlreadyStartedException,
     IllegalStateException,
     InvalidParameterValueException,
     ResourceNotFoundException,
@@ -54,7 +51,6 @@ from aws_durable_execution_sdk_python_testing.model import (
     CheckpointDurableExecutionResponse,
     CheckpointUpdatedExecutionState,
     EventCreationContext,
-    EventType,
     GetDurableExecutionHistoryResponse,
     GetDurableExecutionResponse,
     GetDurableExecutionStateResponse,

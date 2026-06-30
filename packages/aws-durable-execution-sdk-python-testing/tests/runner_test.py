@@ -1360,9 +1360,6 @@ def test_cloud_runner_run_bad_status_code(mock_boto3):
 @patch("aws_durable_execution_sdk_python_testing.runner.boto3")
 def test_cloud_runner_run_function_error(mock_boto3):
     """Test DurableFunctionCloudTestRunner.run with function error."""
-    from aws_durable_execution_sdk_python_testing.exceptions import (
-        DurableFunctionsTestError,
-    )
     from aws_durable_execution_sdk_python_testing.runner import (
         DurableFunctionCloudTestRunner,
     )
@@ -1490,8 +1487,6 @@ def test_durable_function_test_result_from_execution_history_filters_execution_t
     """Test from_execution_history filters out EXECUTION type operations."""
     import datetime
 
-    from aws_durable_execution_sdk_python.execution import InvocationStatus
-
     from aws_durable_execution_sdk_python_testing.model import (
         Event,
         GetDurableExecutionHistoryResponse,
@@ -1562,8 +1557,6 @@ def test_durable_function_test_result_from_execution_history_unknown_status():
 def test_durable_function_test_result_from_execution_history_with_parent_operations():
     """Test from_execution_history filters operations with parent_id."""
     import datetime
-
-    from aws_durable_execution_sdk_python.execution import InvocationStatus
 
     from aws_durable_execution_sdk_python_testing.model import (
         Event,

@@ -30,7 +30,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     TimedSuspendExecution,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
-from aws_durable_execution_sdk_python.lambda_service import ErrorObject, OperationType
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from aws_durable_execution_sdk_python.operation.child import child_handler
 
 

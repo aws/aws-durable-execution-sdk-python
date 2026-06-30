@@ -29,7 +29,6 @@ from typing import Any, Protocol
 from urllib.parse import quote
 
 from aws_durable_execution_sdk_python.constants import CHECKPOINT_SIZE_LIMIT_BYTES
-from aws_durable_execution_sdk_python.preview import build_preview
 from aws_durable_execution_sdk_python.serdes import (
     EXTENDED_TYPES_SERDES,
     SerDes,

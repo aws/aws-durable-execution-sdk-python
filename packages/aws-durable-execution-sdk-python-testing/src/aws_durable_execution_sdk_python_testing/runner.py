@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -17,7 +16,6 @@ from typing import (
     cast,
 )
 
-import aws_durable_execution_sdk_python
 import boto3  # type: ignore
 from botocore.exceptions import ClientError  # type: ignore
 from aws_durable_execution_sdk_python.execution import (
@@ -757,7 +755,7 @@ class DurableFunctionTestRunner:
                 )
                 if callback_id:
                     return callback_id
-            except ResourceNotFoundException as e:
+            except ResourceNotFoundException:
                 pass
             except Exception as e:
                 msg = f"Failed to fetch execution history: {e}"
