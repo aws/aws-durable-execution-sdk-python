@@ -2576,6 +2576,36 @@ def test_callback_timeout_scheduling(executor, mock_store, mock_scheduler):
     assert mock_scheduler.call_later.call_count == 2  # main timeout + heartbeat timeout
 
 
+def test_callback_timeout_scheduling_scales_delays(
+    executor, mock_store, mock_scheduler, monkeypatch
+):
+    """Test that callback timeout timers honor local time scaling with a floor."""
+    monkeypatch.setenv("DURABLE_EXECUTION_TIME_SCALE", "0.05")
+    callback_options = CallbackOptions(timeout_seconds=60, heartbeat_timeout_seconds=30)
+    executor._completion_events["test-arn"] = Mock()
+
+    executor._schedule_callback_timeouts("test-arn", callback_options, "callback-id")
+
+    timeout_call, heartbeat_call = mock_scheduler.call_later.call_args_list
+    assert timeout_call.kwargs["delay"] == 5.0
+    assert heartbeat_call.kwargs["delay"] == 5.0
+
+
+def test_callback_timeout_scheduling_keeps_short_delays(
+    executor, mock_store, mock_scheduler, monkeypatch
+):
+    """Test that short callback timeout timers are not inflated by the floor."""
+    monkeypatch.setenv("DURABLE_EXECUTION_TIME_SCALE", "0.05")
+    callback_options = CallbackOptions(timeout_seconds=1, heartbeat_timeout_seconds=2)
+    executor._completion_events["test-arn"] = Mock()
+
+    executor._schedule_callback_timeouts("test-arn", callback_options, "callback-id")
+
+    timeout_call, heartbeat_call = mock_scheduler.call_later.call_args_list
+    assert timeout_call.kwargs["delay"] == 1.0
+    assert heartbeat_call.kwargs["delay"] == 2.0
+
+
 def test_callback_timeout_cleanup(executor, mock_store):
     """Test that callback timeouts are cleaned up when callback completes."""
     # Create mock timeout events
@@ -2626,6 +2656,31 @@ def test_callback_heartbeat_timeout_reset(executor, mock_store, mock_scheduler):
     # Verify old event was cancelled and new one scheduled
     old_event.cancel.assert_called_once()
     mock_scheduler.call_later.assert_called()
+
+
+def test_callback_heartbeat_timeout_reset_scales_delay(
+    executor, mock_store, mock_scheduler, monkeypatch
+):
+    """Test that reset heartbeat timers honor local time scaling with a floor."""
+    monkeypatch.setenv("DURABLE_EXECUTION_TIME_SCALE", "0.05")
+    callback_token = CallbackToken(execution_arn="test-arn", operation_id="op-123")
+    callback_id = callback_token.to_str()
+    mock_execution = Mock()
+    callback_options = CallbackOptions(heartbeat_timeout_seconds=30)
+    update = OperationUpdate(
+        operation_id="op-123",
+        operation_type=OperationType.CALLBACK,
+        action=OperationAction.START,
+        callback_options=callback_options,
+    )
+    mock_execution.updates = [update]
+    mock_store.load.return_value = mock_execution
+    executor._callback_heartbeats[callback_id] = Mock()
+
+    executor._reset_callback_heartbeat_timeout(callback_id, "test-arn")
+
+    mock_scheduler.call_later.assert_called_once()
+    assert mock_scheduler.call_later.call_args.kwargs["delay"] == 5.0
 
 
 def test_callback_timeout_handlers(executor, mock_store):

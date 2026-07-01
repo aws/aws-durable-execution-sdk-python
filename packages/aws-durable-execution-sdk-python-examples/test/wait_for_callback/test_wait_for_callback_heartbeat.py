@@ -14,6 +14,7 @@ from test.conftest import deserialize_operation_payload
 @pytest.mark.durable_execution(
     handler=wait_for_callback_heartbeat.handler,
     lambda_function_name="Wait For Callback Heartbeat Sends",
+    time_scale="1.0",
 )
 def test_handle_wait_for_callback_heartbeat_scenarios_during_long_running_submitter(
     durable_runner,

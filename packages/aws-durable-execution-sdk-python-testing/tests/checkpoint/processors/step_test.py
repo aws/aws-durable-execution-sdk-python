@@ -125,6 +125,33 @@ def test_process_retry_action():
     assert notifier.step_retry_calls[0] == (execution_arn, "step-123", 30)
 
 
+def test_process_retry_action_scales_retry_delay(monkeypatch):
+    monkeypatch.setenv("DURABLE_EXECUTION_TIME_SCALE", "0.5")
+    processor = StepProcessor()
+    notifier = MockNotifier()
+    execution_arn = "arn:aws:states:us-east-1:123456789012:execution:test"
+
+    current_op = Mock()
+    current_op.start_timestamp = datetime.now(UTC)
+    current_op.step_details = StepDetails(attempt=1)
+    current_op.execution_details = None
+    current_op.context_details = None
+    current_op.wait_details = None
+    current_op.callback_details = None
+    current_op.chained_invoke_details = None
+
+    update = OperationUpdate(
+        operation_id="step-123",
+        operation_type=OperationType.STEP,
+        action=OperationAction.RETRY,
+        step_options=StepOptions(next_attempt_delay_seconds=30),
+    )
+
+    processor.process(update, current_op, notifier, execution_arn)
+
+    assert notifier.step_retry_calls[0] == (execution_arn, "step-123", 15)
+
+
 def test_process_retry_action_without_step_options():
     processor = StepProcessor()
     notifier = MockNotifier()
