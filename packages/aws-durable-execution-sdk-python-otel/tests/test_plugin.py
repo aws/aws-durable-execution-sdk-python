@@ -247,6 +247,93 @@ def test_operation_end_without_start_emits_continuation_span_with_link():
     )
 
 
+def test_step_operation_span_parents_attempt_span():
+    """STEP operations have a logical span with attempt spans beneath it."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    operation_id = "step-1"
+
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="fetch-user",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    step_span = plugin._get_span(operation_id)
+    assert step_span is not None
+    assert step_span.name == "fetch-user"
+    assert step_span.context.span_id == operation_id_to_span_id(
+        EXECUTION_ARN, operation_id
+    )
+
+    plugin.on_user_function_start(
+        UserFunctionStartInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="fetch-user",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+            attempt=1,
+        )
+    )
+    active_attempt_span = trace.get_current_span()
+    assert active_attempt_span.parent.span_id == step_span.context.span_id
+    assert active_attempt_span.get_span_context().span_id != step_span.context.span_id
+
+    plugin.on_user_function_end(
+        UserFunctionEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="fetch-user",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+            attempt=1,
+            outcome=UserFunctionOutcome.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="fetch-user",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
+    spans_by_name = {span.name: span for span in exporter.get_finished_spans()}
+    finished_step_span = spans_by_name["fetch-user"]
+    attempt_span = spans_by_name["fetch-user attempt 1"]
+    assert attempt_span.parent.span_id == finished_step_span.context.span_id
+    assert (
+        finished_step_span.attributes["durable.operation.status"]
+        == OperationStatus.SUCCEEDED.value
+    )
+    assert attempt_span.attributes["durable.attempt.number"] == 1
+
+
 def test_user_function_callbacks_emit_attempt_span_attributes():
     """Verify user-function end refreshes all extractable span attributes."""
     plugin, exporter = _create_plugin()
@@ -266,7 +353,7 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
         attempt=1,
     )
     plugin.on_user_function_start(start_info)
-    active_span = plugin._get_span(operation_id)
+    active_span = plugin._get_span("step-1:attempt:1")
     assert active_span is not None
     active_span.set_attributes(
         {
@@ -294,7 +381,6 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
 
     span = exporter.get_finished_spans()[0]
     assert span.name == "fetch-user attempt 1"
-    assert span.context.span_id == operation_id_to_span_id(EXECUTION_ARN, operation_id)
     assert span.attributes["durable.execution.arn"] == EXECUTION_ARN
     assert span.attributes["durable.operation.id"] == operation_id
     assert span.attributes["durable.operation.type"] == OperationType.STEP.value
@@ -467,10 +553,12 @@ def test_user_function_end_restores_invocation_span():
 
     operation_id = "step-1"
     plugin.on_user_function_start(_user_function_start_info(operation_id))
-    # Inside the step, the current span is the operation span.
+    # Inside the step, the current span is the attempt span.
+    active_attempt_span = plugin._get_span("step-1:attempt:1")
+    assert active_attempt_span is not None
     assert (
         trace.get_current_span().get_span_context().span_id
-        == operation_id_to_span_id(EXECUTION_ARN, operation_id)
+        == active_attempt_span.get_span_context().span_id
     )
 
     plugin.on_user_function_end(_user_function_end_info(operation_id))
@@ -530,15 +618,17 @@ def test_get_current_span_context_returns_invocation_span_at_top_level():
 
 
 def test_get_current_span_context_returns_operation_span_inside_step():
-    """Verify code inside a step resolves to the operation span context."""
+    """Verify code inside a step resolves to the attempt span context."""
     plugin, _ = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     operation_id = "step-1"
     plugin.on_user_function_start(_user_function_start_info(operation_id))
 
     span_context = plugin.get_current_span_context()
+    active_attempt_span = plugin._get_span("step-1:attempt:1")
     assert span_context is not None
-    assert span_context.span_id == operation_id_to_span_id(EXECUTION_ARN, operation_id)
+    assert active_attempt_span is not None
+    assert span_context.span_id == active_attempt_span.get_span_context().span_id
 
 
 def test_get_current_span_context_returns_invocation_span_between_steps():
@@ -579,9 +669,11 @@ def test_user_function_end_restores_parent_context_span_for_nested_step():
     plugin.on_user_function_start(
         _user_function_start_info(inner_step_id, parent_id=context_id)
     )
+    active_attempt_span = plugin._get_span("ctx-1-step:attempt:1")
+    assert active_attempt_span is not None
     assert (
         trace.get_current_span().get_span_context().span_id
-        == operation_id_to_span_id(EXECUTION_ARN, inner_step_id)
+        == active_attempt_span.get_span_context().span_id
     )
 
     plugin.on_user_function_end(

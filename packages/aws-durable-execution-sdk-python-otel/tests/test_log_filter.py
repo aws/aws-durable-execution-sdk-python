@@ -126,8 +126,8 @@ def test_filter_injects_trace_context_from_invocation_span():
     assert isinstance(record.otelTraceSampled, bool)
 
 
-def test_filter_uses_operation_span_inside_user_function():
-    """span_id reflects the active operation span during user code."""
+def test_filter_uses_attempt_span_inside_user_function():
+    """spanId reflects the active attempt span during user code."""
     plugin, _ = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     operation_id = "step-1"
@@ -136,8 +136,9 @@ def test_filter_uses_operation_span_inside_user_function():
     record = _make_record()
     OtelContextLogFilter(plugin).filter(record)
 
-    operation_span = plugin._get_span(operation_id)
-    expected_span_id = format(operation_span.get_span_context().span_id, "016x")
+    attempt_span = plugin._get_span("step-1:attempt:1")
+    assert attempt_span is not None
+    expected_span_id = format(attempt_span.get_span_context().span_id, "016x")
     assert record.spanId == expected_span_id
 
 

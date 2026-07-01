@@ -152,12 +152,18 @@ class OtelPlugin(DurableInstrumentationPlugin):
         with self._operation_spans_lock:
             return self._operation_spans.get(operation_id)
 
+    @staticmethod
+    def _attempt_span_key(info: UserFunctionStartInfo | UserFunctionEndInfo) -> str:
+        """Return the registry key for a STEP attempt span."""
+        return f"{info.operation_id}:attempt:{info.attempt or 1}"
+
     def get_current_span_context(self) -> SpanContext | None:
         """Return the span context to use for log correlation.
 
         Resolution order:
-        1. The span attached to the OTel thread-local context. Inside a step or
-           child context this is the active operation span (attached in
+        1. The span attached to the OTel thread-local context. Inside a step
+           this is the active attempt span, and inside a child context this is
+           the active context span (attached in
            on_user_function_start), and between operations it is the enclosing
            operation span (restored in on_user_function_end).
         2. The invocation span from the plugin registry. This is the path used
@@ -209,6 +215,8 @@ class OtelPlugin(DurableInstrumentationPlugin):
         start_time: datetime.datetime | None = None,
         parent_span: Span | None = None,
         existed: bool = False,
+        span_key: str | None = None,
+        deterministic_span_id: bool = True,
     ) -> Span:
         """Start and store a span for an invocation or durable operation.
 
@@ -223,6 +231,10 @@ class OtelPlugin(DurableInstrumentationPlugin):
             existed: Whether the logical operation already had a previous span.
                 Continuation spans link back to the deterministic span ID for
                 the operation while using a fresh generated span ID.
+            span_key: Optional registry key. Defaults to ``operation_id``.
+            deterministic_span_id: Whether to use the deterministic operation
+                span ID. Attempt spans set this to ``False`` so they can be
+                separate children of the logical operation span.
 
         Returns:
             The started OpenTelemetry span.
@@ -233,8 +245,12 @@ class OtelPlugin(DurableInstrumentationPlugin):
             name,
             parent_span,
         )
+        registry_key = span_key if span_key is not None else operation_id
         with self._operation_spans_lock:
-            if existed:
+            if not deterministic_span_id:
+                links = []
+                self._id_generator.set_next_span_id(None)
+            elif existed:
                 if not operation_id:
                     raise ValueError("operation id is required")
                 span_id = operation_id_to_span_id(self._execution_arn, operation_id)
@@ -271,7 +287,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
                 context=parent_context,
                 links=links,
             )
-            self._operation_spans[operation_id] = span
+            self._operation_spans[registry_key] = span
 
         logger.debug("Started OTel span: %s", span)
         return span
@@ -339,8 +355,8 @@ class OtelPlugin(DurableInstrumentationPlugin):
     def on_operation_start(self, info: OperationStartInfo) -> None:
         """Called when an operation begins. Creates a span for the operation."""
         logger.debug("Durable operation started: %s", info)
-        if info.operation_type in [OperationType.CONTEXT, OperationType.STEP]:
-            # Context and Step operations are tracked using on_user_function_start
+        if info.operation_type is OperationType.CONTEXT:
+            # Context operations are tracked using on_user_function_start.
             return
         parent_span = self._resolve_parent_span(info.parent_id)
         attributes = self._extract_attributes(info)
@@ -363,8 +379,8 @@ class OtelPlugin(DurableInstrumentationPlugin):
         operation span before being ended.
         """
         logger.debug("Durable operation ended: %s", info)
-        if info.operation_type in [OperationType.CONTEXT, OperationType.STEP]:
-            # Context and Step operations are tracked using on_user_function_end
+        if info.operation_type is OperationType.CONTEXT:
+            # Context operations are tracked using on_user_function_end.
             return
         span = self._get_span(info.operation_id)
         if not span:
@@ -401,8 +417,9 @@ class OtelPlugin(DurableInstrumentationPlugin):
 
         This callback runs inside the thread that executes user code so the
         started span can be attached to the OpenTelemetry context for any
-        instrumentation used by that code. Attempts after the first are emitted
-        as continuation spans linked to the logical operation span.
+        instrumentation used by that code. STEP attempts are emitted as child
+        spans beneath the logical STEP operation span created by
+        ``on_operation_start``.
 
         Args:
             info: Information about the operation attempt.
@@ -413,18 +430,30 @@ class OtelPlugin(DurableInstrumentationPlugin):
             raise RuntimeError(
                 "on_user_function_start should only be called for CONTEXT and STEP operations"
             )
-        parent_span = self._resolve_parent_span(info.parent_id)
+        if info.operation_type is OperationType.STEP:
+            parent_span = self._get_span(
+                info.operation_id
+            ) or self._resolve_parent_span(info.parent_id)
+        else:
+            parent_span = self._resolve_parent_span(info.parent_id)
         attributes = self._extract_attributes(info)
         span_name = info.name or info.operation_id
         if info.operation_type is OperationType.STEP:
             span_name = f"{span_name} attempt {info.attempt or 1}"
+        span_key = (
+            self._attempt_span_key(info)
+            if info.operation_type is OperationType.STEP
+            else info.operation_id
+        )
         span = self._start_span(
             operation_id=info.operation_id,
             name=span_name,
             attributes=attributes,
             start_time=info.start_time,
             parent_span=parent_span,
-            existed=info.attempt != 1,
+            existed=info.attempt != 1 and info.operation_type is not OperationType.STEP,
+            span_key=span_key,
+            deterministic_span_id=info.operation_type is not OperationType.STEP,
         )
         context.attach(trace.set_span_in_context(span, self._extracted_context))
 
@@ -444,7 +473,12 @@ class OtelPlugin(DurableInstrumentationPlugin):
                 "on_user_function_end should only be called for CONTEXT and STEP operations"
             )
         # key = f"{info.operation_id}-{int(info.start_time.timestamp())}"
-        span = self._get_span(info.operation_id)
+        span_key = (
+            self._attempt_span_key(info)
+            if info.operation_type is OperationType.STEP
+            else info.operation_id
+        )
+        span = self._get_span(span_key)
         if not span:
             raise RuntimeError(
                 "on_user_function_end called without matching on_user_function_start"
@@ -466,7 +500,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
         end_timestamp = info.end_time
         if end_timestamp is not None and end_timestamp == info.start_time:
             end_timestamp += datetime.timedelta(microseconds=1)
-        self._end_span(info.operation_id, end_timestamp)
+        self._end_span(span_key, end_timestamp)
         # Restore the enclosing operation span as current so code that runs
         # after this operation (e.g. between steps in a child context)
         # correlates to its enclosing operation, not the operation that just
