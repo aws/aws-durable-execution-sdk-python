@@ -1792,7 +1792,16 @@ def test_cloud_runner_wait_for_callback_success(mock_boto3):
                 "Id": "callback-event-1",
                 "Name": "test-callback",
                 "CallbackStartedDetails": {"CallbackId": "callback-123"},
-            }
+            },
+            {
+                "EventType": "InvocationCompleted",
+                "EventTimestamp": "2023-01-01T00:00:01Z",
+                "InvocationCompletedDetails": {
+                    "StartTimestamp": "2023-01-01T00:00:00Z",
+                    "EndTimestamp": "2023-01-01T00:00:01Z",
+                    "RequestId": "request-1",
+                },
+            },
         ]
     }
 
@@ -1835,6 +1844,46 @@ def test_cloud_runner_wait_for_callback_none(mock_boto3):
 
 
 @patch("aws_durable_execution_sdk_python_testing.runner.boto3")
+def test_cloud_runner_wait_for_callback_waits_for_invocation(mock_boto3):
+    """Test wait_for_callback waits until the callback creator has settled."""
+    from aws_durable_execution_sdk_python_testing.runner import (
+        DurableFunctionCloudTestRunner,
+    )
+
+    mock_client = Mock()
+    mock_boto3.client.return_value = mock_client
+
+    callback_started = {
+        "EventType": "CallbackStarted",
+        "EventTimestamp": "2023-01-01T00:00:00Z",
+        "Id": "callback-event-1",
+        "Name": "test-callback",
+        "CallbackStartedDetails": {"CallbackId": "callback-123"},
+    }
+    invocation_completed = {
+        "EventType": "InvocationCompleted",
+        "EventTimestamp": "2023-01-01T00:00:01Z",
+        "InvocationCompletedDetails": {
+            "StartTimestamp": "2023-01-01T00:00:00Z",
+            "EndTimestamp": "2023-01-01T00:00:01Z",
+            "RequestId": "request-1",
+        },
+    }
+    mock_client.get_durable_execution_history.side_effect = [
+        {"Events": [callback_started]},
+        {"Events": [callback_started, invocation_completed]},
+    ]
+
+    runner = DurableFunctionCloudTestRunner(
+        function_name="test-function", poll_interval=0.01
+    )
+    callback_id = runner.wait_for_callback("test-arn", name="test-callback", timeout=10)
+
+    assert callback_id == "callback-123"
+    assert mock_client.get_durable_execution_history.call_count == 2
+
+
+@patch("aws_durable_execution_sdk_python_testing.runner.boto3")
 def test_cloud_runner_wait_for_callback_success_without_name(mock_boto3):
     """Test DurableFunctionCloudTestRunner.wait_for_callback success."""
     from aws_durable_execution_sdk_python_testing.runner import (
@@ -1852,7 +1901,16 @@ def test_cloud_runner_wait_for_callback_success_without_name(mock_boto3):
                 "Id": "callback-event-1",
                 "Name": "test-callback",
                 "CallbackStartedDetails": {"CallbackId": "callback-123"},
-            }
+            },
+            {
+                "EventType": "InvocationCompleted",
+                "EventTimestamp": "2023-01-01T00:00:01Z",
+                "InvocationCompletedDetails": {
+                    "StartTimestamp": "2023-01-01T00:00:00Z",
+                    "EndTimestamp": "2023-01-01T00:00:01Z",
+                    "RequestId": "request-1",
+                },
+            },
         ]
     }
 
@@ -2047,7 +2105,16 @@ def test_cloud_runner_wait_for_callback_client_error_retryable(mock_boto3):
                     "Id": "callback-event-1",
                     "Name": "test-callback",
                     "CallbackStartedDetails": {"CallbackId": "callback-123"},
-                }
+                },
+                {
+                    "EventType": "InvocationCompleted",
+                    "EventTimestamp": "2023-01-01T00:00:01Z",
+                    "InvocationCompletedDetails": {
+                        "StartTimestamp": "2023-01-01T00:00:00Z",
+                        "EndTimestamp": "2023-01-01T00:00:01Z",
+                        "RequestId": "request-1",
+                    },
+                },
             ]
         },
     ]

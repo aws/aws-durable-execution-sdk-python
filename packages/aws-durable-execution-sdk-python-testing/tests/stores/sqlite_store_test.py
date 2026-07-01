@@ -2,6 +2,7 @@
 
 import tempfile
 import time
+from contextlib import closing
 from datetime import datetime, UTC
 from pathlib import Path
 
@@ -664,23 +665,24 @@ def test_sqlite_execution_store_corrupted_data_handling(store, temp_db_path):
     import sqlite3
 
     # Insert corrupted JSON data directly
-    with sqlite3.connect(temp_db_path) as conn:
-        conn.execute(
-            """
-            INSERT INTO executions
-            (durable_execution_arn, function_name, execution_name, status, start_timestamp, end_timestamp, data)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "corrupted-arn",
-                "test-function",
-                "test-execution",
-                "RUNNING",
-                1234567890.0,
-                None,
-                "invalid json data {{{",
-            ),
-        )
+    with closing(sqlite3.connect(temp_db_path)) as conn:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO executions
+                (durable_execution_arn, function_name, execution_name, status, start_timestamp, end_timestamp, data)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "corrupted-arn",
+                    "test-function",
+                    "test-execution",
+                    "RUNNING",
+                    1234567890.0,
+                    None,
+                    "invalid json data {{{",
+                ),
+            )
 
     # Loading corrupted data should raise ValueError
     with pytest.raises(ValueError, match="Corrupted execution data"):
@@ -830,23 +832,24 @@ def test_sqlite_execution_store_query_with_corrupted_data_warning(
     store.save(execution)
 
     # Insert corrupted JSON data directly
-    with sqlite3.connect(temp_db_path) as conn:
-        conn.execute(
-            """
-            INSERT INTO executions
-            (durable_execution_arn, function_name, execution_name, status, start_timestamp, end_timestamp, data)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "corrupted-arn-2",
-                "test-function",
-                "test-execution",
-                "RUNNING",
-                1234567890.0,
-                None,
-                "invalid json data {{{",
-            ),
-        )
+    with closing(sqlite3.connect(temp_db_path)) as conn:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO executions
+                (durable_execution_arn, function_name, execution_name, status, start_timestamp, end_timestamp, data)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "corrupted-arn-2",
+                    "test-function",
+                    "test-execution",
+                    "RUNNING",
+                    1234567890.0,
+                    None,
+                    "invalid json data {{{",
+                ),
+            )
 
     # Query should skip corrupted records and print warning
     executions, _ = store.query()

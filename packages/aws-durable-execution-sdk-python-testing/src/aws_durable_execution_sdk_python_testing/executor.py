@@ -60,7 +60,7 @@ from aws_durable_execution_sdk_python_testing.token import CallbackToken
 
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
     from concurrent.futures import Future
 
     from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
@@ -782,10 +782,10 @@ class Executor(ExecutionObserver):
                 )
                 raise IllegalStateException(msg_unexpected_status)
 
-    def _invoke_handler(self, execution_arn: str) -> Callable[[], Awaitable[None]]:
+    def _invoke_handler(self, execution_arn: str) -> Callable[[], None]:
         """Create a parameterless callable that captures execution arn for the scheduler."""
 
-        async def invoke() -> None:
+        def invoke() -> None:
             execution: Execution = self._store.load(execution_arn)
 
             # Early exit if execution is already completed - like Java's COMPLETED check
