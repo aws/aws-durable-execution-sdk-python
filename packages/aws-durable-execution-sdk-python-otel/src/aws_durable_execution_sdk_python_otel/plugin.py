@@ -367,6 +367,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
             attributes=attributes,
             start_time=info.start_time,
             parent_span=parent_span,
+            existed=info.is_replayed,
         )
 
     def on_operation_end(self, info: OperationEndInfo) -> None:

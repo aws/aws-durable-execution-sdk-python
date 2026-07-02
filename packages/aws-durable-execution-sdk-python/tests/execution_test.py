@@ -74,6 +74,7 @@ def test_durable_execution_invocation_input_from_dict():
             ],
             "NextMarker": "",
         },
+        "UpdatedOperationIds": ["op-1"],
     }
 
     result = DurableExecutionInvocationInput.from_dict(input_dict)
@@ -90,6 +91,7 @@ def test_durable_execution_invocation_input_from_dict():
         result.initial_execution_state.operations[0].operation_id
         == "9692ca80-399d-4f52-8d0a-41acc9cd0492"
     )
+    assert result.updated_operation_ids == ["op-1"]
 
 
 def test_initial_execution_state_from_dict_minimal():
@@ -182,6 +184,7 @@ def test_durable_execution_invocation_input_to_dict():
         "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
         "InitialExecutionState": initial_state.to_dict(),
+        "UpdatedOperationIds": [],
     }
 
     assert result == expected
@@ -201,6 +204,7 @@ def test_durable_execution_invocation_input_to_dict_not_local():
         "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
         "InitialExecutionState": initial_state.to_dict(),
+        "UpdatedOperationIds": [],
     }
 
     assert result == expected
@@ -224,10 +228,12 @@ def test_durable_execution_invocation_input_with_client_inheritance():
         "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
         "InitialExecutionState": initial_state.to_dict(),
+        "UpdatedOperationIds": [],
     }
 
     assert result == expected
     assert invocation_input.service_client == mock_client
+    assert invocation_input.updated_operation_ids == []
 
 
 def test_durable_execution_invocation_input_with_client_from_parent():
@@ -248,6 +254,7 @@ def test_durable_execution_invocation_input_with_client_from_parent():
     assert with_client.durable_execution_arn == parent_input.durable_execution_arn
     assert with_client.checkpoint_token == parent_input.checkpoint_token
     assert with_client.initial_execution_state == parent_input.initial_execution_state
+    assert with_client.updated_operation_ids == parent_input.updated_operation_ids
     assert with_client.service_client == mock_client
 
 
@@ -2219,6 +2226,7 @@ def test_durable_execution_invocation_input_to_json_dict_minimal():
         "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
         "InitialExecutionState": initial_state.to_json_dict(),
+        "UpdatedOperationIds": [],
     }
 
     assert result == expected
@@ -2276,6 +2284,7 @@ def test_durable_execution_invocation_input_to_json_dict_empty_operations():
         "DurableExecutionArn": "arn:test:execution/exec1",
         "CheckpointToken": "token123",
         "InitialExecutionState": {"Operations": [], "NextMarker": ""},
+        "UpdatedOperationIds": [],
     }
 
     assert result == expected
@@ -2306,6 +2315,7 @@ def test_durable_execution_invocation_input_from_json_dict_minimal():
     assert len(result.initial_execution_state.operations) == 1
     assert result.initial_execution_state.next_marker == "test_marker"
     assert result.initial_execution_state.operations[0].operation_id == "exec1"
+    assert result.updated_operation_ids == []
 
 
 def test_durable_execution_invocation_input_from_json_dict_with_timestamps():
@@ -2408,6 +2418,7 @@ def test_durable_execution_invocation_input_json_roundtrip():
         durable_execution_arn="arn:test:execution:12345",
         checkpoint_token="token123456",  # noqa: S106
         initial_execution_state=initial_state,
+        updated_operation_ids=["step1"],
     )
 
     # Convert to JSON dict and back
@@ -2417,6 +2428,7 @@ def test_durable_execution_invocation_input_json_roundtrip():
     # Verify all top-level fields are preserved
     assert restored.durable_execution_arn == original.durable_execution_arn
     assert restored.checkpoint_token == original.checkpoint_token
+    assert restored.updated_operation_ids == original.updated_operation_ids
 
     # Verify initial execution state is preserved
     assert len(restored.initial_execution_state.operations) == len(

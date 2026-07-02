@@ -121,6 +121,7 @@ class InProcessInvoker(Invoker):
                 operations=execution.operations,
                 next_marker="",
             ),
+            updated_operation_ids=list(execution.updated_operation_ids),
             service_client=self.service_client,
         )
 
@@ -215,6 +216,7 @@ class LambdaInvoker(Invoker):
                 operations=execution.operations,
                 next_marker="",
             ),
+            updated_operation_ids=list(execution.updated_operation_ids),
         )
 
     def invoke(

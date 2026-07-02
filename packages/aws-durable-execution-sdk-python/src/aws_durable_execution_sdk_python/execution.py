@@ -6,7 +6,7 @@ import json
 import logging
 import warnings
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from aws_durable_execution_sdk_python.context import DurableContext
@@ -94,6 +94,7 @@ class DurableExecutionInvocationInput:
     durable_execution_arn: str
     checkpoint_token: str
     initial_execution_state: InitialExecutionState
+    updated_operation_ids: list[str] = field(default_factory=list, kw_only=True)
 
     @staticmethod
     def from_dict(
@@ -105,6 +106,7 @@ class DurableExecutionInvocationInput:
             initial_execution_state=InitialExecutionState.from_dict(
                 input_dict.get("InitialExecutionState", {})
             ),
+            updated_operation_ids=list(input_dict.get("UpdatedOperationIds", [])),
         )
 
     @staticmethod
@@ -117,6 +119,7 @@ class DurableExecutionInvocationInput:
             initial_execution_state=InitialExecutionState.from_json_dict(
                 input_dict.get("InitialExecutionState", {})
             ),
+            updated_operation_ids=list(input_dict.get("UpdatedOperationIds", [])),
         )
 
     def to_dict(self) -> MutableMapping[str, Any]:
@@ -124,6 +127,7 @@ class DurableExecutionInvocationInput:
             "DurableExecutionArn": self.durable_execution_arn,
             "CheckpointToken": self.checkpoint_token,
             "InitialExecutionState": self.initial_execution_state.to_dict(),
+            "UpdatedOperationIds": self.updated_operation_ids,
         }
 
     def to_json_dict(self) -> MutableMapping[str, Any]:
@@ -131,6 +135,7 @@ class DurableExecutionInvocationInput:
             "DurableExecutionArn": self.durable_execution_arn,
             "CheckpointToken": self.checkpoint_token,
             "InitialExecutionState": self.initial_execution_state.to_json_dict(),
+            "UpdatedOperationIds": self.updated_operation_ids,
         }
 
 
@@ -152,6 +157,7 @@ class DurableExecutionInvocationInputWithClient(DurableExecutionInvocationInput)
             durable_execution_arn=invocation_input.durable_execution_arn,
             checkpoint_token=invocation_input.checkpoint_token,
             initial_execution_state=invocation_input.initial_execution_state,
+            updated_operation_ids=invocation_input.updated_operation_ids,
             service_client=service_client,
         )
 
@@ -228,6 +234,7 @@ def durable_execution(
             operations={},
             service_client=service_client,
             plugin_executor=plugin_executor,
+            updated_operation_ids=invocation_input.updated_operation_ids,
         )
 
         try:

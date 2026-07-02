@@ -43,6 +43,7 @@ def test_execution_init():
     assert execution.start_input == start_input
     assert execution.operations == operations
     assert execution.updates == []
+    assert execution.updated_operation_ids == []
     assert execution.used_tokens == set()
     assert execution.token_sequence == 0
     assert execution.is_complete is False
@@ -162,6 +163,54 @@ def test_get_new_checkpoint_token():
     assert token1 in execution.used_tokens
     assert token2 in execution.used_tokens
     assert token1 != token2
+
+
+def test_complete_wait_records_updated_operation_id():
+    """Wait completion happens outside the invocation and is reported on the next input."""
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="invocation-id",
+    )
+    execution = Execution(
+        "test-arn",
+        start_input,
+        [
+            Operation(
+                operation_id="wait-1",
+                operation_type=OperationType.WAIT,
+                status=OperationStatus.STARTED,
+            )
+        ],
+    )
+
+    execution.complete_wait("wait-1")
+
+    assert execution.updated_operation_ids == ["wait-1"]
+
+
+def test_record_invocation_completion_clears_updated_operation_ids():
+    """Updated IDs are scoped to the next completed invocation."""
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="invocation-id",
+    )
+    execution = Execution("test-arn", start_input, [])
+    execution.updated_operation_ids = ["wait-1"]
+
+    now = datetime(2023, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    execution.record_invocation_completion(now, now, "request-1")
+
+    assert execution.updated_operation_ids == []
 
 
 def test_get_navigable_operations():
