@@ -45,7 +45,7 @@ class WaitProcessor(OperationProcessor):
                 scaled_wait_seconds = scale_delay(wait_seconds)
 
                 scheduled_end_timestamp = datetime.now(UTC) + timedelta(
-                    seconds=scaled_wait_seconds
+                    seconds=wait_seconds
                 )
 
                 # Create WaitDetails with scheduled timestamp

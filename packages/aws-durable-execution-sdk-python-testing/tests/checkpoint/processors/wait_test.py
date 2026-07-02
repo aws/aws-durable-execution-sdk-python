@@ -1,6 +1,6 @@
 """Tests for wait operation processor."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
 
 import pytest
@@ -86,9 +86,17 @@ def test_process_start_action_scales_wait_delay(monkeypatch):
         wait_options=WaitOptions(wait_seconds=30),
     )
 
-    processor.process(update, None, notifier, execution_arn)
+    before_process = datetime.now(UTC)
+    result = processor.process(update, None, notifier, execution_arn)
+    after_process = datetime.now(UTC)
 
     assert notifier.wait_timer_calls[0] == (execution_arn, "wait-123", 15)
+    assert result.wait_details is not None
+    assert (
+        before_process + timedelta(seconds=30)
+        <= result.wait_details.scheduled_end_timestamp
+        <= after_process + timedelta(seconds=30)
+    )
 
 
 def test_process_start_action_without_wait_options():
