@@ -3292,6 +3292,7 @@ def test_executor_returns_before_slow_branch_completes():
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
+    execution_state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"  # noqa: SLF001
     executor_context._parent_id = "parent"  # noqa: SLF001
