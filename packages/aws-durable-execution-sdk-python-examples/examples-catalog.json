@@ -645,6 +645,17 @@
       "path": "./src/plugin/execution_with_plugin.py"
     },
     {
+      "name": "Plugin Wait",
+      "description": "Test plugin hook emission for a wait completed during suspend",
+      "handler": "execution_with_wait_plugin.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/plugin/execution_with_wait_plugin.py"
+    },
+    {
       "name": "Otel Plugin",
       "description": "Test Otel plugin",
       "handler": "execution_with_otel.handler",

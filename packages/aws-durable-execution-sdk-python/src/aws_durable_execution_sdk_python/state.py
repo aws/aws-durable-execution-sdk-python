@@ -267,6 +267,7 @@ class ExecutionState:
         service_client: DurableServiceClient,
         plugin_executor: PluginExecutor,
         batcher_config: CheckpointBatcherConfig | None = None,
+        updated_operation_ids: list[str] | None = None,
     ):
         self.durable_execution_arn: str = durable_execution_arn
         self._current_checkpoint_token: str = initial_checkpoint_token
@@ -302,6 +303,13 @@ class ExecutionState:
         # emit_operation_replay_hook. This set is the firing mechanism only.
         self._replayed_operation_hooks: set[str] = set()
         self._replayed_operation_hooks_lock: Lock = Lock()
+
+        # Operations changed by the backend since the last successful
+        # invocation, such as waits, callbacks, invokes, or retry timers that
+        # completed while the Lambda was suspended. These are not "replayed"
+        # completions: plugins should observe them as operation updates when the
+        # replay reaches the operation.
+        self._updated_operation_ids: set[str] = set(updated_operation_ids or [])
 
     @property
     def operations(self) -> dict[str, Operation]:
@@ -453,6 +461,23 @@ class ExecutionState:
             self._replayed_operation_hooks.add(operation.operation_id)
 
         self._plugin_executor.on_operation_replay(operation)
+
+    def is_operation_updated_since_last_invocation(self, operation_id: str) -> bool:
+        """Return True if an operation changed while this execution was suspended."""
+        return operation_id in self._updated_operation_ids
+
+    def emit_operation_update_hook(self, operation: Operation) -> None:
+        """Fire the plugin update hook for an operation changed during suspend.
+
+        This method is safe to call for any operation. It emits only for
+        operations listed in UpdatedOperationIds.
+        """
+        if not self.is_operation_updated_since_last_invocation(operation.operation_id):
+            return
+        if operation.operation_type is OperationType.EXECUTION:
+            return
+
+        self._plugin_executor.on_operation_update(operation)
 
     def create_checkpoint(
         self,

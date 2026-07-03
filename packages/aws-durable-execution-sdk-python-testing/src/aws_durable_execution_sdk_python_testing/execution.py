@@ -60,6 +60,7 @@ class Execution:
         self.operations: list[Operation] = operations
         self.updates: list[OperationUpdate] = []
         self.invocation_completions: list[InvocationCompletedDetails] = []
+        self.updated_operation_ids: list[str] = []
         self.used_tokens: set[str] = set()
         # TODO: this will need to persist/rehydrate depending on inmemory vs sqllite store
         self._token_sequence: int = 0
@@ -108,6 +109,7 @@ class Execution:
             "InvocationCompletions": [
                 completion.to_json_dict() for completion in self.invocation_completions
             ],
+            "UpdatedOperationIds": self.updated_operation_ids,
             "UsedTokens": list(self.used_tokens),
             "TokenSequence": self._token_sequence,
             "IsComplete": self.is_complete,
@@ -142,6 +144,7 @@ class Execution:
             InvocationCompletedDetails.from_json_dict(item)
             for item in data.get("InvocationCompletions", [])
         ]
+        execution.updated_operation_ids = list(data.get("UpdatedOperationIds", []))
         execution.used_tokens = set(data["UsedTokens"])
         execution._token_sequence = data["TokenSequence"]  # noqa: SLF001
         execution.is_complete = data["IsComplete"]
@@ -239,6 +242,12 @@ class Execution:
                 request_id=request_id,
             )
         )
+        self.updated_operation_ids = []
+
+    def _record_updated_operation(self, operation_id: str) -> None:
+        """Remember an operation changed outside the last invocation."""
+        if operation_id not in self.updated_operation_ids:
+            self.updated_operation_ids.append(operation_id)
 
     def complete_success(self, result: str | None) -> None:
         """Complete execution successfully (DecisionType.COMPLETE_WORKFLOW_EXECUTION)."""
@@ -319,6 +328,7 @@ class Execution:
                 status=OperationStatus.SUCCEEDED,
                 end_timestamp=datetime.now(UTC),
             )
+            self._record_updated_operation(operation_id)
             return self.operations[index]
 
     def complete_retry(self, operation_id: str) -> Operation:
@@ -352,6 +362,7 @@ class Execution:
 
             # Assign
             self.operations[index] = updated_operation
+            self._record_updated_operation(operation_id)
             return updated_operation
 
     def complete_callback_success(
@@ -378,6 +389,7 @@ class Execution:
                 end_timestamp=datetime.now(UTC),
                 callback_details=updated_callback_details,
             )
+            self._record_updated_operation(operation.operation_id)
             return self.operations[index]
 
     def complete_callback_failure(
@@ -404,6 +416,7 @@ class Execution:
                 end_timestamp=datetime.now(UTC),
                 callback_details=updated_callback_details,
             )
+            self._record_updated_operation(operation.operation_id)
             return self.operations[index]
 
     def complete_callback_timeout(
@@ -430,6 +443,7 @@ class Execution:
                 end_timestamp=datetime.now(UTC),
                 callback_details=updated_callback_details,
             )
+            self._record_updated_operation(operation.operation_id)
             return self.operations[index]
 
     def _end_execution(self, status: OperationStatus) -> None:

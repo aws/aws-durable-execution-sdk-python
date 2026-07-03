@@ -1050,6 +1050,24 @@
         }
       }
     },
+    "ExecutionWithWaitPlugin": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "execution_with_wait_plugin.handler",
+        "Description": "Test plugin hook emission for a wait completed during suspend",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
     "ExecutionWithOtel": {
       "Type": "AWS::Serverless::Function",
       "Properties": {

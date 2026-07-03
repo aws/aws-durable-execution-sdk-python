@@ -247,6 +247,51 @@ def test_operation_end_without_start_emits_continuation_span_with_link():
     )
 
 
+def test_replayed_operation_start_emits_continuation_span_with_link():
+    """Replayed operation spans should not reuse the original deterministic span ID."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    operation_id = "wait-replayed"
+    random_span_id = int("abcdef1234567890", 16)
+    plugin._id_generator._fallback_id_generator.generate_span_id = lambda: (
+        random_span_id
+    )
+
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="replayed-wait",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=True,
+            status=OperationStatus.SUCCEEDED,
+        )
+    )
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="replayed-wait",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=True,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+
+    span = exporter.get_finished_spans()[0]
+    assert span.name == "replayed-wait"
+    assert span.context.span_id == random_span_id
+    assert span.links[0].context.span_id == operation_id_to_span_id(
+        EXECUTION_ARN, operation_id
+    )
+
+
 def test_step_operation_span_parents_attempt_span():
     """STEP operations have a logical span with attempt spans beneath it."""
     plugin, exporter = _create_plugin()

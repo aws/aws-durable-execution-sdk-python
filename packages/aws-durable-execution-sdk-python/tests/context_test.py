@@ -38,7 +38,10 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationSubType,
     OperationType,
 )
-from aws_durable_execution_sdk_python.plugin import PluginExecutor
+from aws_durable_execution_sdk_python.plugin import (
+    DurableInstrumentationPlugin,
+    PluginExecutor,
+)
 from aws_durable_execution_sdk_python.state import (
     CheckpointedResult,
     ExecutionState,
@@ -2357,6 +2360,15 @@ def _wait_op(operation_id: str, status: OperationStatus) -> Operation:
     )
 
 
+def _callback_op(operation_id: str, status: OperationStatus) -> Operation:
+    return Operation(
+        operation_id=operation_id,
+        operation_type=OperationType.CALLBACK,
+        status=status,
+        callback_details=CallbackDetails(callback_id="callback-1"),
+    )
+
+
 def test_is_replaying_defaults_to_new_for_fresh_context():
     """A context created without a replay seed is not replaying."""
     ctx = create_test_context(state=_replay_state({}))
@@ -2691,6 +2703,88 @@ def test_replay_aware_does_not_emit_replay_hook_when_not_replaying():
         ctx._create_step_id()  # noqa: SLF001
 
     assert emitted == []
+
+
+def test_replay_aware_emits_update_hook_for_operation_updated_since_last_invocation():
+    """Updated terminal operations emit operation_end, not replay start+end."""
+    captured: list[tuple[str, str, bool, OperationStatus]] = []
+
+    class _CapturingPlugin(DurableInstrumentationPlugin):
+        def on_operation_start(self, info):
+            captured.append(("start", info.operation_id, info.is_replayed, info.status))
+
+        def on_operation_end(self, info):
+            captured.append(("end", info.operation_id, info.is_replayed, info.status))
+
+    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
+    with plugin_executor.run():
+        state = ExecutionState(
+            durable_execution_arn="arn",
+            initial_checkpoint_token="token",  # noqa: S106
+            operations={},
+            service_client=Mock(),
+            plugin_executor=plugin_executor,
+            updated_operation_ids=[],
+        )
+        ctx = DurableContext(
+            state=state,
+            execution_context=ExecutionContext(durable_execution_arn="arn"),
+            replay_status=ReplayStatus.REPLAY,
+        )
+        next_id = ctx._peek_next_operation_id()  # noqa: SLF001
+        state._operations[next_id] = _wait_op(  # noqa: SLF001
+            next_id, OperationStatus.SUCCEEDED
+        )
+        state._updated_operation_ids.add(next_id)  # noqa: SLF001
+
+        with ctx._replay_aware():  # noqa: SLF001
+            ctx._create_step_id()  # noqa: SLF001
+
+    assert captured == [("end", next_id, False, OperationStatus.SUCCEEDED)]
+
+
+def test_replay_aware_updated_callback_with_following_op_stays_replaying():
+    """A completed callback is not itself the replay boundary when later replayed ops exist."""
+    captured: list[tuple[str, str, bool, OperationStatus]] = []
+
+    class _CapturingPlugin(DurableInstrumentationPlugin):
+        def on_operation_start(self, info):
+            captured.append(("start", info.operation_id, info.is_replayed, info.status))
+
+        def on_operation_end(self, info):
+            captured.append(("end", info.operation_id, info.is_replayed, info.status))
+
+    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
+    with plugin_executor.run():
+        state = ExecutionState(
+            durable_execution_arn="arn",
+            initial_checkpoint_token="token",  # noqa: S106
+            operations={},
+            service_client=Mock(),
+            plugin_executor=plugin_executor,
+            updated_operation_ids=[],
+        )
+        ctx = DurableContext(
+            state=state,
+            execution_context=ExecutionContext(durable_execution_arn="arn"),
+            replay_status=ReplayStatus.REPLAY,
+        )
+        callback_id = ctx._create_step_id_for_logical_step(1)  # noqa: SLF001
+        following_id = ctx._create_step_id_for_logical_step(2)  # noqa: SLF001
+        state._operations[callback_id] = _callback_op(  # noqa: SLF001
+            callback_id, OperationStatus.SUCCEEDED
+        )
+        state._operations[following_id] = _step_op(  # noqa: SLF001
+            following_id, OperationStatus.SUCCEEDED
+        )
+        state._updated_operation_ids.add(callback_id)  # noqa: SLF001
+
+        with ctx._replay_aware():  # noqa: SLF001
+            ctx._create_step_id()  # noqa: SLF001
+
+        assert ctx.is_replaying() is True
+
+    assert captured == [("end", callback_id, False, OperationStatus.SUCCEEDED)]
 
 
 # endregion per-context replay status

@@ -74,6 +74,7 @@ def test_in_process_invoker_create_invocation_input():
         invocation_id="test-invocation-id",
     )
     execution = Execution.new(input_data)
+    execution.updated_operation_ids = ["wait-1"]
 
     invocation_input = invoker.create_invocation_input(execution)
 
@@ -81,6 +82,7 @@ def test_in_process_invoker_create_invocation_input():
     assert invocation_input.durable_execution_arn == execution.durable_execution_arn
     assert invocation_input.checkpoint_token is not None
     assert isinstance(invocation_input.initial_execution_state, InitialExecutionState)
+    assert invocation_input.updated_operation_ids == ["wait-1"]
     assert invocation_input.service_client is service_client
 
 
