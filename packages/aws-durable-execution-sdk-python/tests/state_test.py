@@ -3879,6 +3879,11 @@ class _RecordingPlugin(DurableInstrumentationPlugin):
     def on_operation_end(self, info):
         self.calls.append(f"operation_end:{info.operation_id}")
 
+    def on_operation_change(self, info):
+        self.calls.append(
+            "operation_change:" + ",".join(sorted(info.updated_operations))
+        )
+
     def on_user_function_start(self, info):
         self.calls.append(f"user_function_start:{info.operation_id}")
 
@@ -4126,6 +4131,74 @@ def test_plugin_executor_called_for_multiple_updates_in_batch():
     # Both terminal operations should have triggered on_operation_update
     assert "operation_end:step-1" in plugin.calls
     assert "operation_end:step-2" in plugin.calls
+
+
+def test_plugin_executor_on_operation_change_called_for_status_changes():
+    """Test that on_operation_change receives status-changed checkpoint responses."""
+    mock_client = create_autospec(spec=LambdaClient)
+
+    step_op = Operation(
+        operation_id="step-1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        step_details=StepDetails(attempt=1, result='"done"'),
+    )
+    unchanged_wait_op = Operation(
+        operation_id="wait-1",
+        operation_type=OperationType.WAIT,
+        status=OperationStatus.STARTED,
+        sub_type=OperationSubType.WAIT,
+    )
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(
+            operations=[step_op, unchanged_wait_op],
+            next_marker=None,
+        ),
+    )
+
+    plugin = _RecordingPlugin()
+    plugin_executor = PluginExecutor(plugins=[plugin])
+    with plugin_executor.run():
+        plugin_executor.on_invocation_start(
+            execution_arn="test_arn",
+            is_first_invocation=False,
+            execution_start_time=None,
+            lambda_context=None,
+        )
+        state = ExecutionState(
+            durable_execution_arn="test_arn",
+            initial_checkpoint_token="token123",  # noqa: S106
+            operations={
+                "wait-1": Operation(
+                    operation_id="wait-1",
+                    operation_type=OperationType.WAIT,
+                    status=OperationStatus.STARTED,
+                    sub_type=OperationSubType.WAIT,
+                )
+            },
+            service_client=mock_client,
+            plugin_executor=plugin_executor,
+        )
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        executor.submit(state.checkpoint_batches_forever)
+
+        try:
+            operation_update = OperationUpdate(
+                operation_id="step-1",
+                operation_type=OperationType.STEP,
+                action=OperationAction.SUCCEED,
+                name="my-step",
+                payload='"done"',
+            )
+            state.create_checkpoint(operation_update, is_sync=True)
+        finally:
+            state.stop_checkpointing()
+            executor.shutdown(wait=True)
+
+    assert "operation_change:step-1" in plugin.calls
+    assert "operation_change:wait-1" not in plugin.calls
 
 
 def test_plugin_executor_not_called_on_checkpoint_failure():

@@ -744,18 +744,22 @@ class ExecutionState:
                     # Update local token for next iteration
                     current_checkpoint_token = output.checkpoint_token
 
+                    previous_operations = self.operations
+
                     # Fetch new operations from the API before unblocking sync waiters
                     updated_operations = self.fetch_paginated_operations(
                         output.new_execution_state.operations,
                         output.checkpoint_token,
                         output.new_execution_state.next_marker,
                     )
-
                     for update in updates:
                         self._plugin_executor.on_operation_action(update)
 
-                    for operation in updated_operations:
-                        self._plugin_executor.on_operation_update(operation)
+                    self._plugin_executor.on_operation_update(
+                        updated_operations,
+                        self.operations,
+                        previous_operations,
+                    )
 
                     # Signal completion for any synchronous operations
                     for queued_op in batch:
