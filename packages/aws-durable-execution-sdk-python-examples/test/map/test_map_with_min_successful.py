@@ -64,7 +64,8 @@ def test_map_with_min_successful(durable_runner):
         op for op in map_op.child_operations if op.status is OperationStatus.STARTED
     ]
 
-    # Should have 6-7 successes, 0 failures, and remaining in STARTED state
-    assert len(succeeded) == result_data["success_count"]
+    # The operation tree may observe one already-running child completing after
+    # the BatchResult snapshot used by the handler response.
+    assert result_data["success_count"] <= len(succeeded) <= 7
     assert len(failed) == 0
-    assert len(started) == 10 - result_data["success_count"]
+    assert len(started) == 10 - len(succeeded)
