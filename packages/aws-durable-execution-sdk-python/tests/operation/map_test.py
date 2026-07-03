@@ -893,12 +893,14 @@ def test_map_item_serialize(mock_serialize, item_serdes, batch_serdes):
         )
 
     expected = item_serdes or batch_serdes
-    assert mock_serialize.call_args_list[0][1]["serdes"] is expected
-    assert mock_serialize.call_args_list[0][1]["operation_id"] == "child-0"
-    assert mock_serialize.call_args_list[1][1]["serdes"] is expected
-    assert mock_serialize.call_args_list[1][1]["operation_id"] == "child-1"
-    assert mock_serialize.call_args_list[2][1]["serdes"] is batch_serdes
-    assert mock_serialize.call_args_list[2][1]["operation_id"] == "parent"
+    serialize_calls = {
+        call.kwargs["operation_id"]: call.kwargs
+        for call in mock_serialize.call_args_list
+    }
+    assert set(serialize_calls) == {"child-0", "child-1", "parent"}
+    assert serialize_calls["child-0"]["serdes"] is expected
+    assert serialize_calls["child-1"]["serdes"] is expected
+    assert serialize_calls["parent"]["serdes"] is batch_serdes
 
 
 @pytest.mark.parametrize(
@@ -956,10 +958,13 @@ def test_map_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
         )
 
     expected = item_serdes or batch_serdes
-    assert mock_deserialize.call_args_list[0][1]["serdes"] is expected
-    assert mock_deserialize.call_args_list[0][1]["operation_id"] == "child-0"
-    assert mock_deserialize.call_args_list[1][1]["serdes"] is expected
-    assert mock_deserialize.call_args_list[1][1]["operation_id"] == "child-1"
+    deserialize_calls = {
+        call.kwargs["operation_id"]: call.kwargs
+        for call in mock_deserialize.call_args_list
+    }
+    assert set(deserialize_calls) == {"child-0", "child-1"}
+    assert deserialize_calls["child-0"]["serdes"] is expected
+    assert deserialize_calls["child-1"]["serdes"] is expected
 
 
 def test_map_result_serialization_roundtrip():
