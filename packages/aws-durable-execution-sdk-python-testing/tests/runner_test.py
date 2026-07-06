@@ -2,7 +2,7 @@
 
 import datetime
 import json
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 from aws_durable_execution_sdk_python.execution import InvocationStatus
@@ -43,6 +43,40 @@ from aws_durable_execution_sdk_python_testing.runner import (
     WaitOperation,
     create_operation,
 )
+
+
+def _step_started_event(index: int) -> dict[str, object]:
+    return {
+        "EventType": "StepStarted",
+        "EventId": index,
+        "EventTimestamp": "2023-01-01T00:00:00Z",
+        "Id": f"long-step-{index}",
+        "Name": f"long-step-{index}",
+    }
+
+
+def _callback_started_event(index: int) -> dict[str, object]:
+    return {
+        "EventType": "CallbackStarted",
+        "EventId": index,
+        "EventTimestamp": "2023-01-01T00:00:00Z",
+        "Id": "late-callback",
+        "Name": "late-callback",
+        "CallbackStartedDetails": {"CallbackId": "callback-late"},
+    }
+
+
+def _invocation_completed_event(index: int) -> dict[str, object]:
+    return {
+        "EventType": "InvocationCompleted",
+        "EventId": index,
+        "EventTimestamp": "2023-01-01T00:00:01Z",
+        "InvocationCompletedDetails": {
+            "StartTimestamp": "2023-01-01T00:00:00Z",
+            "EndTimestamp": "2023-01-01T00:00:01Z",
+            "RequestId": "request-1",
+        },
+    }
 
 
 def test_operation_creation():
@@ -1884,6 +1918,163 @@ def test_cloud_runner_wait_for_callback_waits_for_invocation(mock_boto3):
 
 
 @patch("aws_durable_execution_sdk_python_testing.runner.boto3")
+def test_cloud_runner_wait_for_callback_with_paginated_long_history(mock_boto3):
+    """Test cloud callback lookup follows history pagination."""
+    from aws_durable_execution_sdk_python_testing.runner import (
+        DurableFunctionCloudTestRunner,
+    )
+
+    mock_client = Mock()
+    mock_boto3.client.return_value = mock_client
+
+    first_page = [_step_started_event(index) for index in range(1, 51)]
+    second_page = [_step_started_event(index) for index in range(51, 101)]
+    third_page = [
+        *[_step_started_event(index) for index in range(101, 121)],
+        _callback_started_event(121),
+        _invocation_completed_event(122),
+    ]
+    mock_client.get_durable_execution_history.side_effect = [
+        {"Events": first_page, "NextMarker": "page-2"},
+        {"Events": second_page, "NextMarker": "page-3"},
+        {"Events": third_page},
+    ]
+
+    runner = DurableFunctionCloudTestRunner(
+        function_name="test-function", poll_interval=0.01
+    )
+    callback_id = runner.wait_for_callback("test-arn", name="late-callback", timeout=10)
+
+    assert callback_id == "callback-late"
+    assert mock_client.get_durable_execution_history.call_args_list == [
+        call(DurableExecutionArn="test-arn", IncludeExecutionData=True),
+        call(
+            DurableExecutionArn="test-arn",
+            IncludeExecutionData=True,
+            Marker="page-2",
+        ),
+        call(
+            DurableExecutionArn="test-arn",
+            IncludeExecutionData=True,
+            Marker="page-3",
+        ),
+    ]
+
+
+@patch("aws_durable_execution_sdk_python_testing.runner.boto3")
+def test_cloud_runner_wait_for_result_with_paginated_child_context_history(mock_boto3):
+    """Test cloud result construction follows history pagination."""
+    from aws_durable_execution_sdk_python_testing.runner import (
+        DurableFunctionCloudTestRunner,
+    )
+
+    mock_client = Mock()
+    mock_boto3.client.return_value = mock_client
+
+    mock_client.get_durable_execution.return_value = {
+        "DurableExecutionArn": "test-arn",
+        "DurableExecutionName": "test-execution",
+        "FunctionArn": "arn:aws:lambda:us-east-1:123456789012:function:test",
+        "Status": "SUCCEEDED",
+        "StartTimestamp": "2023-01-01T00:00:00Z",
+        "EndTimestamp": "2023-01-01T00:01:00Z",
+        "Result": "test-result",
+    }
+    mock_client.get_durable_execution_history.side_effect = [
+        {
+            "Events": [
+                {
+                    "EventType": "ExecutionStarted",
+                    "EventId": 1,
+                    "EventTimestamp": "2023-01-01T00:00:00Z",
+                    "Id": "exec-1",
+                },
+                {
+                    "EventType": "StepStarted",
+                    "EventId": 2,
+                    "EventTimestamp": "2023-01-01T00:00:01Z",
+                    "Id": "top-step-1",
+                    "Name": "top-step",
+                },
+                {
+                    "EventType": "StepSucceeded",
+                    "EventId": 3,
+                    "EventTimestamp": "2023-01-01T00:00:02Z",
+                    "Id": "top-step-1",
+                },
+            ],
+            "NextMarker": "page-2",
+        },
+        {
+            "Events": [
+                {
+                    "EventType": "ContextStarted",
+                    "EventId": 4,
+                    "EventTimestamp": "2023-01-01T00:00:03Z",
+                    "Id": "child-context-1",
+                    "Name": "child-context",
+                },
+                {
+                    "EventType": "StepStarted",
+                    "EventId": 5,
+                    "EventTimestamp": "2023-01-01T00:00:04Z",
+                    "Id": "child-step-1",
+                    "Name": "child-step",
+                    "ParentId": "child-context-1",
+                },
+                {
+                    "EventType": "StepSucceeded",
+                    "EventId": 6,
+                    "EventTimestamp": "2023-01-01T00:00:05Z",
+                    "Id": "child-step-1",
+                    "ParentId": "child-context-1",
+                },
+            ],
+            "NextMarker": "page-3",
+        },
+        {
+            "Events": [
+                {
+                    "EventType": "ContextSucceeded",
+                    "EventId": 7,
+                    "EventTimestamp": "2023-01-01T00:00:06Z",
+                    "Id": "child-context-1",
+                },
+                {
+                    "EventType": "ExecutionSucceeded",
+                    "EventId": 8,
+                    "EventTimestamp": "2023-01-01T00:00:07Z",
+                    "Id": "exec-1",
+                },
+            ]
+        },
+    ]
+
+    runner = DurableFunctionCloudTestRunner(
+        function_name="test-function", poll_interval=0.01
+    )
+    result = runner.wait_for_result("test-arn", timeout=10)
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert result.get_step("top-step").operation_id == "top-step-1"
+    child_context = result.get_context("child-context")
+    assert child_context.get_step("child-step").operation_id == "child-step-1"
+    assert mock_client.get_durable_execution_history.call_args_list == [
+        call(DurableExecutionArn="test-arn", IncludeExecutionData=True),
+        call(
+            DurableExecutionArn="test-arn",
+            IncludeExecutionData=True,
+            Marker="page-2",
+        ),
+        call(
+            DurableExecutionArn="test-arn",
+            IncludeExecutionData=True,
+            Marker="page-3",
+        ),
+    ]
+
+
+@patch("aws_durable_execution_sdk_python_testing.runner.boto3")
 def test_cloud_runner_wait_for_callback_success_without_name(mock_boto3):
     """Test DurableFunctionCloudTestRunner.wait_for_callback success."""
     from aws_durable_execution_sdk_python_testing.runner import (
@@ -1988,6 +2179,27 @@ def test_local_runner_wait_for_callback_all_done_without_name(mock_executor_clas
     runner = DurableFunctionTestRunner(handler)
     with pytest.raises(TimeoutError, match="Callback did not available within"):
         runner.wait_for_callback("test-arn", timeout=2)
+
+
+@patch("aws_durable_execution_sdk_python_testing.runner.Executor")
+def test_local_runner_wait_for_callback_with_long_history(mock_executor_class):
+    """Test local callback lookup scans long histories."""
+    handler = Mock()
+    mock_executor = Mock()
+    mock_executor_class.return_value = mock_executor
+    long_history = [
+        *[_step_started_event(index) for index in range(1, 121)],
+        _callback_started_event(121),
+        _invocation_completed_event(122),
+    ]
+    mock_executor.get_execution_history.return_value = (
+        GetDurableExecutionHistoryResponse.from_dict({"Events": long_history})
+    )
+
+    runner = DurableFunctionTestRunner(handler)
+    callback_id = runner.wait_for_callback("test-arn", name="late-callback", timeout=2)
+
+    assert callback_id == "callback-late"
 
 
 @patch("aws_durable_execution_sdk_python_testing.runner.Executor")

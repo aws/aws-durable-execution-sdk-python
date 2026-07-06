@@ -960,6 +960,24 @@
         }
       }
     },
+    "ManyOperations": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "build/",
+        "Handler": "many_operations.handler",
+        "Description": "Runs many durable steps and child contexts to exercise long execution history retrieval",
+        "Role": {
+          "Fn::GetAtt": [
+            "DurableFunctionRole",
+            "Arn"
+          ]
+        },
+        "DurableConfig": {
+          "RetentionPeriodInDays": 7,
+          "ExecutionTimeout": 300
+        }
+      }
+    },
     "CallbackConcurrency": {
       "Type": "AWS::Serverless::Function",
       "Properties": {

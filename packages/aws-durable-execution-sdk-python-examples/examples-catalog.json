@@ -586,6 +586,17 @@
       "path": "./src/comprehensive_operations/comprehensive_operations.py"
     },
     {
+      "name": "Many Operations",
+      "description": "Runs many durable steps and child contexts to exercise long execution history retrieval",
+      "handler": "many_operations.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/comprehensive_operations/many_operations.py"
+    },
+    {
         "name": "Create Callback Concurrency",
         "description": "Demonstrates multiple concurrent createCallback operations using context.parallel",
         "handler": "callback_concurrency.handler",
