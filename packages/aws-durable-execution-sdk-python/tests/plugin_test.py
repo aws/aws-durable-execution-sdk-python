@@ -60,7 +60,6 @@ OPERATION_END_INFO = OperationEndInfo(
     error=ERROR,
 )
 OPERATION_CHANGE_INFO = OperationChangeInfo(
-    request_id="req-1",
     execution_arn="arn:test",
     updated_operations={"op-1": OPERATION_END_INFO},
     operations={"op-1": OPERATION_END_INFO},
@@ -706,7 +705,6 @@ class TestPluginExecutorOnOperationChange(unittest.TestCase):
             )
 
         self.assertIn("operation_change:op-1", self.plugin.calls)
-        self.assertEqual(captured[0].request_id, "req-1")
         self.assertEqual(captured[0].execution_arn, "arn:exec")
         self.assertEqual(set(captured[0].updated_operations), {"op-1"})
         self.assertEqual(set(captured[0].operations), {"op-1", "op-2"})

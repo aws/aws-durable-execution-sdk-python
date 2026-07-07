@@ -106,7 +106,6 @@ class OperationEndInfo(OperationInfo):
 
 @dataclass(frozen=True)
 class OperationChangeInfo:
-    request_id: str | None
     execution_arn: str | None
     updated_operations: dict[str, OperationInfo]
     operations: dict[str, OperationInfo]
@@ -511,7 +510,6 @@ class PluginExecutor:
 
         self.execute_plugins(
             OperationChangeInfo(
-                request_id=self._invocation_status.request_id,
                 execution_arn=self._invocation_status.execution_arn,
                 updated_operations={
                     operation.operation_id: OperationInfo.from_operation(operation)
