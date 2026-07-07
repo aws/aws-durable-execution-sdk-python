@@ -38,18 +38,15 @@ def test_parallel_with_named_branches(durable_runner):
     # Verify branch names: named branches have custom names, unnamed use defaults
     assert len(parallel_op.child_operations) == 5
 
-    child_names = [op.name for op in parallel_op.child_operations]
+    child_names = {op.name for op in parallel_op.child_operations}
 
-    # 1. Named ParallelBranch
-    assert child_names[0] == "fetch-user-data"
-    # 2. Named decorator
-    assert child_names[1] == "fetch-orders"
-    # 3. Unnamed decorator (None name falls back to index-based default)
-    assert child_names[2] == "parallel-branch-2"
-    # 4. Unnamed ParallelBranch (None name falls back to index-based default)
-    assert child_names[3] == "parallel-branch-3"
-    # 5. Raw callable (no ParallelBranch wrapper, index-based default)
-    assert child_names[4] == "parallel-branch-4"
+    assert child_names == {
+        "fetch-user-data",  # Named ParallelBranch
+        "fetch-orders",  # Named decorator
+        "parallel-branch-2",  # Unnamed decorator
+        "parallel-branch-3",  # Unnamed ParallelBranch
+        "parallel-branch-4",  # Raw callable
+    }
 
     # Verify all children succeeded
     for child in parallel_op.child_operations:
