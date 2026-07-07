@@ -1054,6 +1054,17 @@ class DurableFunctionCloudTestRunner:
                     DurableExecutionArn=execution_arn
                 )
                 execution = GetDurableExecutionResponse.from_dict(execution_dict)
+            except ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code")
+                # Retry while the asynchronous invoke's durable execution record is
+                # still becoming visible to GetDurableExecution.
+                if error_code == "ResourceNotFoundException":
+                    logger.info("Execution status not available yet; retrying")
+                    time.sleep(self.poll_interval)
+                    continue
+
+                msg = f"Failed to get execution status: {e}"
+                raise DurableFunctionsTestError(msg) from e
             except Exception as e:
                 msg = f"Failed to get execution status: {e}"
                 raise DurableFunctionsTestError(msg) from e
