@@ -7,16 +7,20 @@ from aws_durable_execution_sdk_python.lambda_service import (
     DurableExecutionInvocationOutput,
     ErrorObject,
     InvocationStatus,
+    Operation,
     OperationAction,
     OperationStatus,
     OperationSubType,
     OperationType,
+    StepDetails,
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationEndInfo,
     InvocationStartInfo,
+    OperationChangeInfo,
     OperationEndInfo,
+    OperationInfo,
     OperationStartInfo,
     PluginExecutor,
     UserFunctionEndInfo,
@@ -54,6 +58,11 @@ OPERATION_END_INFO = OperationEndInfo(
     status=OperationStatus.FAILED,
     end_time=END_TS,
     error=ERROR,
+)
+OPERATION_CHANGE_INFO = OperationChangeInfo(
+    execution_arn="arn:test",
+    updated_operations={"op-1": OPERATION_END_INFO},
+    operations={"op-1": OPERATION_END_INFO},
 )
 
 INVOCATION_START_INFO = InvocationStartInfo(
@@ -175,6 +184,7 @@ class TestDurableInstrumentationPlugin(unittest.TestCase):
         self.assertIsNone(plugin.on_invocation_end(INVOCATION_END_INFO))
         self.assertIsNone(plugin.on_operation_start(OPERATION_START_INFO))
         self.assertIsNone(plugin.on_operation_end(OPERATION_END_INFO))
+        self.assertIsNone(plugin.on_operation_change(OPERATION_CHANGE_INFO))
         self.assertIsNone(plugin.on_user_function_start(USER_FUNCTION_START_INFO))
         self.assertIsNone(plugin.on_user_function_end(USER_FUNCTION_END_INFO))
 
@@ -321,6 +331,11 @@ class TestPluginExecutorExecutePlugins(unittest.TestCase):
         with self.executor.run():
             self.executor.execute_plugins(OPERATION_START_INFO, sync=False)
         self.assertIn("operation_start:op-2", self.plugin.calls)
+
+    def test_dispatch_operation_change_info(self):
+        with self.executor.run():
+            self.executor.execute_plugins(OPERATION_CHANGE_INFO, sync=False)
+        self.assertIn("operation_change:op-1", self.plugin.calls)
 
     def test_dispatch_user_function_start_info(self):
         with self.executor.run():
@@ -637,6 +652,88 @@ class TestPluginExecutorOnOperationUpdate(unittest.TestCase):
         self.assertIn("operation_end:op-1", self.plugin.calls)
 
 
+class TestPluginExecutorOnOperationChange(unittest.TestCase):
+    """Tests for operation change notifications from on_operation_update."""
+
+    def setUp(self):
+        self.plugin = _TrackingPlugin()
+        self.executor = PluginExecutor(plugins=[self.plugin])
+
+    def test_operation_change_uses_invocation_and_operation_maps(self):
+        updated_operation = Operation(
+            operation_id="op-1",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.SUCCEEDED,
+            name="my-step",
+            parent_id="parent-1",
+            start_timestamp=START_TS,
+            end_timestamp=END_TS,
+            sub_type=OperationSubType.STEP,
+            step_details=StepDetails(attempt=2, result='"done"', error=None),
+        )
+        other_operation = Operation(
+            operation_id="op-2",
+            operation_type=OperationType.WAIT,
+            status=OperationStatus.STARTED,
+            name="my-wait",
+            sub_type=OperationSubType.WAIT,
+        )
+        captured: list[OperationChangeInfo] = []
+
+        class _CapturingPlugin(_TrackingPlugin):
+            def on_operation_change(self, info: OperationChangeInfo) -> None:
+                super().on_operation_change(info)
+                captured.append(info)
+
+        self.plugin = _CapturingPlugin()
+        self.executor = PluginExecutor(plugins=[self.plugin])
+
+        with self.executor.run():
+            self.executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=False,
+            )
+            self.executor.on_operation_update(
+                [updated_operation],
+                {
+                    "op-1": updated_operation,
+                    "op-2": other_operation,
+                },
+                previous_operations={},
+            )
+
+        self.assertIn("operation_change:op-1", self.plugin.calls)
+        self.assertEqual(captured[0].execution_arn, "arn:exec")
+        self.assertEqual(set(captured[0].updated_operations), {"op-1"})
+        self.assertEqual(set(captured[0].operations), {"op-1", "op-2"})
+
+        updated_info = captured[0].updated_operations["op-1"]
+        self.assertIsInstance(updated_info, OperationInfo)
+        self.assertEqual(updated_info.status, OperationStatus.SUCCEEDED)
+        self.assertEqual(updated_info.result, '"done"')
+        self.assertEqual(updated_info.attempt, 2)
+        self.assertEqual(updated_info.end_time, END_TS)
+        self.assertFalse(updated_info.is_replayed)
+
+    def test_operation_change_without_invocation_start_is_noop(self):
+        operation = Operation(
+            operation_id="op-1",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.STARTED,
+        )
+
+        with self.executor.run():
+            self.executor.on_operation_update(
+                [operation],
+                {"op-1": operation},
+                previous_operations={},
+            )
+
+        self.assertEqual(self.plugin.calls, [])
+
+
 class TestPluginExecutorExtractError(unittest.TestCase):
     """Tests for PluginExecutor._extract_error static method."""
 
@@ -766,6 +863,11 @@ class _TrackingPlugin(DurableInstrumentationPlugin):
     def on_operation_end(self, info: OperationEndInfo) -> None:
         self.calls.append(f"operation_end:{info.operation_id}")
 
+    def on_operation_change(self, info: OperationChangeInfo) -> None:
+        self.calls.append(
+            "operation_change:" + ",".join(sorted(info.updated_operations))
+        )
+
     def on_user_function_start(self, info: UserFunctionStartInfo) -> None:
         self.calls.append(f"user_function_start:{info.operation_id}")
 
@@ -792,6 +894,9 @@ class _FailingPlugin(DurableInstrumentationPlugin):
         raise RuntimeError("boom")
 
     def on_operation_end(self, info):
+        raise RuntimeError("boom")
+
+    def on_operation_change(self, info):
         raise RuntimeError("boom")
 
     def on_operation_attempt_start(self, info):
