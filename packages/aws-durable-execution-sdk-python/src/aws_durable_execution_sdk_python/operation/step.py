@@ -217,7 +217,8 @@ class StepOperationExecutor(OperationExecutor[T]):
                     op_id=self.operation_identifier,
                     attempt=attempt,
                 )
-            )
+            ),
+            attempt=attempt,
         )
 
         try:

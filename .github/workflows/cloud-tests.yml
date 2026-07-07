@@ -1,0 +1,142 @@
+name: Cloud tests
+
+on:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      lambda_endpoint:
+        description: "Optional Lambda endpoint URL for deploying and running cloud tests"
+        required: false
+        type: string
+
+env:
+  AWS_REGION: us-west-2
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  example-tests:
+    name: example-tests (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    concurrency:
+      group: cloud-tests-${{ matrix.python-prefix }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.11"
+            python-prefix: Py311
+          - python-version: "3.12"
+            python-prefix: Py312
+          - python-version: "3.13"
+            python-prefix: Py313
+          - python-version: "3.14"
+            python-prefix: Py314
+    steps:
+    - uses: actions/checkout@v7
+    
+    - name: Setup Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Configure AWS credentials
+      if: github.event_name != 'workflow_dispatch' || github.actor != 'nektos/act'
+      uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: "${{ secrets.TEST_ROLE_ARN }}"
+        role-session-name: pythonTestingLibraryGitHubIntegrationTest
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Verify AWS test account
+      if: github.event_name != 'workflow_dispatch' || github.actor != 'nektos/act'
+      env:
+        TEST_ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
+      run: |
+        ACTUAL_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        if [ "$ACTUAL_ACCOUNT_ID" != "$TEST_ACCOUNT_ID" ]; then
+          echo "Expected AWS account $TEST_ACCOUNT_ID but assumed into $ACTUAL_ACCOUNT_ID"
+          exit 1
+        fi
+        echo "Using AWS test account $ACTUAL_ACCOUNT_ID"
+
+    - name: Install Hatch
+      run: pip install hatch
+
+    - name: Setup SAM CLI
+      uses: aws-actions/setup-sam@v2
+
+    - name: Build examples
+      run: |
+        hatch run -- examples:pip install -e packages/aws-durable-execution-sdk-python packages/aws-durable-execution-sdk-python-otel packages/aws-durable-execution-sdk-python-testing
+        hatch run examples:build
+        hatch run examples:generate-sam-template
+
+    - name: Deploy all examples with SAM
+      id: deploy
+      env:
+        LAMBDA_EXECUTION_ROLE_ARN: ${{ secrets.TEST_LAMBDA_EXECUTION_ROLE_ARN }}
+        LAMBDA_ENDPOINT_OVERRIDE: ${{ github.event.inputs.lambda_endpoint || vars.TEST_LAMBDA_ENDPOINT }}
+        PYTHON_PREFIX: ${{ matrix.python-prefix }}
+        PYTHON_RUNTIME: python${{ matrix.python-version }}
+      run: |
+        STACK_NAME="${PYTHON_PREFIX}-python-examples"
+        FUNCTION_NAME_PREFIX="${PYTHON_PREFIX}-"
+
+        STACK_NAME=$(echo "$STACK_NAME" | tr -cd '[:alnum:]-' | cut -c1-128)
+        export STACK_NAME FUNCTION_NAME_PREFIX
+        echo "STACK_NAME=$STACK_NAME" >> $GITHUB_ENV
+
+        echo "Building SAM application"
+        sam build --template-file packages/aws-durable-execution-sdk-python-examples/template.generated.json
+
+        PARAMETER_OVERRIDES=(
+          PythonRuntime="$PYTHON_RUNTIME"
+          FunctionNamePrefix="$FUNCTION_NAME_PREFIX"
+          LambdaExecutionRoleArn="$LAMBDA_EXECUTION_ROLE_ARN"
+        )
+        if [ -n "$LAMBDA_ENDPOINT_OVERRIDE" ]; then
+          PARAMETER_OVERRIDES+=(LambdaEndpoint="$LAMBDA_ENDPOINT_OVERRIDE")
+          echo "LAMBDA_ENDPOINT=$LAMBDA_ENDPOINT_OVERRIDE" >> $GITHUB_ENV
+          echo "Using custom Lambda endpoint override"
+        fi
+
+        echo "Deploying stack $STACK_NAME with function prefix $FUNCTION_NAME_PREFIX and runtime $PYTHON_RUNTIME"
+        sam deploy \
+          --template-file .aws-sam/build/template.yaml \
+          --stack-name "$STACK_NAME" \
+          --resolve-s3 \
+          --no-confirm-changeset \
+          --no-fail-on-empty-changeset \
+          --region "$AWS_REGION" \
+          --parameter-overrides "${PARAMETER_OVERRIDES[@]}"
+
+        PYTEST_FUNCTION_NAME_MAP=$(
+          python packages/aws-durable-execution-sdk-python-examples/scripts/generate_function_name_map.py \
+            --function-name-prefix "$FUNCTION_NAME_PREFIX"
+        )
+
+        echo "PYTEST_FUNCTION_NAME_MAP=$PYTEST_FUNCTION_NAME_MAP" >> $GITHUB_ENV
+
+    - name: Run Integration Tests
+      env:
+        AWS_REGION: ${{ env.AWS_REGION }}
+      run: |
+        echo "Running integration tests for all deployed examples"
+        echo "AWS Region: ${AWS_REGION}"
+        echo "Configured function map: ${PYTEST_FUNCTION_NAME_MAP}"
+
+        mkdir -p .test-results
+        hatch run test:examples-integration -n 8 --dist loadfile --junitxml=.test-results/examples.xml
+
+    - name: Report Test Summary
+      if: always()
+      run: |
+        python packages/aws-durable-execution-sdk-python-examples/scripts/write_junit_summary.py \
+          .test-results/examples.xml \
+          --title "Cloud test summary (Python ${{ matrix.python-version }})" \
+          --output "$GITHUB_STEP_SUMMARY"

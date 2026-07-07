@@ -94,7 +94,62 @@ hatch build
 
 # Examples deployment (from repo root)
 hatch run examples:build
-hatch run examples:deploy "Hello World"
+hatch run examples:generate-sam-template
+sam build --template-file packages/aws-durable-execution-sdk-python-examples/template.generated.json
+sam deploy \
+  --template-file .aws-sam/build/template.yaml \
+  --stack-name python-examples-dev \
+  --resolve-s3 \
+  --no-confirm-changeset \
+  --parameter-overrides \
+    PythonRuntime=python3.13 \
+    FunctionNamePrefix=PythonDev- \
+    LambdaEndpoint=https://lambda.us-west-2.amazonaws.com \
+    LambdaExecutionRoleArn=arn:aws:iam::123456789012:role/example-lambda-role
+```
+
+After the stack is deployed, use [SAM remote execution commands](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-cli-command-reference-sam-remote-execution.html) to invoke examples, inspect durable executions, stop executions that go wrong, and manage reusable test events. Pass the generated CloudFormation logical ID from `template.generated.json`; for example, `hello_world.handler` is generated as `HelloWorld`.
+
+```bash
+# Invoke a deployed example with a payload. Durable functions require a qualifier.
+sam remote invoke \
+  --stack-name python-examples-dev \
+  HelloWorld \
+  --event '{"name":"Ada"}' \
+  --parameter 'Qualifier=$LATEST' \
+  --output json
+
+# Start a durable execution asynchronously.
+sam remote invoke \
+  --stack-name python-examples-dev \
+  HelloWorld \
+  --event '{"name":"Ada"}' \
+  --parameter InvocationType=Event \
+  --parameter 'Qualifier=$LATEST' \
+  --durable-execution-name hello-world-dev-run
+
+# Save and reuse a remote test event for an example.
+sam remote test-event put \
+  --stack-name python-examples-dev \
+  HelloWorld \
+  --name hello-world \
+  --file event.json \
+  --force
+sam remote invoke \
+  --stack-name python-examples-dev \
+  HelloWorld \
+  --test-event-name hello-world \
+  --parameter 'Qualifier=$LATEST'
+```
+
+Use the `DurableExecutionArn` returned from an invocation with SAM's durable execution commands:
+
+```bash
+sam remote execution get "$DURABLE_EXECUTION_ARN" --format json
+sam remote execution history "$DURABLE_EXECUTION_ARN" --format table
+sam remote execution stop "$DURABLE_EXECUTION_ARN" \
+  --error-type UserCancellation \
+  --error-message "Stopped during manual troubleshooting"
 ```
 
 ### CI checks script
@@ -307,7 +362,6 @@ tests/mypackage/mymodule_test.py
 
 ## Examples and Deployment
 
-The project includes a unified CLI tool for managing examples, deployment, and AWS account setup.
 Run these commands from the **repository root**.
 
 To run examples tests from the repo root:
@@ -315,42 +369,48 @@ To run examples tests from the repo root:
 hatch run dev-examples:test
 ```
 
-### Bootstrap AWS Account
-```bash
-# Set up IAM role and KMS key for durable functions
-export AWS_ACCOUNT_ID=your-account-id
-hatch run examples:bootstrap
-```
-
 ### Build and Deploy Examples
 ```bash
-# Build all examples with dependencies
+# Build the shared example bundle with vendored dependencies
 hatch run examples:build
 
-# Generate SAM template for all examples
+# Generate the SAM template for the full catalog
 hatch run examples:generate-sam-template
 
-# List available examples
-hatch run examples:list
+# Build and deploy the full stack with SAM
+sam build --template-file packages/aws-durable-execution-sdk-python-examples/template.generated.json
+sam deploy \
+  --template-file .aws-sam/build/template.yaml \
+  --stack-name python-examples-dev \
+  --resolve-s3 \
+  --no-confirm-changeset \
+  --parameter-overrides \
+    PythonRuntime=python3.13 \
+    FunctionNamePrefix=PythonDev- \
+    LambdaEndpoint=https://lambda.us-west-2.amazonaws.com \
+    LambdaExecutionRoleArn=arn:aws:iam::123456789012:role/example-lambda-role
 
-# Deploy specific example (when durable functions are available)
-hatch run examples:deploy "Hello World"
-```
-
-### Other CLI Commands
-```bash
-# Invoke deployed function
-hatch run examples:invoke function-name --payload '{}'
-
-# Get execution details
-hatch run examples:get execution-arn
-
-# Get execution history
-hatch run examples:history execution-arn
+# Invoke deployed examples, inspect executions, and manage saved test events
+# with SAM remote commands
+sam remote invoke \
+  --stack-name python-examples-dev \
+  HelloWorld \
+  --event '{"name":"Ada"}' \
+  --parameter 'Qualifier=$LATEST'
+sam remote execution get "$DURABLE_EXECUTION_ARN"
+sam remote execution history "$DURABLE_EXECUTION_ARN"
+sam remote execution stop "$DURABLE_EXECUTION_ARN" \
+  --error-type UserCancellation \
+  --error-message "Stopped during manual troubleshooting"
+sam remote test-event list \
+  --stack-name python-examples-dev \
+  HelloWorld
 
 # Clean build artifacts
 hatch run examples:clean
 ```
+
+The generated template uses logical IDs derived from handler module names; for example, `hello_world.handler` becomes `HelloWorld`. See the [SAM remote execution command reference](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-cli-command-reference-sam-remote-execution.html) for the full set of `sam remote invoke`, `sam remote execution`, and `sam remote test-event` options.
 
 ## Coverage
 

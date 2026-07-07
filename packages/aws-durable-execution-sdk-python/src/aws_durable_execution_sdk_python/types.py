@@ -57,7 +57,7 @@ class OperationContext:
 
 @dataclass(frozen=True)
 class StepContext(OperationContext):
-    pass
+    attempt: int = 1
 
 
 @dataclass(frozen=True)
