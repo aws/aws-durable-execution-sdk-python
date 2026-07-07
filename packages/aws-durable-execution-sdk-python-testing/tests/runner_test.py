@@ -1421,6 +1421,43 @@ def test_cloud_runner_run_missing_execution_arn(mock_boto3):
 
 
 @patch("aws_durable_execution_sdk_python_testing.runner.boto3")
+def test_cloud_runner_wait_for_completion_get_execution_resource_not_found_retries(
+    mock_boto3,
+):
+    """Test _wait_for_completion retries transient ResourceNotFoundException."""
+    from botocore.exceptions import ClientError  # type: ignore
+
+    from aws_durable_execution_sdk_python_testing.runner import (
+        DurableFunctionCloudTestRunner,
+    )
+
+    mock_client = Mock()
+    mock_boto3.client.return_value = mock_client
+    mock_client.get_durable_execution.side_effect = [
+        ClientError(
+            error_response={"Error": {"Code": "ResourceNotFoundException"}},
+            operation_name="GetDurableExecution",
+        ),
+        {
+            "DurableExecutionArn": "arn:aws:lambda:us-east-1:123456789012:function:test:execution:exec-1",
+            "DurableExecutionName": "test-execution",
+            "FunctionArn": "arn:aws:lambda:us-east-1:123456789012:function:test",
+            "Status": "SUCCEEDED",
+            "StartTimestamp": "2023-01-01T00:00:00Z",
+            "EndTimestamp": "2023-01-01T00:01:00Z",
+        },
+    ]
+
+    runner = DurableFunctionCloudTestRunner(
+        function_name="test-function", poll_interval=0
+    )
+    result = runner._wait_for_completion("test-arn", timeout=10)
+
+    assert result.status == "SUCCEEDED"
+    assert mock_client.get_durable_execution.call_count == 2
+
+
+@patch("aws_durable_execution_sdk_python_testing.runner.boto3")
 def test_cloud_runner_wait_for_completion_get_execution_failure(mock_boto3):
     """Test DurableFunctionCloudTestRunner._wait_for_completion with API failure."""
     from aws_durable_execution_sdk_python_testing.exceptions import (
