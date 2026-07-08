@@ -123,8 +123,6 @@ jobs:
         echo "PYTEST_FUNCTION_NAME_MAP=$PYTEST_FUNCTION_NAME_MAP" >> $GITHUB_ENV
 
     - name: Run Integration Tests
-      env:
-        AWS_REGION: ${{ env.AWS_REGION }}
       run: |
         echo "Running integration tests for all deployed examples"
         echo "AWS Region: ${AWS_REGION}"
