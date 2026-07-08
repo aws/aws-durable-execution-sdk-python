@@ -86,16 +86,10 @@ jobs:
       env:
         LAMBDA_EXECUTION_ROLE_ARN: ${{ secrets.TEST_LAMBDA_EXECUTION_ROLE_ARN }}
         LAMBDA_ENDPOINT_OVERRIDE: ${{ github.event.inputs.lambda_endpoint || vars.TEST_LAMBDA_ENDPOINT }}
-        PYTHON_PREFIX: ${{ matrix.python-prefix }}
         PYTHON_RUNTIME: python${{ matrix.python-version }}
+        STACK_NAME: ${{ matrix.python-prefix }}-python-examples
+        FUNCTION_NAME_PREFIX: ${{ matrix.python-prefix }}-
       run: |
-        STACK_NAME="${PYTHON_PREFIX}-python-examples"
-        FUNCTION_NAME_PREFIX="${PYTHON_PREFIX}-"
-
-        STACK_NAME=$(echo "$STACK_NAME" | tr -cd '[:alnum:]-' | cut -c1-128)
-        export STACK_NAME FUNCTION_NAME_PREFIX
-        echo "STACK_NAME=$STACK_NAME" >> $GITHUB_ENV
-
         echo "Building SAM application"
         sam build --template-file packages/aws-durable-execution-sdk-python-examples/template.generated.json
 
