@@ -9,9 +9,14 @@ on:
         description: "Optional Lambda endpoint URL for deploying and running cloud tests"
         required: false
         type: string
+      region:
+        description: "AWS Region for deploying and running cloud tests"
+        required: false
+        default: us-west-2
+        type: string
 
 env:
-  AWS_REGION: us-west-2
+  AWS_REGION: ${{ github.event.inputs.region || 'us-west-2' }}
 
 permissions:
   id-token: write
