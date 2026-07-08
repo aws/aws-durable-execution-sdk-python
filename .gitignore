@@ -33,5 +33,7 @@ dist/
 
 **/build/
 **/*.zip
+.aws-sam/
+**/template.generated.json
 
 .env
