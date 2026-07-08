@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_FUNCTION_NAME_PREFIX = "DurablePythonExample-"
+
+
 def load_catalog() -> dict[str, Any]:
     """Load the examples catalog."""
     catalog_path = Path(__file__).resolve().parent.parent / "examples-catalog.json"
@@ -52,7 +55,7 @@ def build_template(examples: list[dict[str, Any]]) -> dict[str, Any]:
             },
             "FunctionNamePrefix": {
                 "Type": "String",
-                "Default": "",
+                "Default": DEFAULT_FUNCTION_NAME_PREFIX,
             },
             "LambdaExecutionRoleArn": {
                 "Type": "String",
