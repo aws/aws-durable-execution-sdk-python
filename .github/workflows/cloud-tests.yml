@@ -73,7 +73,7 @@ jobs:
       run: pip install hatch
 
     - name: Setup SAM CLI
-      uses: aws-actions/setup-sam@v2
+      uses: aws-actions/setup-sam@v3
 
     - name: Build examples
       run: |
