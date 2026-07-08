@@ -1,3 +1,4 @@
+from itertools import count
 from typing import Any
 
 from aws_durable_execution_sdk_python.config import StepConfig
@@ -13,13 +14,19 @@ from aws_durable_execution_sdk_python.retries import (
 )
 
 
+# Counter for deterministic behavior across retries
+_attempts = count(1)  # starts from 1
+
+
 @durable_step
 def unreliable_operation(
-    step_context: StepContext,
+    _step_context: StepContext,
 ) -> str:
-    # Fail on the first durable step attempt, then let the retry succeed.
-    if step_context.attempt < 2:
-        msg = f"Attempt {step_context.attempt} failed"
+    # Use counter for deterministic behavior
+    # Will fail on first attempt, succeed on second
+    attempt = next(_attempts)
+    if attempt < 2:
+        msg = f"Attempt {attempt} failed"
         raise RuntimeError(msg)
     return "Operation succeeded"
 

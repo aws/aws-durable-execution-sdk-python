@@ -1,5 +1,6 @@
 """Example demonstrating multiple steps with retry logic."""
 
+from itertools import count
 from typing import Any
 
 from aws_durable_execution_sdk_python.config import Duration, StepConfig
@@ -11,17 +12,25 @@ from aws_durable_execution_sdk_python.retries import (
 )
 
 
-def simulated_get_item(
-    step_context: StepContext, name: str, poll_count: int
-) -> dict[str, Any] | None:
-    """Simulate polling with one retry on the first poll."""
-    if poll_count == 1 and step_context.attempt == 1:
+# Counter for deterministic behavior across retries
+_attempts = count(1)  # starts from 1
+
+
+def simulated_get_item(_step_context: StepContext, name: str) -> dict[str, Any] | None:
+    """Simulate getting an item with deterministic counter-based behavior."""
+    # Use counter for deterministic behavior
+    attempt = next(_attempts)
+
+    # Fail on first attempt
+    if attempt == 1:
         msg = "Random failure"
         raise RuntimeError(msg)
 
-    if poll_count == 1:
+    # Return None on second attempt (poll 1)
+    if attempt == 2:
         return None
 
+    # Return item on third attempt (poll 2, after retry)
     return {"id": name, "data": "item data"}
 
 
@@ -48,9 +57,7 @@ def handler(event: Any, context: DurableContext) -> dict[str, Any]:
 
             # Try to get the item with retry
             get_response = context.step(
-                lambda step_context, n=name, poll=poll_count: simulated_get_item(
-                    step_context, n, poll
-                ),
+                lambda _, n=name: simulated_get_item(_, n),
                 name=f"get_item_poll_{poll_count}",
                 config=step_config,
             )
