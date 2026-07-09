@@ -18,10 +18,15 @@ def build_examples() -> None:
     src_dir = examples_dir / "src"
     packages_dir = examples_dir.parent
 
+    third_party_runtime_packages = [
+        "pydantic-ai",
+        "pydantic-ai-slim[bedrock]",
+    ]
     runtime_packages = [
         packages_dir / "aws-durable-execution-sdk-python",
         packages_dir / "aws-durable-execution-sdk-python-otel",
         packages_dir / "aws-durable-execution-sdk-python-testing",
+        *third_party_runtime_packages,
     ]
 
     if build_dir.exists():
@@ -42,6 +47,13 @@ def build_examples() -> None:
             *[str(package) for package in runtime_packages],
         ],
         check=True,
+    )
+
+    # SAM's Python builder installs third-party packages from requirements.txt
+    # into the final function artifact, even when CodeUri already points at a
+    # vendored build directory.
+    (build_dir / "requirements.txt").write_text(
+        "\n".join(third_party_runtime_packages) + "\n"
     )
 
     logger.info("Copying examples from %s", src_dir)
