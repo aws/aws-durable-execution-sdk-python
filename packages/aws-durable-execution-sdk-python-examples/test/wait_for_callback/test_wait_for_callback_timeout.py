@@ -2,6 +2,10 @@
 
 import pytest
 from aws_durable_execution_sdk_python.execution import InvocationStatus
+from aws_durable_execution_sdk_python.lambda_service import (
+    OperationStatus,
+    OperationType,
+)
 
 from src.wait_for_callback import wait_for_callback_timeout
 from test.conftest import deserialize_operation_payload
@@ -18,15 +22,27 @@ def test_handle_wait_for_callback_timeout_scenarios(durable_runner):
 
     with durable_runner:
         execution_arn = durable_runner.run_async(input=test_payload, timeout=2)
-        # Don't send callback - let it timeout
+        # Don't send callback - let it timeout.
         result = durable_runner.wait_for_result(execution_arn=execution_arn)
 
-    # Handler catches the timeout error, so execution succeeds with error in result
-    assert result.status is InvocationStatus.SUCCEEDED
+    # Handler catches the timeout error, so execution succeeds with error in result.
+    assert result.status == InvocationStatus.SUCCEEDED
 
     result_data = deserialize_operation_payload(result.result)
 
     assert result_data["success"] is False
     assert isinstance(result_data["error"], str)
     assert len(result_data["error"]) > 0
-    assert "Callback timed out" == result_data["error"]
+    assert result_data["error"] == "Callback timed out"
+
+    callback_operations = [
+        operation
+        for operation in result.get_all_operations()
+        if operation.operation_type == OperationType.CALLBACK
+    ]
+
+    assert callback_operations
+    assert any(
+        operation.status == OperationStatus.TIMED_OUT
+        for operation in callback_operations
+    )
