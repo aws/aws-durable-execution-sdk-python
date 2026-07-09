@@ -1,5 +1,6 @@
 """Tests for callback operation processor."""
 
+from datetime import UTC, datetime
 from unittest.mock import Mock
 
 import pytest
@@ -55,7 +56,11 @@ def test_process_start_action():
     )
 
     result = processor.process(
-        update, None, notifier, "arn:aws:states:us-east-1:123456789012:execution:test"
+        update,
+        None,
+        notifier,
+        "arn:aws:states:us-east-1:123456789012:execution:test",
+        datetime.now(UTC),
     )
 
     assert isinstance(result, Operation)
@@ -85,6 +90,7 @@ def test_process_start_action_with_current_operation():
         current_op,
         notifier,
         "arn:aws:states:us-east-1:123456789012:execution:test",
+        datetime.now(UTC),
     )
 
     assert isinstance(result, Operation)
@@ -112,6 +118,7 @@ def test_process_invalid_action():
             None,
             notifier,
             "arn:aws:states:us-east-1:123456789012:execution:test",
+            datetime.now(UTC),
         )
 
 
@@ -134,6 +141,7 @@ def test_process_fail_action():
             None,
             notifier,
             "arn:aws:states:us-east-1:123456789012:execution:test",
+            datetime.now(UTC),
         )
 
 
@@ -156,6 +164,7 @@ def test_process_cancel_action():
             None,
             notifier,
             "arn:aws:states:us-east-1:123456789012:execution:test",
+            datetime.now(UTC),
         )
 
 
@@ -178,6 +187,7 @@ def test_process_retry_action():
             None,
             notifier,
             "arn:aws:states:us-east-1:123456789012:execution:test",
+            datetime.now(UTC),
         )
 
 
@@ -194,7 +204,11 @@ def test_process_with_payload():
     )
 
     result = processor.process(
-        update, None, notifier, "arn:aws:states:us-east-1:123456789012:execution:test"
+        update,
+        None,
+        notifier,
+        "arn:aws:states:us-east-1:123456789012:execution:test",
+        datetime.now(UTC),
     )
 
     assert result.callback_details.result == "test-payload"
@@ -213,7 +227,11 @@ def test_process_with_parent_id():
     )
 
     result = processor.process(
-        update, None, notifier, "arn:aws:states:us-east-1:123456789012:execution:test"
+        update,
+        None,
+        notifier,
+        "arn:aws:states:us-east-1:123456789012:execution:test",
+        datetime.now(UTC),
     )
 
     assert result.parent_id == "parent-456"
@@ -232,7 +250,11 @@ def test_process_with_sub_type():
     )
 
     result = processor.process(
-        update, None, notifier, "arn:aws:states:us-east-1:123456789012:execution:test"
+        update,
+        None,
+        notifier,
+        "arn:aws:states:us-east-1:123456789012:execution:test",
+        datetime.now(UTC),
     )
 
     assert result.sub_type == "activity"
@@ -250,7 +272,11 @@ def test_notifier_not_called_for_start():
     )
 
     processor.process(
-        update, None, notifier, "arn:aws:states:us-east-1:123456789012:execution:test"
+        update,
+        None,
+        notifier,
+        "arn:aws:states:us-east-1:123456789012:execution:test",
+        datetime.now(UTC),
     )
 
     assert len(notifier.completed_calls) == 0

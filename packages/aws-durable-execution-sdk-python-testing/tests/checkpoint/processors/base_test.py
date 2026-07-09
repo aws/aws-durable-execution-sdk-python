@@ -37,7 +37,9 @@ def test_process_not_implemented():
     )
 
     try:
-        processor.process(update, None, Mock(), "test-arn")
+        processor.process(
+            update, None, Mock(), "test-arn", datetime.datetime.now(tz=datetime.UTC)
+        )
         pytest.fail("Expected NotImplementedError")
     except NotImplementedError:
         pass
@@ -46,18 +48,25 @@ def test_process_not_implemented():
 class MockProcessor(OperationProcessor):
     """Mock processor for testing base functionality."""
 
-    def process(self, update, current_op, notifier, execution_arn):
+    def process(self, update, current_op, notifier, execution_arn, now=None):
         return self._translate_update_to_operation(
-            update, current_op, OperationStatus.STARTED
+            update,
+            current_op,
+            OperationStatus.STARTED,
+            now or datetime.datetime.now(tz=datetime.UTC),
         )
 
-    def translate_update(self, update, current_op, status):
+    def translate_update(self, update, current_op, status, now=None):
         """Public method to access _translate_update_to_operation for testing."""
-        return self._translate_update_to_operation(update, current_op, status)
+        return self._translate_update_to_operation(
+            update, current_op, status, now or datetime.datetime.now(tz=datetime.UTC)
+        )
 
-    def get_end_time(self, current_op, status):
+    def get_end_time(self, current_op, status, now=None):
         """Public method to access _get_end_time for testing."""
-        return self._get_end_time(current_op, status)
+        return self._get_end_time(
+            current_op, status, now or datetime.datetime.now(tz=datetime.UTC)
+        )
 
     def create_execution_details(self, update):
         """Public method to access _create_execution_details for testing."""
@@ -79,9 +88,11 @@ class MockProcessor(OperationProcessor):
         """Public method to access _create_invoke_details for testing."""
         return self._create_invoke_details(update)
 
-    def create_wait_details(self, update, current_op):
+    def create_wait_details(self, update, current_op, now=None):
         """Public method to access _create_wait_details for testing."""
-        return self._create_wait_details(update, current_op)
+        return self._create_wait_details(
+            update, current_op, now or datetime.datetime.now(tz=datetime.UTC)
+        )
 
 
 def test_get_end_time_with_existing_end_timestamp():

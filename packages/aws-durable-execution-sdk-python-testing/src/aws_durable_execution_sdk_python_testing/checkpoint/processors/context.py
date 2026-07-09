@@ -20,6 +20,8 @@ from aws_durable_execution_sdk_python_testing.exceptions import (
 
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from aws_durable_execution_sdk_python_testing.observer import ExecutionNotifier
 
 
@@ -32,6 +34,7 @@ class ContextProcessor(OperationProcessor):
         current_op: Operation | None,
         notifier: ExecutionNotifier,  # noqa: ARG002
         execution_arn: str,  # noqa: ARG002
+        now: datetime,
     ) -> Operation:
         """Process CONTEXT operation update for context state transitions."""
         match update.action:
@@ -41,18 +44,21 @@ class ContextProcessor(OperationProcessor):
                     update=update,
                     current_operation=current_op,
                     status=OperationStatus.STARTED,
+                    now=now,
                 )
             case OperationAction.SUCCEED:
                 return self._translate_update_to_operation(
                     update=update,
                     current_operation=current_op,
                     status=OperationStatus.SUCCEEDED,
+                    now=now,
                 )
             case OperationAction.FAIL:
                 return self._translate_update_to_operation(
                     update=update,
                     current_operation=current_op,
                     status=OperationStatus.FAILED,
+                    now=now,
                 )
             case _:
                 msg: str = "Invalid action for CONTEXT operation."

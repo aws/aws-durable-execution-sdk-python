@@ -59,7 +59,7 @@ def test_process_start_action():
         name="test-step",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert isinstance(result, Operation)
     assert result.operation_id == "step-123"
@@ -84,7 +84,9 @@ def test_process_start_action_with_current_operation():
         name="test-step",
     )
 
-    result = processor.process(update, current_op, notifier, execution_arn)
+    result = processor.process(
+        update, current_op, notifier, execution_arn, datetime.now(UTC)
+    )
 
     assert result.start_timestamp == current_op.start_timestamp
 
@@ -112,7 +114,9 @@ def test_process_retry_action():
         step_options=step_options,
     )
 
-    result = processor.process(update, current_op, notifier, execution_arn)
+    result = processor.process(
+        update, current_op, notifier, execution_arn, datetime.now(UTC)
+    )
 
     assert isinstance(result, Operation)
     assert result.operation_id == "step-123"
@@ -147,7 +151,9 @@ def test_process_retry_action_without_step_options():
         name="test-step",
     )
 
-    result = processor.process(update, current_op, notifier, execution_arn)
+    result = processor.process(
+        update, current_op, notifier, execution_arn, datetime.now(UTC)
+    )
 
     assert result.step_details.attempt == 1
     # no per-op notifier call; central scheduler.
@@ -168,7 +174,7 @@ def test_process_retry_action_without_current_operation():
         step_options=step_options,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.step_details.attempt == 1
     assert result.step_details.result is None
@@ -198,7 +204,9 @@ def test_process_retry_action_without_current_step_details():
         step_options=step_options,
     )
 
-    result = processor.process(update, current_op, notifier, execution_arn)
+    result = processor.process(
+        update, current_op, notifier, execution_arn, datetime.now(UTC)
+    )
 
     assert result.step_details.attempt == 1
 
@@ -216,7 +224,7 @@ def test_process_succeed_action():
         payload="success-result",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert isinstance(result, Operation)
     assert result.operation_id == "step-123"
@@ -241,7 +249,9 @@ def test_process_succeed_action_with_current_operation():
         payload="success-result",
     )
 
-    result = processor.process(update, current_op, notifier, execution_arn)
+    result = processor.process(
+        update, current_op, notifier, execution_arn, datetime.now(UTC)
+    )
 
     assert result.start_timestamp == current_op.start_timestamp
     assert result.status == OperationStatus.SUCCEEDED
@@ -262,7 +272,7 @@ def test_process_fail_action():
         error=error,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert isinstance(result, Operation)
     assert result.operation_id == "step-123"
@@ -288,7 +298,9 @@ def test_process_fail_action_with_current_operation():
         error=error,
     )
 
-    result = processor.process(update, current_op, notifier, execution_arn)
+    result = processor.process(
+        update, current_op, notifier, execution_arn, datetime.now(UTC)
+    )
 
     assert result.start_timestamp == current_op.start_timestamp
     assert result.status == OperationStatus.FAILED
@@ -310,7 +322,7 @@ def test_process_invalid_action():
     with pytest.raises(
         InvalidParameterValueException, match="Invalid action for STEP operation"
     ):
-        processor.process(update, None, notifier, execution_arn)
+        processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
 
 def test_process_with_parent_id():
@@ -326,7 +338,7 @@ def test_process_with_parent_id():
         parent_id="parent-456",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.parent_id == "parent-456"
 
@@ -344,7 +356,7 @@ def test_process_with_sub_type():
         sub_type="lambda",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.sub_type == "lambda"
 
@@ -374,7 +386,9 @@ def test_retry_preserves_current_operation_details():
         step_options=step_options,
     )
 
-    result = processor.process(update, current_op, notifier, execution_arn)
+    result = processor.process(
+        update, current_op, notifier, execution_arn, datetime.now(UTC)
+    )
 
     assert result.step_details.attempt == 3
     assert result.step_details.result is None
@@ -398,7 +412,7 @@ def test_no_completed_or_failed_calls_for_non_execution_actions():
         name="test-step",
     )
 
-    processor.process(update, None, notifier, execution_arn)
+    processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert len(notifier.completed_calls) == 0
     assert len(notifier.failed_calls) == 0
@@ -417,6 +431,6 @@ def test_no_step_retry_calls_for_non_retry_actions():
         name="test-step",
     )
 
-    processor.process(update, None, notifier, execution_arn)
+    processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert len(notifier.step_retry_calls) == 0

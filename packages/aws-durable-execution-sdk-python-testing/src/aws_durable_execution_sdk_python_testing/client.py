@@ -9,6 +9,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     StateOutput,
 )
 
+from aws_durable_execution_sdk_python_testing.clock import real_now
 from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
     CheckpointProcessor,
 )
@@ -57,4 +58,4 @@ class InMemoryServiceClient(DurableServiceClient):
     def stop(self, execution_arn: str, payload: bytes | None) -> datetime.datetime:  # noqa: ARG002
         # TODO: implement
         # Return current time for in-memory testing
-        return datetime.datetime.now(tz=datetime.UTC)
+        return real_now()

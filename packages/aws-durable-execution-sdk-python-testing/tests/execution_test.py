@@ -78,11 +78,9 @@ def test_execution_new(mock_uuid4):
     assert execution.operations == []
 
 
-@patch("aws_durable_execution_sdk_python_testing.execution.datetime")
-def test_execution_start(mock_datetime):
+def test_execution_start():
     """Test Execution.start method."""
     mock_now = datetime(2023, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    mock_datetime.now.return_value = mock_now
 
     start_input = StartDurableExecutionInput(
         account_id="123456789012",
@@ -96,7 +94,7 @@ def test_execution_start(mock_datetime):
     )
     execution = Execution("test-arn", start_input, [])
 
-    execution.start()
+    execution.start(now=mock_now)
 
     assert len(execution.operations) == 1
     operation = execution.operations[0]
@@ -481,11 +479,9 @@ def test_find_operation_not_exists():
         execution.find_operation("non-existent-id")
 
 
-@patch("aws_durable_execution_sdk_python_testing.execution.datetime")
-def test_complete_wait_success(mock_datetime):
+def test_complete_wait_success():
     """Test complete_wait method successful completion."""
     mock_now = datetime(2023, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    mock_datetime.now.return_value = mock_now
 
     start_input = StartDurableExecutionInput(
         account_id="123456789012",
@@ -506,7 +502,7 @@ def test_complete_wait_success(mock_datetime):
     )
     execution = Execution("test-arn", start_input, [operation])
 
-    result = execution.complete_wait("wait-op-id")
+    result = execution.complete_wait("wait-op-id", now=mock_now)
 
     assert result.status == OperationStatus.SUCCEEDED
     assert result.end_timestamp == mock_now

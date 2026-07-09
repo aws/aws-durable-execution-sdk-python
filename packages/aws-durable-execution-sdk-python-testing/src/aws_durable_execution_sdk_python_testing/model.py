@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime
+
+from aws_durable_execution_sdk_python_testing.clock import real_now
 import json
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -35,8 +37,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python.types import (
     LambdaContext as LambdaContextProtocol,
 )
-from dateutil.tz import UTC
-
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
 )
@@ -328,7 +328,7 @@ class Execution:
             status=status,
             start_timestamp=execution_op.start_timestamp
             if execution_op.start_timestamp
-            else datetime.datetime.now(datetime.UTC),
+            else real_now(),
             end_timestamp=execution_op.end_timestamp
             if execution_op.end_timestamp
             else None,
@@ -1335,7 +1335,7 @@ class EventCreationContext:
         return (
             self.operation.start_timestamp
             if self.operation.start_timestamp is not None
-            else datetime.datetime.now(UTC)
+            else real_now()
         )
 
     @property
@@ -1343,7 +1343,7 @@ class EventCreationContext:
         return (
             self.operation.end_timestamp
             if self.operation.end_timestamp is not None
-            else datetime.datetime.now(UTC)
+            else real_now()
         )
 
 
@@ -2664,7 +2664,7 @@ def events_to_operations(events: list[Event]) -> list[Operation]:
             name=event.name,
             parent_id=event.parent_id,
             sub_type=sub_type,
-            start_timestamp=datetime.datetime.now(tz=datetime.timezone.utc),
+            start_timestamp=event.event_timestamp,
         )
 
         # Merge with previous operation if it exists

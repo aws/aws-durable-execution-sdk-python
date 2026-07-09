@@ -20,6 +20,8 @@ from aws_durable_execution_sdk_python_testing.execution import (
 from aws_durable_execution_sdk_python_testing.token import CheckpointToken
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from aws_durable_execution_sdk_python.lambda_service import (
         Operation,
         OperationUpdate,
@@ -79,6 +81,7 @@ class CheckpointCore:
         updates: list[OperationUpdate],
         client_token: str | None,
         dispatcher: CheckpointRequestDispatcher,
+        now: datetime,
     ) -> CheckpointResult:
         """Apply ``updates`` to ``execution`` and compute the response delta.
 
@@ -88,6 +91,10 @@ class CheckpointCore:
         idempotency entry for a byte-identical replay of a retried call.
         The caller is responsible for the invocation gate, locking,
         persistence, and applying the returned effects.
+
+        ``now`` is the checkpoint's single source of "now", resolved from
+        the execution's clock, so all timestamps stamped by this apply
+        advance with modeled time under a skip clock.
         """
         effects: list[CheckpointEffect] = []
         if updates:
@@ -97,6 +104,7 @@ class CheckpointCore:
                 updates=updates,
                 client_token=client_token,
                 touch=execution.touch_operation,
+                now=now,
             )
 
         new_token_sequence: int = execution.advance_token_sequence()

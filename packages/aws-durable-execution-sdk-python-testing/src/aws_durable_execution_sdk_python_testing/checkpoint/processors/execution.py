@@ -17,6 +17,8 @@ from aws_durable_execution_sdk_python_testing.checkpoint.processors.base import 
 
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from aws_durable_execution_sdk_python_testing.observer import ExecutionNotifier
 
 
@@ -29,6 +31,7 @@ class ExecutionProcessor(OperationProcessor):
         current_op: Operation | None,  # noqa: ARG002
         notifier: ExecutionNotifier,
         execution_arn: str,
+        now: datetime,  # noqa: ARG002
     ) -> Operation | None:
         """Process EXECUTION operation update for workflow completion/failure."""
         match update.action:

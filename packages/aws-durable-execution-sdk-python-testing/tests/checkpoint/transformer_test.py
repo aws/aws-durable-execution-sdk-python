@@ -8,6 +8,7 @@ update, and returns the lifecycle effects raised by the updates.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import Mock
 
 import pytest
@@ -41,7 +42,7 @@ class _MockProcessor(OperationProcessor):
         self.return_value = return_value
         self.calls: list[tuple] = []
 
-    def process(self, update, current_op, notifier, execution_arn):
+    def process(self, update, current_op, notifier, execution_arn, now=None):  # noqa: ARG002
         self.calls.append((update, current_op, notifier, execution_arn))
         return self.return_value
 
@@ -86,6 +87,7 @@ def test_apply_updates_with_empty_list_is_a_noop():
         updates=[],
         client_token=None,
         touch=touched.append,
+        now=datetime.now(UTC),
     )
 
     assert execution.operations == []
@@ -113,6 +115,7 @@ def test_apply_updates_unknown_type_raises():
             updates=[update],
             client_token=None,
             touch=lambda _: None,
+            now=datetime.now(UTC),
         )
 
 
@@ -134,6 +137,7 @@ def test_apply_updates_skips_ops_when_processor_returns_none():
         updates=[update],
         client_token=None,
         touch=touched.append,
+        now=datetime.now(UTC),
     )
 
     assert execution.operations == []
@@ -162,6 +166,7 @@ def test_apply_updates_appends_new_operation_and_touches():
         updates=[update],
         client_token=None,
         touch=touched.append,
+        now=datetime.now(UTC),
     )
 
     assert execution.operations == [new_op]
@@ -191,6 +196,7 @@ def test_apply_updates_replaces_existing_operation_in_place():
         updates=[update],
         client_token=None,
         touch=lambda _: None,
+        now=datetime.now(UTC),
     )
 
     assert execution.operations == [replaced]
@@ -229,6 +235,7 @@ def test_apply_updates_preserves_order_across_multiple_updates():
         ],
         client_token=None,
         touch=touched.append,
+        now=datetime.now(UTC),
     )
     assert execution.operations == [op1, updated_op2, op3]
 
@@ -245,6 +252,7 @@ def test_apply_updates_preserves_order_across_multiple_updates():
         ],
         client_token=None,
         touch=touched.append,
+        now=datetime.now(UTC),
     )
     assert execution.operations == [op1, updated_op2, op3, new_op4]
     assert touched == ["op2", "op4"]
@@ -283,6 +291,7 @@ def test_apply_updates_dispatches_by_operation_type():
         ],
         client_token=None,
         touch=lambda _: None,
+        now=datetime.now(UTC),
     )
 
     assert execution.operations == [step_op, wait_op]
@@ -310,6 +319,7 @@ def test_apply_updates_forwards_arn_notifier_and_current_op_to_processor():
         updates=[update],
         client_token=None,
         touch=lambda _: None,
+        now=datetime.now(UTC),
     )
 
     forwarded_update, forwarded_current_op, forwarded_notifier, forwarded_arn = (
@@ -339,6 +349,7 @@ def test_apply_updates_returns_completion_effect():
         updates=[update],
         client_token=None,
         touch=lambda _: None,
+        now=datetime.now(UTC),
     )
 
     assert effects == [
@@ -366,6 +377,7 @@ def test_apply_updates_returns_no_effects_for_plain_step():
         ],
         client_token=None,
         touch=lambda _: None,
+        now=datetime.now(UTC),
     )
 
     assert effects == []
@@ -393,6 +405,7 @@ def test_apply_updates_records_payload_size_for_paging():
         updates=[update],
         client_token=None,
         touch=lambda _: None,
+        now=datetime.now(UTC),
     )
 
     assert execution.operation_size_bytes["with-payload"] >= len(b"hello-world-payload")
@@ -422,6 +435,7 @@ def test_apply_updates_records_size_for_error_payload():
         updates=[update],
         client_token=None,
         touch=lambda _: None,
+        now=datetime.now(UTC),
     )
 
     # Some non-zero size was recorded (exact value depends on
@@ -451,6 +465,7 @@ def test_apply_updates_records_size_for_bytes_payload():
         updates=[update],
         client_token=None,
         touch=lambda _: None,
+        now=datetime.now(UTC),
     )
 
     # bytes payload length == 12.

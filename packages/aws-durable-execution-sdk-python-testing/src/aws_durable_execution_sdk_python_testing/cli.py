@@ -221,6 +221,12 @@ class CliApp:
             default=900,
             help="Per-invocation timeout in seconds, simulates Lambda Timeout (default: 900)",
         )
+        start_server_parser.add_argument(
+            "--skip-time",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Skip durable timer wall-clock waits; history keeps real modeled durations. Default is real timing (--no-skip-time); pass --skip-time to opt in",
+        )
         start_server_parser.set_defaults(func=self.start_server_command)
 
     def _create_invoke_parser(self, subparsers) -> None:
@@ -294,6 +300,7 @@ class CliApp:
                 store_type=StoreType(args.store_type),
                 store_path=args.store_path,
                 invocation_timeout_seconds=args.invocation_timeout,
+                skip_time=args.skip_time,
             )
 
             logger.info(

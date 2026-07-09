@@ -2,7 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import pytest
 
@@ -863,7 +863,7 @@ def test_should_complete_workflow_successfully_through_public_api(
 
     # Assert - Verify final execution status and stored results
     mock_store.load.assert_any_call(execution_arn="test-arn")
-    mock_execution.complete_success.assert_called_once_with(result="result")
+    mock_execution.complete_success.assert_called_once_with(result="result", now=ANY)
     mock_store.update.assert_called_once_with(mock_execution)
     mock_complete_events.assert_called_once_with(execution_arn="test-arn")
 
@@ -883,7 +883,7 @@ def test_should_complete_workflow_with_failure_through_public_api(
 
     # Assert - Verify final execution status and stored error
     mock_store.load.assert_any_call(execution_arn="test-arn")
-    mock_execution.complete_fail.assert_called_once_with(error=error)
+    mock_execution.complete_fail.assert_called_once_with(error=error, now=ANY)
     mock_store.update.assert_called_once_with(mock_execution)
     mock_complete_events.assert_called_once_with(execution_arn="test-arn")
 
@@ -902,7 +902,7 @@ def test_should_handle_workflow_completion_state_through_public_api(
 
     # Assert - Verify completion was processed and observer notifications sent
     mock_store.load.assert_any_call(execution_arn="test-arn")
-    mock_execution.complete_success.assert_called_once_with(result="result")
+    mock_execution.complete_success.assert_called_once_with(result="result", now=ANY)
     mock_store.update.assert_called_once_with(mock_execution)
     mock_complete_events.assert_called_once_with(execution_arn="test-arn")
 
@@ -1252,7 +1252,7 @@ def test_complete_execution(executor, mock_store, mock_execution):
         executor.complete_execution("test-arn", "result")
 
     mock_store.load.assert_any_call(execution_arn="test-arn")
-    mock_execution.complete_success.assert_called_once_with(result="result")
+    mock_execution.complete_success.assert_called_once_with(result="result", now=ANY)
     mock_store.update.assert_called_once_with(mock_execution)
     mock_complete_events.assert_called_once_with(execution_arn="test-arn")
 
@@ -1266,7 +1266,7 @@ def test_fail_execution(executor, mock_store, mock_execution):
         executor.fail_execution("test-arn", error)
 
     mock_store.load.assert_any_call(execution_arn="test-arn")
-    mock_execution.complete_fail.assert_called_once_with(error=error)
+    mock_execution.complete_fail.assert_called_once_with(error=error, now=ANY)
     mock_store.update.assert_called_once_with(mock_execution)
     mock_complete_events.assert_called_once_with(execution_arn="test-arn")
 
@@ -2188,7 +2188,7 @@ def test_send_callback_success(executor, mock_store):
     assert isinstance(result, SendDurableExecutionCallbackSuccessResponse)
     mock_store.load.assert_any_call("test-arn")
     mock_execution.complete_callback_success.assert_called_once_with(
-        callback_id, b"success-result"
+        callback_id, b"success-result", now=ANY
     )
     mock_store.update.assert_called_once_with(mock_execution)
     # Verify execution is invoked after callback success
@@ -2226,7 +2226,7 @@ def test_send_callback_success_with_result(executor, mock_store):
 
     assert isinstance(result, SendDurableExecutionCallbackSuccessResponse)
     mock_execution.complete_callback_success.assert_called_once_with(
-        callback_id, b"test-result"
+        callback_id, b"test-result", now=ANY
     )
     # Verify execution is invoked after callback success
     mock_invoke.assert_called_once_with("test-arn")
@@ -2285,7 +2285,9 @@ def test_send_callback_failure_with_error(executor, mock_store):
         result = executor.send_callback_failure(callback_id, error)
 
     assert isinstance(result, SendDurableExecutionCallbackFailureResponse)
-    mock_execution.complete_callback_failure.assert_called_once_with(callback_id, error)
+    mock_execution.complete_callback_failure.assert_called_once_with(
+        callback_id, error, now=ANY
+    )
     # Verify execution is invoked after callback failure
     mock_invoke.assert_called_once_with("test-arn")
 
