@@ -10,6 +10,7 @@ This monorepo contains the following packages:
 |---------|------|------------|
 | `aws-durable-execution-sdk-python` | `packages/aws-durable-execution-sdk-python` | `sdk` |
 | `aws-durable-execution-sdk-python-otel` | `packages/aws-durable-execution-sdk-python-otel` | `otel` |
+| `aws-durable-execution-sdk-python-testing` | `packages/aws-durable-execution-sdk-python-testing` | `testing` |
 
 ## Versioning
 
@@ -17,6 +18,7 @@ Each package maintains its own version in its respective `__about__.py` file:
 
 - SDK: `packages/aws-durable-execution-sdk-python/src/aws_durable_execution_sdk_python/__about__.py`
 - OTel: `packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel/__about__.py`
+- Testing: `packages/aws-durable-execution-sdk-python-testing/src/aws_durable_execution_sdk_python_testing/__about__.py`
 
 Bump the version in the appropriate `__about__.py` file(s) and merge to `main` before creating a release.
 
@@ -41,13 +43,15 @@ The tag should be the version of the package being bumped, prepended with a desc
 
 - **SDK only:** `sdk-v<version>` (e.g., `sdk-v1.6.0`)
 - **OTel only:** `otel-v<version>` (e.g., `otel-v0.3.0`)
-- **Both packages in a single release:** comma-separate the sub-tags (e.g., `sdk-v1.6.0,otel-v0.3.0`)
+- **Testing only:** `testing-v<version>` (e.g., `testing-v1.2.1`)
+- **Multiple packages in a single release:** comma-separate the sub-tags (e.g., `sdk-v1.6.0,otel-v0.3.0`)
 
 Examples:
 
 ```
 sdk-v1.6.0
 otel-v0.3.0
+testing-v1.2.1
 sdk-v1.6.0,otel-v0.3.0
 ```
 
@@ -57,7 +61,7 @@ If additional packages are added to the monorepo in the future, follow the same 
 
 Creating a GitHub Release triggers the [`pypi-publish.yml`](.github/workflows/pypi-publish.yml) workflow automatically. The workflow:
 
-1. **Builds** both packages using [Hatch](https://hatch.pypa.io/) (`hatch build`).
+1. **Builds** all packages using [Hatch](https://hatch.pypa.io/) (`hatch build`).
 2. **Uploads** the built distributions as artifacts.
 3. **Publishes** each package to [PyPI](https://pypi.org/) using trusted publishing (OIDC-based, no API tokens required).
 
@@ -91,6 +95,13 @@ Release notes should maintain separate timelines for each package. Use the follo
 
 ### Bug Fixes
 - Fixed span context propagation in child contexts
+
+---
+
+## aws-durable-execution-sdk-python-testing v1.2.1
+
+### Bug Fixes
+- Fixed issue with test runner under condition Z
 ```
 
 If only one package is being released, include only that package's section. Each package's changelog should be self-contained so users can follow the history of the package they depend on independently.
@@ -103,4 +114,4 @@ Before publishing a release:
 - [ ] Changes merged to `main`
 - [ ] CI checks pass on `main`
 - [ ] Release notes written with separate sections per package
-- [ ] Tag follows the naming convention (`sdk-X.Y.Z`, `otel-X.Y.Z`, or comma-separated)
+- [ ] Tag follows the naming convention (`sdk-vX.Y.Z`, `otel-vX.Y.Z`, `testing-vX.Y.Z`, or comma-separated)
