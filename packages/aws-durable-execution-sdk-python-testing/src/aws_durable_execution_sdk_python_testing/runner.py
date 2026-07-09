@@ -36,6 +36,7 @@ from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
     DEFAULT_MAX_INVOCATION_PAGE_BYTES,
 )
 from aws_durable_execution_sdk_python_testing.client import InMemoryServiceClient
+from aws_durable_execution_sdk_python_testing.clock import Clock, RealClock, SkipClock
 from aws_durable_execution_sdk_python_testing.worker.registry import ExecutionRegistry
 from aws_durable_execution_sdk_python_testing.exceptions import (
     DurableFunctionsLocalRunnerError,
@@ -110,6 +111,12 @@ class WebRunnerConfig:
 
     # Timeout configuration
     invocation_timeout_seconds: int = 900
+
+    # Skip durable timer wall-clock waits (waits and step retries complete
+    # on the next scheduler turn while history keeps the real modeled
+    # durations). Defaults False so the server emulates real cloud timing;
+    # set True to opt into fast skip.
+    skip_time: bool = False
 
     # Invocation-input pagination cap (bytes). Handler receives pages
     # up to this size; larger state is served via
@@ -603,6 +610,7 @@ class DurableFunctionTestRunner:
         execution_timeout: int = 300,
         invocation_timeout: int = 900,
         store: ExecutionStore | None = None,
+        skip_time: bool = True,  # noqa: FBT001, FBT002
     ):
         self._execution_timeout = execution_timeout
         self._invocation_timeout = invocation_timeout
@@ -619,11 +627,13 @@ class DurableFunctionTestRunner:
             store if store is not None else InMemoryExecutionStore()
         )
         self.poll_interval = poll_interval
+        self._clock: Clock = SkipClock() if skip_time else RealClock()
+        self._registry = ExecutionRegistry(self._store, self._scheduler)
         self._checkpoint_processor = CheckpointProcessor(
             store=self._store,
             scheduler=self._scheduler,
+            clock=self._clock,
         )
-        self._registry = ExecutionRegistry(self._store, self._scheduler)
         self._service_client = InMemoryServiceClient(
             self._checkpoint_processor, self._registry
         )
@@ -640,6 +650,7 @@ class DurableFunctionTestRunner:
             max_invocation_page_bytes=self._max_invocation_page_bytes,
             invocation_timeout_seconds=invocation_timeout,
             registry=self._registry,
+            clock=self._clock,
         )
 
         # Wire up observer pattern - CheckpointProcessor uses this to notify executor of state changes
@@ -789,6 +800,7 @@ class DurableChildContextTestRunner(DurableFunctionTestRunner):
         self,
         context_function: Callable[Concatenate[DurableContext, P], Any],
         *args,
+        skip_time: bool = True,
         **kwargs,
     ):
         # wrap the durable context around a durable execution handler as a convenience to run directly
@@ -796,7 +808,7 @@ class DurableChildContextTestRunner(DurableFunctionTestRunner):
         def handler(event: Any, context: DurableContext):  # noqa: ARG001
             return context_function(*args, **kwargs)(context)
 
-        super().__init__(handler)
+        super().__init__(handler, skip_time=skip_time)
 
 
 class WebRunner:
@@ -870,8 +882,14 @@ class WebRunner:
         )
 
         # Create shared CheckpointProcessor
-        checkpoint_processor = CheckpointProcessor(self._store, self._scheduler)
+        clock: Clock = SkipClock() if self._config.skip_time else RealClock()
+        self._clock = clock
         self._registry = ExecutionRegistry(self._store, self._scheduler)
+        checkpoint_processor = CheckpointProcessor(
+            self._store,
+            self._scheduler,
+            clock=clock,
+        )
 
         # Create executor with all dependencies including checkpoint processor
         self._executor = Executor(
@@ -882,6 +900,7 @@ class WebRunner:
             max_invocation_page_bytes=resolved_max_page_bytes,
             invocation_timeout_seconds=self._config.invocation_timeout_seconds,
             registry=self._registry,
+            clock=clock,
         )
 
         # Add executor as observer to the checkpoint processor

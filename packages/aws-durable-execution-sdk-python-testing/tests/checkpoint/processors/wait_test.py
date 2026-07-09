@@ -59,7 +59,7 @@ def test_process_start_action():
         wait_options=wait_options,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert isinstance(result, Operation)
     assert result.operation_id == "wait-123"
@@ -88,7 +88,7 @@ def test_process_start_action_without_wait_options():
         name="test-wait",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert isinstance(result, Operation)
     assert result.wait_details is not None
@@ -111,7 +111,7 @@ def test_process_start_action_with_zero_seconds():
         wait_options=wait_options,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert isinstance(result, Operation)
     assert result.wait_details is not None
@@ -135,7 +135,7 @@ def test_process_start_action_with_parent_id():
         wait_options=wait_options,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.parent_id == "parent-456"
 
@@ -155,7 +155,7 @@ def test_process_start_action_with_sub_type():
         wait_options=wait_options,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.sub_type == "timer"
 
@@ -175,7 +175,9 @@ def test_process_cancel_action():
         name="test-wait",
     )
 
-    result = processor.process(update, current_op, notifier, execution_arn)
+    result = processor.process(
+        update, current_op, notifier, execution_arn, datetime.now(UTC)
+    )
 
     assert isinstance(result, Operation)
     assert result.operation_id == "wait-123"
@@ -195,7 +197,7 @@ def test_process_cancel_action_without_current_operation():
         name="test-wait",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert isinstance(result, Operation)
     assert result.status == OperationStatus.CANCELLED
@@ -216,7 +218,7 @@ def test_process_invalid_action():
     with pytest.raises(
         InvalidParameterValueException, match="Invalid action for WAIT operation"
     ):
-        processor.process(update, None, notifier, execution_arn)
+        processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
 
 def test_process_fail_action():
@@ -234,7 +236,7 @@ def test_process_fail_action():
     with pytest.raises(
         InvalidParameterValueException, match="Invalid action for WAIT operation"
     ):
-        processor.process(update, None, notifier, execution_arn)
+        processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
 
 def test_process_retry_action():
@@ -252,7 +254,7 @@ def test_process_retry_action():
     with pytest.raises(
         InvalidParameterValueException, match="Invalid action for WAIT operation"
     ):
-        processor.process(update, None, notifier, execution_arn)
+        processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
 
 def test_wait_details_created_correctly():
@@ -270,7 +272,7 @@ def test_wait_details_created_correctly():
     )
 
     before_time = datetime.now(UTC)
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.wait_details.scheduled_end_timestamp > before_time
 
@@ -289,7 +291,7 @@ def test_no_completed_or_failed_calls():
         wait_options=wait_options,
     )
 
-    processor.process(update, None, notifier, execution_arn)
+    processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert len(notifier.completed_calls) == 0
     assert len(notifier.failed_calls) == 0
@@ -311,6 +313,6 @@ def test_cancel_no_timer_scheduled():
         name="test-wait",
     )
 
-    processor.process(update, current_op, notifier, execution_arn)
+    processor.process(update, current_op, notifier, execution_arn, datetime.now(UTC))
 
     assert len(notifier.wait_timer_calls) == 0

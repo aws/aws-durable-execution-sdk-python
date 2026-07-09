@@ -20,6 +20,7 @@ from aws_durable_execution_sdk_python_testing.checkpoint.core import CheckpointC
 from aws_durable_execution_sdk_python_testing.checkpoint.transformer import (
     CheckpointRequestDispatcher,
 )
+from aws_durable_execution_sdk_python_testing.clock import RealClock
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
 )
@@ -30,6 +31,7 @@ from aws_durable_execution_sdk_python_testing.token import CheckpointToken
 if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.lambda_service import OperationUpdate
 
+    from aws_durable_execution_sdk_python_testing.clock import Clock
     from aws_durable_execution_sdk_python_testing.execution import Execution
     from aws_durable_execution_sdk_python_testing.observer import ExecutionObserver
     from aws_durable_execution_sdk_python_testing.scheduler import Scheduler
@@ -52,10 +54,15 @@ class CheckpointProcessor:
         self,
         store: ExecutionStore,
         scheduler: Scheduler,  # noqa: ARG002 — kept for backward-compatible signature
+        clock: Clock | None = None,
     ):
         self._store = store
         self._observers: list[ExecutionObserver] = []
         self._dispatcher = CheckpointRequestDispatcher()
+        # The runner's clock, shared with the Executor so stamping uses
+        # the same "now" as timer arming. Defaults to a real clock for
+        # standalone construction (e.g. direct unit tests).
+        self._clock: Clock = clock if clock is not None else RealClock()
 
     def add_execution_observer(self, observer: ExecutionObserver) -> None:
         """Add observer for execution events."""
@@ -91,12 +98,14 @@ class CheckpointProcessor:
             msg = "Invalid checkpoint token"
             raise InvalidParameterValueException(msg)
 
+        now = self._clock.now()
         result = CheckpointCore.apply(
             execution,
             checkpoint_token,
             updates,
             client_token,
             self._dispatcher,
+            now,
         )
 
         self._store.update(execution)

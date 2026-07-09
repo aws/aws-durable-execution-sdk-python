@@ -230,8 +230,11 @@ def durable_runner(request):
     else:
         if not handler:
             pytest.fail("handler is required for local mode tests")
+        skip_time = marker.kwargs.get("skip_time", True)
         # Create local runner (needs cleanup via context manager)
-        runner = DurableFunctionTestRunner(handler=handler, execution_timeout=60)
+        runner = DurableFunctionTestRunner(
+            handler=handler, execution_timeout=60, skip_time=skip_time
+        )
 
     # Wrap in adapter and use context manager for proper cleanup
     with TestRunnerAdapter(runner, runner_mode) as adapter:

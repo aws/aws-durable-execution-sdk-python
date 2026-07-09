@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -34,6 +34,7 @@ class StepProcessor(OperationProcessor):
         current_op: Operation | None,
         notifier: ExecutionNotifier,
         execution_arn: str,
+        now: datetime,
     ) -> Operation:
         """Process STEP operation update with scheduler integration for retries."""
         match update.action:
@@ -42,6 +43,7 @@ class StepProcessor(OperationProcessor):
                     update=update,
                     current_operation=current_op,
                     status=OperationStatus.STARTED,
+                    now=now,
                 )
             case OperationAction.RETRY:
                 # set Status=PENDING, next attempt time, attempt count + 1
@@ -50,7 +52,7 @@ class StepProcessor(OperationProcessor):
                     if update.step_options
                     else 0
                 )
-                next_attempt_time = datetime.now(UTC) + timedelta(seconds=delay)
+                next_attempt_time = now + timedelta(seconds=delay)
 
                 # Build new step_details with incremented attempt
                 current_attempt = (
@@ -72,9 +74,7 @@ class StepProcessor(OperationProcessor):
                     status=OperationStatus.PENDING,
                     parent_id=update.parent_id,
                     name=update.name,
-                    start_timestamp=(
-                        current_op.start_timestamp if current_op else datetime.now(UTC)
-                    ),
+                    start_timestamp=(current_op.start_timestamp if current_op else now),
                     end_timestamp=None,
                     sub_type=update.sub_type,
                     execution_details=current_op.execution_details
@@ -103,12 +103,14 @@ class StepProcessor(OperationProcessor):
                     update=update,
                     current_operation=current_op,
                     status=OperationStatus.SUCCEEDED,
+                    now=now,
                 )
             case OperationAction.FAIL:
                 return self._translate_update_to_operation(
                     update=update,
                     current_operation=current_op,
                     status=OperationStatus.FAILED,
+                    now=now,
                 )
             case _:
                 msg: str = "Invalid action for STEP operation."

@@ -34,22 +34,29 @@ class OperationProcessor:
         current_op: Operation | None,
         notifier: ExecutionNotifier,
         execution_arn: str,
+        now: datetime.datetime,
     ) -> Operation | None:
-        """Process an operation update and return the transformed operation."""
+        """Process an operation update and return the transformed operation.
+
+        ``now`` is the checkpoint's single source of "now", resolved from
+        the execution's clock so timestamps advance with modeled time
+        under a skip clock and match wall-clock under a real clock.
+        """
         raise NotImplementedError
 
     def _get_start_time(
-        self, current_operation: Operation | None
+        self, current_operation: Operation | None, now: datetime.datetime
     ) -> datetime.datetime | None:
         start_time: datetime.datetime | None = (
-            current_operation.start_timestamp
-            if current_operation
-            else datetime.datetime.now(tz=datetime.UTC)
+            current_operation.start_timestamp if current_operation else now
         )
         return start_time
 
     def _get_end_time(
-        self, current_operation: Operation | None, status: OperationStatus
+        self,
+        current_operation: Operation | None,
+        status: OperationStatus,
+        now: datetime.datetime,
     ) -> datetime.datetime | None:
         """Get end timestamp for operation based on current state and status."""
         if current_operation and current_operation.end_timestamp:
@@ -61,7 +68,7 @@ class OperationProcessor:
             OperationStatus.TIMED_OUT,
             OperationStatus.STOPPED,
         }:
-            return datetime.datetime.now(tz=datetime.UTC)
+            return now
         return None
 
     def _create_execution_details(
@@ -151,11 +158,14 @@ class OperationProcessor:
         update: OperationUpdate,
         current_operation: Operation | None,
         status: OperationStatus,
+        now: datetime.datetime,
     ) -> Operation:
         """Transform OperationUpdate to Operation, always creating new Operation."""
-        start_time: datetime.datetime | None = self._get_start_time(current_operation)
+        start_time: datetime.datetime | None = self._get_start_time(
+            current_operation, now
+        )
         end_time: datetime.datetime | None = self._get_end_time(
-            current_operation, status
+            current_operation, status, now
         )
 
         execution_details = self._create_execution_details(update)
@@ -163,7 +173,7 @@ class OperationProcessor:
         step_details = self._create_step_details(update, current_operation)
         callback_details = self._create_callback_details(update)
         invoke_details = self._create_invoke_details(update)
-        wait_details = self._create_wait_details(update, current_operation)
+        wait_details = self._create_wait_details(update, current_operation, now)
 
         return Operation(
             operation_id=update.operation_id,
@@ -183,7 +193,10 @@ class OperationProcessor:
         )
 
     def _create_wait_details(
-        self, update: OperationUpdate, current_operation: Operation | None
+        self,
+        update: OperationUpdate,
+        current_operation: Operation | None,
+        now: datetime.datetime,
     ) -> WaitDetails | None:
         """Create WaitDetails from OperationUpdate."""
         if update.operation_type == OperationType.WAIT and update.wait_options:
@@ -192,8 +205,8 @@ class OperationProcessor:
                     current_operation.wait_details.scheduled_end_timestamp
                 )
             else:
-                scheduled_end_timestamp = datetime.datetime.now(
-                    tz=datetime.UTC
-                ) + timedelta(seconds=update.wait_options.wait_seconds)
+                scheduled_end_timestamp = now + timedelta(
+                    seconds=update.wait_options.wait_seconds
+                )
             return WaitDetails(scheduled_end_timestamp=scheduled_end_timestamp)
         return None

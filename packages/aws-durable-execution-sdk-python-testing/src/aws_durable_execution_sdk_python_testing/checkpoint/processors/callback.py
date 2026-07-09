@@ -35,6 +35,7 @@ class CallbackProcessor(OperationProcessor):
         current_op: Operation | None,
         notifier: ExecutionNotifier,  # noqa: ARG002
         execution_arn: str,  # noqa: ARG002
+        now: datetime.datetime,
     ) -> Operation:
         """Process CALLBACK operation update with scheduler integration for activities."""
         match update.action:
@@ -58,10 +59,12 @@ class CallbackProcessor(OperationProcessor):
 
                 status: OperationStatus = OperationStatus.STARTED
 
-                start_time: datetime.datetime | None = self._get_start_time(current_op)
+                start_time: datetime.datetime | None = self._get_start_time(
+                    current_op, now
+                )
 
                 end_time: datetime.datetime | None = self._get_end_time(
-                    current_op, status
+                    current_op, status, now
                 )
 
                 operation: Operation = Operation(

@@ -34,10 +34,8 @@ def test_plugin(durable_runner):
     lambda_function_name="Plugin Wait",
 )
 def test_plugin_on_operation_end_called_for_wait_completed_during_suspend(
-    durable_runner, monkeypatch
+    durable_runner,
 ):
-    monkeypatch.setenv("DURABLE_EXECUTION_TIME_SCALE", "0.01")
-
     with durable_runner:
         result = durable_runner.run(input=None, timeout=30)
 

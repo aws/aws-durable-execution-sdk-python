@@ -8,7 +8,6 @@ result to the execution.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar
 
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -38,6 +37,7 @@ from aws_durable_execution_sdk_python_testing.observer import ExecutionNotifier
 
 if TYPE_CHECKING:
     from collections.abc import Callable, MutableMapping
+    from datetime import datetime
 
     from aws_durable_execution_sdk_python.lambda_service import (
         OperationUpdate,
@@ -83,6 +83,7 @@ class CheckpointRequestDispatcher:
         updates: list[OperationUpdate],
         client_token: str | None,  # noqa: ARG002 — reserved for future idempotency diagnostics
         touch: Callable[[str], None],
+        now: datetime,
     ) -> list[CheckpointEffect]:
         """Apply ``updates`` to ``execution`` in place.
 
@@ -124,6 +125,7 @@ class CheckpointRequestDispatcher:
                 current_op=current_op,
                 notifier=collector,
                 execution_arn=execution.durable_execution_arn,
+                now=now,
             )
             if updated_op is None:
                 continue
@@ -143,7 +145,7 @@ class CheckpointRequestDispatcher:
             touch(update.operation_id)
 
         execution.updates.extend(updates)
-        execution.update_timestamps.extend(datetime.now(UTC) for _ in updates)
+        execution.update_timestamps.extend(now for _ in updates)
 
         return collector.effects
 

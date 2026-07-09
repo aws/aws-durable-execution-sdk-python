@@ -1,5 +1,6 @@
 """Tests for execution operation processor."""
 
+from datetime import UTC, datetime
 from unittest.mock import Mock
 
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -50,7 +51,7 @@ def test_process_succeed_action():
         payload="success-result",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result is None
     assert len(notifier.completed_calls) == 1
@@ -72,7 +73,9 @@ def test_process_succeed_action_with_current_operation():
         payload="success-result",
     )
 
-    result = processor.process(update, current_op, notifier, execution_arn)
+    result = processor.process(
+        update, current_op, notifier, execution_arn, datetime.now(UTC)
+    )
 
     assert result is None
     assert len(notifier.completed_calls) == 1
@@ -90,7 +93,7 @@ def test_process_succeed_action_without_payload():
         action=OperationAction.SUCCEED,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result is None
     assert len(notifier.completed_calls) == 1
@@ -110,7 +113,7 @@ def test_process_fail_action_with_error():
         error=error,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result is None
     assert len(notifier.failed_calls) == 1
@@ -129,7 +132,7 @@ def test_process_fail_action_without_error():
         action=OperationAction.FAIL,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result is None
     assert len(notifier.failed_calls) == 1
@@ -153,7 +156,7 @@ def test_process_start_action():
         action=OperationAction.START,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result is None
     assert len(notifier.failed_calls) == 1
@@ -173,7 +176,7 @@ def test_process_retry_action():
         action=OperationAction.RETRY,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result is None
     assert len(notifier.failed_calls) == 1
@@ -193,7 +196,7 @@ def test_process_cancel_action():
         action=OperationAction.CANCEL,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result is None
     assert len(notifier.failed_calls) == 1
@@ -217,7 +220,9 @@ def test_process_with_current_operation_and_error():
         error=error,
     )
 
-    result = processor.process(update, current_op, notifier, execution_arn)
+    result = processor.process(
+        update, current_op, notifier, execution_arn, datetime.now(UTC)
+    )
 
     assert result is None
     assert len(notifier.failed_calls) == 1
@@ -236,7 +241,7 @@ def test_no_wait_timer_or_step_retry_calls():
         payload="result",
     )
 
-    processor.process(update, None, notifier, execution_arn)
+    processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert len(notifier.wait_timer_calls) == 0
     assert len(notifier.step_retry_calls) == 0

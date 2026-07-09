@@ -6,7 +6,7 @@ import asyncio
 import logging
 import threading
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from aws_durable_execution_sdk_python.execution import (
@@ -30,6 +30,7 @@ from aws_durable_execution_sdk_python_testing.checkpoint.core import CheckpointC
 from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
     DEFAULT_MAX_INVOCATION_PAGE_BYTES,
 )
+from aws_durable_execution_sdk_python_testing.clock import Clock, RealClock
 from aws_durable_execution_sdk_python_testing.checkpoint.transformer import (
     CheckpointRequestDispatcher,
 )
@@ -114,6 +115,7 @@ class Executor(ExecutionObserver):
         max_invocation_page_bytes: int | None = None,
         invocation_timeout_seconds: int = 900,
         registry: ExecutionRegistry | None = None,
+        clock: Clock | None = None,
     ):
         self._store = store
         self._scheduler = scheduler
@@ -122,6 +124,7 @@ class Executor(ExecutionObserver):
         self._registry = (
             registry if registry is not None else ExecutionRegistry(store, scheduler)
         )
+        self._clock: Clock = clock if clock is not None else RealClock()
         self._invocation_timeout_seconds = invocation_timeout_seconds
         self._dispatcher = CheckpointRequestDispatcher()
         self._max_invocation_page_bytes = (
@@ -164,7 +167,7 @@ class Executor(ExecutionObserver):
             )
 
         execution = Execution.new(input=input)
-        execution.start()
+        execution.start(now=self._clock.now())
         self._store.save(execution)
         logger.debug("Created execution with ARN: %s", execution.durable_execution_arn)
 
@@ -245,7 +248,7 @@ class Executor(ExecutionObserver):
             status=status,
             start_timestamp=execution_op.start_timestamp
             if execution_op.start_timestamp
-            else datetime.now(UTC),
+            else self._clock.now(),
             input_payload=execution_op.execution_details.input_payload
             if execution_op.execution_details
             else None,
@@ -388,7 +391,7 @@ class Executor(ExecutionObserver):
         if execution.is_complete:
             # Idempotent: return the existing stop timestamp
             execution_op = execution.get_operation_execution_started()
-            stop_timestamp = execution_op.end_timestamp or datetime.now(UTC)
+            stop_timestamp = execution_op.end_timestamp or self._clock.now()
             return StopDurableExecutionResponse(stop_timestamp=stop_timestamp)
 
         # Use provided error or create a default one
@@ -398,11 +401,12 @@ class Executor(ExecutionObserver):
 
         # Stop sets TERMINATED close status (different from fail)
         logger.info("[%s] Stopping execution.", execution_arn)
-        execution.complete_stopped(error=stop_error)  # Sets CloseStatus.TERMINATED
+        stop_time: datetime = self._clock.now()
+        execution.complete_stopped(error=stop_error, now=stop_time)
         self._store.update(execution)
         self._complete_events(execution_arn=execution_arn)
 
-        return StopDurableExecutionResponse(stop_timestamp=datetime.now(UTC))
+        return StopDurableExecutionResponse(stop_timestamp=stop_time)
 
     def get_execution_state(
         self,
@@ -558,7 +562,7 @@ class Executor(ExecutionObserver):
             }
             for idx, update in enumerate(updates):
                 ts: datetime = (
-                    timestamps[idx] if idx < len(timestamps) else datetime.now(UTC)
+                    timestamps[idx] if idx < len(timestamps) else self._clock.now()
                 )
 
                 real_op: Operation | None = ops_by_id.get(update.operation_id)
@@ -847,12 +851,14 @@ class Executor(ExecutionObserver):
             msg = "Invalid checkpoint token"
             raise InvalidParameterValueException(msg)
 
+        now = self._clock.now()
         result = CheckpointCore.apply(
             execution,
             checkpoint_token,
             updates or [],
             client_token,
             self._dispatcher,
+            now,
         )
 
         self._store.update(execution)
@@ -1000,8 +1006,7 @@ class Executor(ExecutionObserver):
                 existing.cancel()
             return
 
-        now = datetime.now(UTC)
-        delay = max((earliest - now).total_seconds(), 0.0)
+        delay = self._clock.arm(earliest)
 
         completion_event = self._completion_events.get(execution_arn)
         # Cancel-then-arm atomically under the supervisor lock so
@@ -1031,7 +1036,7 @@ class Executor(ExecutionObserver):
         if execution.is_complete:
             return False
 
-        now = datetime.now(UTC)
+        now = self._clock.now()
         completed_any = False
         for op in list(execution.operations):
             if (
@@ -1042,7 +1047,7 @@ class Executor(ExecutionObserver):
                 and op.wait_details.scheduled_end_timestamp <= now
             ):
                 try:
-                    execution.complete_wait(op.operation_id)
+                    execution.complete_wait(op.operation_id, now=now)
                     completed_any = True
                 except Exception:  # noqa: BLE001
                     logger.exception(
@@ -1146,7 +1151,7 @@ class Executor(ExecutionObserver):
     ) -> None:
         callback_token = CallbackToken.from_str(callback_id)
         execution = self.get_execution(callback_token.execution_arn)
-        execution.complete_callback_success(callback_id, result)
+        execution.complete_callback_success(callback_id, result, now=self._clock.now())
         self._store.update(execution)
         self._cleanup_callback_timeouts(callback_id)
 
@@ -1202,7 +1207,9 @@ class Executor(ExecutionObserver):
     ) -> None:
         callback_token = CallbackToken.from_str(callback_id)
         execution = self.get_execution(callback_token.execution_arn)
-        execution.complete_callback_failure(callback_id, callback_error)
+        execution.complete_callback_failure(
+            callback_id, callback_error, now=self._clock.now()
+        )
         self._store.update(execution)
         self._cleanup_callback_timeouts(callback_id)
 
@@ -1483,7 +1490,7 @@ class Executor(ExecutionObserver):
                     return
                 execution, invocation_input = claim
 
-                invocation_start = datetime.now(UTC)
+                invocation_start = self._clock.now()
                 invoke_response = await asyncio.wait_for(
                     asyncio.to_thread(
                         self._invoker.invoke,
@@ -1493,7 +1500,7 @@ class Executor(ExecutionObserver):
                     ),
                     timeout=self._invocation_timeout_seconds,
                 )
-                invocation_end = datetime.now(UTC)
+                invocation_end = self._clock.now()
                 await asyncio.to_thread(
                     lambda: self._registry.submit(
                         execution_arn,
@@ -1526,7 +1533,7 @@ class Executor(ExecutionObserver):
                 # Invocation killed by Lambda timeout. Step operations
                 # stay in their current state (STARTED) — no checkpoint
                 # was sent. Record the failed invocation and re-invoke.
-                invocation_end = datetime.now(UTC)
+                invocation_end = self._clock.now()
                 logger.warning(
                     "[%s] Invocation timed out after %ds",
                     execution_arn,
@@ -1662,7 +1669,7 @@ class Executor(ExecutionObserver):
         """Complete execution successfully (COMPLETE_WORKFLOW_EXECUTION decision)."""
         logger.debug("[%s] Completing execution with result: %s", execution_arn, result)
         execution: Execution = self._store.load(execution_arn=execution_arn)
-        execution.complete_success(result=result)  # Sets CloseStatus.COMPLETED
+        execution.complete_success(result=result, now=self._clock.now())
         self._store.update(execution)
         if execution.result is None:
             msg: str = "Execution result is required"
@@ -1673,7 +1680,7 @@ class Executor(ExecutionObserver):
         """Fail execution with error (FAIL_WORKFLOW_EXECUTION decision)."""
         logger.error("[%s] Completing execution with error: %s", execution_arn, error)
         execution: Execution = self._store.load(execution_arn=execution_arn)
-        execution.complete_fail(error=error)  # Sets CloseStatus.FAILED
+        execution.complete_fail(error=error, now=self._clock.now())
         self._store.update(execution)
         # set by complete_fail
         if execution.result is None:
@@ -1701,7 +1708,7 @@ class Executor(ExecutionObserver):
 
     def _apply_timeout(self, execution_arn: str, error: ErrorObject) -> None:
         execution = self._store.load(execution_arn=execution_arn)
-        execution.complete_timeout(error=error)  # Sets CloseStatus.TIMED_OUT
+        execution.complete_timeout(error=error, now=self._clock.now())
         self._store.update(execution)
 
     def on_stopped(self, execution_arn: str, error: ErrorObject) -> None:
@@ -1836,7 +1843,7 @@ class Executor(ExecutionObserver):
         execution = self.get_execution(callback_token.execution_arn)
         if execution.is_complete:
             return
-        execution.complete_callback_timeout(callback_id, error)
+        execution.complete_callback_timeout(callback_id, error, now=self._clock.now())
         self._store.update(execution)
 
     def _on_callback_timeout(self, execution_arn: str, callback_id: str) -> None:

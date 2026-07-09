@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import Enum
 from threading import Lock
 from typing import Any
@@ -20,6 +20,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationUpdate,
 )
 
+from aws_durable_execution_sdk_python_testing.clock import real_now
 from aws_durable_execution_sdk_python_testing.exceptions import (
     IllegalStateException,
     InvalidParameterValueException,
@@ -284,7 +285,7 @@ class Execution:
 
         return execution
 
-    def start(self) -> None:
+    def start(self, now: datetime | None = None) -> None:
         if self.start_input.invocation_id is None:
             msg: str = "invocation_id is required"
             raise InvalidParameterValueException(msg)
@@ -294,7 +295,7 @@ class Execution:
                     operation_id=self.start_input.invocation_id,
                     parent_id=None,
                     name=self.start_input.execution_name,
-                    start_timestamp=datetime.now(UTC),
+                    start_timestamp=now if now is not None else real_now(),
                     operation_type=OperationType.EXECUTION,
                     status=OperationStatus.STARTED,
                     execution_details=ExecutionDetails(
@@ -381,41 +382,41 @@ class Execution:
         if operation_id not in self.updated_operation_ids:
             self.updated_operation_ids.append(operation_id)
 
-    def complete_success(self, result: str | None) -> None:
+    def complete_success(self, result: str | None, now: datetime | None = None) -> None:
         """Complete execution successfully (DecisionType.COMPLETE_WORKFLOW_EXECUTION)."""
         self.result = DurableExecutionInvocationOutput(
             status=InvocationStatus.SUCCEEDED, result=result
         )
         self.is_complete = True
         self.close_status = ExecutionStatus.SUCCEEDED
-        self._end_execution(OperationStatus.SUCCEEDED)
+        self._end_execution(OperationStatus.SUCCEEDED, now)
 
-    def complete_fail(self, error: ErrorObject) -> None:
+    def complete_fail(self, error: ErrorObject, now: datetime | None = None) -> None:
         """Complete execution with failure (DecisionType.FAIL_WORKFLOW_EXECUTION)."""
         self.result = DurableExecutionInvocationOutput(
             status=InvocationStatus.FAILED, error=error
         )
         self.is_complete = True
         self.close_status = ExecutionStatus.FAILED
-        self._end_execution(OperationStatus.FAILED)
+        self._end_execution(OperationStatus.FAILED, now)
 
-    def complete_timeout(self, error: ErrorObject) -> None:
+    def complete_timeout(self, error: ErrorObject, now: datetime | None = None) -> None:
         """Complete execution with timeout."""
         self.result = DurableExecutionInvocationOutput(
             status=InvocationStatus.FAILED, error=error
         )
         self.is_complete = True
         self.close_status = ExecutionStatus.TIMED_OUT
-        self._end_execution(OperationStatus.TIMED_OUT)
+        self._end_execution(OperationStatus.TIMED_OUT, now)
 
-    def complete_stopped(self, error: ErrorObject) -> None:
+    def complete_stopped(self, error: ErrorObject, now: datetime | None = None) -> None:
         """Complete execution as terminated (TerminateWorkflowExecutionV2Request)."""
         self.result = DurableExecutionInvocationOutput(
             status=InvocationStatus.FAILED, error=error
         )
         self.is_complete = True
         self.close_status = ExecutionStatus.STOPPED
-        self._end_execution(OperationStatus.STOPPED)
+        self._end_execution(OperationStatus.STOPPED, now)
 
     def find_operation(self, operation_id: str) -> tuple[int, Operation]:
         """Find operation by ID, return index and operation."""
@@ -437,7 +438,9 @@ class Execution:
         msg: str = f"Callback operation with callback_id [{callback_id}] not found"
         raise IllegalStateException(msg)
 
-    def complete_wait(self, operation_id: str) -> Operation:
+    def complete_wait(
+        self, operation_id: str, now: datetime | None = None
+    ) -> Operation:
         """Complete WAIT operation when timer fires."""
         index, operation = self.find_operation(operation_id)
 
@@ -458,7 +461,7 @@ class Execution:
             self.operations[index] = replace(
                 operation,
                 status=OperationStatus.SUCCEEDED,
-                end_timestamp=datetime.now(UTC),
+                end_timestamp=now if now is not None else real_now(),
             )
             self._record_updated_operation(operation_id)
             return self.operations[index]
@@ -498,7 +501,10 @@ class Execution:
             return updated_operation
 
     def complete_callback_success(
-        self, callback_id: str, result: bytes | None = None
+        self,
+        callback_id: str,
+        result: bytes | None = None,
+        now: datetime | None = None,
     ) -> Operation:
         """Complete CALLBACK operation with success."""
         index, operation = self.find_callback_operation(callback_id)
@@ -518,13 +524,13 @@ class Execution:
             self.operations[index] = replace(
                 operation,
                 status=OperationStatus.SUCCEEDED,
-                end_timestamp=datetime.now(UTC),
+                end_timestamp=now if now is not None else real_now(),
                 callback_details=updated_callback_details,
             )
             return self.operations[index]
 
     def complete_callback_failure(
-        self, callback_id: str, error: ErrorObject
+        self, callback_id: str, error: ErrorObject, now: datetime | None = None
     ) -> Operation:
         """Complete CALLBACK operation with failure."""
         index, operation = self.find_callback_operation(callback_id)
@@ -544,13 +550,13 @@ class Execution:
             self.operations[index] = replace(
                 operation,
                 status=OperationStatus.FAILED,
-                end_timestamp=datetime.now(UTC),
+                end_timestamp=now if now is not None else real_now(),
                 callback_details=updated_callback_details,
             )
             return self.operations[index]
 
     def complete_callback_timeout(
-        self, callback_id: str, error: ErrorObject
+        self, callback_id: str, error: ErrorObject, now: datetime | None = None
     ) -> Operation:
         """Complete CALLBACK operation with timeout."""
         index, operation = self.find_callback_operation(callback_id)
@@ -570,12 +576,14 @@ class Execution:
             self.operations[index] = replace(
                 operation,
                 status=OperationStatus.TIMED_OUT,
-                end_timestamp=datetime.now(UTC),
+                end_timestamp=now if now is not None else real_now(),
                 callback_details=updated_callback_details,
             )
             return self.operations[index]
 
-    def _end_execution(self, status: OperationStatus) -> None:
+    def _end_execution(
+        self, status: OperationStatus, now: datetime | None = None
+    ) -> None:
         """Set the end_timestamp on the main EXECUTION operation when execution completes."""
         execution_op: Operation = self.get_operation_execution_started()
         if execution_op.operation_type == OperationType.EXECUTION:
@@ -589,7 +597,7 @@ class Execution:
                 self.operations[0] = replace(
                     execution_op,
                     status=status,
-                    end_timestamp=datetime.now(UTC),
+                    end_timestamp=now if now is not None else real_now(),
                 )
 
 

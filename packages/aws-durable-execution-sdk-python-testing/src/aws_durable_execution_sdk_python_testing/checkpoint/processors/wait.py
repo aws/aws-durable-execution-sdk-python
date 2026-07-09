@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import logging
-import os
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -36,6 +34,7 @@ class WaitProcessor(OperationProcessor):
         current_op: Operation | None,
         notifier: ExecutionNotifier,
         execution_arn: str,
+        now: datetime,
     ) -> Operation:
         """Process WAIT operation update with scheduler integration for timers."""
         match update.action:
@@ -43,13 +42,8 @@ class WaitProcessor(OperationProcessor):
                 wait_seconds = (
                     update.wait_options.wait_seconds if update.wait_options else 0
                 )
-                time_scale = float(os.getenv("DURABLE_EXECUTION_TIME_SCALE", "1.0"))
-                logging.info("Using DURABLE_EXECUTION_TIME_SCALE: %f", time_scale)
-                scaled_wait_seconds = wait_seconds * time_scale
 
-                scheduled_end_timestamp = datetime.now(UTC) + timedelta(
-                    seconds=scaled_wait_seconds
-                )
+                scheduled_end_timestamp = now + timedelta(seconds=wait_seconds)
 
                 # Create WaitDetails with scheduled timestamp
                 wait_details = WaitDetails(
@@ -63,7 +57,7 @@ class WaitProcessor(OperationProcessor):
                     status=OperationStatus.STARTED,
                     parent_id=update.parent_id,
                     name=update.name,
-                    start_timestamp=datetime.now(UTC),
+                    start_timestamp=now,
                     end_timestamp=None,
                     sub_type=update.sub_type,
                     execution_details=None,
@@ -87,6 +81,7 @@ class WaitProcessor(OperationProcessor):
                     update=update,
                     current_operation=current_op,
                     status=OperationStatus.CANCELLED,
+                    now=now,
                 )
             case _:
                 msg: str = "Invalid action for WAIT operation."

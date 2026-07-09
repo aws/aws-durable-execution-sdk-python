@@ -57,7 +57,7 @@ def test_process_start_action():
         name="test-context",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert isinstance(result, Operation)
     assert result.operation_id == "context-123"
@@ -82,7 +82,9 @@ def test_process_start_action_with_current_operation():
         name="test-context",
     )
 
-    result = processor.process(update, current_op, notifier, execution_arn)
+    result = processor.process(
+        update, current_op, notifier, execution_arn, datetime.now(UTC)
+    )
 
     assert result.start_timestamp == current_op.start_timestamp
     assert result.status == OperationStatus.STARTED
@@ -101,7 +103,7 @@ def test_process_succeed_action():
         payload="success-result",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert isinstance(result, Operation)
     assert result.operation_id == "context-123"
@@ -126,7 +128,9 @@ def test_process_succeed_action_with_current_operation():
         payload="success-result",
     )
 
-    result = processor.process(update, current_op, notifier, execution_arn)
+    result = processor.process(
+        update, current_op, notifier, execution_arn, datetime.now(UTC)
+    )
 
     assert result.start_timestamp == current_op.start_timestamp
     assert result.status == OperationStatus.SUCCEEDED
@@ -146,7 +150,7 @@ def test_process_fail_action():
         error=error,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert isinstance(result, Operation)
     assert result.operation_id == "context-123"
@@ -172,7 +176,9 @@ def test_process_fail_action_with_current_operation():
         error=error,
     )
 
-    result = processor.process(update, current_op, notifier, execution_arn)
+    result = processor.process(
+        update, current_op, notifier, execution_arn, datetime.now(UTC)
+    )
 
     assert result.start_timestamp == current_op.start_timestamp
     assert result.status == OperationStatus.FAILED
@@ -193,7 +199,7 @@ def test_process_fail_action_with_payload_and_error():
         error=error,
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.context_details.result == "partial-result"
     assert result.context_details.error == error
@@ -214,7 +220,7 @@ def test_process_invalid_action():
     with pytest.raises(
         InvalidParameterValueException, match="Invalid action for CONTEXT operation"
     ):
-        processor.process(update, None, notifier, execution_arn)
+        processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
 
 def test_process_cancel_action():
@@ -232,7 +238,7 @@ def test_process_cancel_action():
     with pytest.raises(
         InvalidParameterValueException, match="Invalid action for CONTEXT operation"
     ):
-        processor.process(update, None, notifier, execution_arn)
+        processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
 
 def test_process_with_parent_id():
@@ -248,7 +254,7 @@ def test_process_with_parent_id():
         parent_id="parent-456",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.parent_id == "parent-456"
 
@@ -266,7 +272,7 @@ def test_process_with_sub_type():
         sub_type="parallel",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.sub_type == "parallel"
 
@@ -283,7 +289,7 @@ def test_process_start_without_payload():
         name="test-context",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.context_details.result is None
     assert result.context_details.error is None
@@ -301,7 +307,7 @@ def test_process_succeed_without_payload():
         name="test-context",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.context_details.result is None
     assert result.context_details.error is None
@@ -319,7 +325,7 @@ def test_process_fail_without_error():
         name="test-context",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.context_details.result is None
     assert result.context_details.error is None
@@ -337,7 +343,7 @@ def test_no_notifier_calls():
         name="test-context",
     )
 
-    processor.process(update, None, notifier, execution_arn)
+    processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert len(notifier.completed_calls) == 0
     assert len(notifier.failed_calls) == 0
@@ -357,7 +363,7 @@ def test_end_timestamp_set_for_terminal_states():
         name="test-context",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.end_timestamp is not None
 
@@ -374,6 +380,6 @@ def test_end_timestamp_not_set_for_non_terminal_states():
         name="test-context",
     )
 
-    result = processor.process(update, None, notifier, execution_arn)
+    result = processor.process(update, None, notifier, execution_arn, datetime.now(UTC))
 
     assert result.end_timestamp is None
