@@ -30,14 +30,54 @@ Tests run against actual AWS Lambda functions using `DurableFunctionCloudTestRun
 - ⚠️ Requires deployed functions
 
 ```bash
-# Deploy function first (from repo root)
-hatch run examples:deploy "hello world" --function-name HelloWorld-Test
+# Build and deploy the example stack first (from repo root)
+hatch run examples:build
+hatch run examples:generate-sam-template
+sam build --template-file packages/aws-durable-execution-sdk-python-examples/template.generated.json
+sam deploy \
+  --template-file .aws-sam/build/template.yaml \
+  --stack-name python-examples-test \
+  --resolve-s3 \
+  --no-confirm-changeset \
+  --parameter-overrides \
+    PythonRuntime=python3.13 \
+    FunctionNamePrefix=PythonTest- \
+    LambdaEndpoint=https://lambda.us-west-2.amazonaws.com \
+    LambdaExecutionRoleArn=arn:aws:iam::123456789012:role/example-lambda-role
+
+# Optional: invoke a deployed example directly with SAM remote execution.
+# The logical ID comes from template.generated.json; hello_world.handler maps to HelloWorld.
+sam remote invoke \
+  --stack-name python-examples-test \
+  HelloWorld \
+  --event '{"name":"Ada"}' \
+  --parameter 'Qualifier=$LATEST' \
+  --output json
+
+# Optional: save a reusable remote test event and invoke with it.
+sam remote test-event put \
+  --stack-name python-examples-test \
+  HelloWorld \
+  --name hello-world \
+  --file event.json \
+  --force
+sam remote invoke \
+  --stack-name python-examples-test \
+  HelloWorld \
+  --test-event-name hello-world \
+  --parameter 'Qualifier=$LATEST'
+
+# Optional: inspect or stop a durable execution returned by an invocation.
+sam remote execution get "$DURABLE_EXECUTION_ARN" --format json
+sam remote execution history "$DURABLE_EXECUTION_ARN" --format table
+sam remote execution stop "$DURABLE_EXECUTION_ARN" \
+  --error-type UserCancellation \
+  --error-message "Stopped during manual troubleshooting"
 
 # Set environment variables for cloud testing
 export AWS_REGION=us-west-2
 export LAMBDA_ENDPOINT=https://lambda.us-west-2.amazonaws.com
-export QUALIFIED_FUNCTION_NAME="HelloWorld-Test:\$LATEST"
-export LAMBDA_FUNCTION_TEST_NAME="hello world"
+export PYTEST_FUNCTION_NAME_MAP='{"Hello World":"PythonTest-HelloWorld:$LATEST"}'
 
 # Run tests (from repo root)
 pytest --runner-mode=cloud -k test_hello_world packages/aws-durable-execution-sdk-python-examples/test/
@@ -45,6 +85,8 @@ pytest --runner-mode=cloud -k test_hello_world packages/aws-durable-execution-sd
 # Or using hatch (from repo root)
 hatch run test:examples-integration -k test_hello_world
 ```
+
+See the [SAM remote execution command reference](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-cli-command-reference-sam-remote-execution.html) for more `sam remote invoke`, `sam remote execution`, and `sam remote test-event` options.
 
 ## Writing Tests
 
@@ -81,8 +123,7 @@ def test_my_example(durable_runner):
 ### Environment Variables (Cloud Mode)
 - `AWS_REGION` - AWS region for Lambda invocation (default: us-west-2)
 - `LAMBDA_ENDPOINT` - Optional Lambda endpoint URL for testing
-- `QUALIFIED_FUNCTION_NAME` - Deployed Lambda function ARN or qualified name (required for cloud mode)
-- `LAMBDA_FUNCTION_TEST_NAME` - Lambda function name to match with test's `lambda_function_name` marker (required for cloud mode)
+- `PYTEST_FUNCTION_NAME_MAP` - JSON mapping of example names to qualified function names (required for cloud mode)
 
 ### CLI Options
 - `--runner-mode` - Test mode: `local` (default) or `cloud`
@@ -95,11 +136,11 @@ def test_my_example(durable_runner):
 
 Tests automatically run in CI/CD after deployment:
 
-1. `deploy-examples.yml` deploys functions
+1. `cloud-tests.yml` deploys functions
 2. Integration tests run against deployed functions
 3. Results reported in GitHub Actions
 
-See `.github/workflows/deploy-examples.yml` for details.
+See `.github/workflows/cloud-tests.yml` for details.
 
 ## Troubleshooting
 

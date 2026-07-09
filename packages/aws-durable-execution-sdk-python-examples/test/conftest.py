@@ -170,10 +170,10 @@ def durable_runner(request, monkeypatch):
             AWS_REGION: AWS region for Lambda invocation (default: us-west-2)
             LAMBDA_ENDPOINT: Optional Lambda endpoint URL
             PYTEST_FUNCTION_NAME_MAP: JSON mapping of example names to deployed function names
-        
+
         CLI option:
             --runner-mode=cloud (or local, default: local)
-        
+
         Example:
             AWS_REGION=us-west-2 \
             LAMBDA_ENDPOINT=https://lambda.us-west-2.amazonaws.com \
@@ -208,7 +208,7 @@ def durable_runner(request, monkeypatch):
         # Get deployed function name and AWS config from environment
         deployed_name = _get_deployed_function_name(request, lambda_function_name)
         region = os.environ.get("AWS_REGION", "us-west-2")
-        lambda_endpoint = os.environ.get("LAMBDA_ENDPOINT")
+        lambda_endpoint = os.environ.get("LAMBDA_ENDPOINT") or None
 
         logger.info("Using AWS region: %s", region)
 
@@ -244,36 +244,38 @@ def _get_deployed_function_name(
     """Get the deployed function name from environment variables.
 
     Required environment variables:
-    - QUALIFIED_FUNCTION_NAME: The qualified function ARN (e.g., "MyFunction:$LATEST")
-    - LAMBDA_FUNCTION_TEST_NAME: The lambda function name to match against test markers
+    - PYTEST_FUNCTION_NAME_MAP: JSON mapping of test names to qualified function names
 
-    Tests are skipped if the test's lambda_function_name doesn't match LAMBDA_FUNCTION_TEST_NAME.
+    Tests are skipped if the test's lambda_function_name is not present in the
+    configured mapping.
     """
     if not lambda_function_name:
         pytest.fail("lambda_function_name is required for cloud mode tests")
 
-    # Get from environment variables
-    function_arn = os.environ.get("QUALIFIED_FUNCTION_NAME")
-    env_function_name = os.environ.get("LAMBDA_FUNCTION_TEST_NAME")
-
-    if not function_arn or not env_function_name:
+    function_map_json = os.environ.get("PYTEST_FUNCTION_NAME_MAP")
+    if not function_map_json:
         pytest.fail(
-            "Cloud mode requires both QUALIFIED_FUNCTION_NAME and LAMBDA_FUNCTION_TEST_NAME environment variables\n"
-            'Example: QUALIFIED_FUNCTION_NAME="MyFunction:$LATEST" LAMBDA_FUNCTION_TEST_NAME="hello world" pytest --runner-mode=cloud'
+            "Cloud mode requires PYTEST_FUNCTION_NAME_MAP environment variable\n"
+            'Example: PYTEST_FUNCTION_NAME_MAP=\'{"Hello World":"HelloWorld:$LATEST"}\' pytest --runner-mode=cloud'
         )
 
-    # Check if this test matches the function name (case-insensitive)
-    if lambda_function_name.lower() == env_function_name.lower():
-        logger.info(
-            "Using function ARN: %s for lambda function: %s",
-            function_arn,
-            env_function_name,
-        )
-        return function_arn
+    try:
+        function_map = json.loads(function_map_json)
+    except json.JSONDecodeError as exc:
+        pytest.fail(f"Invalid PYTEST_FUNCTION_NAME_MAP JSON: {exc}")
 
-    # This test doesn't match the function name, skip it
+    normalized_name = lambda_function_name.lower()
+    for configured_name, configured_function in function_map.items():
+        if configured_name.lower() == normalized_name:
+            logger.info(
+                "Using function ARN: %s for lambda function: %s",
+                configured_function,
+                configured_name,
+            )
+            return configured_function
+
     pytest.skip(
-        f"Test '{lambda_function_name}' doesn't match LAMBDA_FUNCTION_TEST_NAME '{env_function_name}'"
+        f"Test '{lambda_function_name}' is not present in PYTEST_FUNCTION_NAME_MAP"
     )
 
 
