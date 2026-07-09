@@ -61,16 +61,8 @@ class StepProcessor(OperationProcessor):
                 new_step_details = StepDetails(
                     attempt=current_attempt + 1,
                     next_attempt_timestamp=next_attempt_time,
-                    result=(
-                        current_op.step_details.result
-                        if current_op and current_op.step_details
-                        else None
-                    ),
-                    error=(
-                        current_op.step_details.error
-                        if current_op and current_op.step_details
-                        else None
-                    ),
+                    result=update.payload,
+                    error=update.error,
                 )
 
                 # Create new operation with updated step_details
@@ -99,12 +91,12 @@ class StepProcessor(OperationProcessor):
                     else None,
                 )
 
-                # Schedule step retry timer to fire after delay
-                notifier.notify_step_retry_scheduled(
-                    execution_arn=execution_arn,
-                    operation_id=update.operation_id,
-                    delay=delay,
-                )
+                # Timer scheduling is handled centrally by
+                # Executor._schedule_earliest_pending. The
+                # processor only needs to set
+                # step_details.next_attempt_timestamp; the executor
+                # finds the earliest pending wake across all ops and
+                # arms a single timer.
                 return retry_operation
             case OperationAction.SUCCEED:
                 return self._translate_update_to_operation(

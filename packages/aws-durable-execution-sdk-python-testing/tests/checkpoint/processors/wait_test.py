@@ -69,8 +69,11 @@ def test_process_start_action():
     assert result.wait_details is not None
     assert result.wait_details.scheduled_end_timestamp > datetime.now(UTC)
 
-    assert len(notifier.wait_timer_calls) == 1
-    assert notifier.wait_timer_calls[0] == (execution_arn, "wait-123", 30)
+    # wait timer scheduling moved from per-op notifier call
+    # to Executor._schedule_earliest_pending (centralised). Processor
+    # now only records scheduled_end_timestamp on the op; no notifier
+    # call.
+    assert len(notifier.wait_timer_calls) == 0
 
 
 def test_process_start_action_without_wait_options():
@@ -90,8 +93,8 @@ def test_process_start_action_without_wait_options():
     assert isinstance(result, Operation)
     assert result.wait_details is not None
 
-    assert len(notifier.wait_timer_calls) == 1
-    assert notifier.wait_timer_calls[0] == (execution_arn, "wait-123", 0)
+    # no per-op timer scheduling; central scheduler.
+    assert len(notifier.wait_timer_calls) == 0
 
 
 def test_process_start_action_with_zero_seconds():
@@ -113,8 +116,8 @@ def test_process_start_action_with_zero_seconds():
     assert isinstance(result, Operation)
     assert result.wait_details is not None
 
-    assert len(notifier.wait_timer_calls) == 1
-    assert notifier.wait_timer_calls[0] == (execution_arn, "wait-123", 0)
+    # no per-op timer scheduling.
+    assert len(notifier.wait_timer_calls) == 0
 
 
 def test_process_start_action_with_parent_id():

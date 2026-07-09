@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+import warnings
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -34,6 +35,7 @@ from aws_durable_execution_sdk_python.lambda_service import Operation as SvcOper
 
 from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
     CheckpointProcessor,
+    DEFAULT_MAX_INVOCATION_PAGE_BYTES,
 )
 from aws_durable_execution_sdk_python_testing.client import InMemoryServiceClient
 from aws_durable_execution_sdk_python_testing.exceptions import (
@@ -106,6 +108,15 @@ class WebRunnerConfig:
     # Store configuration
     store_type: StoreType = StoreType.MEMORY
     store_path: str | None = None  # Path for filesystem store
+
+    # Timeout configuration
+    invocation_timeout_seconds: int = 900
+
+    # Invocation-input pagination cap (bytes). Handler receives pages
+    # up to this size. Larger state is served via
+    # GetDurableExecutionState. None falls back to Executor default
+    # (5 MB).
+    max_invocation_page_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -585,21 +596,42 @@ class DurableFunctionTestResult:
 
 
 class DurableFunctionTestRunner:
-    def __init__(self, handler: Callable, poll_interval: float = 1.0):
+    def __init__(
+        self,
+        handler: Callable,
+        poll_interval: float = 1.0,
+        max_invocation_page_bytes: int | None = None,
+        execution_timeout: int = 300,
+        invocation_timeout: int = 900,
+    ):
+        self._execution_timeout = execution_timeout
+        self._invocation_timeout = invocation_timeout
+        self._max_invocation_page_bytes = (
+            max_invocation_page_bytes
+            if max_invocation_page_bytes is not None
+            else DEFAULT_MAX_INVOCATION_PAGE_BYTES
+        )
         self._scheduler: Scheduler = Scheduler()
         self._scheduler.start()
         self._store = InMemoryExecutionStore()
         self.poll_interval = poll_interval
         self._checkpoint_processor = CheckpointProcessor(
-            store=self._store, scheduler=self._scheduler
+            store=self._store,
+            scheduler=self._scheduler,
         )
         self._service_client = InMemoryServiceClient(self._checkpoint_processor)
-        self._invoker = InProcessInvoker(handler, self._service_client)
+        self._invoker = InProcessInvoker(
+            handler,
+            self._service_client,
+            max_page_bytes=self._max_invocation_page_bytes,
+        )
         self._executor = Executor(
             store=self._store,
             scheduler=self._scheduler,
             invoker=self._invoker,
             checkpoint_processor=self._checkpoint_processor,
+            max_invocation_page_bytes=self._max_invocation_page_bytes,
+            invocation_timeout_seconds=invocation_timeout,
         )
 
         # Wire up observer pattern - CheckpointProcessor uses this to notify executor of state changes
@@ -617,20 +649,35 @@ class DurableFunctionTestRunner:
     def run(
         self,
         input: str | None = None,  # noqa: A002
-        timeout: int = 900,
+        execution_timeout: int | None = None,
+        timeout: int | None = None,
         function_name: str = "test-function",
         execution_name: str = "execution-name",
         account_id: str = "123456789012",
     ) -> DurableFunctionTestResult:
+        if timeout is not None and execution_timeout is None:
+            warnings.warn(
+                "timeout on run() is deprecated. Use execution_timeout instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            execution_timeout = timeout
+        effective_timeout: int = (
+            execution_timeout
+            if execution_timeout is not None
+            else self._execution_timeout
+        )
         execution_arn = self.run_async(
             input=input,
-            timeout=timeout,
+            execution_timeout=effective_timeout,
             function_name=function_name,
             execution_name=execution_name,
             account_id=account_id,
         )
 
-        return self.wait_for_result(execution_arn=execution_arn, timeout=timeout)
+        return self.wait_for_result(
+            execution_arn=execution_arn, timeout=effective_timeout
+        )
 
     def send_callback_success(
         self, callback_id: str, result: bytes | None = None
@@ -648,17 +695,25 @@ class DurableFunctionTestRunner:
     def run_async(
         self,
         input: str | None = None,  # noqa: A002
-        timeout: int = 900,
+        execution_timeout: int | None = None,
+        timeout: int | None = None,
         function_name: str = "test-function",
         execution_name: str = "execution-name",
         account_id: str = "123456789012",
     ) -> str:
+        if timeout is not None and execution_timeout is None:
+            execution_timeout = timeout
+        effective_timeout: int = (
+            execution_timeout
+            if execution_timeout is not None
+            else self._execution_timeout
+        )
         start_input = StartDurableExecutionInput(
             account_id=account_id,
             function_name=function_name,
             function_qualifier="$LATEST",
             execution_name=execution_name,
-            execution_timeout_seconds=timeout,
+            execution_timeout_seconds=effective_timeout,
             execution_retention_period_days=7,
             invocation_id="inv-12345678-1234-1234-1234-123456789012",
             trace_fields={"trace_id": "abc123", "span_id": "def456"},
@@ -793,7 +848,15 @@ class WebRunner:
         else:
             self._store = InMemoryExecutionStore()
         self._scheduler = Scheduler()
-        self._invoker = LambdaInvoker(self._create_boto3_client())
+        resolved_max_page_bytes: int = (
+            self._config.max_invocation_page_bytes
+            if self._config.max_invocation_page_bytes is not None
+            else DEFAULT_MAX_INVOCATION_PAGE_BYTES
+        )
+        self._invoker = LambdaInvoker(
+            self._create_boto3_client(),
+            max_page_bytes=resolved_max_page_bytes,
+        )
 
         # Create shared CheckpointProcessor
         checkpoint_processor = CheckpointProcessor(self._store, self._scheduler)
@@ -804,6 +867,8 @@ class WebRunner:
             scheduler=self._scheduler,
             invoker=self._invoker,
             checkpoint_processor=checkpoint_processor,
+            max_invocation_page_bytes=resolved_max_page_bytes,
+            invocation_timeout_seconds=self._config.invocation_timeout_seconds,
         )
 
         # Add executor as observer to the checkpoint processor

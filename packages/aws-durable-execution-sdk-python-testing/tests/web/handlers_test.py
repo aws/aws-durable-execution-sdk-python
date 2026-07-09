@@ -1028,8 +1028,82 @@ def test_get_durable_execution_state_handler_success():
     assert response.body["Operations"][0]["Id"] == "op-1"
     assert response.body["Operations"][0]["Type"] == "STEP"
 
-    # Verify executor was called with correct ARN
-    executor.get_execution_state.assert_called_once_with("test-arn")
+    # Verify executor was called with correct ARN and no pagination params
+    executor.get_execution_state.assert_called_once_with(
+        "test-arn", checkpoint_token=None, marker=None, max_items=None
+    )
+
+
+def test_get_durable_execution_state_handler_forwards_pagination_params():
+    """State handler forwards CheckpointToken, Marker and MaxItems to the executor."""
+
+    executor = Mock()
+    handler = GetDurableExecutionStateHandler(executor)
+
+    executor.get_execution_state.return_value = GetDurableExecutionStateResponse(
+        operations=[], next_marker=None
+    )
+
+    router = Router()
+    typed_route = router.find_route(
+        "/2025-12-01/durable-executions/test-arn/state", "GET"
+    )
+
+    request = HTTPRequest(
+        method="GET",
+        path=typed_route,
+        headers={},
+        query_params={
+            "CheckpointToken": ["token-abc"],
+            "Marker": ["marker-xyz"],
+            "MaxItems": ["50"],
+        },
+        body={},
+    )
+
+    response = handler.handle(typed_route, request)
+
+    assert response.status_code == 200
+    executor.get_execution_state.assert_called_once_with(
+        "test-arn",
+        checkpoint_token="token-abc",
+        marker="marker-xyz",
+        max_items=50,
+    )
+
+
+def test_get_durable_execution_state_handler_empty_marker_treated_as_none():
+    """An empty Marker query param is normalized to None (first-page request)."""
+
+    executor = Mock()
+    handler = GetDurableExecutionStateHandler(executor)
+
+    executor.get_execution_state.return_value = GetDurableExecutionStateResponse(
+        operations=[], next_marker=None
+    )
+
+    router = Router()
+    typed_route = router.find_route(
+        "/2025-12-01/durable-executions/test-arn/state", "GET"
+    )
+
+    request = HTTPRequest(
+        method="GET",
+        path=typed_route,
+        headers={},
+        query_params={"CheckpointToken": ["token-abc"], "Marker": [""]},
+        body={},
+    )
+
+    response = handler.handle(typed_route, request)
+
+    assert response.status_code == 200
+    executor.get_execution_state.assert_called_once_with(
+        "test-arn",
+        checkpoint_token="token-abc",
+        marker=None,
+        max_items=None,
+    )
 
 
 def test_get_durable_execution_state_handler_resource_not_found():

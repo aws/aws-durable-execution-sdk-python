@@ -78,8 +78,11 @@ def test_filesystem_execution_store_update(store, sample_execution):
     store.save(sample_execution)
 
     sample_execution.is_complete = True
+    # cleanup: get_new_checkpoint_token no longer bumps
+    # token_sequence. Advance it directly via the counter helper
+    # so the round-trip assertion still exercises a non-zero value.
     for _ in range(5):
-        sample_execution.get_new_checkpoint_token()
+        sample_execution.advance_token_sequence()
     store.update(sample_execution)
 
     loaded_execution = store.load(sample_execution.durable_execution_arn)
@@ -101,7 +104,7 @@ def test_filesystem_execution_store_update_overwrites(store, temp_storage_dir):
     execution2 = Execution.new(input_data)
     execution2.durable_execution_arn = execution1.durable_execution_arn
     for _ in range(10):
-        execution2.get_new_checkpoint_token()
+        execution2.advance_token_sequence()
 
     store.save(execution1)
     store.update(execution2)

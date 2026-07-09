@@ -13,9 +13,14 @@ class CheckpointToken:
 
     execution_arn: str
     token_sequence: int
+    invocation_id: str = ""
 
     def to_str(self) -> str:
-        data = {"arn": self.execution_arn, "seq": self.token_sequence}
+        data = {
+            "arn": self.execution_arn,
+            "seq": self.token_sequence,
+            "inv": self.invocation_id,
+        }
         json_str = json.dumps(data, separators=(",", ":"))
         # str -> bytes -> base64 bytes -> str
         return base64.b64encode(json_str.encode()).decode()
@@ -25,7 +30,11 @@ class CheckpointToken:
         # str -> base64 bytes -> str
         decoded = base64.b64decode(token).decode()
         data = json.loads(decoded)
-        return cls(execution_arn=data["arn"], token_sequence=data["seq"])
+        return cls(
+            execution_arn=data["arn"],
+            token_sequence=data["seq"],
+            invocation_id=data.get("inv", ""),
+        )
 
 
 @dataclass(frozen=True)

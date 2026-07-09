@@ -37,18 +37,6 @@ class ExecutionObserver(ABC):
         """Called when execution is stopped."""
 
     @abstractmethod
-    def on_wait_timer_scheduled(
-        self, execution_arn: str, operation_id: str, delay: float
-    ) -> None:
-        """Called when wait timer scheduled."""
-
-    @abstractmethod
-    def on_step_retry_scheduled(
-        self, execution_arn: str, operation_id: str, delay: float
-    ) -> None:
-        """Called when step retry scheduled."""
-
-    @abstractmethod
     def on_callback_created(
         self,
         execution_arn: str,
@@ -101,28 +89,6 @@ class ExecutionNotifier:
         """Notify observers about execution being stopped."""
         self._notify_observers(
             ExecutionObserver.on_stopped, execution_arn=execution_arn, error=error
-        )
-
-    def notify_wait_timer_scheduled(
-        self, execution_arn: str, operation_id: str, delay: float
-    ) -> None:
-        """Notify observers about wait timer scheduling."""
-        self._notify_observers(
-            ExecutionObserver.on_wait_timer_scheduled,
-            execution_arn=execution_arn,
-            operation_id=operation_id,
-            delay=delay,
-        )
-
-    def notify_step_retry_scheduled(
-        self, execution_arn: str, operation_id: str, delay: float
-    ) -> None:
-        """Notify observers about step retry scheduling."""
-        self._notify_observers(
-            ExecutionObserver.on_step_retry_scheduled,
-            execution_arn=execution_arn,
-            operation_id=operation_id,
-            delay=delay,
         )
 
     def notify_callback_created(

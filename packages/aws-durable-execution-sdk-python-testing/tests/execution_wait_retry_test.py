@@ -76,5 +76,7 @@ def test_concurrent_wait_and_retry_completion():
     assert "wait-completed-SUCCEEDED" in results
     assert "retry-completed-READY" in results
 
-    # Verify token sequence was incremented twice
-    assert execution.token_sequence == 2
+    # Each async completion bumps seq_counter (not token_sequence —
+    # that only advances on accepted checkpoint calls).
+    assert execution.seq_counter == 2
+    assert execution.token_sequence == 0

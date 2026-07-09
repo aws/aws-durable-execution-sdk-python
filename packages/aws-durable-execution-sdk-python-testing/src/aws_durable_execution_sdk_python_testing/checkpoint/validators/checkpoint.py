@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from aws_durable_execution_sdk_python.lambda_service import (
     OperationAction,
@@ -13,24 +13,27 @@ from aws_durable_execution_sdk_python.lambda_service import (
 
 from aws_durable_execution_sdk_python_testing.checkpoint.validators.operations.callback import (
     CallbackOperationValidator,
+    VALID_ACTIONS_FOR_CALLBACK,
 )
 from aws_durable_execution_sdk_python_testing.checkpoint.validators.operations.context import (
     ContextOperationValidator,
+    VALID_ACTIONS_FOR_CONTEXT,
 )
 from aws_durable_execution_sdk_python_testing.checkpoint.validators.operations.execution import (
     ExecutionOperationValidator,
+    VALID_ACTIONS_FOR_EXECUTION,
 )
 from aws_durable_execution_sdk_python_testing.checkpoint.validators.operations.invoke import (
     ChainedInvokeOperationValidator,
+    VALID_ACTIONS_FOR_INVOKE,
 )
 from aws_durable_execution_sdk_python_testing.checkpoint.validators.operations.step import (
     StepOperationValidator,
+    VALID_ACTIONS_FOR_STEP,
 )
 from aws_durable_execution_sdk_python_testing.checkpoint.validators.operations.wait import (
     WaitOperationValidator,
-)
-from aws_durable_execution_sdk_python_testing.checkpoint.validators.transitions import (
-    ValidActionsByOperationTypeValidator,
+    VALID_ACTIONS_FOR_WAIT,
 )
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
@@ -47,6 +50,17 @@ MAX_ERROR_PAYLOAD_SIZE_BYTES = 32768
 
 class CheckpointValidator:
     """Validates checkpoint input based on current state."""
+
+    _VALID_ACTIONS_BY_OPERATION_TYPE: ClassVar[
+        dict[OperationType, frozenset[OperationAction]]
+    ] = {
+        OperationType.STEP: VALID_ACTIONS_FOR_STEP,
+        OperationType.CONTEXT: VALID_ACTIONS_FOR_CONTEXT,
+        OperationType.WAIT: VALID_ACTIONS_FOR_WAIT,
+        OperationType.CALLBACK: VALID_ACTIONS_FOR_CALLBACK,
+        OperationType.CHAINED_INVOKE: VALID_ACTIONS_FOR_INVOKE,
+        OperationType.EXECUTION: VALID_ACTIONS_FOR_EXECUTION,
+    }
 
     @staticmethod
     def validate_input(updates: list[OperationUpdate], execution: Execution) -> None:
@@ -86,7 +100,7 @@ class CheckpointValidator:
         """Validate a single operation update."""
         CheckpointValidator._validate_inconsistent_operation_metadata(update, execution)
         CheckpointValidator._validate_payload_sizes(update)
-        ValidActionsByOperationTypeValidator.validate(
+        CheckpointValidator._validate_valid_action_for_type(
             update.operation_type, update.action
         )
         CheckpointValidator._validate_operation_status_transition(update, execution)
@@ -99,6 +113,21 @@ class CheckpointValidator:
             if len(payload) > MAX_ERROR_PAYLOAD_SIZE_BYTES:
                 msg: str = f"Error object size must be less than {MAX_ERROR_PAYLOAD_SIZE_BYTES} bytes."
                 raise InvalidParameterValueException(msg)
+
+    @staticmethod
+    def _validate_valid_action_for_type(
+        operation_type: OperationType, action: OperationAction
+    ) -> None:
+        """Reject the checkpoint if the action is not valid for the type."""
+        valid_actions: frozenset[OperationAction] | None = (
+            CheckpointValidator._VALID_ACTIONS_BY_OPERATION_TYPE.get(operation_type)
+        )
+        if valid_actions is None:
+            msg_unknown_op: str = "Unknown operation type."
+            raise InvalidParameterValueException(msg_unknown_op)
+        if action not in valid_actions:
+            msg_invalid_action: str = "Invalid action for the given operation type."
+            raise InvalidParameterValueException(msg_invalid_action)
 
     @staticmethod
     def _validate_operation_status_transition(

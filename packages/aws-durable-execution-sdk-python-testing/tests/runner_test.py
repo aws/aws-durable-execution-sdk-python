@@ -718,7 +718,9 @@ def test_durable_function_test_runner_init(
     mock_store.assert_called_once()
     mock_processor.assert_called_once()
     mock_client.assert_called_once()
-    mock_invoker.assert_called_once_with(handler, mock_client.return_value)
+    mock_invoker.assert_called_once_with(
+        handler, mock_client.return_value, max_page_bytes=5 * 1024 * 1024
+    )
     mock_executor.assert_called_once()
 
     # Verify observer pattern setup
@@ -796,7 +798,7 @@ def test_durable_function_test_runner_run(mock_store_class, mock_executor_class)
     assert start_input.account_id == "123456789012"
 
     # Verify wait_until_complete was called
-    mock_executor.wait_until_complete.assert_called_once_with("test-arn", 900)
+    mock_executor.wait_until_complete.assert_called_once_with("test-arn", 300)
 
     # Verify store.load was called
     mock_store.load.assert_called_once_with("test-arn")
@@ -992,7 +994,9 @@ def test_durable_context_test_runner_init(
     mock_store.assert_called_once()
     mock_processor.assert_called_once()
     mock_client.assert_called_once()
-    mock_invoker.assert_called_once_with(decorated_handler, mock_client.return_value)
+    mock_invoker.assert_called_once_with(
+        decorated_handler, mock_client.return_value, max_page_bytes=5 * 1024 * 1024
+    )
     mock_executor.assert_called_once()
 
     # Verify observer pattern setup
@@ -1043,7 +1047,9 @@ def test_durable_child_context_test_runner_init_with_args(
     mock_store.assert_called_once()
     mock_processor.assert_called_once()
     mock_client.assert_called_once()
-    mock_invoker.assert_called_once_with(decorated_handler, mock_client.return_value)
+    mock_invoker.assert_called_once_with(
+        decorated_handler, mock_client.return_value, max_page_bytes=5 * 1024 * 1024
+    )
     mock_executor.assert_called_once()
 
     # Verify observer pattern setup
