@@ -26,7 +26,7 @@ def test_handle_wait_for_callback_timeout_scenarios(durable_runner):
         result = durable_runner.wait_for_result(execution_arn=execution_arn)
 
     # Handler catches the timeout error, so execution succeeds with error in result.
-    assert result.status == InvocationStatus.SUCCEEDED
+    assert result.status is InvocationStatus.SUCCEEDED
 
     result_data = deserialize_operation_payload(result.result)
 
@@ -38,11 +38,11 @@ def test_handle_wait_for_callback_timeout_scenarios(durable_runner):
     callback_operations = [
         operation
         for operation in result.get_all_operations()
-        if operation.operation_type == OperationType.CALLBACK
+        if operation.operation_type is OperationType.CALLBACK
     ]
 
     assert callback_operations
     assert any(
-        operation.status == OperationStatus.TIMED_OUT
+        operation.status is OperationStatus.TIMED_OUT
         for operation in callback_operations
     )
