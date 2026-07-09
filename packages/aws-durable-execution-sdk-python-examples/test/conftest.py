@@ -106,7 +106,14 @@ class TestRunnerAdapter:
         input: str | None = None,  # noqa: A002
         timeout: int = 60,
     ) -> DurableFunctionTestResult:
-        """Execute the durable function and return results."""
+        """Execute the durable function and return results.
+
+        The caller's ``timeout`` is the execution deadline. Local runs
+        pass it as ``execution_timeout``; cloud runs pass it as the
+        runner's ``timeout``.
+        """
+        if isinstance(self._runner, DurableFunctionTestRunner):
+            return self._runner.run(input=input, execution_timeout=timeout)
         return self._runner.run(input=input, timeout=timeout)
 
     def run_async(
@@ -114,6 +121,8 @@ class TestRunnerAdapter:
         input: str | None = None,  # noqa: A002
         timeout: int = 60,
     ) -> str:
+        if isinstance(self._runner, DurableFunctionTestRunner):
+            return self._runner.run_async(input=input, execution_timeout=timeout)
         return self._runner.run_async(input=input, timeout=timeout)
 
     def send_callback_success(
@@ -222,7 +231,7 @@ def durable_runner(request):
         if not handler:
             pytest.fail("handler is required for local mode tests")
         # Create local runner (needs cleanup via context manager)
-        runner = DurableFunctionTestRunner(handler=handler)
+        runner = DurableFunctionTestRunner(handler=handler, execution_timeout=60)
 
     # Wrap in adapter and use context manager for proper cleanup
     with TestRunnerAdapter(runner, runner_mode) as adapter:

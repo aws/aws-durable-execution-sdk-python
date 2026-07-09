@@ -681,7 +681,9 @@ def test_should_create_all_required_dependencies_during_start():
         # Assert - Verify all dependencies were created
         mock_store_class.assert_called_once()
         mock_scheduler_class.assert_called_once()
-        mock_invoker_class.assert_called_once_with(mock_client)
+        mock_invoker_class.assert_called_once_with(
+            mock_client, max_page_bytes=5 * 1024 * 1024
+        )
         # Verify Executor was called with the expected parameters including checkpoint_processor
         assert mock_executor_class.call_count == 1
         call_args = mock_executor_class.call_args
@@ -775,7 +777,9 @@ def test_should_pass_correct_boto3_client_to_lambda_invoker():
         )
 
         # Verify LambdaInvoker was created with the client
-        mock_invoker_class.assert_called_once_with(mock_client)
+        mock_invoker_class.assert_called_once_with(
+            mock_client, max_page_bytes=5 * 1024 * 1024
+        )
 
         # Cleanup
         runner.stop()

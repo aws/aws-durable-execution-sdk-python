@@ -74,12 +74,11 @@ class WaitProcessor(OperationProcessor):
                     chained_invoke_details=None,
                 )
 
-                # Schedule wait timer to complete after delay
-                notifier.notify_wait_timer_scheduled(
-                    execution_arn=execution_arn,
-                    operation_id=update.operation_id,
-                    delay=scaled_wait_seconds,
-                )
+                # Timer scheduling is handled centrally by
+                # Executor._schedule_earliest_pending. The processor
+                # only needs to set wait_details.scheduled_end_timestamp;
+                # the executor finds the earliest pending wake across
+                # all ops and arms a single timer.
                 return wait_operation
             case OperationAction.CANCEL:
                 # TODO: need to cancel the WAIT in the executor

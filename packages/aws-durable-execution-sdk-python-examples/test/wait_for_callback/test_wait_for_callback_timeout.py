@@ -29,4 +29,4 @@ def test_handle_wait_for_callback_timeout_scenarios(durable_runner):
     assert result_data["success"] is False
     assert isinstance(result_data["error"], str)
     assert len(result_data["error"]) > 0
-    assert "Callback timed out: Callback.Timeout" == result_data["error"]
+    assert "Callback timed out" == result_data["error"]

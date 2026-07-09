@@ -16,11 +16,15 @@ from aws_durable_execution_sdk_python.execution import (
     InitialExecutionState,
 )
 
+from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
+    DEFAULT_MAX_INVOCATION_PAGE_BYTES,
+)
 from aws_durable_execution_sdk_python_testing.exceptions import (
     DurableFunctionsTestError,
     InvalidParameterValueException,
     ResourceNotFoundException,
 )
+from aws_durable_execution_sdk_python_testing.execution import OperationPaginatorState
 from aws_durable_execution_sdk_python_testing.model import LambdaContext
 
 
@@ -106,20 +110,28 @@ class Invoker(Protocol):
 
 
 class InProcessInvoker(Invoker):
-    def __init__(self, handler: Callable, service_client: InMemoryServiceClient):
+    def __init__(
+        self,
+        handler: Callable,
+        service_client: InMemoryServiceClient,
+        max_page_bytes: int = DEFAULT_MAX_INVOCATION_PAGE_BYTES,
+    ):
         self.handler = handler
         self.service_client = service_client
+        self._max_page_bytes = max_page_bytes
 
     def create_invocation_input(
         self, execution: Execution
     ) -> DurableExecutionInvocationInput:
+        paginator = OperationPaginatorState.pin(execution)
+        page_operations, next_marker = paginator.page(None, self._max_page_bytes)
         return DurableExecutionInvocationInputWithClient(
             durable_execution_arn=execution.durable_execution_arn,
             # TODO: this needs better logic - use existing if not used yet, vs create new
             checkpoint_token=execution.get_new_checkpoint_token(),
             initial_execution_state=InitialExecutionState(
-                operations=execution.operations,
-                next_marker="",
+                operations=page_operations,
+                next_marker=next_marker or "",
             ),
             updated_operation_ids=list(execution.updated_operation_ids),
             service_client=self.service_client,
@@ -147,8 +159,13 @@ class InProcessInvoker(Invoker):
 
 
 class LambdaInvoker(Invoker):
-    def __init__(self, lambda_client: Any) -> None:
+    def __init__(
+        self,
+        lambda_client: Any,
+        max_page_bytes: int = DEFAULT_MAX_INVOCATION_PAGE_BYTES,
+    ) -> None:
         self.lambda_client = lambda_client
+        self._max_page_bytes = max_page_bytes
         # Maps execution_arn -> endpoint for that execution
         # Maps endpoint -> client to reuse clients across executions
         self._execution_endpoints: dict[str, str] = {}
@@ -157,9 +174,16 @@ class LambdaInvoker(Invoker):
         self._lock = Lock()
 
     @staticmethod
-    def create(endpoint_url: str, region_name: str) -> LambdaInvoker:
+    def create(
+        endpoint_url: str,
+        region_name: str,
+        max_page_bytes: int = DEFAULT_MAX_INVOCATION_PAGE_BYTES,
+    ) -> LambdaInvoker:
         """Create with the boto lambda client."""
-        invoker = LambdaInvoker(create_lambda_client(endpoint_url, region_name))
+        invoker = LambdaInvoker(
+            create_lambda_client(endpoint_url, region_name),
+            max_page_bytes=max_page_bytes,
+        )
         invoker._current_endpoint = endpoint_url
         invoker._endpoint_clients[endpoint_url] = invoker.lambda_client
         return invoker
@@ -209,12 +233,14 @@ class LambdaInvoker(Invoker):
     def create_invocation_input(
         self, execution: Execution
     ) -> DurableExecutionInvocationInput:
+        paginator = OperationPaginatorState.pin(execution)
+        page_operations, next_marker = paginator.page(None, self._max_page_bytes)
         return DurableExecutionInvocationInput(
             durable_execution_arn=execution.durable_execution_arn,
             checkpoint_token=execution.get_new_checkpoint_token(),
             initial_execution_state=InitialExecutionState(
-                operations=execution.operations,
-                next_marker="",
+                operations=page_operations,
+                next_marker=next_marker or "",
             ),
             updated_operation_ids=list(execution.updated_operation_ids),
         )

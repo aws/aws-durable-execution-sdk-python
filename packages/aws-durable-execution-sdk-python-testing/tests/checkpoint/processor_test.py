@@ -19,8 +19,14 @@ from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
 )
 from aws_durable_execution_sdk_python_testing.execution import Execution
+from aws_durable_execution_sdk_python_testing.model import (
+    StartDurableExecutionInput,
+)
 from aws_durable_execution_sdk_python_testing.scheduler import Scheduler
 from aws_durable_execution_sdk_python_testing.stores.base import ExecutionStore
+from aws_durable_execution_sdk_python_testing.stores.memory import (
+    InMemoryExecutionStore,
+)
 from aws_durable_execution_sdk_python_testing.token import CheckpointToken
 
 
@@ -59,65 +65,51 @@ def test_add_execution_observer(mock_notifier_class):
     mock_notifier_instance.add_observer.assert_called_once_with(observer)
 
 
-@patch(
-    "aws_durable_execution_sdk_python_testing.checkpoint.processor.CheckpointValidator"
-)
-@patch(
-    "aws_durable_execution_sdk_python_testing.checkpoint.processor.OperationTransformer"
-)
-def test_process_checkpoint_success(mock_transformer_class, mock_validator):
-    """Test successful checkpoint processing."""
-    # Setup mocks
-    store = Mock(spec=ExecutionStore)
-    scheduler = Mock(spec=Scheduler)
-    mock_transformer_instance = Mock()
-    mock_transformer_class.return_value = mock_transformer_instance
+def test_process_checkpoint_success():
+    """End-to-end successful checkpoint through CheckpointProcessor.
 
+    Uses real Execution + InMemoryExecutionStore; no mocks on internal
+    dispatch because flow goes pin -> delta -> advance, which
+    is meaningless against Mock state.
+    """
+    store = InMemoryExecutionStore()
+    scheduler = Mock(spec=Scheduler)
     processor = CheckpointProcessor(store, scheduler)
 
-    # Mock execution
-    execution = Mock(spec=Execution)
-    execution.is_complete = False
-    execution.token_sequence = 1
-    execution.operations = []
-    execution.updates = []
-    execution.get_new_checkpoint_token.return_value = "new-token"
-    execution.get_navigable_operations.return_value = []
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="test-inv-id",
+    )
+    execution = Execution.new(start_input)
+    execution.start()
+    store.save(execution)
 
-    store.load.return_value = execution
+    token = CheckpointToken(
+        execution_arn=execution.durable_execution_arn, token_sequence=0
+    ).to_str()
 
-    # Mock transformer
-    mock_transformer_instance.process_updates.return_value = ([], [])
-
-    # Test data
-    checkpoint_token = "test-token"  # noqa: S105
     updates = [
         OperationUpdate(
-            operation_id="test-id",
+            operation_id="step-A",
             operation_type=OperationType.STEP,
             action=OperationAction.START,
+            name="step-A",
         )
     ]
 
-    # Mock token parsing
-    with patch.object(CheckpointToken, "from_str") as mock_from_str:
-        mock_token = Mock()
-        mock_token.execution_arn = "arn:test"
-        mock_token.token_sequence = 1
-        mock_from_str.return_value = mock_token
+    result = processor.process_checkpoint(token, updates, "client-token")
 
-        result = processor.process_checkpoint(checkpoint_token, updates, "client-token")
-
-    # Verify calls
-    store.load.assert_called_once_with("arn:test")
-    mock_validator.validate_input.assert_called_once_with(updates, execution)
-    mock_transformer_instance.process_updates.assert_called_once()
-    store.update.assert_called_once_with(execution)
-
-    # Verify result
     assert isinstance(result, CheckpointOutput)
-    assert result.checkpoint_token == "new-token"  # noqa: S105
     assert isinstance(result.new_execution_state, CheckpointUpdatedExecutionState)
+    # The freshly-started STEP op is the delta.
+    assert any(
+        op.operation_id == "step-A" for op in result.new_execution_state.operations
+    )
 
 
 @patch(
@@ -133,6 +125,7 @@ def test_process_checkpoint_invalid_token_complete_execution(mock_validator):
     execution = Mock(spec=Execution)
     execution.is_complete = True
     execution.token_sequence = 1
+    execution.last_checkpoint = None  # no cached replay
 
     store.load.return_value = execution
 
@@ -164,6 +157,7 @@ def test_process_checkpoint_invalid_token_sequence(mock_validator):
     execution = Mock(spec=Execution)
     execution.is_complete = False
     execution.token_sequence = 2
+    execution.last_checkpoint = None
 
     store.load.return_value = execution
 
@@ -182,63 +176,45 @@ def test_process_checkpoint_invalid_token_sequence(mock_validator):
             processor.process_checkpoint(checkpoint_token, updates, "client-token")
 
 
-@patch(
-    "aws_durable_execution_sdk_python_testing.checkpoint.processor.CheckpointValidator"
-)
-@patch(
-    "aws_durable_execution_sdk_python_testing.checkpoint.processor.OperationTransformer"
-)
-def test_process_checkpoint_updates_execution_state(
-    mock_transformer_class, mock_validator
-):
-    """Test that checkpoint processing updates execution state correctly."""
-    store = Mock(spec=ExecutionStore)
+def test_process_checkpoint_updates_execution_state():
+    """Test that checkpoint processing applies updates and advances
+    token_sequence. Uses real state because mocking the dispatcher
+    internals no longer tracks the delta semantics."""
+    store = InMemoryExecutionStore()
     scheduler = Mock(spec=Scheduler)
-    mock_transformer_instance = Mock()
-    mock_transformer_class.return_value = mock_transformer_instance
-
     processor = CheckpointProcessor(store, scheduler)
 
-    # Mock execution
-    execution = Mock(spec=Execution)
-    execution.is_complete = False
-    execution.token_sequence = 1
-    execution.operations = []
-    execution.updates = []
-    execution.get_new_checkpoint_token.return_value = "new-token"
-    execution.get_navigable_operations.return_value = []
-
-    store.load.return_value = execution
-
-    # Mock transformer to return updated operations and updates
-    updated_operations = [Mock()]
-    all_updates = [Mock()]
-    mock_transformer_instance.process_updates.return_value = (
-        updated_operations,
-        all_updates,
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="test-inv-id",
     )
+    execution = Execution.new(start_input)
+    execution.start()
+    store.save(execution)
 
-    checkpoint_token = "test-token"  # noqa: S105
+    token = CheckpointToken(
+        execution_arn=execution.durable_execution_arn, token_sequence=0
+    ).to_str()
+
     updates = [
         OperationUpdate(
             operation_id="test-id",
             operation_type=OperationType.STEP,
             action=OperationAction.START,
+            name="test-id",
         )
     ]
 
-    with patch.object(CheckpointToken, "from_str") as mock_from_str:
-        mock_token = Mock()
-        mock_token.execution_arn = "arn:test"
-        mock_token.token_sequence = 1
-        mock_from_str.return_value = mock_token
+    processor.process_checkpoint(token, updates, "client-token")
 
-        processor.process_checkpoint(checkpoint_token, updates, "client-token")
-
-    # Verify execution state was updated
-    assert execution.operations == updated_operations
-    # Check that updates were extended (execution.updates is a real list)
-    assert len(execution.updates) == len(all_updates)
+    refreshed = store.load(execution.durable_execution_arn)
+    assert refreshed.token_sequence == 1
+    assert any(op.operation_id == "test-id" for op in refreshed.operations)
 
 
 def test_get_execution_state():
@@ -293,3 +269,98 @@ def test_get_execution_state_default_max_items():
         result = processor.get_execution_state(checkpoint_token, "next-marker")
 
     assert isinstance(result, StateOutput)
+
+
+def test_process_checkpoint_idempotent_replay():
+    """Covers the in-process _maybe_replay_cached path. Two calls with
+    the same (client_token, inbound_checkpoint_token) return the same
+    outbound token and operations list."""
+    store = InMemoryExecutionStore()
+    scheduler = Mock(spec=Scheduler)
+    processor = CheckpointProcessor(store, scheduler)
+
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="inv-idem",
+    )
+    execution = Execution.new(start_input)
+    execution.start()
+    store.save(execution)
+
+    inbound = CheckpointToken(
+        execution_arn=execution.durable_execution_arn, token_sequence=0
+    ).to_str()
+    updates = [
+        OperationUpdate(
+            operation_id="step-A",
+            operation_type=OperationType.STEP,
+            action=OperationAction.START,
+            name="step-A",
+        )
+    ]
+
+    r1 = processor.process_checkpoint(inbound, updates, "c1")
+    r2 = processor.process_checkpoint(inbound, updates, "c1")
+
+    assert r1.checkpoint_token == r2.checkpoint_token
+    # token_sequence didn't double-advance: replay returned the
+    # cached response without applying updates again.
+    assert store.load(execution.durable_execution_arn).token_sequence == 1
+
+
+def test_checkpoint_from_superseded_invocation_is_rejected():
+    """A checkpoint carrying a prior invocation's token is rejected once
+    a new invocation has been dispatched.
+
+    Reproduces the case where a handler outlives its deadline: the
+    runner dispatches a fresh invocation, and the earlier invocation
+    that is still running must not be able to checkpoint against the
+    live execution.
+    """
+    store = InMemoryExecutionStore()
+    scheduler = Mock(spec=Scheduler)
+    processor = CheckpointProcessor(store, scheduler)
+
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="test-inv-id",
+    )
+    execution = Execution.new(start_input)
+    execution.start()
+
+    # First invocation is dispatched; capture the token handed to it.
+    execution.begin_new_invocation()
+    store.save(execution)
+    stale_token = execution.get_new_checkpoint_token()
+
+    # A new invocation supersedes the first (e.g. after a timeout).
+    execution.begin_new_invocation()
+    store.save(execution)
+    current_token = execution.get_new_checkpoint_token()
+
+    updates = [
+        OperationUpdate(
+            operation_id="step-A",
+            operation_type=OperationType.STEP,
+            action=OperationAction.START,
+            name="step-A",
+        )
+    ]
+
+    # The superseded invocation's checkpoint is rejected.
+    with pytest.raises(InvalidParameterValueException):
+        processor.process_checkpoint(stale_token, updates, "client-token")
+
+    # The current invocation's checkpoint is accepted.
+    result = processor.process_checkpoint(current_token, updates, "client-token")
+    assert isinstance(result, CheckpointOutput)

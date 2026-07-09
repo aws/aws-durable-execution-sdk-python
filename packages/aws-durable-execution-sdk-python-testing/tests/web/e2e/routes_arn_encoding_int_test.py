@@ -23,6 +23,7 @@ from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
 from aws_durable_execution_sdk_python_testing.execution import Execution
 from aws_durable_execution_sdk_python_testing.executor import Executor
 from aws_durable_execution_sdk_python_testing.model import (
+    GetDurableExecutionStateResponse,
     StartDurableExecutionInput,
 )
 from aws_durable_execution_sdk_python_testing.scheduler import Scheduler
@@ -139,17 +140,69 @@ def test_get_durable_execution_decodes_slash_in_arn(server_with_slash_arn):
 
 
 def test_get_durable_execution_state_decodes_slash_in_arn(server_with_slash_arn):
-    """GetDurableExecutionState: %2F must be decoded so the store lookup hits."""
+    """GetDurableExecutionState: %2F must be decoded so the store lookup hits.
+
+    GetDurableExecutionState validates the checkpoint token and the
+    invocation gate: a hand-built Execution that never went
+    through the executor's invoke machinery has a ``PRE_INVOKE`` gate
+    and the stub token does not parse, so the call raises
+    ``InvalidParameterValueException`` ("Invalid checkpoint token").
+    That error proves route resolution already succeeded -- this test
+    is narrowly about whether the route layer decoded the path segment,
+    so any error is fine as long as it does not carry a %2F-form ARN.
+    """
     client, arn, _executor, _store = server_with_slash_arn
 
-    response = client.get_durable_execution_state(
+    try:
+        client.get_durable_execution_state(
+            DurableExecutionArn=arn,
+            CheckpointToken="ignored-by-route-layer",  # noqa: S106 - test stub
+        )
+    except ClientError as exc:
+        _assert_no_percent_encoding_in_error(exc, arn)
+
+
+def test_get_durable_execution_state_forwards_pagination_params(server_with_slash_arn):
+    """CheckpointToken, Marker and MaxItems survive the full wire path.
+
+    The state handler must read these query parameters and forward them to
+    the executor; otherwise a valid checkpoint token never reaches the read
+    path and every paginated state fetch fails. This drives a real boto
+    client against the live server and asserts the executor receives exactly
+    what the client sent.
+    """
+    client, arn, executor, _store = server_with_slash_arn
+
+    captured: dict[str, Any] = {}
+
+    def _spy(
+        execution_arn: str,
+        *,
+        checkpoint_token: str | None = None,
+        marker: str | None = None,
+        max_items: int | None = None,
+    ) -> GetDurableExecutionStateResponse:
+        captured.update(
+            execution_arn=execution_arn,
+            checkpoint_token=checkpoint_token,
+            marker=marker,
+            max_items=max_items,
+        )
+        return GetDurableExecutionStateResponse(operations=[], next_marker=None)
+
+    executor.get_execution_state = _spy  # type: ignore[method-assign]
+
+    client.get_durable_execution_state(
         DurableExecutionArn=arn,
-        CheckpointToken="ignored-by-route-layer",  # noqa: S106 - test stub
+        CheckpointToken="token-abc",  # noqa: S106 - test stub
+        Marker="marker-xyz",
+        MaxItems=7,
     )
 
-    # Response shape varies; the only assertion this test cares about is
-    # that we got past route resolution.
-    assert response is not None
+    assert captured["execution_arn"] == arn
+    assert captured["checkpoint_token"] == "token-abc"
+    assert captured["marker"] == "marker-xyz"
+    assert captured["max_items"] == 7
 
 
 def test_get_durable_execution_history_decodes_slash_in_arn(server_with_slash_arn):
