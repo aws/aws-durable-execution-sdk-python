@@ -34,6 +34,7 @@ from aws_durable_execution_sdk_python_testing.runner import (
     CallbackOperation,
     ContextOperation,
     DurableChildContextTestRunner,
+    DurableFunctionCloudTestRunner,
     DurableFunctionTestResult,
     DurableFunctionTestRunner,
     ExecutionOperation,
@@ -1963,10 +1964,6 @@ def test_cloud_runner_wait_for_callback_waits_for_invocation(mock_boto3):
 @patch("aws_durable_execution_sdk_python_testing.runner.boto3")
 def test_cloud_runner_wait_for_callback_with_paginated_long_history(mock_boto3):
     """Test cloud callback lookup follows history pagination."""
-    from aws_durable_execution_sdk_python_testing.runner import (
-        DurableFunctionCloudTestRunner,
-    )
-
     mock_client = Mock()
     mock_boto3.client.return_value = mock_client
 
@@ -2007,10 +2004,6 @@ def test_cloud_runner_wait_for_callback_with_paginated_long_history(mock_boto3):
 @patch("aws_durable_execution_sdk_python_testing.runner.boto3")
 def test_cloud_runner_wait_for_result_with_paginated_child_context_history(mock_boto3):
     """Test cloud result construction follows history pagination."""
-    from aws_durable_execution_sdk_python_testing.runner import (
-        DurableFunctionCloudTestRunner,
-    )
-
     mock_client = Mock()
     mock_boto3.client.return_value = mock_client
 
