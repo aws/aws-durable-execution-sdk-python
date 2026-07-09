@@ -637,12 +637,16 @@ class OperationPaginatorState:
         self,
         marker: str | None,
         max_size_bytes: int,
+        max_items: int | None = None,
     ) -> tuple[list[Operation], str | None]:
         """Return a page of ops starting after ``marker``, bounded by
-        ``max_size_bytes``. Second element of the tuple is a marker for
-        the next page, or ``None`` when the page fits everything."""
+        ``max_size_bytes`` and, when given, ``max_items``. Second element
+        of the tuple is a marker for the next page, or ``None`` when the
+        page fits everything."""
         start_idx = self._resolve_marker(marker)
-        return self._walk_page(self.snapshot_operations, start_idx, max_size_bytes)
+        return self._walk_page(
+            self.snapshot_operations, start_idx, max_size_bytes, max_items
+        )
 
     def unseen_operations(self) -> list[Operation]:
         """Operations whose ``operation_last_touched_seq`` is strictly
@@ -675,13 +679,16 @@ class OperationPaginatorState:
         ops: list[Operation],
         start_idx: int,
         max_size_bytes: int,
+        max_items: int | None = None,
     ) -> tuple[list[Operation], str | None]:
         selected: list[Operation] = []
         total = 0
         for i in range(start_idx, len(ops)):
             op = ops[i]
             size = self._size_for(op)
-            if selected and total + size > max_size_bytes:
+            over_bytes: bool = total + size > max_size_bytes
+            over_count: bool = max_items is not None and len(selected) >= max_items
+            if selected and (over_bytes or over_count):
                 return selected, self._encode_marker(i)
             selected.append(op)
             total += size

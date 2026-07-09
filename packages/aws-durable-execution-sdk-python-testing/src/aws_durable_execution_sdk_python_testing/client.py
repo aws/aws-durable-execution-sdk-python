@@ -37,11 +37,10 @@ class InMemoryServiceClient(DurableServiceClient):
         updates: list[OperationUpdate],
         client_token: str | None,
     ) -> CheckpointOutput:
-        worker = self._registry.get_or_create(durable_execution_arn)
         task = CheckpointTask(
             self._checkpoint_processor, checkpoint_token, updates, client_token
         )
-        return worker.submit(task).result()
+        return self._registry.submit(durable_execution_arn, task).result()
 
     def get_execution_state(
         self,
@@ -50,11 +49,10 @@ class InMemoryServiceClient(DurableServiceClient):
         next_marker: str,
         max_items: int = 1000,
     ) -> StateOutput:
-        worker = self._registry.get_or_create(durable_execution_arn)
         task = GetStateTask(
             self._checkpoint_processor, checkpoint_token, next_marker, max_items
         )
-        return worker.submit(task).result()
+        return self._registry.submit(durable_execution_arn, task).result()
 
     def stop(self, execution_arn: str, payload: bytes | None) -> datetime.datetime:  # noqa: ARG002
         # TODO: implement

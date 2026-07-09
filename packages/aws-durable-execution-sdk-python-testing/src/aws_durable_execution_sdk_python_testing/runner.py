@@ -652,6 +652,7 @@ class DurableFunctionTestRunner:
         self.close()
 
     def close(self):
+        self._registry.shutdown()
         self._scheduler.stop()
 
     def run(
@@ -766,6 +767,7 @@ class DurableFunctionTestRunner:
                 if callback_id:
                     return callback_id
             except ResourceNotFoundException:
+                # Execution may not be visible yet during async invoke.
                 pass
             except Exception as e:
                 msg = f"Failed to fetch execution history: {e}"
@@ -776,7 +778,7 @@ class DurableFunctionTestRunner:
 
         # Timeout reached
         elapsed = time.time() - start_time
-        msg = f"Callback did not available within {timeout}s (elapsed: {elapsed:.1f}s."
+        msg = f"Callback did not become available within {timeout}s (elapsed: {elapsed:.1f}s)."
         raise TimeoutError(msg)
 
 
@@ -812,6 +814,7 @@ class WebRunner:
         self._store: ExecutionStore | None = None
         self._invoker: LambdaInvoker | None = None
         self._executor: Executor | None = None
+        self._registry: ExecutionRegistry | None = None
 
     def __enter__(self) -> Self:
         """Context manager entry point.
@@ -868,7 +871,7 @@ class WebRunner:
 
         # Create shared CheckpointProcessor
         checkpoint_processor = CheckpointProcessor(self._store, self._scheduler)
-        registry = ExecutionRegistry(self._store, self._scheduler)
+        self._registry = ExecutionRegistry(self._store, self._scheduler)
 
         # Create executor with all dependencies including checkpoint processor
         self._executor = Executor(
@@ -878,7 +881,7 @@ class WebRunner:
             checkpoint_processor=checkpoint_processor,
             max_invocation_page_bytes=resolved_max_page_bytes,
             invocation_timeout_seconds=self._config.invocation_timeout_seconds,
-            registry=registry,
+            registry=self._registry,
         )
 
         # Add executor as observer to the checkpoint processor
@@ -924,6 +927,13 @@ class WebRunner:
                 logger.exception("error closing web server")
 
             self._server = None
+
+        if self._registry is not None:
+            try:
+                self._registry.shutdown()
+            except Exception:
+                logger.exception("error stopping execution registry")
+            self._registry = None
 
         if self._scheduler is not None:
             try:
@@ -1239,7 +1249,7 @@ class DurableFunctionCloudTestRunner:
 
         # Timeout reached
         elapsed = time.time() - start_time
-        msg = f"Callback did not available within {timeout}s (elapsed: {elapsed:.1f}s."
+        msg = f"Callback did not become available within {timeout}s (elapsed: {elapsed:.1f}s)."
         raise TimeoutError(msg)
 
     def _fetch_execution_history(

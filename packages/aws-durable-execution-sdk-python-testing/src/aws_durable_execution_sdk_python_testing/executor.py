@@ -6,7 +6,6 @@ import asyncio
 import logging
 import threading
 import uuid
-from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -34,16 +33,12 @@ from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
 from aws_durable_execution_sdk_python_testing.checkpoint.transformer import (
     CheckpointRequestDispatcher,
 )
-from aws_durable_execution_sdk_python_testing.checkpoint.validators.checkpoint import (
-    CheckpointValidator,
-)
 from aws_durable_execution_sdk_python_testing.exceptions import (
     IllegalStateException,
     InvalidParameterValueException,
     ResourceNotFoundException,
 )
 from aws_durable_execution_sdk_python_testing.execution import (
-    CheckpointIdempotencyRecord,
     Execution,
     OperationPaginatorState,
 )
@@ -89,9 +84,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from concurrent.futures import Future
 
-    from aws_durable_execution_sdk_python_testing.checkpoint.effects import (
-        CheckpointEffect,
-    )
     from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
         CheckpointProcessor,
     )
@@ -108,6 +100,10 @@ logger = logging.getLogger(__name__)
 class Executor(ExecutionObserver):
     MAX_CONSECUTIVE_FAILED_ATTEMPTS: int = 5
     RETRY_BACKOFF_SECONDS: int = 5
+    # GetDurableExecutionState page-count bounds, mirroring the service
+    # (default 100, hard cap 1000 operations per page).
+    DEFAULT_STATE_PAGE_MAX_ITEMS: int = 100
+    MAX_STATE_PAGE_MAX_ITEMS: int = 1000
 
     def __init__(
         self,
@@ -379,11 +375,10 @@ class Executor(ExecutionObserver):
         Raises:
             ResourceNotFoundException: If execution does not exist
         """
-        return (
-            self._registry.get_or_create(execution_arn)
-            .submit(CallableTask(lambda: self._apply_stop(execution_arn, error)))
-            .result()
-        )
+        return self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._apply_stop(execution_arn, error)),
+        ).result()
 
     def _apply_stop(
         self, execution_arn: str, error: ErrorObject | None
@@ -402,7 +397,7 @@ class Executor(ExecutionObserver):
         )
 
         # Stop sets TERMINATED close status (different from fail)
-        logger.exception("[%s] Stopping execution.", execution_arn)
+        logger.info("[%s] Stopping execution.", execution_arn)
         execution.complete_stopped(error=stop_error)  # Sets CloseStatus.TERMINATED
         self._store.update(execution)
         self._complete_events(execution_arn=execution_arn)
@@ -417,31 +412,31 @@ class Executor(ExecutionObserver):
         max_items: int | None = None,
     ) -> GetDurableExecutionStateResponse:
         """Return a page of operations, serialized on the execution's worker."""
-        worker = self._registry.get_or_create(execution_arn)
-        return (
-            self._registry.get_or_create(execution_arn)
-            .submit(
-                CallableTask(
-                    lambda: self._get_execution_state(
-                        execution_arn, checkpoint_token, marker, max_items
-                    )
+        return self._registry.submit(
+            execution_arn,
+            CallableTask(
+                lambda: self._get_execution_state(
+                    execution_arn, checkpoint_token, marker, max_items
                 )
-            )
-            .result()
-        )
+            ),
+        ).result()
 
     def _get_execution_state(
         self,
         execution_arn: str,
         checkpoint_token: str | None = None,
         marker: str | None = None,
-        max_items: int | None = None,  # noqa: ARG002 — kept for API compat; page is byte-bounded
+        max_items: int | None = None,
     ) -> GetDurableExecutionStateResponse:
         """Return a page of operations from the pinned snapshot.
 
         Valid only while the execution is ``INVOKING``. The
         call is a pure read: no ``handler_seen_seq`` advance,
         no ``token_sequence`` bump, no idempotency mutation.
+
+        The page is bounded by both the invocation byte budget and
+        ``max_items`` (clamped to the service's per-page count bounds),
+        matching the service's dual byte-and-count paging.
 
         Raises:
             ResourceNotFoundException: execution does not exist.
@@ -461,8 +456,15 @@ class Executor(ExecutionObserver):
             msg = "Invalid checkpoint token"
             raise InvalidParameterValueException(msg)
 
+        resolved_max_items: int = (
+            self.DEFAULT_STATE_PAGE_MAX_ITEMS
+            if max_items is None
+            else max(1, min(max_items, self.MAX_STATE_PAGE_MAX_ITEMS))
+        )
         paginator = OperationPaginatorState.pin(execution)
-        ops, next_marker = paginator.page(marker, self._max_invocation_page_bytes)
+        ops, next_marker = paginator.page(
+            marker, self._max_invocation_page_bytes, resolved_max_items
+        )
 
         return GetDurableExecutionStateResponse(operations=ops, next_marker=next_marker)
 
@@ -790,13 +792,13 @@ class Executor(ExecutionObserver):
         Routes through the per-execution worker so checkpoints for one
         execution never overlap.
         """
-        worker = self._registry.get_or_create(execution_arn)
-        return worker.submit(
+        return self._registry.submit(
+            execution_arn,
             CallableTask(
                 lambda: self._checkpoint_execution(
                     execution_arn, checkpoint_token, updates, client_token
                 )
-            )
+            ),
         ).result()
 
     def _checkpoint_execution(
@@ -929,37 +931,6 @@ class Executor(ExecutionObserver):
     def _set_invocation_gate(self, arn: str, status: InvocationState) -> None:
         """Set the invocation gate on the execution's worker."""
         self._registry.get_or_create(arn).set_status(status)
-
-    def _release_gate(self, arn: str, to: InvocationState) -> None:
-        """Transition the invocation gate out of ``INVOKING``.
-
-        Called from ``_on_invoke_finished_ok`` (PENDING → PRE_INVOKE
-        or terminal → COMPLETED) and ``_handle_invoke_failure``
-        (FAILED → PRE_INVOKE so a retry can re-enter).
-        """
-        self._set_invocation_gate(arn, to)
-
-    def _cleanup_execution_state(self, arn: str) -> None:
-        """Tear down per-execution Executor-side state when an
-        execution reaches a terminal status. Removes entries from
-        ``_callback_timeouts`` and ``_callback_heartbeats`` and cancels
-        pending futures.
-        """
-        # Cancel and drop callback timers.
-        for callback_id in list(self._callback_timeouts):
-            future = self._callback_timeouts.get(callback_id)
-            if future is not None and not future.done():
-                future.cancel()
-        for callback_id in list(self._callback_heartbeats):
-            future = self._callback_heartbeats.get(callback_id)
-            if future is not None and not future.done():
-                future.cancel()
-        self._completion_events.pop(arn, None)
-        # Cancel the earliest-pending wake-up timer on terminal
-        # transitions — no further re-invokes needed.
-        pending = self._pending_wakeup.pop(arn, None)
-        if pending is not None and not pending.done():
-            pending.cancel()
 
     @staticmethod
     def _earliest_pending_timestamp(execution: Execution) -> datetime | None:
@@ -1119,8 +1090,9 @@ class Executor(ExecutionObserver):
             # and an invocation that force-checkpoints depends on this timer
             # to complete the wait or retry it is blocked on. Bridging
             # through the executor would deadlock.
-            future = self._registry.get_or_create(execution_arn).submit(
-                CallableTask(lambda: self._fire_due_operations(execution_arn))
+            future = self._registry.submit(
+                execution_arn,
+                CallableTask(lambda: self._fire_due_operations(execution_arn)),
             )
             completed_any = await asyncio.wrap_future(future)
             # Outside the lane: invoke and arm the next wake-up.
@@ -1155,10 +1127,11 @@ class Executor(ExecutionObserver):
         try:
             callback_token = CallbackToken.from_str(callback_id)
             arn = callback_token.execution_arn
-            self._registry.get_or_create(arn).submit(
+            self._registry.submit(
+                arn,
                 CallableTask(
                     lambda: self._complete_callback_success(callback_id, result)
-                )
+                ),
             ).result()
             self._invoke_execution(arn)
             logger.info("Callback success completed for callback_id: %s", callback_id)
@@ -1210,10 +1183,11 @@ class Executor(ExecutionObserver):
         try:
             callback_token: CallbackToken = CallbackToken.from_str(callback_id)
             arn = callback_token.execution_arn
-            self._registry.get_or_create(arn).submit(
+            self._registry.submit(
+                arn,
                 CallableTask(
                     lambda: self._complete_callback_failure(callback_id, callback_error)
-                )
+                ),
             ).result()
             self._invoke_execution(arn)
             logger.info("Callback failure completed for callback_id: %s", callback_id)
@@ -1254,8 +1228,9 @@ class Executor(ExecutionObserver):
         try:
             callback_token: CallbackToken = CallbackToken.from_str(callback_id)
             arn = callback_token.execution_arn
-            self._registry.get_or_create(arn).submit(
-                CallableTask(lambda: self._process_callback_heartbeat(callback_id))
+            self._registry.submit(
+                arn,
+                CallableTask(lambda: self._process_callback_heartbeat(callback_id)),
             ).result()
             logger.info("Callback heartbeat processed for callback_id: %s", callback_id)
         except Exception as e:
@@ -1499,9 +1474,10 @@ class Executor(ExecutionObserver):
             # it.
             try:
                 claim = await asyncio.to_thread(
-                    lambda: self._registry.get_or_create(execution_arn)
-                    .submit(CallableTask(lambda: self._begin_invocation(execution_arn)))
-                    .result()
+                    lambda: self._registry.submit(
+                        execution_arn,
+                        CallableTask(lambda: self._begin_invocation(execution_arn)),
+                    ).result()
                 )
                 if claim is None:
                     return
@@ -1519,8 +1495,8 @@ class Executor(ExecutionObserver):
                 )
                 invocation_end = datetime.now(UTC)
                 await asyncio.to_thread(
-                    lambda: self._registry.get_or_create(execution_arn)
-                    .submit(
+                    lambda: self._registry.submit(
+                        execution_arn,
                         CallableTask(
                             lambda: self._finish_invocation(
                                 execution_arn,
@@ -1528,24 +1504,22 @@ class Executor(ExecutionObserver):
                                 invocation_start,
                                 invocation_end,
                             )
-                        )
-                    )
-                    .result()
+                        ),
+                    ).result()
                 )
 
             except ResourceNotFoundException:
                 logger.warning("[%s] Function No longer exists", execution_arn)
                 error_obj = ErrorObject.from_message(message="Function not found")
                 await asyncio.to_thread(
-                    lambda: self._registry.get_or_create(execution_arn)
-                    .submit(
+                    lambda: self._registry.submit(
+                        execution_arn,
                         CallableTask(
                             lambda: self._fail_invocation_not_found(
                                 execution_arn, error_obj
                             )
-                        )
-                    )
-                    .result()
+                        ),
+                    ).result()
                 )
 
             except asyncio.TimeoutError:
@@ -1562,8 +1536,8 @@ class Executor(ExecutionObserver):
                     message=f"Function timed out after {self._invocation_timeout_seconds} seconds"
                 )
                 await asyncio.to_thread(
-                    lambda: self._registry.get_or_create(execution_arn)
-                    .submit(
+                    lambda: self._registry.submit(
+                        execution_arn,
                         CallableTask(
                             lambda: self._retry_after_timeout(
                                 execution_arn,
@@ -1571,9 +1545,8 @@ class Executor(ExecutionObserver):
                                 invocation_start,
                                 invocation_end,
                             )
-                        )
-                    )
-                    .result()
+                        ),
+                    ).result()
                 )
 
             except Exception as e:  # noqa: BLE001
@@ -1581,13 +1554,12 @@ class Executor(ExecutionObserver):
                 logger.warning("[%s] Invocation failed: %s", execution_arn, e)
                 error_obj = ErrorObject.from_exception(e)
                 await asyncio.to_thread(
-                    lambda: self._registry.get_or_create(execution_arn)
-                    .submit(
+                    lambda: self._registry.submit(
+                        execution_arn,
                         CallableTask(
                             lambda: self._retry_after_error(execution_arn, error_obj)
-                        )
-                    )
-                    .result()
+                        ),
+                    ).result()
                 )
 
         return invoke
@@ -1720,9 +1692,10 @@ class Executor(ExecutionObserver):
 
     def on_timed_out(self, execution_arn: str, error: ErrorObject) -> None:
         """Handle execution timeout (workflow timeout)."""
-        logger.exception("[%s] Execution timed out.", execution_arn)
-        self._registry.get_or_create(execution_arn).submit(
-            CallableTask(lambda: self._apply_timeout(execution_arn, error))
+        logger.warning("[%s] Execution timed out.", execution_arn)
+        self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._apply_timeout(execution_arn, error)),
         ).result()
         self._complete_events(execution_arn=execution_arn)
 
@@ -1877,10 +1850,11 @@ class Executor(ExecutionObserver):
                 data=None,
                 stack_trace=None,
             )
-            self._registry.get_or_create(arn).submit(
+            self._registry.submit(
+                arn,
                 CallableTask(
                     lambda: self._apply_callback_timeout(callback_id, timeout_error)
-                )
+                ),
             ).result()
             logger.warning("[%s] Callback %s timed out", execution_arn, callback_id)
             self._invoke_execution(arn)
@@ -1904,10 +1878,11 @@ class Executor(ExecutionObserver):
                 data=None,
                 stack_trace=None,
             )
-            self._registry.get_or_create(arn).submit(
+            self._registry.submit(
+                arn,
                 CallableTask(
                     lambda: self._apply_callback_timeout(callback_id, heartbeat_error)
-                )
+                ),
             ).result()
             logger.warning(
                 "[%s] Callback %s heartbeat timed out", execution_arn, callback_id

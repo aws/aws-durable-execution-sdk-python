@@ -91,6 +91,14 @@ class ExecutionWorker:
         """Load this execution's current state from the store."""
         return self._store.load(self._arn)
 
+    def stop(self) -> None:
+        """Stop this worker's lane without touching the registry.
+
+        Used by :meth:`ExecutionRegistry.shutdown`, which has already
+        dropped the worker from its map.
+        """
+        self._lane.stop(wait=False)
+
     def _run(self, task: ExecutionTask[T]) -> T:
         outcome: TaskOutcome[T] = task.execute(self._status, self)
         self._status = outcome.next_status
@@ -99,8 +107,11 @@ class ExecutionWorker:
         return outcome.value
 
     def _teardown(self) -> None:
-        # Runs on the lane thread, so stop without joining (a join here
-        # would wait on the current thread). The stop flag takes effect
-        # at once, rejecting any later submit for a completed execution.
-        self._registry.remove(self._arn)
+        # Runs on the lane thread. Stop the lane first (without joining,
+        # which would wait on the current thread) so the stop flag is
+        # set before the worker leaves the registry. A caller that was
+        # handed this worker then fails fast on submit and the registry
+        # hands it a fresh lane, rather than enqueueing onto a lane that
+        # is about to exit.
         self._lane.stop(wait=False)
+        self._registry.remove(self._arn)
