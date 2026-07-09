@@ -597,6 +597,20 @@
       "path": "./src/comprehensive_operations/many_operations.py"
     },
     {
+      "name": "Pydantic AI Durable Capability Prototype",
+      "description": "Prototype Pydantic AI capability for checkpointing Lambda durable model and tool calls",
+      "handler": "pydantic_ai_agent.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "environment": {
+        "PYDANTIC_AI_MODEL": "us.amazon.nova-micro-v1:0"
+      },
+      "path": "./src/pydantic_ai_agent/pydantic_ai_agent.py"
+    },
+    {
         "name": "Create Callback Concurrency",
         "description": "Demonstrates multiple concurrent createCallback operations using context.parallel",
         "handler": "callback_concurrency.handler",

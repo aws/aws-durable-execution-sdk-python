@@ -22,6 +22,7 @@ def build_examples() -> None:
         packages_dir / "aws-durable-execution-sdk-python",
         packages_dir / "aws-durable-execution-sdk-python-otel",
         packages_dir / "aws-durable-execution-sdk-python-testing",
+        "pydantic-ai",
     ]
 
     if build_dir.exists():
