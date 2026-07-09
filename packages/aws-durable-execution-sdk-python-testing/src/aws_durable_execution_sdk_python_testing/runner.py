@@ -1246,11 +1246,28 @@ class DurableFunctionCloudTestRunner:
         Raises:
             ClientError: If lambda client encounter error
         """
-        history_dict = self.lambda_client.get_durable_execution_history(
-            DurableExecutionArn=execution_arn,
-            IncludeExecutionData=True,
-        )
-        history_response = GetDurableExecutionHistoryResponse.from_dict(history_dict)
+        events: list[Event] = []
+        next_marker: str | None = None
+
+        while True:
+            request = {
+                "DurableExecutionArn": execution_arn,
+                "IncludeExecutionData": True,
+            }
+            if next_marker:
+                request["Marker"] = next_marker
+
+            history_dict = self.lambda_client.get_durable_execution_history(**request)
+            history_response = GetDurableExecutionHistoryResponse.from_dict(
+                history_dict
+            )
+            events.extend(history_response.events)
+
+            next_marker = history_response.next_marker
+            if not next_marker:
+                break
+
+        history_response = GetDurableExecutionHistoryResponse(events=events)
 
         logger.info("Retrieved %d events from history", len(history_response.events))
 
