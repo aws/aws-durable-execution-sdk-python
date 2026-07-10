@@ -7,6 +7,7 @@ from typing import Any
 
 
 DEFAULT_FUNCTION_NAME_PREFIX = "DurablePythonExample-"
+LOG_RETENTION_DAYS = 7
 
 
 def load_catalog() -> dict[str, Any]:
@@ -78,8 +79,9 @@ def build_template(examples: list[dict[str, Any]]) -> dict[str, Any]:
         if "durableConfig" in example:
             properties["DurableConfig"] = example["durableConfig"]
 
-        if "loggingConfig" in example:
-            properties["LoggingConfig"] = example["loggingConfig"]
+        logging_config: dict[str, Any] = dict(example.get("loggingConfig", {}))
+        logging_config["LogGroup"] = {"Ref": f"{logical_id}LogGroup"}
+        properties["LoggingConfig"] = logging_config
 
         if "layers" in example:
             properties["Layers"] = example["layers"]
@@ -92,7 +94,17 @@ def build_template(examples: list[dict[str, Any]]) -> dict[str, Any]:
 
         template["Resources"][logical_id] = {
             "Type": "AWS::Serverless::Function",
+            "DependsOn": [f"{logical_id}LogGroup"],
             "Properties": properties,
+        }
+        template["Resources"][f"{logical_id}LogGroup"] = {
+            "Type": "AWS::Logs::LogGroup",
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::Sub": f"/aws/lambda/${{FunctionNamePrefix}}{logical_id}"
+                },
+                "RetentionInDays": LOG_RETENTION_DAYS,
+            },
         }
 
     return template
