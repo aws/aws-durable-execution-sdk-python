@@ -7,6 +7,7 @@ from typing import Any
 
 
 DEFAULT_FUNCTION_NAME_PREFIX = "DurablePythonExample-"
+DEFAULT_DURABLE_LOGGING_CONFIG: dict[str, str] = {"LogFormat": "JSON"}
 
 
 def load_catalog() -> dict[str, Any]:
@@ -77,9 +78,13 @@ def build_template(examples: list[dict[str, Any]]) -> dict[str, Any]:
 
         if "durableConfig" in example:
             properties["DurableConfig"] = example["durableConfig"]
+            properties["LoggingConfig"] = DEFAULT_DURABLE_LOGGING_CONFIG
 
         if "loggingConfig" in example:
-            properties["LoggingConfig"] = example["loggingConfig"]
+            properties["LoggingConfig"] = {
+                **DEFAULT_DURABLE_LOGGING_CONFIG,
+                **example["loggingConfig"],
+            }
 
         if "layers" in example:
             properties["Layers"] = example["layers"]
