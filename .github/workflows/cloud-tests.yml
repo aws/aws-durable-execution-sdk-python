@@ -104,6 +104,18 @@ jobs:
           echo "Using custom Lambda endpoint override"
         fi
 
+        PYTEST_FUNCTION_NAME_MAP=$(
+          python packages/aws-durable-execution-sdk-python-examples/scripts/generate_function_name_map.py \
+            --function-name-prefix "$FUNCTION_NAME_PREFIX"
+        )
+
+        # TODO: Remove this one-time cleanup after existing CI stacks adopt the
+        # generated AWS::Logs::LogGroup resources.
+        python packages/aws-durable-execution-sdk-python-examples/scripts/cleanup_unmanaged_log_groups.py \
+          --stack-name "$STACK_NAME" \
+          --function-name-prefix "$FUNCTION_NAME_PREFIX" \
+          --region "$AWS_REGION"
+
         echo "Deploying stack $STACK_NAME with function prefix $FUNCTION_NAME_PREFIX and runtime $PYTHON_RUNTIME"
         sam deploy \
           --template-file .aws-sam/build/template.yaml \
@@ -113,11 +125,6 @@ jobs:
           --no-fail-on-empty-changeset \
           --region "$AWS_REGION" \
           --parameter-overrides "${PARAMETER_OVERRIDES[@]}"
-
-        PYTEST_FUNCTION_NAME_MAP=$(
-          python packages/aws-durable-execution-sdk-python-examples/scripts/generate_function_name_map.py \
-            --function-name-prefix "$FUNCTION_NAME_PREFIX"
-        )
 
         echo "PYTEST_FUNCTION_NAME_MAP=$PYTEST_FUNCTION_NAME_MAP" >> $GITHUB_ENV
 

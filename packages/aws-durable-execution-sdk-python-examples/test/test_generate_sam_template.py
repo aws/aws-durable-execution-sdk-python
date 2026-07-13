@@ -43,10 +43,14 @@ def test_build_template_adds_default_json_logging_to_durable_functions():
 
     resources = template["Resources"]
     assert resources["HelloWorld"]["Properties"]["LoggingConfig"] == {
-        "LogFormat": "JSON"
+        "LogFormat": "JSON",
+        "LogGroup": {"Ref": "HelloWorldLogGroup"},
     }
     assert resources["LoggerExample"]["Properties"]["LoggingConfig"] == {
         "LogFormat": "JSON",
         "ApplicationLogLevel": "INFO",
+        "LogGroup": {"Ref": "LoggerExampleLogGroup"},
     }
-    assert "LoggingConfig" not in resources["PlainLambda"]["Properties"]
+    assert resources["PlainLambda"]["Properties"]["LoggingConfig"] == {
+        "LogGroup": {"Ref": "PlainLambdaLogGroup"},
+    }
