@@ -20,17 +20,10 @@ from aws_durable_execution_sdk_python_testing.checkpoint.core import CheckpointC
 from aws_durable_execution_sdk_python_testing.checkpoint.transformer import (
     CheckpointRequestDispatcher,
 )
-from aws_durable_execution_sdk_python_testing.checkpoint.validators.checkpoint import (
-    CheckpointValidator,
-)
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
 )
-from aws_durable_execution_sdk_python_testing.execution import (
-    CheckpointIdempotencyRecord,
-    OperationPaginatorState,
-)
-from aws_durable_execution_sdk_python_testing.observer import ExecutionNotifier
+from aws_durable_execution_sdk_python_testing.observer import apply_effects
 from aws_durable_execution_sdk_python_testing.token import CheckpointToken
 
 
@@ -38,6 +31,7 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.lambda_service import OperationUpdate
 
     from aws_durable_execution_sdk_python_testing.execution import Execution
+    from aws_durable_execution_sdk_python_testing.observer import ExecutionObserver
     from aws_durable_execution_sdk_python_testing.scheduler import Scheduler
     from aws_durable_execution_sdk_python_testing.stores.base import ExecutionStore
 
@@ -60,12 +54,12 @@ class CheckpointProcessor:
         scheduler: Scheduler,  # noqa: ARG002 — kept for backward-compatible signature
     ):
         self._store = store
-        self._notifier = ExecutionNotifier()
+        self._observers: list[ExecutionObserver] = []
         self._dispatcher = CheckpointRequestDispatcher()
 
-    def add_execution_observer(self, observer) -> None:
+    def add_execution_observer(self, observer: ExecutionObserver) -> None:
         """Add observer for execution events."""
-        self._notifier.add_observer(observer)
+        self._observers.append(observer)
 
     def process_checkpoint(
         self,
@@ -97,50 +91,23 @@ class CheckpointProcessor:
             msg = "Invalid checkpoint token"
             raise InvalidParameterValueException(msg)
 
-        if updates:
-            CheckpointValidator.validate_input(updates, execution)
-            self._dispatcher.apply_updates(
-                execution=execution,
-                updates=updates,
-                client_token=client_token,
-                notifier=self._notifier,
-                touch=execution.touch_operation,
-            )
-
-        new_token_sequence = execution.advance_token_sequence()
-
-        paginator = OperationPaginatorState.pin(execution)
-        # The checkpoint response returns the full unseen delta in a single
-        # response. Advance handler_seen_seq to cover every returned op so
-        # the next delta carries only operations touched after this response.
-        response_ops = paginator.unseen_operations()
-        if response_ops:
-            highest_delivered_seq = max(
-                execution.operation_last_touched_seq[op.operation_id]
-                for op in response_ops
-            )
-            paginator.advance_handler_seen(highest_delivered_seq)
-
-        new_token = CheckpointToken(
-            execution_arn=execution.durable_execution_arn,
-            token_sequence=new_token_sequence,
-            invocation_id=execution.current_invocation_id,
-        ).to_str()
-
-        execution.last_checkpoint = CheckpointIdempotencyRecord(
-            client_token=client_token or "",
-            inbound_checkpoint_token=checkpoint_token,
-            outbound_checkpoint_token=new_token,
-            operations=list(response_ops),
-            next_marker=None,
+        result = CheckpointCore.apply(
+            execution,
+            checkpoint_token,
+            updates,
+            client_token,
+            self._dispatcher,
         )
 
         self._store.update(execution)
 
+        for observer in self._observers:
+            apply_effects(result.effects, observer)
+
         return CheckpointOutput(
-            checkpoint_token=new_token,
+            checkpoint_token=result.checkpoint_token,
             new_execution_state=CheckpointUpdatedExecutionState(
-                operations=response_ops,
+                operations=result.operations,
                 next_marker=None,
             ),
         )
@@ -170,8 +137,10 @@ def _maybe_replay_cached(
     checkpoint_token: str,
     client_token: str | None,
 ) -> CheckpointOutput | None:
-    """Replay cached CheckpointOutput when the incoming call matches
-    the last checkpoint. Returns ``None`` when there is no match.
+    """Replay the cached response when the incoming
+    ``(client_token, checkpoint_token)`` matches the last checkpoint.
+
+    Returns ``None`` when there is no matching cached record.
     """
     cached = CheckpointCore.match_cached(execution, checkpoint_token, client_token)
     if cached is None:

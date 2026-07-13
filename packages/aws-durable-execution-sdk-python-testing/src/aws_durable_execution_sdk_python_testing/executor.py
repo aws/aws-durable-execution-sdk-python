@@ -7,7 +7,6 @@ import logging
 import threading
 import uuid
 from datetime import UTC, datetime
-from enum import Enum
 from typing import TYPE_CHECKING
 
 from aws_durable_execution_sdk_python.execution import (
@@ -34,16 +33,12 @@ from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
 from aws_durable_execution_sdk_python_testing.checkpoint.transformer import (
     CheckpointRequestDispatcher,
 )
-from aws_durable_execution_sdk_python_testing.checkpoint.validators.checkpoint import (
-    CheckpointValidator,
-)
 from aws_durable_execution_sdk_python_testing.exceptions import (
     IllegalStateException,
     InvalidParameterValueException,
     ResourceNotFoundException,
 )
 from aws_durable_execution_sdk_python_testing.execution import (
-    CheckpointIdempotencyRecord,
     Execution,
     OperationPaginatorState,
 )
@@ -71,13 +66,18 @@ from aws_durable_execution_sdk_python_testing.model import (
     Execution as ExecutionSummary,
 )
 from aws_durable_execution_sdk_python_testing.observer import (
-    ExecutionNotifier,
     ExecutionObserver,
+    apply_effects,
 )
 from aws_durable_execution_sdk_python_testing.token import (
     CallbackToken,
     CheckpointToken,
 )
+from aws_durable_execution_sdk_python_testing.worker.checkpoint_tasks import (
+    CallableTask,
+)
+from aws_durable_execution_sdk_python_testing.worker.registry import ExecutionRegistry
+from aws_durable_execution_sdk_python_testing.worker.status import InvocationState
 
 
 if TYPE_CHECKING:
@@ -87,41 +87,23 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
         CheckpointProcessor,
     )
-    from aws_durable_execution_sdk_python_testing.invoker import Invoker
+    from aws_durable_execution_sdk_python_testing.invoker import (
+        Invoker,
+        InvokeResponse,
+    )
     from aws_durable_execution_sdk_python_testing.scheduler import Event, Scheduler
     from aws_durable_execution_sdk_python_testing.stores.base import ExecutionStore
 
 logger = logging.getLogger(__name__)
 
 
-class InvocationState(Enum):
-    """Per-ARN handler-invocation state machine.
-
-    Lives on :class:`Executor` keyed by execution ARN, never
-    persisted: a crashed ``INVOKING`` state would strand the execution
-    forever on restart because the gate would read "someone is
-    invoking" while nobody is.
-
-    Transitions:
-
-    * ``PRE_INVOKE`` → ``INVOKING`` — when ``_invoke_execution``
-      dispatches a handler call.
-    * ``INVOKING`` → ``PRE_INVOKE`` — when a handler returns
-      ``PENDING`` or fails (retry will re-enter ``PRE_INVOKE`` →
-      ``INVOKING``).
-    * ``INVOKING`` → ``COMPLETED`` — when the execution reaches a
-      terminal status (handler returned ``SUCCEEDED`` / ``FAILED``,
-      stop requested, timeout).
-    """
-
-    PRE_INVOKE = "PRE_INVOKE"
-    INVOKING = "INVOKING"
-    COMPLETED = "COMPLETED"
-
-
 class Executor(ExecutionObserver):
     MAX_CONSECUTIVE_FAILED_ATTEMPTS: int = 5
     RETRY_BACKOFF_SECONDS: int = 5
+    # GetDurableExecutionState page-count bounds, mirroring the service
+    # (default 100, hard cap 1000 operations per page).
+    DEFAULT_STATE_PAGE_MAX_ITEMS: int = 100
+    MAX_STATE_PAGE_MAX_ITEMS: int = 1000
 
     def __init__(
         self,
@@ -131,42 +113,30 @@ class Executor(ExecutionObserver):
         checkpoint_processor: CheckpointProcessor,
         max_invocation_page_bytes: int | None = None,
         invocation_timeout_seconds: int = 900,
+        registry: ExecutionRegistry | None = None,
     ):
         self._store = store
         self._scheduler = scheduler
         self._invoker = invoker
         self._checkpoint_processor = checkpoint_processor
+        self._registry = (
+            registry if registry is not None else ExecutionRegistry(store, scheduler)
+        )
         self._invocation_timeout_seconds = invocation_timeout_seconds
         self._dispatcher = CheckpointRequestDispatcher()
-        self._notifier = ExecutionNotifier()
-        # Self-observe so processors called via our own dispatcher can
-        # schedule wait / retry / callback timers through the normal
-        # observer path.
-        self._notifier.add_observer(self)
         self._max_invocation_page_bytes = (
             max_invocation_page_bytes
             if max_invocation_page_bytes is not None
             else DEFAULT_MAX_INVOCATION_PAGE_BYTES
         )
-        # Per-ARN lock infrastructure. Locks live on the
-        # Executor, not the Execution, because the SQLite / Filesystem
-        # stores return a freshly deserialised Execution on every
-        # load — an instance-level lock would protect nothing across
-        # the load/save window. Entries are deliberately leaked on
-        # execution termination; removing them would create a
-        # lock-identity race.
-        self._arn_locks: dict[str, threading.Lock] = {}
-        self._arn_locks_supervisor: threading.Lock = threading.Lock()
-        # Per-ARN handler-invocation state machine. Gates
-        # _invoke_execution so at most one handler invocation is in
-        # flight per execution. Never persisted: an absent
-        # entry is PRE_INVOKE by convention.
-        self._invocation_state: dict[str, InvocationState] = {}
-        # Single earliest-pending wake-up timer per execution.
-        # Replaces the per-op call_later pattern for wait timers and
-        # step retries so concurrent async completions all fire on
-        # their earliest aggregate moment rather than chaining.
-        # Entries cancelled on terminal transitions. Never persisted.
+        # Guards the pending-wakeup map below so concurrent callers
+        # re-arming the earliest-pending timer can't leak a Future
+        # into the dict.
+        self._pending_wakeup_lock: threading.Lock = threading.Lock()
+        # Single earliest-pending wake-up timer per execution: wait
+        # timers and step retries share one timer that fires at their
+        # earliest aggregate moment. Entries are cancelled on terminal
+        # transitions and never persisted.
         self._pending_wakeup: dict[str, Future] = {}
         self._completion_events: dict[str, Event] = {}
         self._callback_timeouts: dict[str, Future] = {}
@@ -405,25 +375,32 @@ class Executor(ExecutionObserver):
         Raises:
             ResourceNotFoundException: If execution does not exist
         """
-        with self._lock_for(execution_arn):
-            execution = self.get_execution(execution_arn)
+        return self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._apply_stop(execution_arn, error)),
+        ).result()
 
-            if execution.is_complete:
-                # Idempotent: return the existing stop timestamp
-                execution_op = execution.get_operation_execution_started()
-                stop_timestamp = execution_op.end_timestamp or datetime.now(UTC)
-                return StopDurableExecutionResponse(stop_timestamp=stop_timestamp)
+    def _apply_stop(
+        self, execution_arn: str, error: ErrorObject | None
+    ) -> StopDurableExecutionResponse:
+        execution = self.get_execution(execution_arn)
 
-            # Use provided error or create a default one
-            stop_error = error or ErrorObject.from_message(
-                "Execution stopped by user request"
-            )
+        if execution.is_complete:
+            # Idempotent: return the existing stop timestamp
+            execution_op = execution.get_operation_execution_started()
+            stop_timestamp = execution_op.end_timestamp or datetime.now(UTC)
+            return StopDurableExecutionResponse(stop_timestamp=stop_timestamp)
 
-            # Stop sets TERMINATED close status (different from fail)
-            logger.exception("[%s] Stopping execution.", execution_arn)
-            execution.complete_stopped(error=stop_error)  # Sets CloseStatus.TERMINATED
-            self._store.update(execution)
-            self._complete_events(execution_arn=execution_arn)
+        # Use provided error or create a default one
+        stop_error = error or ErrorObject.from_message(
+            "Execution stopped by user request"
+        )
+
+        # Stop sets TERMINATED close status (different from fail)
+        logger.info("[%s] Stopping execution.", execution_arn)
+        execution.complete_stopped(error=stop_error)  # Sets CloseStatus.TERMINATED
+        self._store.update(execution)
+        self._complete_events(execution_arn=execution_arn)
 
         return StopDurableExecutionResponse(stop_timestamp=datetime.now(UTC))
 
@@ -432,13 +409,34 @@ class Executor(ExecutionObserver):
         execution_arn: str,
         checkpoint_token: str | None = None,
         marker: str | None = None,
-        max_items: int | None = None,  # noqa: ARG002 — kept for API compat; page is byte-bounded
+        max_items: int | None = None,
+    ) -> GetDurableExecutionStateResponse:
+        """Return a page of operations, serialized on the execution's worker."""
+        return self._registry.submit(
+            execution_arn,
+            CallableTask(
+                lambda: self._get_execution_state(
+                    execution_arn, checkpoint_token, marker, max_items
+                )
+            ),
+        ).result()
+
+    def _get_execution_state(
+        self,
+        execution_arn: str,
+        checkpoint_token: str | None = None,
+        marker: str | None = None,
+        max_items: int | None = None,
     ) -> GetDurableExecutionStateResponse:
         """Return a page of operations from the pinned snapshot.
 
         Valid only while the execution is ``INVOKING``. The
-        call is a pure read: no ``handler_seen_seq`` advance, no
-        ``token_sequence`` bump, no idempotency mutation.
+        call is a pure read: no ``handler_seen_seq`` advance,
+        no ``token_sequence`` bump, no idempotency mutation.
+
+        The page is bounded by both the invocation byte budget and
+        ``max_items`` (clamped to the service's per-page count bounds),
+        matching the service's dual byte-and-count paging.
 
         Raises:
             ResourceNotFoundException: execution does not exist.
@@ -446,24 +444,27 @@ class Executor(ExecutionObserver):
                 is not ``INVOKING``, the token is stale, or the
                 marker does not resolve against the pinned sequence.
         """
-        with self._lock_for(execution_arn):
-            execution = self.get_execution(execution_arn)
+        execution = self.get_execution(execution_arn)
 
-            # Invocation gate: reads are valid only while INVOKING.
-            if (
-                self._invocation_state.get(execution_arn, InvocationState.PRE_INVOKE)
-                is not InvocationState.INVOKING
-            ):
-                msg = "Invalid checkpoint token"
-                raise InvalidParameterValueException(msg)
+        # Invocation gate: reads are valid only while INVOKING.
+        if self._invocation_gate(execution_arn) is not InvocationState.INVOKING:
+            msg = "Invalid checkpoint token"
+            raise InvalidParameterValueException(msg)
 
-            # Token check: reject a stale or superseded checkpoint token.
-            if not self._is_current_token(execution, checkpoint_token):
-                msg = "Invalid checkpoint token"
-                raise InvalidParameterValueException(msg)
+        # Token check: reject a stale or superseded checkpoint token.
+        if not self._is_current_token(execution, checkpoint_token):
+            msg = "Invalid checkpoint token"
+            raise InvalidParameterValueException(msg)
 
-            paginator = OperationPaginatorState.pin(execution)
-            ops, next_marker = paginator.page(marker, self._max_invocation_page_bytes)
+        resolved_max_items: int = (
+            self.DEFAULT_STATE_PAGE_MAX_ITEMS
+            if max_items is None
+            else max(1, min(max_items, self.MAX_STATE_PAGE_MAX_ITEMS))
+        )
+        paginator = OperationPaginatorState.pin(execution)
+        ops, next_marker = paginator.page(
+            marker, self._max_invocation_page_bytes, resolved_max_items
+        )
 
         return GetDurableExecutionStateResponse(operations=ops, next_marker=next_marker)
 
@@ -509,7 +510,6 @@ class Executor(ExecutionObserver):
 
         # Generate events from update history (one event per update).
         # Each checkpoint update increments the history event counter,
-        # so every recorded transition becomes a separate history event.
         updates: list[OperationUpdate] = execution.updates
         timestamps: list[datetime] = execution.update_timestamps
         # Track cumulative step_details per operation for retry details
@@ -787,6 +787,27 @@ class Executor(ExecutionObserver):
         updates: list[OperationUpdate] | None = None,
         client_token: str | None = None,
     ) -> CheckpointDurableExecutionResponse:
+        """Process a checkpoint, serializing it on the execution's worker.
+
+        Routes through the per-execution worker so checkpoints for one
+        execution never overlap.
+        """
+        return self._registry.submit(
+            execution_arn,
+            CallableTask(
+                lambda: self._checkpoint_execution(
+                    execution_arn, checkpoint_token, updates, client_token
+                )
+            ),
+        ).result()
+
+    def _checkpoint_execution(
+        self,
+        execution_arn: str,
+        checkpoint_token: str,
+        updates: list[OperationUpdate] | None = None,
+        client_token: str | None = None,
+    ) -> CheckpointDurableExecutionResponse:
         """Process a checkpoint request for an execution.
 
         Applies ``updates`` in place, advances ``token_sequence`` once,
@@ -794,9 +815,9 @@ class Executor(ExecutionObserver):
         truncates to one page, and advances ``handler_seen_seq`` only
         for the ops actually returned.
 
-        The full load-mutate-save sequence runs under the per-ARN
-        lock so concurrent callers against the same execution
-        can never read a half-applied mutation.
+        Runs on the execution's worker lane, so concurrent callers
+        against the same execution can never read a half-applied
+        mutation.
 
         Raises:
             ResourceNotFoundException: If the execution does not exist.
@@ -804,89 +825,54 @@ class Executor(ExecutionObserver):
                 invalid (wrong ``token_sequence`` or the execution is
                 already complete).
         """
-        with self._lock_for(execution_arn):
-            execution = self.get_execution(execution_arn)
+        execution = self.get_execution(execution_arn)
 
-            # Idempotency first. A caller retrying a previously-
-            # successful checkpoint is entitled to the cached response
-            # even if the execution has since moved on (though in
-            # practice it won't — the SDK waits for a response before
-            # advancing). Idempotency check runs before the token check.
-            cached = self._maybe_replay_cached(
-                execution, checkpoint_token, client_token
-            )
-            if cached is not None:
-                return cached
+        # Idempotency first. A caller retrying a previously-
+        # successful checkpoint is entitled to the cached response
+        # even if the execution has since moved on (though in
+        # practice it won't — the SDK waits for a response before
+        # advancing). Idempotency check runs before the token check.
+        cached = self._maybe_replay_cached(execution, checkpoint_token, client_token)
+        if cached is not None:
+            return cached
 
-            # Invocation-state gate. Rejects stale checkpoints
-            # from handler processes that died or timed out and came
-            # back after we tore down.
-            if (
-                self._invocation_state.get(execution_arn, InvocationState.PRE_INVOKE)
-                is not InvocationState.INVOKING
-            ):
-                msg = "Invalid checkpoint token"
-                raise InvalidParameterValueException(msg)
+        # Invocation-state gate: reject stale checkpoints from
+        # handler processes that died or timed out and came back after
+        # the worker tore down.
+        if self._invocation_gate(execution_arn) is not InvocationState.INVOKING:
+            msg = "Invalid checkpoint token"
+            raise InvalidParameterValueException(msg)
 
-            if not self._is_current_token(execution, checkpoint_token):
-                msg = "Invalid checkpoint token"
-                raise InvalidParameterValueException(msg)
+        if not self._is_current_token(execution, checkpoint_token):
+            msg = "Invalid checkpoint token"
+            raise InvalidParameterValueException(msg)
 
-            if updates:
-                CheckpointValidator.validate_input(updates, execution)
-                self._dispatcher.apply_updates(
-                    execution=execution,
-                    updates=updates,
-                    client_token=client_token,
-                    notifier=self._notifier,
-                    touch=execution.touch_operation,
-                )
+        result = CheckpointCore.apply(
+            execution,
+            checkpoint_token,
+            updates or [],
+            client_token,
+            self._dispatcher,
+        )
 
-            new_token_sequence = execution.advance_token_sequence()
+        self._store.update(execution)
 
-            paginator = OperationPaginatorState.pin(execution)
-            # The checkpoint response returns the full unseen delta in a
-            # single response. Advance handler_seen_seq to cover every
-            # returned op so the next delta carries only operations
-            # touched after this response.
-            response_ops = paginator.unseen_operations()
-            if response_ops:
-                highest_delivered_seq = max(
-                    execution.operation_last_touched_seq[op.operation_id]
-                    for op in response_ops
-                )
-                paginator.advance_handler_seen(highest_delivered_seq)
-
-            new_token = CheckpointToken(
-                execution_arn=execution.durable_execution_arn,
-                token_sequence=new_token_sequence,
-                invocation_id=execution.current_invocation_id,
-            ).to_str()
-
-            # Cache the response so a retried call with the
-            # same (client_token, inbound_checkpoint_token) gets a
-            # byte-identical replay.
-            execution.last_checkpoint = CheckpointIdempotencyRecord(
-                client_token=client_token or "",
-                inbound_checkpoint_token=checkpoint_token,
-                outbound_checkpoint_token=new_token,
-                operations=list(response_ops),
+        response = CheckpointDurableExecutionResponse(
+            checkpoint_token=result.checkpoint_token,
+            new_execution_state=CheckpointUpdatedExecutionState(
+                operations=result.operations,
                 next_marker=None,
-            )
+            ),
+        )
 
-            self._store.update(execution)
+        # Apply lifecycle effects after the write, not mid-apply:
+        # completion and failure submit follow-up work onto this
+        # execution's lane, which a running lane task cannot re-enter.
+        apply_effects(result.effects, self)
 
-            response = CheckpointDurableExecutionResponse(
-                checkpoint_token=new_token,
-                new_execution_state=CheckpointUpdatedExecutionState(
-                    operations=response_ops,
-                    next_marker=None,
-                ),
-            )
-
-        # Re-arm the earliest-pending wake-up outside the
-        # lock so the next scheduler-driven completion fires at the
-        # minimum pending timestamp across Wait / Step ops.
+        # Re-arm the earliest-pending wake-up so the next
+        # scheduler-driven completion fires at the minimum pending
+        # timestamp across Wait / Step ops.
         self._schedule_earliest_pending(execution_arn)
 
         return response
@@ -899,7 +885,9 @@ class Executor(ExecutionObserver):
     ) -> CheckpointDurableExecutionResponse | None:
         """Replay the cached response for a retried checkpoint call.
 
-        Returns ``None`` when there is no idempotency match.
+        Returns ``None`` unless the last checkpoint matches the incoming
+        ``(client_token, checkpoint_token)`` pair. A match is a
+        byte-identical replay; no state is mutated.
         """
         cached = CheckpointCore.match_cached(execution, checkpoint_token, client_token)
         if cached is None:
@@ -932,56 +920,17 @@ class Executor(ExecutionObserver):
             and parsed.invocation_id == execution.current_invocation_id
         )
 
-    def _lock_for(self, arn: str) -> threading.Lock:
-        """Return the per-ARN ``threading.Lock`` for an execution.
+    def _invocation_gate(self, arn: str) -> InvocationState:
+        """Read the invocation gate from the execution's worker.
 
-        Lazily created on first access. Entries are deliberately
-        leaked — see :class:`Executor` docstring and the design
-        for why removal would introduce a lock-identity race.
+        Absent worker means no invocation has started, i.e. PRE_INVOKE.
         """
-        with self._arn_locks_supervisor:
-            lock = self._arn_locks.get(arn)
-            if lock is None:
-                lock = threading.Lock()
-                self._arn_locks[arn] = lock
-            return lock
+        worker = self._registry.get(arn)
+        return worker.status if worker is not None else InvocationState.PRE_INVOKE
 
-    def _release_gate(self, arn: str, to: InvocationState) -> None:
-        """Transition ``_invocation_state[arn]`` out of ``INVOKING``.
-
-        Called from ``_on_invoke_finished_ok`` (PENDING → PRE_INVOKE
-        or terminal → COMPLETED) and ``_handle_invoke_failure``
-        (FAILED → PRE_INVOKE so a retry can re-enter). Caller MUST
-        hold ``_lock_for(arn)`` around the state read that justified
-        the transition.
-        """
-        self._invocation_state[arn] = to
-
-    def _cleanup_execution_state(self, arn: str) -> None:
-        """Tear down per-execution Executor-side state when an
-        execution reaches a terminal status. Removes entries from
-        ``_callback_timeouts`` and ``_callback_heartbeats`` and cancels
-        pending futures. **Does NOT remove ``_arn_locks[arn]``**:
-        removal would let two threads acquire different lock objects
-        for the same ARN across cleanup boundaries, breaking the
-        serialisation guarantee.
-        """
-        # Cancel and drop callback timers.
-        for callback_id in list(self._callback_timeouts):
-            future = self._callback_timeouts.get(callback_id)
-            if future is not None and not future.done():
-                future.cancel()
-        for callback_id in list(self._callback_heartbeats):
-            future = self._callback_heartbeats.get(callback_id)
-            if future is not None and not future.done():
-                future.cancel()
-        self._completion_events.pop(arn, None)
-        self._invocation_state.pop(arn, None)
-        # Cancel the earliest-pending wake-up timer on terminal
-        # transitions — no further re-invokes needed.
-        pending = self._pending_wakeup.pop(arn, None)
-        if pending is not None and not pending.done():
-            pending.cancel()
+    def _set_invocation_gate(self, arn: str, status: InvocationState) -> None:
+        """Set the invocation gate on the execution's worker."""
+        self._registry.get_or_create(arn).set_status(status)
 
     @staticmethod
     def _earliest_pending_timestamp(execution: Execution) -> datetime | None:
@@ -990,8 +939,10 @@ class Executor(ExecutionObserver):
 
         Sources:
 
-        * ``wait.scheduled_end_timestamp`` for ``STARTED`` Wait ops.
-        * ``step.next_attempt_timestamp`` for ``PENDING`` Step ops.
+        * ``wait.scheduled_end_timestamp`` for ``STARTED`` Wait ops
+
+        * ``step.next_attempt_timestamp`` for ``PENDING`` Step ops
+
 
         Callback timeouts are deliberately excluded: they
         keep their existing per-callback timers and would
@@ -1035,7 +986,7 @@ class Executor(ExecutionObserver):
 
         if execution.is_complete:
             # Drop any stale wake-up without re-arming.
-            with self._arn_locks_supervisor:
+            with self._pending_wakeup_lock:
                 existing = self._pending_wakeup.pop(execution_arn, None)
             if existing is not None and not existing.done():
                 existing.cancel()
@@ -1043,7 +994,7 @@ class Executor(ExecutionObserver):
 
         earliest = self._earliest_pending_timestamp(execution)
         if earliest is None:
-            with self._arn_locks_supervisor:
+            with self._pending_wakeup_lock:
                 existing = self._pending_wakeup.pop(execution_arn, None)
             if existing is not None and not existing.done():
                 existing.cancel()
@@ -1055,7 +1006,7 @@ class Executor(ExecutionObserver):
         completion_event = self._completion_events.get(execution_arn)
         # Cancel-then-arm atomically under the supervisor lock so
         # concurrent callers can't leave orphan Futures in the dict.
-        with self._arn_locks_supervisor:
+        with self._pending_wakeup_lock:
             existing = self._pending_wakeup.pop(execution_arn, None)
             future = self._scheduler.call_later(
                 self._fire_due_and_invoke_handler(execution_arn),
@@ -1065,6 +1016,59 @@ class Executor(ExecutionObserver):
             self._pending_wakeup[execution_arn] = future
         if existing is not None and not existing.done():
             existing.cancel()
+
+    def _fire_due_operations(self, execution_arn: str) -> bool:
+        """Complete any Wait/Step ops whose scheduled moment has passed.
+
+        Returns True if at least one operation completed (so the caller
+        re-invokes the handler).
+        """
+        try:
+            execution = self._store.load(execution_arn)
+        except Exception:  # noqa: BLE001
+            return False
+
+        if execution.is_complete:
+            return False
+
+        now = datetime.now(UTC)
+        completed_any = False
+        for op in list(execution.operations):
+            if (
+                op.operation_type == OperationType.WAIT
+                and op.status == OperationStatus.STARTED
+                and op.wait_details is not None
+                and op.wait_details.scheduled_end_timestamp is not None
+                and op.wait_details.scheduled_end_timestamp <= now
+            ):
+                try:
+                    execution.complete_wait(op.operation_id)
+                    completed_any = True
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[%s] earliest-pending: complete_wait failed for %s",
+                        execution_arn,
+                        op.operation_id,
+                    )
+            elif (
+                op.operation_type == OperationType.STEP
+                and op.status == OperationStatus.PENDING
+                and op.step_details is not None
+                and op.step_details.next_attempt_timestamp is not None
+                and op.step_details.next_attempt_timestamp <= now
+            ):
+                try:
+                    execution.complete_retry(op.operation_id)
+                    completed_any = True
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[%s] earliest-pending: complete_retry failed for %s",
+                        execution_arn,
+                        op.operation_id,
+                    )
+        if completed_any:
+            self._store.update(execution)
+        return completed_any
 
     def _fire_due_and_invoke_handler(
         self, execution_arn: str
@@ -1080,53 +1084,18 @@ class Executor(ExecutionObserver):
         """
 
         async def fire_due() -> None:
-            with self._lock_for(execution_arn):
-                try:
-                    execution = self._store.load(execution_arn)
-                except Exception:  # noqa: BLE001
-                    return
-                if execution.is_complete:
-                    return
-
-                now = datetime.now(UTC)
-                completed_any = False
-                for op in list(execution.operations):
-                    if (
-                        op.operation_type == OperationType.WAIT
-                        and op.status == OperationStatus.STARTED
-                        and op.wait_details is not None
-                        and op.wait_details.scheduled_end_timestamp is not None
-                        and op.wait_details.scheduled_end_timestamp <= now
-                    ):
-                        try:
-                            execution.complete_wait(op.operation_id)
-                            completed_any = True
-                        except Exception:  # noqa: BLE001
-                            logger.exception(
-                                "[%s] earliest-pending: complete_wait failed for %s",
-                                execution_arn,
-                                op.operation_id,
-                            )
-                    elif (
-                        op.operation_type == OperationType.STEP
-                        and op.status == OperationStatus.PENDING
-                        and op.step_details is not None
-                        and op.step_details.next_attempt_timestamp is not None
-                        and op.step_details.next_attempt_timestamp <= now
-                    ):
-                        try:
-                            execution.complete_retry(op.operation_id)
-                            completed_any = True
-                        except Exception:  # noqa: BLE001
-                            logger.exception(
-                                "[%s] earliest-pending: complete_retry failed for %s",
-                                execution_arn,
-                                op.operation_id,
-                            )
-                if completed_any:
-                    self._store.update(execution)
-
-            # Outside the lock: invoke and arm the next wake-up.
+            # Await the lane future on the scheduler loop via wrap_future
+            # rather than asyncio.to_thread(...result()). The scheduler's
+            # executor thread is occupied by the in-flight blocking invoke,
+            # and an invocation that force-checkpoints depends on this timer
+            # to complete the wait or retry it is blocked on. Bridging
+            # through the executor would deadlock.
+            future = self._registry.submit(
+                execution_arn,
+                CallableTask(lambda: self._fire_due_operations(execution_arn)),
+            )
+            completed_any = await asyncio.wrap_future(future)
+            # Outside the lane: invoke and arm the next wake-up.
             if completed_any:
                 self._invoke_execution(execution_arn)
             self._schedule_earliest_pending(execution_arn)
@@ -1157,18 +1126,29 @@ class Executor(ExecutionObserver):
 
         try:
             callback_token = CallbackToken.from_str(callback_id)
-            with self._lock_for(callback_token.execution_arn):
-                execution = self.get_execution(callback_token.execution_arn)
-                execution.complete_callback_success(callback_id, result)
-                self._store.update(execution)
-                self._cleanup_callback_timeouts(callback_id)
-            self._invoke_execution(callback_token.execution_arn)
+            arn = callback_token.execution_arn
+            self._registry.submit(
+                arn,
+                CallableTask(
+                    lambda: self._complete_callback_success(callback_id, result)
+                ),
+            ).result()
+            self._invoke_execution(arn)
             logger.info("Callback success completed for callback_id: %s", callback_id)
         except Exception as e:
             msg = f"Failed to process callback success: {e}"
             raise ResourceNotFoundException(msg) from e
 
         return SendDurableExecutionCallbackSuccessResponse()
+
+    def _complete_callback_success(
+        self, callback_id: str, result: bytes | None
+    ) -> None:
+        callback_token = CallbackToken.from_str(callback_id)
+        execution = self.get_execution(callback_token.execution_arn)
+        execution.complete_callback_success(callback_id, result)
+        self._store.update(execution)
+        self._cleanup_callback_timeouts(callback_id)
 
     def send_callback_failure(
         self,
@@ -1193,8 +1173,8 @@ class Executor(ExecutionObserver):
             raise InvalidParameterValueException(msg)
 
         # A callback failure sent with no error payload must leave the
-        # error fields absent, not synthesize an empty ErrorMessage.
-        # ErrorObject.to_dict() omits None fields, so an all-None
+        # error fields absent, not synthesize an empty
+        # ErrorMessage. ErrorObject.to_dict() omits None fields, so an all-None
         # error serializes to {} and the SDK surfaces undefined fields.
         callback_error: ErrorObject = error or ErrorObject(
             message=None, type=None, data=None, stack_trace=None
@@ -1202,18 +1182,29 @@ class Executor(ExecutionObserver):
 
         try:
             callback_token: CallbackToken = CallbackToken.from_str(callback_id)
-            with self._lock_for(callback_token.execution_arn):
-                execution: Execution = self.get_execution(callback_token.execution_arn)
-                execution.complete_callback_failure(callback_id, callback_error)
-                self._store.update(execution)
-                self._cleanup_callback_timeouts(callback_id)
-            self._invoke_execution(callback_token.execution_arn)
+            arn = callback_token.execution_arn
+            self._registry.submit(
+                arn,
+                CallableTask(
+                    lambda: self._complete_callback_failure(callback_id, callback_error)
+                ),
+            ).result()
+            self._invoke_execution(arn)
             logger.info("Callback failure completed for callback_id: %s", callback_id)
         except Exception as e:
             msg = f"Failed to process callback failure: {e}"
             raise ResourceNotFoundException(msg) from e
 
         return SendDurableExecutionCallbackFailureResponse()
+
+    def _complete_callback_failure(
+        self, callback_id: str, callback_error: ErrorObject
+    ) -> None:
+        callback_token = CallbackToken.from_str(callback_id)
+        execution = self.get_execution(callback_token.execution_arn)
+        execution.complete_callback_failure(callback_id, callback_error)
+        self._store.update(execution)
+        self._cleanup_callback_timeouts(callback_id)
 
     def send_callback_heartbeat(
         self, callback_id: str
@@ -1236,25 +1227,31 @@ class Executor(ExecutionObserver):
 
         try:
             callback_token: CallbackToken = CallbackToken.from_str(callback_id)
-            with self._lock_for(callback_token.execution_arn):
-                execution: Execution = self.get_execution(callback_token.execution_arn)
-
-                # Find callback operation to verify it exists and is active
-                _, operation = execution.find_callback_operation(callback_id)
-                if operation.status != OperationStatus.STARTED:
-                    msg = f"Callback {callback_id} is not active"
-                    raise ResourceNotFoundException(msg)
-
-                # Reset heartbeat timeout if configured
-                self._reset_callback_heartbeat_timeout(
-                    callback_id, execution.durable_execution_arn
-                )
+            arn = callback_token.execution_arn
+            self._registry.submit(
+                arn,
+                CallableTask(lambda: self._process_callback_heartbeat(callback_id)),
+            ).result()
             logger.info("Callback heartbeat processed for callback_id: %s", callback_id)
         except Exception as e:
             msg = f"Failed to process callback heartbeat: {e}"
             raise ResourceNotFoundException(msg) from e
 
         return SendDurableExecutionCallbackHeartbeatResponse()
+
+    def _process_callback_heartbeat(self, callback_id: str) -> None:
+        callback_token = CallbackToken.from_str(callback_id)
+        execution = self.get_execution(callback_token.execution_arn)
+
+        # Verify the callback operation exists and is active.
+        _, operation = execution.find_callback_operation(callback_id)
+        if operation.status != OperationStatus.STARTED:
+            msg = f"Callback {callback_id} is not active"
+            raise ResourceNotFoundException(msg)
+
+        self._reset_callback_heartbeat_timeout(
+            callback_id, execution.durable_execution_arn
+        )
 
     def _validate_invocation_response_and_store(
         self,
@@ -1315,68 +1312,177 @@ class Executor(ExecutionObserver):
                 )
                 raise IllegalStateException(msg_unexpected_status)
 
+    def _begin_invocation(
+        self, execution_arn: str
+    ) -> tuple[Execution, DurableExecutionInvocationInput] | None:
+        """Claim the invocation gate and build the handler input.
+
+        Returns the execution and its invocation input when this call
+        claims the gate (PRE_INVOKE -> INVOKING); returns None when the
+        execution is already complete, the gate is COMPLETED, or another
+        invocation is in flight (recording a deferred re-invoke).
+        """
+        execution = self._store.load(execution_arn)
+
+        if execution.is_complete:
+            logger.info(
+                "[%s] Execution already completed, ignoring invoke",
+                execution_arn,
+            )
+            self._set_invocation_gate(execution_arn, InvocationState.COMPLETED)
+            return None
+
+        current_state = self._invocation_gate(execution_arn)
+        if current_state is InvocationState.COMPLETED:
+            logger.info(
+                "[%s] Invocation state already COMPLETED, not re-invoking",
+                execution_arn,
+            )
+            return None
+        if current_state is InvocationState.INVOKING:
+            # Another invocation is in flight. Record the
+            # re-invoke intent; the in-flight handler's post-invoke
+            # hook consults needs_reinvoke and schedules a follow-up.
+            execution.needs_reinvoke = True
+            self._store.save(execution)
+            logger.info(
+                "[%s] Handler already INVOKING; deferring re-invoke",
+                execution_arn,
+            )
+            return None
+
+        # Claim the gate: at most one handler invocation per
+        # execution in flight.
+        self._set_invocation_gate(execution_arn, InvocationState.INVOKING)
+        execution.begin_new_invocation()
+        invocation_input = self._invoker.create_invocation_input(execution=execution)
+        self._store.save(execution)
+        return execution, invocation_input
+
+    def _finish_invocation(
+        self,
+        execution_arn: str,
+        invoke_response: InvokeResponse,
+        invocation_start: datetime,
+        invocation_end: datetime,
+    ) -> None:
+        """Apply a completed handler invocation.
+
+        Records the attempt, validates the response (completing or
+        retrying), resets the retry counter on a clean run, and releases
+        the gate to PRE_INVOKE (re-invoking if a trigger was deferred) or
+        COMPLETED.
+        """
+        execution = self._store.load(execution_arn)
+
+        execution.record_invocation_completion(
+            invocation_start,
+            invocation_end,
+            invoke_response.request_id,
+        )
+        self._store.save(execution)
+
+        if execution.is_complete:
+            # A stop / timeout landed while we were invoking — the
+            # terminal state is authoritative; the handler's
+            # response does not overwrite it.
+            logger.info(
+                "[%s] Execution completed during invocation, ignoring result",
+                execution_arn,
+            )
+            self._set_invocation_gate(execution_arn, InvocationState.COMPLETED)
+            return
+
+        response = invoke_response.invocation_output
+        try:
+            self._validate_invocation_response_and_store(
+                execution_arn, response, execution
+            )
+        except (InvalidParameterValueException, IllegalStateException) as e:
+            logger.warning(
+                "[%s] Lambda output validation failure: %s", execution_arn, e
+            )
+            error_obj = ErrorObject.from_exception(e)
+            # Release the gate before retry scheduling so the retry's
+            # invoke finds PRE_INVOKE.
+            self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
+            self._retry_invocation(execution, error_obj)
+            return
+
+        # A clean invocation resets the retry counter.
+        reset_target = self._store.load(execution_arn)
+        reset_target.consecutive_failed_invocation_attempts = 0
+        self._store.save(reset_target)
+
+        # Release the gate: terminal -> COMPLETED, otherwise PRE_INVOKE
+        # (re-invoking if a trigger was deferred mid-invocation).
+        reloaded = self._store.load(execution_arn)
+        if reloaded.is_complete:
+            self._set_invocation_gate(execution_arn, InvocationState.COMPLETED)
+            should_reinvoke = False
+        else:
+            self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
+            should_reinvoke = reloaded.needs_reinvoke
+            if should_reinvoke:
+                reloaded.needs_reinvoke = False
+                self._store.save(reloaded)
+
+        if should_reinvoke:
+            self._invoke_execution(execution_arn)
+        else:
+            # Arm the earliest-pending wake-up.
+            self._schedule_earliest_pending(execution_arn)
+
+    def _fail_invocation_not_found(
+        self, execution_arn: str, error: ErrorObject
+    ) -> None:
+        self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
+        self._fail_workflow(execution_arn, error)
+
+    def _retry_after_timeout(
+        self,
+        execution_arn: str,
+        error: ErrorObject,
+        invocation_start: datetime,
+        invocation_end: datetime,
+    ) -> None:
+        execution = self._store.load(execution_arn)
+        execution.record_invocation_completion(
+            invocation_start, invocation_end, str(uuid.uuid4())
+        )
+        self._store.save(execution)
+        self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
+        self._retry_invocation(execution, error)
+
+    def _retry_after_error(self, execution_arn: str, error: ErrorObject) -> None:
+        self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
+        try:
+            execution = self._store.load(execution_arn)
+        except Exception:  # noqa: BLE001
+            return
+        self._retry_invocation(execution, error)
+
     def _invoke_handler(self, execution_arn: str) -> Callable[[], Awaitable[None]]:
         """Create a parameterless callable that captures execution arn for the scheduler."""
 
         async def invoke() -> None:
-            # Under the per-ARN lock, claim the invocation gate and
-            # snapshot the execution for input construction. Release
-            # the lock BEFORE the blocking Lambda invoke — otherwise
-            # the customer handler's HTTP callbacks (which land on
-            # other threads and also acquire this lock) would block
-            # forever, deadlocking the execution.
-            execution: Execution
-            invocation_input: DurableExecutionInvocationInput
+            # The gate claim, the blocking Lambda invoke, and the
+            # post-invoke processing run as separate steps: the two
+            # state-mutation windows run on the execution's worker lane
+            # (serialized with checkpoints), while the blocking invoke
+            # runs off the lane so the handler's checkpoints can run on
+            # it.
             try:
-                with self._lock_for(execution_arn):
-                    execution = self._store.load(execution_arn)
+                claim = await asyncio.to_thread(
+                    lambda: self._registry.submit(
+                        execution_arn,
+                        CallableTask(lambda: self._begin_invocation(execution_arn)),
+                    ).result()
+                )
+                if claim is None:
+                    return
+                execution, invocation_input = claim
 
-                    if execution.is_complete:
-                        logger.info(
-                            "[%s] Execution already completed, ignoring invoke",
-                            execution_arn,
-                        )
-                        self._invocation_state[execution_arn] = (
-                            InvocationState.COMPLETED
-                        )
-                        return
-
-                    current_state = self._invocation_state.get(
-                        execution_arn, InvocationState.PRE_INVOKE
-                    )
-                    if current_state is InvocationState.COMPLETED:
-                        logger.info(
-                            "[%s] Invocation state already COMPLETED, not re-invoking",
-                            execution_arn,
-                        )
-                        return
-                    if current_state is InvocationState.INVOKING:
-                        # Another invocation is already in flight
-                        # . Record that we wanted to re-invoke;
-                        # the in-flight handler's post-invoke hook will
-                        # consult ``needs_reinvoke`` and schedule a
-                        # follow-up if set.
-                        execution.needs_reinvoke = True
-                        self._store.save(execution)
-                        logger.info(
-                            "[%s] Handler already INVOKING; deferring re-invoke",
-                            execution_arn,
-                        )
-                        return
-
-                    # Claim the gate: at most one handler
-                    # invocation per execution in flight.
-                    self._invocation_state[execution_arn] = InvocationState.INVOKING
-                    execution.begin_new_invocation()
-
-                    invocation_input = self._invoker.create_invocation_input(
-                        execution=execution
-                    )
-                    self._store.save(execution)
-
-                # Lock released. Blocking Lambda call happens here so
-                # HTTP callback threads can acquire the lock for their
-                # own load-mutate-save windows.
                 invocation_start = datetime.now(UTC)
                 invoke_response = await asyncio.wait_for(
                     asyncio.to_thread(
@@ -1388,110 +1494,33 @@ class Executor(ExecutionObserver):
                     timeout=self._invocation_timeout_seconds,
                 )
                 invocation_end = datetime.now(UTC)
-
-                # Re-acquire the lock for post-invoke state updates.
-                # While we were blocked, the Execution may have been
-                # mutated by HTTP callback threads; reload fresh.
-                with self._lock_for(execution_arn):
-                    execution = self._store.load(execution_arn)
-
-                    execution.record_invocation_completion(
-                        invocation_start,
-                        invocation_end,
-                        invoke_response.request_id,
-                    )
-                    self._store.save(execution)
-
-                    if execution.is_complete:
-                        # A stop_execution / timeout landed while we
-                        # were invoking — the terminal state is
-                        # authoritative; don't let the handler's
-                        # response overwrite it.
-                        logger.info(
-                            "[%s] Execution completed during invocation, ignoring result",
-                            execution_arn,
-                        )
-                        self._invocation_state[execution_arn] = (
-                            InvocationState.COMPLETED
-                        )
-                        return
-
-                response = invoke_response.invocation_output
-                try:
-                    self._validate_invocation_response_and_store(
-                        execution_arn, response, execution
-                    )
-                except (InvalidParameterValueException, IllegalStateException) as e:
-                    logger.warning(
-                        "[%s] Lambda output validation failure: %s",
+                await asyncio.to_thread(
+                    lambda: self._registry.submit(
                         execution_arn,
-                        e,
-                    )
-                    error_obj = ErrorObject.from_exception(e)
-                    # Release gate before retry scheduling so the
-                    # retry's _invoke_execution call finds PRE_INVOKE.
-                    # Under the per-ARN lock to block concurrent
-                    # triggers.
-                    with self._lock_for(execution_arn):
-                        self._invocation_state[execution_arn] = (
-                            InvocationState.PRE_INVOKE
-                        )
-                    self._retry_invocation(execution, error_obj)
-                    return
-
-                # A clean invocation (no validation failure,
-                # no exception) resets the retry counter to zero. The
-                # prior implementation only ever grew this counter.
-                with self._lock_for(execution_arn):
-                    reset_target = self._store.load(execution_arn)
-                    reset_target.consecutive_failed_invocation_attempts = 0
-                    self._store.save(reset_target)
-
-                # Clean return from handler. If the response was
-                # terminal, _complete_workflow has already set
-                # is_complete and the next _invoke_execution call
-                # (if any) will see COMPLETED. If PENDING, release
-                # the gate to PRE_INVOKE so the next trigger can
-                # start a fresh invocation.
-                with self._lock_for(execution_arn):
-                    reloaded = self._store.load(execution_arn)
-                    if reloaded.is_complete:
-                        self._invocation_state[execution_arn] = (
-                            InvocationState.COMPLETED
-                        )
-                        should_reinvoke = False
-                    else:
-                        self._invocation_state[execution_arn] = (
-                            InvocationState.PRE_INVOKE
-                        )
-                        # Re-invoke if another trigger
-                        # deferred during this invocation. Clear the
-                        # flag before scheduling so a concurrent
-                        # trigger doesn't set it a second time after
-                        # we've already picked it up.
-                        should_reinvoke = reloaded.needs_reinvoke
-                        if should_reinvoke:
-                            reloaded.needs_reinvoke = False
-                            self._store.save(reloaded)
-
-                if should_reinvoke:
-                    self._invoke_execution(execution_arn)
-                else:
-                    # Arm the earliest-pending wake-up so any
-                    # scheduler-driven completion (wait timer, step
-                    # retry) fires on its earliest aggregate moment.
-                    self._schedule_earliest_pending(execution_arn)
+                        CallableTask(
+                            lambda: self._finish_invocation(
+                                execution_arn,
+                                invoke_response,
+                                invocation_start,
+                                invocation_end,
+                            )
+                        ),
+                    ).result()
+                )
 
             except ResourceNotFoundException:
                 logger.warning("[%s] Function No longer exists", execution_arn)
                 error_obj = ErrorObject.from_message(message="Function not found")
-                # Release gate — _fail_workflow will set COMPLETED
-                # after writing the terminal state. Transition under
-                # the lock so a concurrent _invoke_execution can't
-                # see PRE_INVOKE and race us.
-                with self._lock_for(execution_arn):
-                    self._invocation_state[execution_arn] = InvocationState.PRE_INVOKE
-                self._fail_workflow(execution_arn, error_obj)
+                await asyncio.to_thread(
+                    lambda: self._registry.submit(
+                        execution_arn,
+                        CallableTask(
+                            lambda: self._fail_invocation_not_found(
+                                execution_arn, error_obj
+                            )
+                        ),
+                    ).result()
+                )
 
             except asyncio.TimeoutError:
                 # Invocation killed by Lambda timeout. Step operations
@@ -1503,34 +1532,35 @@ class Executor(ExecutionObserver):
                     execution_arn,
                     self._invocation_timeout_seconds,
                 )
-                with self._lock_for(execution_arn):
-                    execution = self._store.load(execution_arn)
-                    execution.record_invocation_completion(
-                        invocation_start,
-                        invocation_end,
-                        str(uuid.uuid4()),
-                    )
-                    self._store.save(execution)
-                    self._invocation_state[execution_arn] = InvocationState.PRE_INVOKE
                 error_obj = ErrorObject.from_message(
                     message=f"Function timed out after {self._invocation_timeout_seconds} seconds"
                 )
-                self._retry_invocation(execution, error_obj)
+                await asyncio.to_thread(
+                    lambda: self._registry.submit(
+                        execution_arn,
+                        CallableTask(
+                            lambda: self._retry_after_timeout(
+                                execution_arn,
+                                error_obj,
+                                invocation_start,
+                                invocation_end,
+                            )
+                        ),
+                    ).result()
+                )
 
             except Exception as e:  # noqa: BLE001
                 # Handle invocation errors (network, function not found, etc.)
                 logger.warning("[%s] Invocation failed: %s", execution_arn, e)
                 error_obj = ErrorObject.from_exception(e)
-                # Transition gate + reload execution under a single
-                # lock acquisition so callers never see a half-updated
-                # state.
-                with self._lock_for(execution_arn):
-                    self._invocation_state[execution_arn] = InvocationState.PRE_INVOKE
-                    try:
-                        execution = self._store.load(execution_arn)
-                    except Exception:  # noqa: BLE001
-                        return
-                self._retry_invocation(execution, error_obj)
+                await asyncio.to_thread(
+                    lambda: self._registry.submit(
+                        execution_arn,
+                        CallableTask(
+                            lambda: self._retry_after_error(execution_arn, error_obj)
+                        ),
+                    ).result()
+                )
 
         return invoke
 
@@ -1631,26 +1661,24 @@ class Executor(ExecutionObserver):
     def complete_execution(self, execution_arn: str, result: str | None = None) -> None:
         """Complete execution successfully (COMPLETE_WORKFLOW_EXECUTION decision)."""
         logger.debug("[%s] Completing execution with result: %s", execution_arn, result)
-        with self._lock_for(execution_arn):
-            execution: Execution = self._store.load(execution_arn=execution_arn)
-            execution.complete_success(result=result)  # Sets CloseStatus.COMPLETED
-            self._store.update(execution)
-            if execution.result is None:
-                msg: str = "Execution result is required"
-                raise IllegalStateException(msg)
+        execution: Execution = self._store.load(execution_arn=execution_arn)
+        execution.complete_success(result=result)  # Sets CloseStatus.COMPLETED
+        self._store.update(execution)
+        if execution.result is None:
+            msg: str = "Execution result is required"
+            raise IllegalStateException(msg)
         self._complete_events(execution_arn=execution_arn)
 
     def fail_execution(self, execution_arn: str, error: ErrorObject) -> None:
         """Fail execution with error (FAIL_WORKFLOW_EXECUTION decision)."""
         logger.error("[%s] Completing execution with error: %s", execution_arn, error)
-        with self._lock_for(execution_arn):
-            execution: Execution = self._store.load(execution_arn=execution_arn)
-            execution.complete_fail(error=error)  # Sets CloseStatus.FAILED
-            self._store.update(execution)
-            # set by complete_fail
-            if execution.result is None:
-                msg: str = "Execution result is required"
-                raise IllegalStateException(msg)
+        execution: Execution = self._store.load(execution_arn=execution_arn)
+        execution.complete_fail(error=error)  # Sets CloseStatus.FAILED
+        self._store.update(execution)
+        # set by complete_fail
+        if execution.result is None:
+            msg: str = "Execution result is required"
+            raise IllegalStateException(msg)
         self._complete_events(execution_arn=execution_arn)
 
     # region ExecutionObserver
@@ -1663,16 +1691,21 @@ class Executor(ExecutionObserver):
         self.fail_execution(execution_arn, error)
 
     def on_timed_out(self, execution_arn: str, error: ErrorObject) -> None:
-        """Handle execution timeout (workflow timeout). Observer method triggered by notifier."""
-        logger.exception("[%s] Execution timed out.", execution_arn)
-        with self._lock_for(execution_arn):
-            execution: Execution = self._store.load(execution_arn=execution_arn)
-            execution.complete_timeout(error=error)  # Sets CloseStatus.TIMED_OUT
-            self._store.update(execution)
+        """Handle execution timeout (workflow timeout)."""
+        logger.warning("[%s] Execution timed out.", execution_arn)
+        self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._apply_timeout(execution_arn, error)),
+        ).result()
         self._complete_events(execution_arn=execution_arn)
 
+    def _apply_timeout(self, execution_arn: str, error: ErrorObject) -> None:
+        execution = self._store.load(execution_arn=execution_arn)
+        execution.complete_timeout(error=error)  # Sets CloseStatus.TIMED_OUT
+        self._store.update(execution)
+
     def on_stopped(self, execution_arn: str, error: ErrorObject) -> None:
-        """Handle execution stop. Observer method triggered by notifier."""
+        """Handle execution stop."""
         # This should not be called directly - stop_execution handles termination
         self.fail_execution(execution_arn, error)
 
@@ -1798,27 +1831,33 @@ class Executor(ExecutionObserver):
         if heartbeat_future := self._callback_heartbeats.pop(callback_id, None):
             heartbeat_future.cancel()
 
+    def _apply_callback_timeout(self, callback_id: str, error: ErrorObject) -> None:
+        callback_token = CallbackToken.from_str(callback_id)
+        execution = self.get_execution(callback_token.execution_arn)
+        if execution.is_complete:
+            return
+        execution.complete_callback_timeout(callback_id, error)
+        self._store.update(execution)
+
     def _on_callback_timeout(self, execution_arn: str, callback_id: str) -> None:
         """Handle callback timeout."""
         try:
             callback_token = CallbackToken.from_str(callback_id)
-            with self._lock_for(callback_token.execution_arn):
-                execution = self.get_execution(callback_token.execution_arn)
-
-                if execution.is_complete:
-                    return
-
-                # Fail the callback with timeout error
-                timeout_error = ErrorObject(
-                    message="Callback timed out",
-                    type=CallbackTimeoutType.TIMEOUT.value,
-                    data=None,
-                    stack_trace=None,
-                )
-                execution.complete_callback_timeout(callback_id, timeout_error)
-                self._store.update(execution)
-                logger.warning("[%s] Callback %s timed out", execution_arn, callback_id)
-            self._invoke_execution(callback_token.execution_arn)
+            arn = callback_token.execution_arn
+            timeout_error = ErrorObject(
+                message="Callback timed out",
+                type=CallbackTimeoutType.TIMEOUT.value,
+                data=None,
+                stack_trace=None,
+            )
+            self._registry.submit(
+                arn,
+                CallableTask(
+                    lambda: self._apply_callback_timeout(callback_id, timeout_error)
+                ),
+            ).result()
+            logger.warning("[%s] Callback %s timed out", execution_arn, callback_id)
+            self._invoke_execution(arn)
         except Exception:
             logger.exception(
                 "[%s] Error processing callback timeout for %s",
@@ -1832,26 +1871,23 @@ class Executor(ExecutionObserver):
         """Handle callback heartbeat timeout."""
         try:
             callback_token = CallbackToken.from_str(callback_id)
-            with self._lock_for(callback_token.execution_arn):
-                execution = self.get_execution(callback_token.execution_arn)
-
-                if execution.is_complete:
-                    return
-
-                # Fail the callback with heartbeat timeout error
-
-                heartbeat_error = ErrorObject(
-                    message="Callback timed out on heartbeat",
-                    type=CallbackTimeoutType.HEARTBEAT.value,
-                    data=None,
-                    stack_trace=None,
-                )
-                execution.complete_callback_timeout(callback_id, heartbeat_error)
-                self._store.update(execution)
-                logger.warning(
-                    "[%s] Callback %s heartbeat timed out", execution_arn, callback_id
-                )
-            self._invoke_execution(callback_token.execution_arn)
+            arn = callback_token.execution_arn
+            heartbeat_error = ErrorObject(
+                message="Callback timed out on heartbeat",
+                type=CallbackTimeoutType.HEARTBEAT.value,
+                data=None,
+                stack_trace=None,
+            )
+            self._registry.submit(
+                arn,
+                CallableTask(
+                    lambda: self._apply_callback_timeout(callback_id, heartbeat_error)
+                ),
+            ).result()
+            logger.warning(
+                "[%s] Callback %s heartbeat timed out", execution_arn, callback_id
+            )
+            self._invoke_execution(arn)
         except Exception:
             logger.exception(
                 "[%s] Error processing callback heartbeat timeout for %s",

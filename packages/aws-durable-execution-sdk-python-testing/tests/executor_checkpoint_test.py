@@ -79,8 +79,8 @@ def _make_executor_with_started_execution() -> tuple[
     # Simulate an active invocation so the gate lets checkpoint
     # requests through. _invoke_handler will do this
     # automatically; tests here pre-prime it.
-    executor._invocation_state[execution.durable_execution_arn] = (  # noqa: SLF001
-        InvocationState.INVOKING
+    executor._set_invocation_gate(  # noqa: SLF001
+        execution.durable_execution_arn, InvocationState.INVOKING
     )
 
     initial_token = CheckpointToken(
@@ -434,7 +434,7 @@ def test_invocation_gate_defers_concurrent_trigger():
     executor = Executor(store, scheduler, invoker, checkpoint_processor)
 
     # Simulate "handler is mid-flight" — gate is INVOKING.
-    executor._invocation_state[arn] = InvocationState.INVOKING  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.INVOKING)  # noqa: SLF001
 
     # Grab the coroutine _invoke_handler builds and run it directly.
     # Under the gate check it must NOT call the mocked invoker.
@@ -480,7 +480,7 @@ def test_failed_invocation_releases_the_gate():
     # in a previous attempt and this failure tips it over). But never
     # INVOKING.
     assert (
-        executor._invocation_state.get(arn, InvocationState.PRE_INVOKE)  # noqa: SLF001
+        executor._invocation_gate(arn)  # noqa: SLF001
         is not InvocationState.INVOKING
     )
 
@@ -681,7 +681,7 @@ def test_get_execution_state_gate_and_marker_contracts():
         )
 
     # Outside INVOKING: flip the gate to PRE_INVOKE and expect rejection.
-    executor._invocation_state[arn] = InvocationState.PRE_INVOKE  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.PRE_INVOKE)  # noqa: SLF001
     with pytest.raises(InvalidParameterValueException):
         executor.get_execution_state(
             execution_arn=arn, checkpoint_token=r1.checkpoint_token

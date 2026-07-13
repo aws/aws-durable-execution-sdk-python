@@ -36,6 +36,7 @@ from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
     DEFAULT_MAX_INVOCATION_PAGE_BYTES,
 )
 from aws_durable_execution_sdk_python_testing.client import InMemoryServiceClient
+from aws_durable_execution_sdk_python_testing.worker.registry import ExecutionRegistry
 from aws_durable_execution_sdk_python_testing.exceptions import (
     DurableFunctionsLocalRunnerError,
     DurableFunctionsTestError,
@@ -111,7 +112,7 @@ class WebRunnerConfig:
     invocation_timeout_seconds: int = 900
 
     # Invocation-input pagination cap (bytes). Handler receives pages
-    # up to this size. Larger state is served via
+    # up to this size; larger state is served via
     # GetDurableExecutionState. None falls back to Executor default
     # (5 MB).
     max_invocation_page_bytes: int | None = None
@@ -601,6 +602,7 @@ class DurableFunctionTestRunner:
         max_invocation_page_bytes: int | None = None,
         execution_timeout: int = 300,
         invocation_timeout: int = 900,
+        store: ExecutionStore | None = None,
     ):
         self._execution_timeout = execution_timeout
         self._invocation_timeout = invocation_timeout
@@ -611,13 +613,20 @@ class DurableFunctionTestRunner:
         )
         self._scheduler: Scheduler = Scheduler()
         self._scheduler.start()
-        self._store = InMemoryExecutionStore()
+        # Defaults to the in-memory store. Pass a filesystem or sqlite
+        # store to run the in-process lifecycle on a disk-backed store.
+        self._store: ExecutionStore = (
+            store if store is not None else InMemoryExecutionStore()
+        )
         self.poll_interval = poll_interval
         self._checkpoint_processor = CheckpointProcessor(
             store=self._store,
             scheduler=self._scheduler,
         )
-        self._service_client = InMemoryServiceClient(self._checkpoint_processor)
+        self._registry = ExecutionRegistry(self._store, self._scheduler)
+        self._service_client = InMemoryServiceClient(
+            self._checkpoint_processor, self._registry
+        )
         self._invoker = InProcessInvoker(
             handler,
             self._service_client,
@@ -630,6 +639,7 @@ class DurableFunctionTestRunner:
             checkpoint_processor=self._checkpoint_processor,
             max_invocation_page_bytes=self._max_invocation_page_bytes,
             invocation_timeout_seconds=invocation_timeout,
+            registry=self._registry,
         )
 
         # Wire up observer pattern - CheckpointProcessor uses this to notify executor of state changes
@@ -642,6 +652,7 @@ class DurableFunctionTestRunner:
         self.close()
 
     def close(self):
+        self._registry.shutdown()
         self._scheduler.stop()
 
     def run(
@@ -756,6 +767,7 @@ class DurableFunctionTestRunner:
                 if callback_id:
                     return callback_id
             except ResourceNotFoundException:
+                # Execution may not be visible yet during async invoke.
                 pass
             except Exception as e:
                 msg = f"Failed to fetch execution history: {e}"
@@ -766,7 +778,7 @@ class DurableFunctionTestRunner:
 
         # Timeout reached
         elapsed = time.time() - start_time
-        msg = f"Callback did not available within {timeout}s (elapsed: {elapsed:.1f}s."
+        msg = f"Callback did not become available within {timeout}s (elapsed: {elapsed:.1f}s)."
         raise TimeoutError(msg)
 
 
@@ -802,6 +814,7 @@ class WebRunner:
         self._store: ExecutionStore | None = None
         self._invoker: LambdaInvoker | None = None
         self._executor: Executor | None = None
+        self._registry: ExecutionRegistry | None = None
 
     def __enter__(self) -> Self:
         """Context manager entry point.
@@ -858,6 +871,7 @@ class WebRunner:
 
         # Create shared CheckpointProcessor
         checkpoint_processor = CheckpointProcessor(self._store, self._scheduler)
+        self._registry = ExecutionRegistry(self._store, self._scheduler)
 
         # Create executor with all dependencies including checkpoint processor
         self._executor = Executor(
@@ -867,6 +881,7 @@ class WebRunner:
             checkpoint_processor=checkpoint_processor,
             max_invocation_page_bytes=resolved_max_page_bytes,
             invocation_timeout_seconds=self._config.invocation_timeout_seconds,
+            registry=self._registry,
         )
 
         # Add executor as observer to the checkpoint processor
@@ -913,6 +928,13 @@ class WebRunner:
 
             self._server = None
 
+        if self._registry is not None:
+            try:
+                self._registry.shutdown()
+            except Exception:
+                logger.exception("error stopping execution registry")
+            self._registry = None
+
         if self._scheduler is not None:
             try:
                 self._scheduler.stop()
@@ -943,7 +965,7 @@ class WebRunner:
 
 
 class DurableFunctionCloudTestRunner:
-    """Test runner that executes durable functions against actual AWS Lambda backend.
+    """Test runner that executes durable functions against the deployed service.
 
     This runner invokes deployed Lambda functions and polls for execution completion,
     providing the same interface as DurableFunctionTestRunner for seamless test
@@ -1227,7 +1249,7 @@ class DurableFunctionCloudTestRunner:
 
         # Timeout reached
         elapsed = time.time() - start_time
-        msg = f"Callback did not available within {timeout}s (elapsed: {elapsed:.1f}s."
+        msg = f"Callback did not become available within {timeout}s (elapsed: {elapsed:.1f}s)."
         raise TimeoutError(msg)
 
     def _fetch_execution_history(

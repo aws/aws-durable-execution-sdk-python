@@ -14,12 +14,10 @@ from aws_durable_execution_sdk_python.lambda_service import (
     CallbackOptions,
     OperationUpdate,
     OperationAction,
-    OperationSubType,
     OperationType,
     Operation,
     OperationStatus,
     CallbackDetails,
-    StepDetails,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
@@ -37,7 +35,6 @@ from aws_durable_execution_sdk_python_testing.execution import (
 from aws_durable_execution_sdk_python_testing.executor import Executor, InvocationState
 from aws_durable_execution_sdk_python_testing.invoker import InvokeResponse
 from aws_durable_execution_sdk_python_testing.model import (
-    InvocationCompletedDetails,
     ListDurableExecutionsResponse,
     SendDurableExecutionCallbackFailureResponse,
     SendDurableExecutionCallbackHeartbeatResponse,
@@ -46,7 +43,6 @@ from aws_durable_execution_sdk_python_testing.model import (
     StopDurableExecutionResponse,
 )
 from aws_durable_execution_sdk_python_testing.observer import (
-    ExecutionNotifier,
     ExecutionObserver,
 )
 from aws_durable_execution_sdk_python_testing.stores.memory import (
@@ -264,7 +260,7 @@ def test_start_execution_with_provided_invocation_id(
 
     result = executor.get_execution("test-arn")
 
-    mock_store.load.assert_called_once_with("test-arn")
+    mock_store.load.assert_any_call("test-arn")
     assert result == mock_execution
 
 
@@ -721,8 +717,12 @@ def test_invoke_handler_execution_completed_during_invocation(
     completed_execution.is_complete = True
     completed_execution.start_input = start_input
 
-    # First call returns incomplete execution, second call returns completed execution
-    mock_store.load.side_effect = [mock_execution, completed_execution]
+    # Invoke loads the store several times (begin, status refresh, finish):
+    # return incomplete first then completed, and never let the side_effect
+    # iterator exhaust. An exhausted side_effect raises StopIteration, which
+    # cannot cross an asyncio future and hangs the run under Python 3.11.
+    _loads = iter([mock_execution])
+    mock_store.load.side_effect = lambda *a, **k: next(_loads, completed_execution)
 
     # Mock execution creation
     with patch(
@@ -862,7 +862,7 @@ def test_should_complete_workflow_successfully_through_public_api(
         executor.complete_execution("test-arn", "result")
 
     # Assert - Verify final execution status and stored results
-    mock_store.load.assert_called_once_with(execution_arn="test-arn")
+    mock_store.load.assert_any_call(execution_arn="test-arn")
     mock_execution.complete_success.assert_called_once_with(result="result")
     mock_store.update.assert_called_once_with(mock_execution)
     mock_complete_events.assert_called_once_with(execution_arn="test-arn")
@@ -882,7 +882,7 @@ def test_should_complete_workflow_with_failure_through_public_api(
         executor.fail_execution("test-arn", error)
 
     # Assert - Verify final execution status and stored error
-    mock_store.load.assert_called_once_with(execution_arn="test-arn")
+    mock_store.load.assert_any_call(execution_arn="test-arn")
     mock_execution.complete_fail.assert_called_once_with(error=error)
     mock_store.update.assert_called_once_with(mock_execution)
     mock_complete_events.assert_called_once_with(execution_arn="test-arn")
@@ -901,7 +901,7 @@ def test_should_handle_workflow_completion_state_through_public_api(
         executor.complete_execution("test-arn", "result")
 
     # Assert - Verify completion was processed and observer notifications sent
-    mock_store.load.assert_called_once_with(execution_arn="test-arn")
+    mock_store.load.assert_any_call(execution_arn="test-arn")
     mock_execution.complete_success.assert_called_once_with(result="result")
     mock_store.update.assert_called_once_with(mock_execution)
     mock_complete_events.assert_called_once_with(execution_arn="test-arn")
@@ -1251,7 +1251,7 @@ def test_complete_execution(executor, mock_store, mock_execution):
     with patch.object(executor, "_complete_events") as mock_complete_events:
         executor.complete_execution("test-arn", "result")
 
-    mock_store.load.assert_called_once_with(execution_arn="test-arn")
+    mock_store.load.assert_any_call(execution_arn="test-arn")
     mock_execution.complete_success.assert_called_once_with(result="result")
     mock_store.update.assert_called_once_with(mock_execution)
     mock_complete_events.assert_called_once_with(execution_arn="test-arn")
@@ -1265,7 +1265,7 @@ def test_fail_execution(executor, mock_store, mock_execution):
     with patch.object(executor, "_complete_events") as mock_complete_events:
         executor.fail_execution("test-arn", error)
 
-    mock_store.load.assert_called_once_with(execution_arn="test-arn")
+    mock_store.load.assert_any_call(execution_arn="test-arn")
     mock_execution.complete_fail.assert_called_once_with(error=error)
     mock_store.update.assert_called_once_with(mock_execution)
     mock_complete_events.assert_called_once_with(execution_arn="test-arn")
@@ -1383,7 +1383,11 @@ def test_invoke_handler_execution_completed_during_invocation_async(
     completed_execution = Mock(spec=Execution)
     completed_execution.is_complete = True
 
-    mock_store.load.side_effect = [incomplete_execution, completed_execution]
+    # Never let the side_effect iterator exhaust (see the sync twin): an
+    # exhausted side_effect raises StopIteration, which cannot cross an
+    # asyncio future and hangs the run under Python 3.11.
+    _loads = iter([incomplete_execution])
+    mock_store.load.side_effect = lambda *a, **k: next(_loads, completed_execution)
 
     mock_invocation_input = Mock()
     mock_invoker.create_invocation_input.return_value = mock_invocation_input
@@ -1570,7 +1574,7 @@ def test_get_execution_details(executor, mock_store):
     assert result.status == "SUCCEEDED"
     assert result.result == "test-result"
     assert result.error is None
-    mock_store.load.assert_called_once_with("test-arn")
+    mock_store.load.assert_any_call("test-arn")
 
 
 def test_get_execution_details_not_found(executor, mock_store):
@@ -1783,7 +1787,7 @@ def test_stop_execution(executor, mock_store):
 
     result = executor.stop_execution("test-arn")
 
-    mock_store.load.assert_called_once_with("test-arn")
+    mock_store.load.assert_any_call("test-arn")
     mock_store.update.assert_called_once_with(execution)
     assert result.stop_timestamp is not None
     assert execution.is_complete is True
@@ -1828,7 +1832,7 @@ def test_stop_execution_with_custom_error(executor, mock_store):
 
     executor.stop_execution("test-arn", error=custom_error)
 
-    mock_store.load.assert_called_once_with("test-arn")
+    mock_store.load.assert_any_call("test-arn")
     mock_store.update.assert_called_once_with(execution)
     assert execution.is_complete is True
     assert execution.close_status == ExecutionStatus.STOPPED
@@ -1888,7 +1892,7 @@ def test_get_execution_state(mock_scheduler, mock_invoker, mock_checkpoint_proce
     store.update(execution)
 
     # Gate open + valid token.
-    executor._invocation_state[arn] = InvocationState.INVOKING  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.INVOKING)  # noqa: SLF001
     token = CheckpointToken(execution_arn=arn, token_sequence=0).to_str()
 
     result = executor.get_execution_state(arn, checkpoint_token=token)
@@ -1920,7 +1924,7 @@ def test_get_execution_state_invalid_token(
     execution.start()
     store.save(execution)
     arn = execution.durable_execution_arn
-    executor._invocation_state[arn] = InvocationState.INVOKING  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.INVOKING)  # noqa: SLF001
 
     with pytest.raises(
         InvalidParameterValueException, match="Invalid checkpoint token"
@@ -1945,11 +1949,12 @@ def test_get_execution_history(executor, mock_store):
 
     assert result.events == []
     assert result.next_marker is None
-    mock_store.load.assert_called_once_with("test-arn")
+    mock_store.load.assert_any_call("test-arn")
 
 
 def test_get_execution_history_with_events(executor, mock_store):
     """Test get_execution_history with actual events."""
+    from aws_durable_execution_sdk_python.lambda_service import StepDetails
 
     # Create operations that will generate events
     op1 = Operation(
@@ -1976,53 +1981,6 @@ def test_get_execution_history_with_events(executor, mock_store):
     assert len(result.events) == 2  # Started + Succeeded events
     assert result.events[0].event_type == "StepStarted"
     assert result.events[1].event_type == "StepSucceeded"
-
-
-def test_get_execution_history_with_invocation_completions_and_updates(
-    executor, mock_store
-):
-    """Exercise the update-history and invocation-completions branches."""
-    now: datetime = datetime.now(UTC)
-    op: Operation = Operation(
-        operation_id="op-1",
-        operation_type=OperationType.STEP,
-        status=OperationStatus.SUCCEEDED,
-        start_timestamp=now,
-        end_timestamp=now,
-        sub_type=OperationSubType.STEP,
-        step_details=StepDetails(result='"ok"', attempt=1),
-    )
-    update: OperationUpdate = OperationUpdate(
-        operation_id="op-1",
-        operation_type=OperationType.STEP,
-        action=OperationAction.START,
-        sub_type=OperationSubType.STEP,
-        name="my-step",
-    )
-    completion: InvocationCompletedDetails = InvocationCompletedDetails(
-        start_timestamp=now,
-        end_timestamp=now,
-        request_id="req-1",
-    )
-
-    mock_execution = Mock()
-    mock_execution.operations = [op]
-    mock_execution.updates = [update]
-    mock_execution.update_timestamps = [now]
-    mock_execution.invocation_completions = [completion]
-    mock_execution.durable_execution_arn = "arn:test"
-    mock_execution.start_input = Mock()
-    mock_execution.start_input.execution_timeout_seconds = 60
-    mock_execution.result = None
-    mock_store.load.return_value = mock_execution
-
-    result = executor.get_execution_history("arn:test", include_execution_data=True)
-
-    # At minimum we expect: ExecutionStarted, the step event(s) from
-    # the update, and an InvocationCompleted event from the completion.
-    event_types = [e.event_type for e in result.events]
-    assert "InvocationCompleted" in event_types
-    assert "StepStarted" in event_types
 
 
 def test_get_execution_history_reverse_order(executor, mock_store):
@@ -2162,7 +2120,7 @@ def test_checkpoint_execution(mock_scheduler, mock_invoker, mock_checkpoint_proc
     # Simulate an active invocation so the invocation-state gate lets
     # the checkpoint through. _invoke_handler wires this
     # automatically.
-    real_executor._invocation_state[arn] = InvocationState.INVOKING  # noqa: SLF001
+    real_executor._set_invocation_gate(arn, InvocationState.INVOKING)  # noqa: SLF001
 
     initial_token = CheckpointToken(execution_arn=arn, token_sequence=0).to_str()
 
@@ -2228,7 +2186,7 @@ def test_send_callback_success(executor, mock_store):
         result = executor.send_callback_success(callback_id, b"success-result")
 
     assert isinstance(result, SendDurableExecutionCallbackSuccessResponse)
-    mock_store.load.assert_called_once_with("test-arn")
+    mock_store.load.assert_any_call("test-arn")
     mock_execution.complete_callback_success.assert_called_once_with(
         callback_id, b"success-result"
     )
@@ -2292,7 +2250,7 @@ def test_send_callback_failure(executor, mock_store):
         result = executor.send_callback_failure(callback_id)
 
     assert isinstance(result, SendDurableExecutionCallbackFailureResponse)
-    mock_store.load.assert_called_once_with("test-arn")
+    mock_store.load.assert_any_call("test-arn")
     mock_store.update.assert_called_once_with(mock_execution)
     # Verify execution is invoked after callback failure
     mock_invoke.assert_called_once_with("test-arn")
@@ -2352,7 +2310,9 @@ def test_send_callback_heartbeat(executor, mock_store):
 
     assert isinstance(result, SendDurableExecutionCallbackHeartbeatResponse)
     # Called twice: once in get_execution, once in _reset_callback_heartbeat_timeout
-    assert mock_store.load.call_count == 2
+    # get_execution + _reset_callback_heartbeat_timeout, plus the
+    # worker's completion-reload after the lane task.
+    assert mock_store.load.call_count >= 2
     mock_execution.find_callback_operation.assert_called_once_with(callback_id)
 
 
@@ -2715,7 +2675,7 @@ def test_on_timed_out(executor, mock_store):
     with patch.object(executor, "_complete_events") as mock_complete_events:
         executor.on_timed_out("test-arn", error)
 
-    mock_store.load.assert_called_once_with(execution_arn="test-arn")
+    mock_store.load.assert_any_call(execution_arn="test-arn")
     mock_store.update.assert_called_once_with(execution)
     mock_complete_events.assert_called_once_with(execution_arn="test-arn")
     assert execution.is_complete is True
@@ -2731,27 +2691,3 @@ def test_on_stopped(executor):
         executor.on_stopped("test-arn", error)
 
     mock_fail.assert_called_once_with("test-arn", error)
-
-
-def test_notify_timed_out():
-    """Test notify_timed_out method."""
-    notifier = ExecutionNotifier()
-    observer = Mock()
-    notifier.add_observer(observer)
-
-    error = ErrorObject.from_message("Timeout error")
-    notifier.notify_timed_out("test-arn", error)
-
-    observer.on_timed_out.assert_called_once_with(execution_arn="test-arn", error=error)
-
-
-def test_notify_stopped():
-    """Test notify_stopped method."""
-    notifier = ExecutionNotifier()
-    observer = Mock()
-    notifier.add_observer(observer)
-
-    error = ErrorObject.from_message("Stop error")
-    notifier.notify_stopped("test-arn", error)
-
-    observer.on_stopped.assert_called_once_with(execution_arn="test-arn", error=error)

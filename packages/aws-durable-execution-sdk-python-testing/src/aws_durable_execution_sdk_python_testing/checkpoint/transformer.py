@@ -1,9 +1,8 @@
 """Checkpoint request dispatcher.
 
-Routes each ``OperationUpdate`` in a checkpoint batch to a
-type-specific processor (step, wait, callback, context, execution),
-which returns the resulting ``Operation`` to upsert into the
-execution's operation list.
+Routes each ``OperationUpdate`` in a checkpoint to its type-specific
+processor (step, wait, callback, context, execution) and applies the
+result to the execution.
 """
 
 from __future__ import annotations
@@ -34,6 +33,7 @@ from aws_durable_execution_sdk_python_testing.checkpoint.processors.wait import 
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
 )
+from aws_durable_execution_sdk_python_testing.observer import ExecutionNotifier
 
 
 if TYPE_CHECKING:
@@ -43,11 +43,13 @@ if TYPE_CHECKING:
         OperationUpdate,
     )
 
+    from aws_durable_execution_sdk_python_testing.checkpoint.effects import (
+        CheckpointEffect,
+    )
     from aws_durable_execution_sdk_python_testing.checkpoint.processors.base import (
         OperationProcessor,
     )
     from aws_durable_execution_sdk_python_testing.execution import Execution
-    from aws_durable_execution_sdk_python_testing.observer import ExecutionNotifier
 
 
 class CheckpointRequestDispatcher:
@@ -80,9 +82,8 @@ class CheckpointRequestDispatcher:
         execution: Execution,
         updates: list[OperationUpdate],
         client_token: str | None,  # noqa: ARG002 — reserved for future idempotency diagnostics
-        notifier: ExecutionNotifier,
         touch: Callable[[str], None],
-    ) -> None:
+    ) -> list[CheckpointEffect]:
         """Apply ``updates`` to ``execution`` in place.
 
         Callers are responsible for running
@@ -103,10 +104,12 @@ class CheckpointRequestDispatcher:
           production caller) bumps :attr:`Execution.seq_counter` and
           sets ``operation_last_touched_seq[op_id]``.
 
-        No response object is returned. Response construction is the
-        responsibility of the checkpoint orchestrator
-        (``Executor.checkpoint_execution``).
+        Returns the lifecycle effects raised by the updates (completion,
+        failure, callback creation) for the caller to apply once the
+        write is done. Response construction is the responsibility of the
+        checkpoint orchestrator.
         """
+        collector = ExecutionNotifier()
         op_map = {op.operation_id: op for op in execution.operations}
 
         for update in updates:
@@ -119,7 +122,7 @@ class CheckpointRequestDispatcher:
             updated_op = processor.process(
                 update=update,
                 current_op=current_op,
-                notifier=notifier,
+                notifier=collector,
                 execution_arn=execution.durable_execution_arn,
             )
             if updated_op is None:
@@ -141,6 +144,8 @@ class CheckpointRequestDispatcher:
 
         execution.updates.extend(updates)
         execution.update_timestamps.extend(datetime.now(UTC) for _ in updates)
+
+        return collector.effects
 
 
 def _estimate_payload_size(update: OperationUpdate) -> int:

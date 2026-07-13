@@ -1296,6 +1296,42 @@ def test_paginator_page_returns_prefix_and_marker_when_bytes_exceeded():
     assert first_marker is not None
 
 
+def test_paginator_page_bounded_by_max_items():
+    """With a generous byte cap, max_items bounds the page by count and
+    yields a resumable marker; a larger count from the same resume point
+    returns the remainder."""
+    execution = _make_execution_with_ops(
+        ["A", "B", "C", "D", "E"],
+        sizes={"A": 1, "B": 1, "C": 1, "D": 1, "E": 1},
+    )
+    paginator = OperationPaginatorState.pin(execution)
+
+    first_ops, first_marker = paginator.page(
+        None, max_size_bytes=1_000_000, max_items=2
+    )
+    assert [op.operation_id for op in first_ops] == ["A", "B"]
+    assert first_marker is not None
+
+    second_ops, second_marker = paginator.page(
+        first_marker, max_size_bytes=1_000_000, max_items=100
+    )
+    assert [op.operation_id for op in second_ops] == ["C", "D", "E"]
+    assert second_marker is None
+
+
+def test_paginator_page_max_items_none_is_unbounded_by_count():
+    """max_items=None keeps the byte-only behavior (no count bound)."""
+    execution = _make_execution_with_ops(
+        ["A", "B", "C"], sizes={"A": 1, "B": 1, "C": 1}
+    )
+    paginator = OperationPaginatorState.pin(execution)
+
+    ops, next_marker = paginator.page(None, max_size_bytes=1_000_000, max_items=None)
+
+    assert [op.operation_id for op in ops] == ["A", "B", "C"]
+    assert next_marker is None
+
+
 def test_paginator_page_resumes_from_marker():
     """Feeding a next_marker from a previous page() back in resumes the
     walk from the right index. Combined pages equal the full op list."""

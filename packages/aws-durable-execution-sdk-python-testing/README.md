@@ -112,66 +112,10 @@ def test_my_durable_functions():
     assert three_result.result == '"5 6"'
 ```
 ## Architecture
-![Durable Functions Python Test Framework Architecture](assets/dar-python-test-framework-architecture.svg)
 
-## Event Flow
-![Event Flow Sequence Diagram](assets/dar-python-test-framework-event-flow.svg)
-
-1. **DurableTestRunner** starts execution via **Executor**
-2. **Executor** creates **Execution** and schedules initial invocation
-3. During execution, checkpoints are processed by **CheckpointProcessor**
-4. **Individual Processors** transform operation updates and may trigger events
-5. **ExecutionNotifier** broadcasts events to **Executor** (observer)
-6. **Executor** updates **Execution** state based on events
-7. **Execution** completion triggers final event notifications
-8. **DurableTestRunner** run() blocks until it receives completion event, and then returns `DurableFunctionTestResult`.
-
-## Major Components
-
-### Core Execution Flow
-- **DurableTestRunner** - Main entry point that orchestrates test execution
-- **Executor** - Manages execution lifecycle. Mutates Execution.
-- **Execution** - Represents the state and operations of a single durable execution
-
-### Service Client Integration
-- **InMemoryServiceClient** - Replaces AWS Lambda service client for local testing. Injected into SDK via `DurableExecutionInvocationInputWithClient`
-
-### Checkpoint Processing Pipeline
-- **CheckpointProcessor** - Orchestrates operation transformations and validation
-- **Individual Validators** - Validate operation updates and state transitions
-- **Individual Processors** - Transform operation updates into operations (step, wait, callback, context, execution)
-
-### Execution status changes (Observer Pattern)
-- **ExecutionNotifier** - Notifies observers of execution events
-- **ExecutionObserver** - Interface for receiving execution lifecycle events
-- **Executor** implements `ExecutionObserver` to handle completion events
-
-## Component Relationships
-
-### 1. DurableTestRunner → Executor → Execution
-- **DurableTestRunner** serves as the main API entry point and sets up all components
-- **Executor** manages the execution lifecycle, handling invocations and state transitions
-- **Execution** maintains the state of operations and completion status
-
-### 2. Service Client Injection
-- **DurableTestRunner** creates **InMemoryServiceClient** with **CheckpointProcessor**
-- **InProcessInvoker** injects the service client into SDK via `DurableExecutionInvocationInputWithClient`
-- When durable functions call checkpoint operations, they're intercepted by **InMemoryServiceClient**
-- **InMemoryServiceClient** delegates to **CheckpointProcessor** for local processing
-
-### 3. CheckpointProcessor → Individual Validators → Individual Processors
-- **CheckpointProcessor** orchestrates the checkpoint processing pipeline
-- **Individual Validators** (CheckpointValidator, TransitionsValidator, and operation-specific validators) ensure operation updates are valid
-- **Individual Processors** (StepProcessor, WaitProcessor, etc.) transform `OperationUpdate` into `Operation`
-
-### 4. Observer Pattern Flow
-The observer pattern enables loose coupling between checkpoint processing and execution management:
-
-1. **CheckpointProcessor** processes operation updates
-2. **Individual Processors** detect state changes (completion, failures, timer scheduling)
-3. **ExecutionNotifier** broadcasts events to registered observers
-4. **Executor** (as ExecutionObserver) receives notifications and updates **Execution** state
-5. **Execution** complete_* methods finalize the execution state
+See [docs/architecture.md](docs/architecture.md) for framework
+internals. It covers the components, the worker model, the checkpoint
+flow, pagination, and a map of the code.
 
 
 ## Documentation

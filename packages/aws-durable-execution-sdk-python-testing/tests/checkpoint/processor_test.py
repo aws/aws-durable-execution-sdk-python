@@ -46,23 +46,17 @@ def test_init():
     processor.add_execution_observer(observer)  # Should not raise an exception
 
 
-@patch(
-    "aws_durable_execution_sdk_python_testing.checkpoint.processor.ExecutionNotifier"
-)
-def test_add_execution_observer(mock_notifier_class):
+def test_add_execution_observer():
     """Test adding execution observer."""
     store = Mock(spec=ExecutionStore)
     scheduler = Mock(spec=Scheduler)
-    mock_notifier_instance = Mock()
-    mock_notifier_class.return_value = mock_notifier_instance
 
     processor = CheckpointProcessor(store, scheduler)
     observer = Mock()
 
     processor.add_execution_observer(observer)
 
-    # Verify observer was added through the notifier's public method
-    mock_notifier_instance.add_observer.assert_called_once_with(observer)
+    assert observer in processor._observers  # noqa: SLF001
 
 
 def test_process_checkpoint_success():
@@ -112,9 +106,7 @@ def test_process_checkpoint_success():
     )
 
 
-@patch(
-    "aws_durable_execution_sdk_python_testing.checkpoint.processor.CheckpointValidator"
-)
+@patch("aws_durable_execution_sdk_python_testing.checkpoint.core.CheckpointValidator")
 def test_process_checkpoint_invalid_token_complete_execution(mock_validator):
     """Test checkpoint processing with complete execution."""
     store = Mock(spec=ExecutionStore)
@@ -144,9 +136,7 @@ def test_process_checkpoint_invalid_token_complete_execution(mock_validator):
             processor.process_checkpoint(checkpoint_token, updates, "client-token")
 
 
-@patch(
-    "aws_durable_execution_sdk_python_testing.checkpoint.processor.CheckpointValidator"
-)
+@patch("aws_durable_execution_sdk_python_testing.checkpoint.core.CheckpointValidator")
 def test_process_checkpoint_invalid_token_sequence(mock_validator):
     """Test checkpoint processing with invalid token sequence."""
     store = Mock(spec=ExecutionStore)

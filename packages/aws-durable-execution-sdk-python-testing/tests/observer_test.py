@@ -1,15 +1,19 @@
-"""Tests for observer module."""
+"""Tests for the observer module: effect collection and application."""
 
 import inspect
-import threading
-from unittest.mock import Mock
 
 import pytest
-from aws_durable_execution_sdk_python.lambda_service import ErrorObject, CallbackOptions
+from aws_durable_execution_sdk_python.lambda_service import CallbackOptions, ErrorObject
 
+from aws_durable_execution_sdk_python_testing.checkpoint.effects import (
+    CallbackCreated,
+    Completed,
+    Failed,
+)
 from aws_durable_execution_sdk_python_testing.observer import (
     ExecutionNotifier,
     ExecutionObserver,
+    apply_effects,
 )
 from aws_durable_execution_sdk_python_testing.token import CallbackToken
 
@@ -48,249 +52,155 @@ class MockExecutionObserver(ExecutionObserver):
         )
 
 
-def test_execution_notifier_init():
-    """Test ExecutionNotifier initialization."""
+# region ExecutionNotifier collects effects
+
+
+def test_execution_notifier_init_has_no_effects():
+    assert ExecutionNotifier().effects == []
+
+
+def test_notify_completed_records_completed_effect():
     notifier = ExecutionNotifier()
+    notifier.notify_completed("test-arn", "test-result")
+    assert notifier.effects == [
+        Completed(execution_arn="test-arn", result="test-result")
+    ]
 
-    assert notifier._observers == []  # noqa: SLF001
-    assert notifier._lock is not None  # noqa: SLF001
 
-
-def test_execution_notifier_add_observer():
-    """Test adding an observer to ExecutionNotifier."""
+def test_notify_completed_no_result_records_none_result():
     notifier = ExecutionNotifier()
-    observer = MockExecutionObserver()
-
-    notifier.add_observer(observer)
-
-    assert len(notifier._observers) == 1  # noqa: SLF001
-    assert notifier._observers[0] is observer  # noqa: SLF001
+    notifier.notify_completed("test-arn")
+    assert notifier.effects == [Completed(execution_arn="test-arn", result=None)]
 
 
-def test_execution_notifier_add_multiple_observers():
-    """Test adding multiple observers to ExecutionNotifier."""
+def test_notify_failed_records_failed_effect():
     notifier = ExecutionNotifier()
-    observer1 = MockExecutionObserver()
-    observer2 = MockExecutionObserver()
-
-    notifier.add_observer(observer1)
-    notifier.add_observer(observer2)
-
-    assert len(notifier._observers) == 2  # noqa: SLF001
-    assert observer1 in notifier._observers  # noqa: SLF001
-    assert observer2 in notifier._observers  # noqa: SLF001
+    error = ErrorObject("TestError", "Test error message", "test-data", ["trace"])
+    notifier.notify_failed("test-arn", error)
+    assert notifier.effects == [Failed(execution_arn="test-arn", error=error)]
 
 
-def test_execution_notifier_notify_completed():
-    """Test notifying observers about execution completion."""
+def test_notify_callback_created_records_callback_effect():
     notifier = ExecutionNotifier()
-    observer = MockExecutionObserver()
-    notifier.add_observer(observer)
-
-    execution_arn = "test-arn"
-    result = "test-result"
-
-    notifier.notify_completed(execution_arn, result)
-
-    assert len(observer.on_completed_calls) == 1
-    assert observer.on_completed_calls[0] == (execution_arn, result)
-
-
-def test_execution_notifier_notify_completed_no_result():
-    """Test notifying observers about execution completion with no result."""
-    notifier = ExecutionNotifier()
-    observer = MockExecutionObserver()
-    notifier.add_observer(observer)
-
-    execution_arn = "test-arn"
-
-    notifier.notify_completed(execution_arn)
-
-    assert len(observer.on_completed_calls) == 1
-    assert observer.on_completed_calls[0] == (execution_arn, None)
-
-
-def test_execution_notifier_notify_failed():
-    """Test notifying observers about execution failure."""
-    notifier = ExecutionNotifier()
-    observer = MockExecutionObserver()
-    notifier.add_observer(observer)
-
-    execution_arn = "test-arn"
-    error = ErrorObject(
-        "TestError", "Test error message", "test-data", ["stack", "trace"]
+    token = CallbackToken(execution_arn="test-arn", operation_id="op-1")
+    options = CallbackOptions()
+    notifier.notify_callback_created(
+        execution_arn="test-arn",
+        operation_id="op-1",
+        callback_options=options,
+        callback_token=token,
     )
+    assert notifier.effects == [
+        CallbackCreated(
+            execution_arn="test-arn",
+            operation_id="op-1",
+            callback_options=options,
+            callback_token=token,
+        )
+    ]
 
-    notifier.notify_failed(execution_arn, error)
 
-    assert len(observer.on_failed_calls) == 1
-    assert observer.on_failed_calls[0] == (execution_arn, error)
-
-
-def test_execution_notifier_multiple_observers_all_notified():
-    """Test that all observers are notified when multiple are registered."""
+def test_notify_accumulates_in_order():
     notifier = ExecutionNotifier()
-    observer1 = MockExecutionObserver()
-    observer2 = MockExecutionObserver()
-
-    notifier.add_observer(observer1)
-    notifier.add_observer(observer2)
-
-    execution_arn = "test-arn"
-    result = "test-result"
-
-    notifier.notify_completed(execution_arn, result)
-
-    # Both observers should be notified
-    assert len(observer1.on_completed_calls) == 1
-    assert observer1.on_completed_calls[0] == (execution_arn, result)
-    assert len(observer2.on_completed_calls) == 1
-    assert observer2.on_completed_calls[0] == (execution_arn, result)
+    error = ErrorObject.from_message("boom")
+    notifier.notify_completed("arn-1", "r1")
+    notifier.notify_failed("arn-2", error)
+    assert notifier.effects == [
+        Completed(execution_arn="arn-1", result="r1"),
+        Failed(execution_arn="arn-2", error=error),
+    ]
 
 
-def test_execution_notifier_no_observers():
-    """Test that notifications work even with no observers."""
-    notifier = ExecutionNotifier()
+# endregion ExecutionNotifier collects effects
 
-    # Should not raise any exceptions
-    notifier.notify_completed("test-arn", "result")
-    notifier.notify_failed(
-        "test-arn", ErrorObject("Error", "Message", "data", ["trace"])
-    )
+# region apply_effects drives effects onto an observer
 
 
-def test_execution_notifier_thread_safety():
-    """Test that ExecutionNotifier is thread-safe."""
-    notifier = ExecutionNotifier()
+def test_apply_effects_dispatches_completed():
     observer = MockExecutionObserver()
-    notifier.add_observer(observer)
-
-    # Test concurrent access
-    def add_observer_thread():
-        new_observer = MockExecutionObserver()
-        notifier.add_observer(new_observer)
-
-    def notify_thread():
-        notifier.notify_completed("test-arn", "result")
-
-    threads = []
-    for _ in range(5):
-        threads.append(threading.Thread(target=add_observer_thread))
-        threads.append(threading.Thread(target=notify_thread))
-
-    for thread in threads:
-        thread.start()
-
-    for thread in threads:
-        thread.join()
-
-    # Should have original observer plus 5 more
-    assert len(notifier._observers) == 6  # noqa: SLF001
-    # Original observer should have been notified multiple times
-    assert len(observer.on_completed_calls) >= 1
+    apply_effects([Completed(execution_arn="arn", result="ok")], observer)
+    assert observer.on_completed_calls == [("arn", "ok")]
 
 
-def test_execution_observer_abstract_methods():
-    """Test that ExecutionObserver is abstract and cannot be instantiated."""
+def test_apply_effects_dispatches_failed():
+    observer = MockExecutionObserver()
+    error = ErrorObject.from_message("nope")
+    apply_effects([Failed(execution_arn="arn", error=error)], observer)
+    assert observer.on_failed_calls == [("arn", error)]
+
+
+def test_apply_effects_dispatches_callback_created():
+    observer = MockExecutionObserver()
+    token = CallbackToken(execution_arn="arn", operation_id="op-1")
+    options = CallbackOptions()
+    apply_effects(
+        [
+            CallbackCreated(
+                execution_arn="arn",
+                operation_id="op-1",
+                callback_options=options,
+                callback_token=token,
+            )
+        ],
+        observer,
+    )
+    assert observer.on_callback_created_calls == [("arn", "op-1", options, token)]
+
+
+def test_apply_effects_preserves_order_across_observer():
+    observer = MockExecutionObserver()
+    error = ErrorObject.from_message("boom")
+    apply_effects(
+        [
+            Completed(execution_arn="arn-1", result="r1"),
+            Failed(execution_arn="arn-2", error=error),
+        ],
+        observer,
+    )
+    assert observer.on_completed_calls == [("arn-1", "r1")]
+    assert observer.on_failed_calls == [("arn-2", error)]
+
+
+def test_apply_effects_empty_is_a_noop():
+    observer = MockExecutionObserver()
+    apply_effects([], observer)
+    assert observer.on_completed_calls == []
+    assert observer.on_failed_calls == []
+    assert observer.on_callback_created_calls == []
+
+
+# endregion apply_effects
+
+# region ExecutionObserver interface
+
+
+def test_execution_observer_is_abstract():
     with pytest.raises(TypeError):
         ExecutionObserver()
 
 
-def test_mock_execution_observer_implementation():
-    """Test that MockExecutionObserver properly implements all abstract methods."""
+def test_mock_execution_observer_implements_all_methods():
     observer = MockExecutionObserver()
-
-    # Test all methods can be called
     error = ErrorObject("Error", "Message", "data", ["trace"])
     observer.on_completed("arn", "result")
     observer.on_failed("arn", error)
     observer.on_timed_out("arn", error)
     observer.on_stopped("arn", error)
 
-    # Verify calls were recorded
     assert len(observer.on_completed_calls) == 1
     assert len(observer.on_failed_calls) == 1
     assert len(observer.on_timed_out_calls) == 1
     assert len(observer.on_stopped_calls) == 1
 
 
-def test_execution_notifier_notify_observers_with_exception():
-    """Test that exceptions in one observer don't affect others."""
-    notifier = ExecutionNotifier()
-
-    # Create a mock observer that raises an exception
-    failing_observer = Mock(spec=ExecutionObserver)
-    failing_observer.on_completed.side_effect = ValueError("Test exception")
-
-    # Create a normal observer
-    normal_observer = MockExecutionObserver()
-
-    notifier.add_observer(failing_observer)
-    notifier.add_observer(normal_observer)
-
-    # This should raise an exception from the failing observer
-    with pytest.raises(ValueError, match="Test exception"):
-        notifier.notify_completed("test-arn", "result")
-
-    # The normal observer should still have been called before the exception
-    failing_observer.on_completed.assert_called_once_with(
-        execution_arn="test-arn", result="result"
-    )
-
-
-def test_execution_observer_abstract_method_coverage():
-    """Test coverage of abstract methods in ExecutionObserver."""
-    # This test ensures we cover the abstract method definitions
-    # by checking they exist and have the correct signatures
-
+def test_execution_observer_declares_expected_methods():
     methods = inspect.getmembers(ExecutionObserver, predicate=inspect.isfunction)
     method_names = [name for name, _ in methods]
-
     assert "on_completed" in method_names
     assert "on_failed" in method_names
     assert "on_timed_out" in method_names
     assert "on_stopped" in method_names
-    # on_wait_timer_scheduled and on_step_retry_scheduled were
-    # removed in — timer scheduling no longer dispatched
-    # via the observer pattern.
     assert "on_callback_created" in method_names
 
 
-def test_execution_notifier_notify_observers_internal():
-    """Test the internal _notify_observers method behavior."""
-    notifier = ExecutionNotifier()
-    observer = MockExecutionObserver()
-    notifier.add_observer(observer)
-
-    # Test that _notify_observers correctly calls the method on observers
-    notifier._notify_observers(  # noqa: SLF001
-        ExecutionObserver.on_completed, execution_arn="test", result="success"
-    )
-
-    assert len(observer.on_completed_calls) == 1
-    assert observer.on_completed_calls[0] == ("test", "success")
-
-
-def test_execution_notifier_all_notification_methods():
-    """Test all notification methods with various parameter combinations."""
-    notifier = ExecutionNotifier()
-    observer = MockExecutionObserver()
-    notifier.add_observer(observer)
-
-    # Test notify_completed with positional args
-    notifier.notify_completed("arn1", "result1")
-    assert observer.on_completed_calls[-1] == ("arn1", "result1")
-
-    # Test notify_completed with keyword args
-    notifier.notify_completed(execution_arn="arn2", result="result2")
-    assert observer.on_completed_calls[-1] == ("arn2", "result2")
-
-    # Test notify_failed
-    error = ErrorObject("TestError", "Message", "data", ["trace"])
-    notifier.notify_failed("arn3", error)
-    assert observer.on_failed_calls[-1] == ("arn3", error)
-
-    # notify_wait_timer_scheduled and notify_step_retry_scheduled
-    # were removed in () —
-    # timer scheduling centralised in
-    # Executor._schedule_earliest_pending.
+# endregion ExecutionObserver interface

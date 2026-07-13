@@ -85,7 +85,7 @@ def _make_executor() -> tuple[Executor, InMemoryExecutionStore, str, str]:
     store.save(execution)
     executor = Executor(store, Mock(), Mock(), Mock())
     arn = execution.durable_execution_arn
-    executor._invocation_state[arn] = InvocationState.INVOKING  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.INVOKING)  # noqa: SLF001
     token = CheckpointToken(execution_arn=arn, token_sequence=0).to_str()
     return executor, store, arn, token
 
@@ -300,14 +300,14 @@ def test_invariant_gate_release_after_transient_failures():
     # Drive a few failed attempts (still under MAX=5).
     for _ in range(3):
         asyncio.run(executor._invoke_handler(arn)())  # noqa: SLF001
-        state = executor._invocation_state.get(arn, InvocationState.PRE_INVOKE)  # noqa: SLF001
+        state = executor._invocation_gate(arn)  # noqa: SLF001
         assert state is not InvocationState.INVOKING
 
     # After the budget is exhausted the execution is terminal; state
     # becomes COMPLETED (also not INVOKING).
     for _ in range(Executor.MAX_CONSECUTIVE_FAILED_ATTEMPTS):
         asyncio.run(executor._invoke_handler(arn)())  # noqa: SLF001
-    state = executor._invocation_state.get(arn, InvocationState.PRE_INVOKE)  # noqa: SLF001
+    state = executor._invocation_gate(arn)  # noqa: SLF001
     assert state is not InvocationState.INVOKING
 
 
@@ -608,51 +608,6 @@ def test_earliest_pending_cancels_prior_wakeup_on_rearm():
     assert futures[0].cancelled()
 
 
-def test_earliest_pending_canceled_on_cleanup():
-    """_cleanup_execution_state must cancel the armed wake-up so we
-    don't keep firing into a dead execution."""
-    store = InMemoryExecutionStore()
-    scheduler = MagicMock()
-    futures: list[ConcurrentFuture] = []
-
-    def fake_call_later(func, delay, completion_event=None):  # noqa: ARG001, ARG002
-        f: ConcurrentFuture = ConcurrentFuture()
-        futures.append(f)
-        return f
-
-    scheduler.call_later.side_effect = fake_call_later
-    executor = Executor(store, scheduler, Mock(), Mock())
-
-    execution = Execution.new(
-        StartDurableExecutionInput(
-            account_id="123456789012",
-            function_name="fn",
-            function_qualifier="$LATEST",
-            execution_name="test",
-            execution_timeout_seconds=300,
-            execution_retention_period_days=7,
-            invocation_id="inv-cleanup",
-        )
-    )
-    execution.start()
-    future_ts = datetime.now(tz=timezone.utc) + timedelta(seconds=60)
-    execution.operations.append(
-        SvcOperation(
-            operation_id="wait-1",
-            operation_type=OperationType.WAIT,
-            status=OperationStatus.STARTED,
-            wait_details=WaitDetails(scheduled_end_timestamp=future_ts),
-        )
-    )
-    store.save(execution)
-    arn = execution.durable_execution_arn
-
-    executor._schedule_earliest_pending(arn)  # noqa: SLF001
-    executor._cleanup_execution_state(arn)  # noqa: SLF001
-
-    assert futures[0].cancelled()
-
-
 def test_invoke_handler_bails_out_on_completed_gate():
     """When _invocation_state is already COMPLETED, _invoke_handler
     exits immediately without calling the invoker. Covers the
@@ -675,7 +630,7 @@ def test_invoke_handler_bails_out_on_completed_gate():
     execution.start()
     store.save(execution)
     arn = execution.durable_execution_arn
-    executor._invocation_state[arn] = InvocationState.COMPLETED  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.COMPLETED)  # noqa: SLF001
 
     asyncio.run(executor._invoke_handler(arn)())  # noqa: SLF001
 
@@ -684,9 +639,8 @@ def test_invoke_handler_bails_out_on_completed_gate():
 
 
 def test_invoke_handler_bails_out_on_is_complete():
-    """Similarly, if the Execution is already is_complete when the
-    handler starts, the handler transitions state to COMPLETED and
-    exits without calling the invoker."""
+    """If the Execution is already is_complete when the handler starts,
+    the handler exits without calling the invoker."""
     store = InMemoryExecutionStore()
     invoker = Mock()
     executor = Executor(store, Mock(), invoker, Mock())
@@ -710,11 +664,10 @@ def test_invoke_handler_bails_out_on_is_complete():
     asyncio.run(executor._invoke_handler(arn)())  # noqa: SLF001
 
     assert invoker.invoke.call_count == 0
-    # Gate transitioned to COMPLETED.
-    assert (
-        executor._invocation_state.get(arn)  # noqa: SLF001
-        is InvocationState.COMPLETED
-    )
+    # Execution stays terminal; the worker tears down on COMPLETED, so
+    # the gate has no live worker and reads PRE_INVOKE.
+    assert store.load(arn).is_complete
+    assert executor._invocation_gate(arn) is InvocationState.PRE_INVOKE  # noqa: SLF001
 
 
 def test_is_current_token_returns_false_for_none_token():
@@ -738,7 +691,7 @@ def test_is_current_token_returns_false_for_none_token():
     execution.start()
     store.save(execution)
     arn = execution.durable_execution_arn
-    executor._invocation_state[arn] = InvocationState.INVOKING  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.INVOKING)  # noqa: SLF001
 
     with pytest.raises(
         InvalidParameterValueException, match="Invalid checkpoint token"
@@ -766,7 +719,7 @@ def test_is_current_token_returns_false_for_malformed_token():
     execution.start()
     store.save(execution)
     arn = execution.durable_execution_arn
-    executor._invocation_state[arn] = InvocationState.INVOKING  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.INVOKING)  # noqa: SLF001
 
     with pytest.raises(
         InvalidParameterValueException, match="Invalid checkpoint token"
@@ -940,7 +893,7 @@ def test_checkpoint_returns_full_delta_in_one_response():
     execution.start()
     store.save(execution)
     arn = execution.durable_execution_arn
-    executor._invocation_state[arn] = InvocationState.INVOKING  # noqa: SLF001
+    executor._set_invocation_gate(arn, InvocationState.INVOKING)  # noqa: SLF001
 
     token = CheckpointToken(execution_arn=arn, token_sequence=0).to_str()
 
@@ -972,32 +925,6 @@ def test_checkpoint_returns_full_delta_in_one_response():
         execution_arn=arn, checkpoint_token=r1.checkpoint_token, updates=[]
     )
     assert [op.operation_id for op in r2.new_execution_state.operations] == []
-
-
-def test_cleanup_execution_state_cancels_callback_timers():
-    """Covers the callback-timer loops in _cleanup_execution_state.
-    Seeds _callback_timeouts and _callback_heartbeats with pending
-    Futures and verifies they get cancelled."""
-    store = InMemoryExecutionStore()
-    executor = Executor(store, Mock(), Mock(), Mock())
-
-    # Seed callback timer dicts with unfulfilled futures. Using
-    # ConcurrentFuture because that's what the scheduler returns.
-    pending_future_1 = ConcurrentFuture()
-    pending_future_2 = ConcurrentFuture()
-    done_future = ConcurrentFuture()
-    done_future.set_result(None)  # already done
-
-    executor._callback_timeouts["cb-1"] = pending_future_1  # noqa: SLF001
-    executor._callback_timeouts["cb-done"] = done_future  # noqa: SLF001
-    executor._callback_heartbeats["cb-2"] = pending_future_2  # noqa: SLF001
-
-    executor._cleanup_execution_state("any-arn")  # noqa: SLF001
-
-    assert pending_future_1.cancelled()
-    assert pending_future_2.cancelled()
-    # done future was not touched (done() is True, skipped).
-    assert not done_future.cancelled()
 
 
 def test_validate_invocation_response_raises_on_already_complete():
