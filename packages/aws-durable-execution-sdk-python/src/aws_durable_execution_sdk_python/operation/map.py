@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import logging
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -18,15 +16,15 @@ from aws_durable_execution_sdk_python.lambda_service import OperationSubType
 
 if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.context import DurableContext
-    from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+    from aws_durable_execution_sdk_python.identifier import (
+        OperationIdentifier,
+        OperationIdNamespace,
+    )
     from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.state import (
         CheckpointedResult,
         ExecutionState,
     )
-    from aws_durable_execution_sdk_python.types import SummaryGenerator
-
-logger = logging.getLogger(__name__)
 
 # Input item type
 T = TypeVar("T")
@@ -45,10 +43,9 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI0
         iteration_sub_type: OperationSubType,
         name_prefix: str,
         serdes: SerDes | None,
-        summary_generator: SummaryGenerator | None = None,
+        operation_id_namespace: OperationIdNamespace,
         item_serdes: SerDes | None = None,
         nesting_type: NestingType = NestingType.NESTED,
-        item_namer: Callable[[T, int], str] | None = None,
     ):
         super().__init__(
             executables=executables,
@@ -58,12 +55,11 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI0
             sub_type_iteration=iteration_sub_type,
             name_prefix=name_prefix,
             serdes=serdes,
-            summary_generator=summary_generator,
+            operation_id_namespace=operation_id_namespace,
             item_serdes=item_serdes,
             nesting_type=nesting_type,
         )
         self.items = items
-        self._item_namer = item_namer
 
     @classmethod
     def from_items(
@@ -71,10 +67,24 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI0
         items: Sequence[T],
         func: Callable,
         config: MapConfig[T],
+        operation_id_namespace: OperationIdNamespace,
     ) -> MapExecutor[T, R]:
         """Create MapExecutor from items and a callable."""
+
+        def bind(i: int, item: T) -> Callable:
+            def run(child_context: DurableContext) -> R:
+                result: R = func(child_context, item, i, items)
+                return result
+
+            return run
+
         executables: list[Executable[Callable]] = [
-            Executable(index=i, func=func) for i in range(len(items))
+            Executable(
+                index=i,
+                func=bind(i, item),
+                name=config.item_namer(item, i) if config.item_namer else None,
+            )
+            for i, item in enumerate(items)
         ]
 
         return cls(
@@ -86,24 +96,10 @@ class MapExecutor(Generic[T, R], ConcurrentExecutor[Callable, R]):  # noqa: PYI0
             iteration_sub_type=OperationSubType.MAP_ITERATION,
             name_prefix="map-item-",
             serdes=config.serdes,
-            summary_generator=config.summary_generator,
+            operation_id_namespace=operation_id_namespace,
             item_serdes=config.item_serdes,
             nesting_type=config.nesting_type,
-            item_namer=config.item_namer,
         )
-
-    def get_iteration_name(self, index: int) -> str:
-        """Return custom item name if item_namer is provided, otherwise default."""
-        if self._item_namer is not None:
-            return self._item_namer(self.items[index], index)
-        return super().get_iteration_name(index)
-
-    def execute_item(self, child_context, executable: Executable[Callable]) -> R:
-        logger.debug("🗺️ Processing map item: %s", executable.index)
-        item = self.items[executable.index]
-        result: R = executable.func(child_context, item, executable.index, self.items)
-        logger.debug("✅ Processed map item: %s", executable.index)
-        return result
 
 
 def map_handler(
@@ -113,18 +109,16 @@ def map_handler(
     execution_state: ExecutionState,
     map_context: DurableContext,
     operation_identifier: OperationIdentifier,
+    operation_id_namespace: OperationIdNamespace,
 ) -> BatchResult[R]:
     """Execute a callable for each item in parallel."""
-    # Summary Generator Construction (matches TypeScript implementation):
-    # Construct the summary generator at the handler level, just like TypeScript does in map-handler.ts.
-    # This matches the pattern where handlers are responsible for configuring operation-specific behavior.
-    #
-    # See TypeScript reference: aws-durable-execution-sdk-js/src/handlers/map-handler/map-handler.ts (~line 79)
+    map_config: MapConfig = config or MapConfig()
 
     executor: MapExecutor[T, R] = MapExecutor.from_items(
         items=items,
         func=func,
-        config=config or MapConfig(summary_generator=MapSummaryGenerator()),
+        config=map_config,
+        operation_id_namespace=operation_id_namespace,
     )
 
     checkpoint: CheckpointedResult = execution_state.get_checkpoint_result(
@@ -132,19 +126,6 @@ def map_handler(
     )
     if checkpoint.is_succeeded():
         # if we've reached this point, then not only is the step succeeded, but it is also `replay_children`.
-        return executor.replay(execution_state, map_context)
+        return executor.replay(execution_state, map_context, checkpoint)
     # we are making it explicit that we are now executing within the map_context
     return executor.execute(execution_state, executor_context=map_context)
-
-
-class MapSummaryGenerator:
-    def __call__(self, result: BatchResult) -> str:
-        fields = {
-            "totalCount": result.total_count,
-            "successCount": result.success_count,
-            "failureCount": result.failure_count,
-            "completionReason": result.completion_reason.value,
-            "status": result.status.value,
-            "type": "MapResult",
-        }
-        return json.dumps(fields)

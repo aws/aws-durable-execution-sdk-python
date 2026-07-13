@@ -11,6 +11,7 @@ import pytest
 from aws_durable_execution_sdk_python.config import (
     CallbackConfig,
     ChildConfig,
+    CompletionConfig,
     Duration,
     InvokeConfig,
     MapConfig,
@@ -1857,6 +1858,51 @@ def test_context_map_handler_call():
             mock_map_handler.assert_called_once()
 
 
+@patch("aws_durable_execution_sdk_python.context.child_handler")
+def test_context_map_min_successful_greater_than_total_raises_bare(
+    mock_child_handler,
+):
+    """ctx.map validates min_successful before the child context starts.
+
+    The error is a bare ValidationError (not a checkpointed operation
+    failure wrapped in ChildContextError), matching wait and
+    wait_for_condition validation.
+    """
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    context = create_test_context(state=mock_state)
+
+    with pytest.raises(ValidationError, match="min_successful cannot be greater"):
+        context.map(
+            [1, 2],
+            lambda ctx, item, idx, items: item,
+            config=MapConfig(completion_config=CompletionConfig(min_successful=3)),
+        )
+    # No operation started: the child context was never entered.
+    mock_child_handler.assert_not_called()
+
+
+@patch("aws_durable_execution_sdk_python.context.child_handler")
+def test_context_parallel_min_successful_greater_than_total_raises_bare(
+    mock_child_handler,
+):
+    """ctx.parallel validates min_successful before the child context starts."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    context = create_test_context(state=mock_state)
+
+    with pytest.raises(ValidationError, match="min_successful cannot be greater"):
+        context.parallel(
+            [lambda ctx: 1],
+            config=ParallelConfig(completion_config=CompletionConfig(min_successful=2)),
+        )
+    mock_child_handler.assert_not_called()
+
+
 def test_context_parallel_handler_call():
     """Test that parallel method calls through to parallel_handler (line 306)."""
     execution_calls = []
@@ -2201,7 +2247,7 @@ def test_should_use_step_id_prefix_when_generating_step_ids():
     )
     expected_prefixed = hashlib.blake2b(b"branch-op-1").hexdigest()[:64]
 
-    assert virtual._create_step_id_for_logical_step(1) == expected_prefixed  # noqa: SLF001
+    assert virtual._create_step_id_for_logical_step(1) == expected_prefixed
 
 
 def test_should_use_parent_id_as_step_prefix_when_non_virtual():
@@ -2228,7 +2274,7 @@ def test_should_use_parent_id_as_step_prefix_when_non_virtual():
     )
     expected = hashlib.blake2b(b"parent-op-1").hexdigest()[:64]
 
-    assert non_virtual._create_step_id_for_logical_step(1) == expected  # noqa: SLF001
+    assert non_virtual._create_step_id_for_logical_step(1) == expected
     assert non_virtual.is_virtual is False
 
 
@@ -2282,7 +2328,7 @@ def test_should_create_virtual_child_with_none_parent_when_parent_is_root():
     assert child.is_virtual is True
 
     expected = hashlib.blake2b(b"child-op-1").hexdigest()[:64]
-    assert child._create_step_id_for_logical_step(1) == expected  # noqa: SLF001
+    assert child._create_step_id_for_logical_step(1) == expected
 
 
 def test_should_propagate_outer_parent_id_when_virtual_is_nested_in_virtual():
@@ -2327,7 +2373,7 @@ def test_should_propagate_outer_parent_id_when_virtual_is_nested_in_virtual():
     # own operation id; they must not leak the outer ancestor into the
     # step-id namespace.
     expected = hashlib.blake2b(b"inner-branch-op-1").hexdigest()[:64]
-    assert inner_branch._create_step_id_for_logical_step(1) == expected  # noqa: SLF001
+    assert inner_branch._create_step_id_for_logical_step(1) == expected
 
 
 # endregion Virtual-context identity tests
@@ -2635,8 +2681,8 @@ def test_replay_aware_stays_replaying_between_two_completed_ops():
         replay_status=ReplayStatus.REPLAY,
     )
     # Both the wrapped op and the following op already completed.
-    first_id = ctx._create_step_id_for_logical_step(1)  # noqa: SLF001
-    second_id = ctx._create_step_id_for_logical_step(2)  # noqa: SLF001
+    first_id = ctx._create_step_id_for_logical_step(1)
+    second_id = ctx._create_step_id_for_logical_step(2)
     ctx.state._operations[first_id] = _step_op(  # noqa: SLF001
         first_id, OperationStatus.SUCCEEDED
     )
@@ -2677,8 +2723,8 @@ def test_replay_aware_terminal_non_success_op_stays_replaying(terminal_status):
     )
     # op1: terminal-but-not-succeeded/failed (e.g. a handled invoke/callback timeout).
     # op2: a completed step that ran after it.
-    first_id = ctx._create_step_id_for_logical_step(1)  # noqa: SLF001
-    second_id = ctx._create_step_id_for_logical_step(2)  # noqa: SLF001
+    first_id = ctx._create_step_id_for_logical_step(1)
+    second_id = ctx._create_step_id_for_logical_step(2)
     ctx.state._operations[first_id] = Operation(  # noqa: SLF001
         operation_id=first_id,
         operation_type=OperationType.CHAINED_INVOKE,
@@ -2734,8 +2780,8 @@ def test_replay_aware_step_stays_replaying_for_completed_op():
         replay_status=ReplayStatus.REPLAY,
     )
     # Wrapped op completed; a following op also completed so nothing flips.
-    first_id = ctx._create_step_id_for_logical_step(1)  # noqa: SLF001
-    second_id = ctx._create_step_id_for_logical_step(2)  # noqa: SLF001
+    first_id = ctx._create_step_id_for_logical_step(1)
+    second_id = ctx._create_step_id_for_logical_step(2)
     ctx.state._operations[first_id] = _step_op(  # noqa: SLF001
         first_id, OperationStatus.SUCCEEDED
     )
@@ -2885,8 +2931,8 @@ def test_replay_aware_updated_callback_with_following_op_stays_replaying():
             execution_context=ExecutionContext(durable_execution_arn="arn"),
             replay_status=ReplayStatus.REPLAY,
         )
-        callback_id = ctx._create_step_id_for_logical_step(1)  # noqa: SLF001
-        following_id = ctx._create_step_id_for_logical_step(2)  # noqa: SLF001
+        callback_id = ctx._create_step_id_for_logical_step(1)
+        following_id = ctx._create_step_id_for_logical_step(2)
         state._operations[callback_id] = _callback_op(  # noqa: SLF001
             callback_id, OperationStatus.SUCCEEDED
         )
