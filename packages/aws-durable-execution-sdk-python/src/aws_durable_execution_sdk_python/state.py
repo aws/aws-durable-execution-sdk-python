@@ -8,6 +8,7 @@ import logging
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
@@ -303,6 +304,15 @@ class ExecutionState:
 
         # Protects parent_to_children and parent_done
         self._parent_done_lock: Lock = Lock()
+
+        # Branch thread pools created by concurrency coordinators. A pool
+        # abandoned on early completion can still have branches running user
+        # code; close() joins every registered pool so no SDK-created thread
+        # outlives the invocation (a thread still running at handler return
+        # is frozen with the execution environment and resumes mid-flight
+        # during the next warm invocation).
+        self._branch_pools: list[ThreadPoolExecutor] = []
+        self._branch_pools_lock: Lock = Lock()
 
         # Dedup set so each operation's replay plugin hook fires at most once.
         # Replay status itself is tracked per-context on DurableContext; the
@@ -828,6 +838,18 @@ class ExecutionState:
         logger.debug("Signaling background thread to stop checkpointing")
         self._checkpointing_stopped.set()
 
+    def register_branch_pool(self, pool: ThreadPoolExecutor) -> None:
+        """Register a branch thread pool for joining at invocation end.
+
+        Concurrency coordinators register their pool on creation. close()
+        joins every registered pool before stopping the checkpoint batcher,
+        so branches abandoned by early completion finish (or unwind on
+        OrphanedChildException at their next checkpoint attempt) before the
+        invocation returns.
+        """
+        with self._branch_pools_lock:
+            self._branch_pools.append(pool)
+
     def _collect_checkpoint_batch(self) -> list[QueuedOperation]:
         """Collect multiple checkpoint operations into a batch for API efficiency.
 
@@ -980,6 +1002,27 @@ class ExecutionState:
         return len(serialized)
 
     def close(self):
+        """Release invocation-scoped resources.
+
+        Joins still-running branch threads BEFORE stopping the checkpoint
+        batcher: a branch blocked on an in-flight synchronous checkpoint
+        needs the batcher alive to receive its response (a rejection for an
+        orphaned branch) and unwind. Stopping the batcher first would
+        deadlock that branch until the Lambda timeout.
+
+        Drains registrations until no pools remain: a branch joined in one
+        batch can start a nested map or parallel operation, whose
+        coordinator registers a new pool mid-join. The lock is never held
+        across shutdown(wait=True), so those registrations do not block.
+        """
+        while True:
+            with self._branch_pools_lock:
+                pools: list[ThreadPoolExecutor] = list(self._branch_pools)
+                self._branch_pools.clear()
+            if not pools:
+                break
+            for pool in pools:
+                pool.shutdown(wait=True)
         self.stop_checkpointing()
 
     def wrap_user_function(

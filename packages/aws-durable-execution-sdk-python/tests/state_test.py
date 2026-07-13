@@ -425,6 +425,107 @@ def test_execution_state_creation():
     assert state.operations == {}
 
 
+def test_close_joins_registered_branch_pools():
+    """close() blocks until threads in registered branch pools finish."""
+    mock_lambda_client = Mock(spec=LambdaClient)
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="test_token",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+    branch_finished: threading.Event = threading.Event()
+
+    def slow_branch() -> None:
+        time.sleep(0.2)
+        branch_finished.set()
+
+    pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1)
+    state.register_branch_pool(pool)
+    pool.submit(slow_branch)
+    # Abandon the pool the way the coordinator does on early completion.
+    pool.shutdown(wait=False, cancel_futures=True)
+
+    assert not branch_finished.is_set()
+    state.close()
+    assert branch_finished.is_set()
+
+
+def test_close_joins_branch_pools_before_stopping_checkpointing():
+    """close() joins branch threads while the checkpoint batcher is alive.
+
+    A branch blocked on an in-flight synchronous checkpoint needs the
+    batcher to respond before it can unwind, so the join must precede
+    stop_checkpointing.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="test_token",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+    stopped_during_branch: list[bool] = []
+
+    def slow_branch() -> None:
+        time.sleep(0.2)
+        stopped_during_branch.append(state._checkpointing_stopped.is_set())  # noqa: SLF001
+
+    pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1)
+    state.register_branch_pool(pool)
+    pool.submit(slow_branch)
+    pool.shutdown(wait=False, cancel_futures=True)
+
+    state.close()
+    assert stopped_during_branch == [False]
+    assert state._checkpointing_stopped.is_set()  # noqa: SLF001
+
+
+def test_close_drains_pools_registered_while_joining():
+    """A pool registered during the join (nested map/parallel started by a
+    branch being joined) is itself joined before checkpointing stops.
+
+    Mock pools pin the exact interleaving: the first pool's shutdown
+    registers the second pool, so the second is provably absent from
+    close()'s first snapshot and only a drain loop joins it.
+    """
+    mock_lambda_client: Mock = Mock(spec=LambdaClient)
+    state: ExecutionState = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="test_token",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+    nested_pool: Mock = Mock(spec=ThreadPoolExecutor)
+    outer_pool: Mock = Mock(spec=ThreadPoolExecutor)
+    stopped_at_nested_join: list[bool] = []
+
+    def register_nested(*_args: object, **_kwargs: object) -> None:
+        state.register_branch_pool(nested_pool)
+
+    def record_checkpointing_state(*_args: object, **_kwargs: object) -> None:
+        stopped_at_nested_join.append(
+            state._checkpointing_stopped.is_set()  # noqa: SLF001
+        )
+
+    outer_pool.shutdown.side_effect = register_nested
+    nested_pool.shutdown.side_effect = record_checkpointing_state
+    state.register_branch_pool(outer_pool)
+
+    state.close()
+
+    outer_pool.shutdown.assert_called_once_with(wait=True)
+    nested_pool.shutdown.assert_called_once_with(wait=True)
+    # The nested pool was joined while the checkpoint batcher was still
+    # alive: a nested branch blocked on a synchronous checkpoint needs the
+    # batcher to respond before it can unwind.
+    assert stopped_at_nested_join == [False]
+    assert state._checkpointing_stopped.is_set()  # noqa: SLF001
+
+
 def test_get_checkpoint_result_success_with_result():
     """Test get_checkpoint_result with successful operation and result."""
     mock_lambda_client = Mock(spec=LambdaClient)
