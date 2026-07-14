@@ -25,7 +25,10 @@ jobs:
       with:
         python-version: "3.12"
     - name: Lint commit messages
-      run: python .github/scripts/lintcommit.py --range "origin/${{ github.event.pull_request.base.ref }}..${{ github.event.pull_request.head.sha }}"
+      env:
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: python .github/scripts/lintcommit.py --range "${PR_BASE_SHA}..${PR_HEAD_SHA}"
 
   build:
     runs-on: ubuntu-latest
