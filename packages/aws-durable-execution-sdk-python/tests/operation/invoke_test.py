@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from aws_durable_execution_sdk_python.config import Duration, InvokeConfig
+from aws_durable_execution_sdk_python.config import InvokeConfig
 from aws_durable_execution_sdk_python.exceptions import (
     CallableRuntimeError,
     ExecutionError,
@@ -218,8 +218,8 @@ def test_invoke_handler_already_started(status):
 
 
 @pytest.mark.parametrize("status", [OperationStatus.STARTED, OperationStatus.PENDING])
-def test_invoke_handler_already_started_with_timeout(status):
-    """Test invoke_handler when operation is already started with timeout config."""
+def test_invoke_handler_already_started_suspends(status):
+    """Test invoke_handler when operation is already started suspends indefinitely."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
 
@@ -232,9 +232,9 @@ def test_invoke_handler_already_started_with_timeout(status):
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
 
-    config = InvokeConfig[str, str](timeout=Duration.from_seconds(30))
+    config = InvokeConfig[str, str]()
 
-    with pytest.raises(TimedSuspendExecution):
+    with pytest.raises(SuspendExecution) as exc_info:
         invoke_handler(
             function_name="test_function",
             payload="test_input",
@@ -244,6 +244,7 @@ def test_invoke_handler_already_started_with_timeout(status):
             ),
             config=config,
         )
+    assert type(exc_info.value) is SuspendExecution
 
 
 def test_invoke_handler_new_operation():
@@ -261,7 +262,7 @@ def test_invoke_handler_new_operation():
     started = CheckpointedResult.create_from_operation(started_op)
     mock_state.get_checkpoint_result.side_effect = [not_found, started]
 
-    config = InvokeConfig[str, str](timeout=Duration.from_minutes(1))
+    config = InvokeConfig[str, str]()
 
     with pytest.raises(
         SuspendExecution, match="Invoke invoke8 started, suspending for completion"
@@ -286,62 +287,6 @@ def test_invoke_handler_new_operation():
     assert operation_update.name == "test_invoke"
     assert operation_update.payload == json.dumps("test_input")
     assert operation_update.chained_invoke_options.function_name == "test_function"
-
-
-def test_invoke_handler_new_operation_with_timeout():
-    """Test invoke_handler when starting a new operation with timeout."""
-    mock_state = Mock(spec=ExecutionState)
-    mock_state.durable_execution_arn = "test_arn"
-
-    not_found = CheckpointedResult.create_not_found()
-    started_op = Operation(
-        operation_id="invoke_test",
-        operation_type=OperationType.CHAINED_INVOKE,
-        status=OperationStatus.STARTED,
-    )
-    started = CheckpointedResult.create_from_operation(started_op)
-    mock_state.get_checkpoint_result.side_effect = [not_found, started]
-
-    config = InvokeConfig[str, str](timeout=Duration.from_seconds(30))
-
-    with pytest.raises(TimedSuspendExecution):
-        invoke_handler(
-            function_name="test_function",
-            payload="test_input",
-            state=mock_state,
-            operation_identifier=OperationIdentifier(
-                "invoke9", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
-            ),
-            config=config,
-        )
-
-
-def test_invoke_handler_new_operation_no_timeout():
-    """Test invoke_handler when starting a new operation without timeout."""
-    mock_state = Mock(spec=ExecutionState)
-    mock_state.durable_execution_arn = "test_arn"
-
-    not_found = CheckpointedResult.create_not_found()
-    started_op = Operation(
-        operation_id="invoke_test",
-        operation_type=OperationType.CHAINED_INVOKE,
-        status=OperationStatus.STARTED,
-    )
-    started = CheckpointedResult.create_from_operation(started_op)
-    mock_state.get_checkpoint_result.side_effect = [not_found, started]
-
-    config = InvokeConfig[str, str](timeout=Duration.from_seconds(0))
-
-    with pytest.raises(SuspendExecution):
-        invoke_handler(
-            function_name="test_function",
-            payload="test_input",
-            state=mock_state,
-            operation_identifier=OperationIdentifier(
-                "invoke10", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
-            ),
-            config=config,
-        )
 
 
 def test_invoke_handler_no_config():
@@ -1065,79 +1010,6 @@ def test_invoke_immediate_response_already_completed():
     mock_state.create_checkpoint.assert_not_called()
     # Verify get_checkpoint_result was called only once
     assert mock_state.get_checkpoint_result.call_count == 1
-
-
-def test_invoke_immediate_response_with_timeout_immediate_success():
-    """Test immediate success with timeout configuration."""
-    mock_state = Mock(spec=ExecutionState)
-    mock_state.durable_execution_arn = "test_arn"
-
-    # First call: not found, second call: succeeded
-    not_found = CheckpointedResult.create_not_found()
-    succeeded_op = Operation(
-        operation_id="invoke_immediate_8",
-        operation_type=OperationType.CHAINED_INVOKE,
-        status=OperationStatus.SUCCEEDED,
-        chained_invoke_details=ChainedInvokeDetails(
-            result=json.dumps("timeout_result")
-        ),
-    )
-    succeeded = CheckpointedResult.create_from_operation(succeeded_op)
-    mock_state.get_checkpoint_result.side_effect = [not_found, succeeded]
-
-    config = InvokeConfig[str, str](timeout=Duration.from_seconds(30))
-
-    result = invoke_handler(
-        function_name="test_function",
-        payload="test_input",
-        state=mock_state,
-        operation_identifier=OperationIdentifier(
-            "invoke_immediate_8", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
-        ),
-        config=config,
-    )
-
-    # Verify result was returned without suspend
-    assert result == "timeout_result"
-    assert mock_state.get_checkpoint_result.call_count == 2
-
-
-def test_invoke_immediate_response_with_timeout_no_immediate_response():
-    """Test no immediate response with timeout configuration.
-
-    When no immediate response, operation should suspend with timeout.
-    """
-    mock_state = Mock(spec=ExecutionState)
-    mock_state.durable_execution_arn = "test_arn"
-
-    # First call: not found, second call: started
-    not_found = CheckpointedResult.create_not_found()
-    started_op = Operation(
-        operation_id="invoke_immediate_9",
-        operation_type=OperationType.CHAINED_INVOKE,
-        status=OperationStatus.STARTED,
-    )
-    started = CheckpointedResult.create_from_operation(started_op)
-    mock_state.get_checkpoint_result.side_effect = [not_found, started]
-
-    config = InvokeConfig[str, str](timeout=Duration.from_seconds(30))
-
-    # Verify operation suspends with timeout
-    with pytest.raises(TimedSuspendExecution):
-        invoke_handler(
-            function_name="test_function",
-            payload="test_input",
-            state=mock_state,
-            operation_identifier=OperationIdentifier(
-                "invoke_immediate_9",
-                OperationSubType.CHAINED_INVOKE,
-                None,
-                "test_invoke",
-            ),
-            config=config,
-        )
-
-    assert mock_state.get_checkpoint_result.call_count == 2
 
 
 def test_invoke_immediate_response_with_custom_serdes():
