@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, TypeVar
 
 from aws_durable_execution_sdk_python.exceptions import (
     ExecutionError,
+    InvocationError,
+    WaitForConditionError,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
@@ -84,7 +86,7 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
             CheckResult indicating the next action to take
 
         Raises:
-            CallableRuntimeError: For FAILED operations
+            WaitForConditionError: For FAILED operations
             SuspendExecution: For PENDING operations waiting for retry
         """
         checkpointed_result = self.state.get_checkpoint_result(
@@ -110,7 +112,7 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
 
         # Terminal failure
         if checkpointed_result.is_failed():
-            checkpointed_result.raise_callable_error()
+            checkpointed_result.raise_operation_error(WaitForConditionError)
 
         # Pending retry
         if checkpointed_result.is_pending():
@@ -266,23 +268,30 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
             )
 
         except Exception as e:
-            # Mark as failed - waitForCondition doesn't have its own retry logic for errors
-            # If the check function throws, it's considered a failure
+            # Retryable InvocationError: re-raise with no FAIL checkpoint so the
+            # backend retry re-runs. Non-retryable falls through to FAIL + wrap.
+            if isinstance(e, InvocationError) and e.is_retryable():
+                logger.warning(
+                    "wait_for_condition invocation error for id: %s, name: %s; re-raising for retry",
+                    self.operation_identifier.operation_id,
+                    self.operation_identifier.name,
+                )
+                raise
+
+            # Any other error is terminal: persist FAIL, then surface as
+            # WaitForConditionError (original type kept on error_type/__cause__).
             logger.exception(
                 "❌ wait_for_condition failed for id: %s, name: %s",
                 self.operation_identifier.operation_id,
                 self.operation_identifier.name,
             )
-
+            error_object = ErrorObject.from_exception(e)
             fail_operation = OperationUpdate.create_wait_for_condition_fail(
                 identifier=self.operation_identifier,
-                error=ErrorObject.from_exception(e),
+                error=error_object,
             )
-            # Checkpoint FAIL operation with blocking (is_sync=True, default).
-            # Must ensure the failure state is persisted before raising the exception.
-            # This guarantees the error is durable and the condition won't be re-evaluated on replay.
             self.state.create_checkpoint(operation_update=fail_operation)
-            raise
+            error_object.raise_as_operation_error(WaitForConditionError)
 
         msg: str = (
             "wait_for_condition should never reach this point"  # pragma: no cover

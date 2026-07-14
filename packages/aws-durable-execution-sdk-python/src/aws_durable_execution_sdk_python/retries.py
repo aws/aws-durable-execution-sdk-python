@@ -296,8 +296,8 @@ class WithRetryConfig(Generic[T]):
             (RetryStrategyConfig defaults) is used.
         wrap_with_run_in_child_context: Whether to wrap the retry loop in
             a child context for isolation. Default True. When True, final
-            failure is rethrown as CallableRuntimeError with the original
-            exception on `cause`. When False, the original error is
+            failure is rethrown as ChildContextError with the original
+            exception on `__cause__`. When False, the original error is
             rethrown unchanged.
         child_context_config: Optional ChildConfig forwarded to
             run_in_child_context when wrapping is enabled. Ignored when
@@ -344,8 +344,8 @@ def with_retry(
         exhausted or the retry strategy returns should_retry=False.
         When wrap_with_run_in_child_context is True (default),
         ChildOperationExecutor.process wraps non-InvocationError /
-        SuspendExecution exceptions as CallableRuntimeError with the
-        original error in cause.
+        SuspendExecution exceptions as ChildContextError with the
+        original error in __cause__.
         When wrap_with_run_in_child_context is False, the original
         exception propagates unchanged.
         SuspendExecution: Re-raised immediately (SDK control flow).

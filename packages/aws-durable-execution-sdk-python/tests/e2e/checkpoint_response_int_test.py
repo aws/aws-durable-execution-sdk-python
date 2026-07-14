@@ -643,7 +643,7 @@ def test_end_to_end_child_context_error_handling():
     """Test end-to-end child context error handling.
 
     Verifies that child context that raises exception creates FAIL checkpoint
-    and error is wrapped as CallableRuntimeError.
+    and error is wrapped as a typed DurableOperationError (e.g. StepError).
     """
 
     def child_function_that_fails(ctx: DurableContext) -> str:
@@ -705,11 +705,7 @@ def test_end_to_end_child_context_error_handling():
 
 
 def test_end_to_end_child_context_invocation_error_reraised():
-    """Test end-to-end child context InvocationError re-raising.
-
-    Verifies that child context that raises InvocationError creates FAIL checkpoint
-    and re-raises InvocationError (not wrapped) to enable retry at execution handler level.
-    """
+    """Child context InvocationError re-raises unchanged and writes no FAIL checkpoint."""
 
     def child_function_with_invocation_error(ctx: DurableContext) -> str:
         msg = "Invocation failed in child"
@@ -758,11 +754,11 @@ def test_end_to_end_child_context_invocation_error_reraised():
         with pytest.raises(InvocationError, match="Invocation failed in child"):
             my_handler(event, lambda_context)
 
-        # Verify FAIL checkpoint was created before re-raising
+        # No FAIL checkpoint - the operation stays non-terminal for retry.
         all_operations = [op for batch in checkpoint_calls for op in batch]
         fail_updates = [
             op
             for op in all_operations
             if hasattr(op, "action") and op.action.value == "FAIL"
         ]
-        assert len(fail_updates) == 1
+        assert len(fail_updates) == 0

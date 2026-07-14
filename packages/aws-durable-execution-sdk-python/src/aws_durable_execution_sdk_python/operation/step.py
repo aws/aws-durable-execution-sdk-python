@@ -12,6 +12,7 @@ from aws_durable_execution_sdk_python.config import (
 from aws_durable_execution_sdk_python.exceptions import (
     ExecutionError,
     InvalidStateError,
+    StepError,
     StepInterruptedError,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -86,7 +87,7 @@ class StepOperationExecutor(OperationExecutor[T]):
             CheckResult indicating the next action to take
 
         Raises:
-            CallableRuntimeError: For FAILED operations
+            StepError: For FAILED operations
             StepInterruptedError: For interrupted AT_MOST_ONCE operations
             SuspendExecution: For PENDING operations waiting for retry
         """
@@ -115,7 +116,7 @@ class StepOperationExecutor(OperationExecutor[T]):
         # Terminal failure
         if checkpointed_result.is_failed():
             # Have to throw the exact same error on replay as the checkpointed failure
-            checkpointed_result.raise_callable_error()
+            checkpointed_result.raise_operation_error(StepError)
 
         # Pending retry
         if checkpointed_result.is_pending():
@@ -143,7 +144,7 @@ class StepOperationExecutor(OperationExecutor[T]):
             # Step was previously interrupted in a prior invocation - handle retry
             msg: str = f"Step operation_id={self.operation_identifier.operation_id} name={self.operation_identifier.name} was previously interrupted"
             self.retry_handler(StepInterruptedError(msg), checkpointed_result)
-            checkpointed_result.raise_callable_error()
+            checkpointed_result.raise_operation_error(StepError)
 
         # Ready to execute if STARTED + AT_LEAST_ONCE
         if (
@@ -297,9 +298,12 @@ class StepOperationExecutor(OperationExecutor[T]):
 
         Raises:
             SuspendExecution: If retry is scheduled
-            StepInterruptedError: If the error is a StepInterruptedError
-            CallableRuntimeError: If retry is exhausted or error is not retryable
+            StepError: If retry is exhausted or the error is not retryable
+                (including an exhausted StepInterruptedError)
         """
+        # Checkpoint the raw escaping error (records its own type, e.g.
+        # "ValueError"); the StepError wrapper is what we raise, and it is
+        # recorded one level up by whoever catches it.
         error_object = ErrorObject.from_exception(error)
 
         retry_strategy = self.config.retry_strategy or RetryPresets.default()
@@ -371,7 +375,8 @@ class StepOperationExecutor(OperationExecutor[T]):
         # This guarantees the error is durable and the step won't be retried on replay.
         self.state.create_checkpoint(operation_update=fail_operation)
 
-        if isinstance(error, StepInterruptedError):
-            raise error
-
-        raise error_object.to_callable_runtime_error()
+        # Surface as a StepError reconstructed from the checkpointed error, the
+        # same path replay uses, so first run and replay are identical. (An
+        # exhausted StepInterruptedError surfaces the same way as any other
+        # step failure.)
+        error_object.raise_as_operation_error(StepError)

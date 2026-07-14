@@ -11,12 +11,12 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, NoReturn
 
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
-    CallableRuntimeError,
     DurableExecutionsError,
+    DurableOperationError,
     GetExecutionStateError,
     OrphanedChildException,
     SuspendExecution,
@@ -222,20 +222,29 @@ class CheckpointedResult:
             return False
         return op.context_details.replay_children if op.context_details else False
 
-    def raise_callable_error(self, msg: str | None = None) -> None:
+    def raise_operation_error(
+        self,
+        operation_error_cls: type[DurableOperationError],
+        msg: str | None = None,
+    ) -> NoReturn:
+        """Reconstruct and raise the typed operation error for a FAILED checkpoint.
+
+        The concrete error type is dictated by the operation being replayed and
+        supplied by the calling executor (e.g. ``StepError`` for a step). This
+        ensures async operations whose checkpoint carries a downstream error type
+        (invoke/callback) still surface as the correct per-operation error.
+        """
         if self.error is None:
-            err_msg = (
+            err_msg: str = (
                 msg
                 or "Unknown error. No ErrorObject exists on the Checkpoint Operation."
             )
-            raise CallableRuntimeError(
-                message=err_msg,
-                error_type=None,
-                data=None,
-                stack_trace=None,
-            )
+            raise operation_error_cls(message=err_msg)
 
-        raise self.error.to_callable_runtime_error()
+        # Reconstruct from the checkpointed ErrorObject. This is the same path the
+        # handlers use on the first-run failure, so first run and replay surface
+        # an identical error.
+        self.error.raise_as_operation_error(operation_error_cls)
 
     def get_next_attempt_timestamp(self) -> datetime.datetime | None:
         if self.operation and self.operation.step_details:

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 from aws_durable_execution_sdk_python.config import ChildConfig
 from aws_durable_execution_sdk_python.exceptions import (
+    ChildContextError,
     InvocationError,
     SuspendExecution,
 )
@@ -78,7 +79,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
             CheckResult indicating the next action to take
 
         Raises:
-            CallableRuntimeError: For FAILED operations
+            ChildContextError: For FAILED operations
         """
         checkpointed_result: CheckpointedResult = self.state.get_checkpoint_result(
             self.operation_identifier.operation_id
@@ -114,7 +115,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
 
         # Terminal failure
         if checkpointed_result.is_failed():
-            checkpointed_result.raise_callable_error()
+            checkpointed_result.raise_operation_error(ChildContextError)
 
         # Create START checkpoint if not exists
         if not checkpointed_result.is_existent() and not self.is_virtual:
@@ -145,7 +146,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
         Raises:
             SuspendExecution: Re-raised without checkpointing
             InvocationError: Re-raised after checkpointing FAIL
-            CallableRuntimeError: Raised for other exceptions after checkpointing FAIL
+            ChildContextError: Raised for other exceptions after checkpointing FAIL
         """
         logger.debug(
             "▶️ Executing child context for id: %s, name: %s",
@@ -239,6 +240,13 @@ class ChildOperationExecutor(OperationExecutor[T]):
             # Don't checkpoint SuspendExecution - let it bubble up
             raise
         except Exception as e:
+            # Retryable InvocationError: re-raise with no FAIL checkpoint so the
+            # backend retry re-runs. Non-retryable falls through to FAIL + wrap.
+            if isinstance(e, InvocationError) and e.is_retryable():
+                raise
+
+            # Any other error is terminal: persist FAIL, then surface as
+            # ChildContextError (original type kept on error_type/__cause__).
             error_object = ErrorObject.from_exception(e)
             # Virtual deliberately does not write checkpoints, but exception still propagates below
             if not self.is_virtual:
@@ -252,14 +260,9 @@ class ChildOperationExecutor(OperationExecutor[T]):
                 # This guarantees the error is durable and child operations won't be re-executed on replay.
                 self.state.create_checkpoint(operation_update=fail_operation)
 
-            # InvocationError and its derivatives can be retried.
-            # When we encounter an invocation error (in all of its forms), we
-            # bubble that error upwards (with the checkpoint in place for
-            # non-virtual) such that we reach the execution handler at the
-            # very top, which will then make the backend retry.
-            if isinstance(e, InvocationError):
-                raise
-            raise error_object.to_callable_runtime_error() from e
+            # Reconstruct from the checkpointed error (same path as replay) so
+            # first run and replay surface an identical ChildContextError.
+            error_object.raise_as_operation_error(ChildContextError)
 
 
 def child_handler(

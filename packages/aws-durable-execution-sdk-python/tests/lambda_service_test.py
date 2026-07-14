@@ -8,9 +8,10 @@ import pytest
 
 from aws_durable_execution_sdk_python.__about__ import __version__
 from aws_durable_execution_sdk_python.exceptions import (
-    CallableRuntimeError,
     CheckpointError,
+    DurableOperationError,
     GetExecutionStateError,
+    StepError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -228,20 +229,53 @@ def test_error_object_to_dict_all_none():
     assert result == {}
 
 
-def test_error_object_to_callable_runtime_error():
-    """Test ErrorObject.to_callable_runtime_error method."""
+def test_error_object_to_durable_operation_error_reconstructs_subclass():
+    """ErrorObject.to_durable_operation_error rebuilds the typed subclass by name."""
+    error = ErrorObject(
+        message="Test error",
+        type="StepError",
+        data="test_data",
+        stack_trace=["line1"],
+    )
+    operation_error = error.to_durable_operation_error()
+    assert isinstance(operation_error, StepError)
+    assert operation_error.message == "Test error"
+    assert operation_error.error_type == "StepError"
+    assert operation_error.data == "test_data"
+    assert operation_error.stack_trace == ["line1"]
+
+
+def test_error_object_to_durable_operation_error_unknown_type_falls_back():
+    """An unknown discriminator falls back to the base DurableOperationError."""
     error = ErrorObject(
         message="Test error",
         type="TestError",
         data="test_data",
         stack_trace=["line1"],
     )
-    runtime_error = error.to_callable_runtime_error()
-    assert isinstance(runtime_error, CallableRuntimeError)
-    assert runtime_error.message == "Test error"
-    assert runtime_error.error_type == "TestError"
-    assert runtime_error.data == "test_data"
-    assert runtime_error.stack_trace == ["line1"]
+    operation_error = error.to_durable_operation_error()
+    assert type(operation_error) is DurableOperationError
+    assert operation_error.error_type == "TestError"
+    assert operation_error.message == "Test error"
+
+
+def test_error_object_from_exception_preserves_operation_error_fields():
+    """from_exception keeps a DurableOperationError's typed discriminator/data."""
+    cause = ValueError("boom")
+    step_error = StepError(message="step failed", data="payload")
+    step_error.__cause__ = cause
+    error_object = ErrorObject.from_exception(step_error)
+    assert error_object.type == "StepError"
+    assert error_object.message == "step failed"
+    assert error_object.data == "payload"
+
+
+def test_error_object_from_exception_plain_exception():
+    """A non-operation exception still serializes its Python class name."""
+    error_object = ErrorObject.from_exception(ValueError("nope"))
+    assert error_object.type == "ValueError"
+    assert error_object.message == "nope"
+    assert error_object.data is None
 
 
 def test_step_details_from_dict():

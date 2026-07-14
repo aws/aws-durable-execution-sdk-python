@@ -1,20 +1,21 @@
 from __future__ import annotations
 
+import builtins
 import copy
 import datetime
 import logging
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, TypeAlias, cast
 
 import boto3
 from botocore.config import Config
 
 from aws_durable_execution_sdk_python.__about__ import __version__
 from aws_durable_execution_sdk_python.exceptions import (
-    CallableRuntimeError,
     CheckpointError,
+    DurableOperationError,
     GetExecutionStateError,
 )
 
@@ -235,6 +236,17 @@ class ErrorObject:
 
     @classmethod
     def from_exception(cls, exception: Exception) -> ErrorObject:
+        # The wire ErrorType is always the class name (the discriminant): a raw
+        # error records its own type; a typed wrapper records its operation kind.
+        # For a DurableOperationError also preserve its own data and stack_trace
+        # so the inner info survives across a single operation boundary.
+        if isinstance(exception, DurableOperationError):
+            return cls(
+                message=exception.message,
+                type=type(exception).__name__,
+                data=exception.data,
+                stack_trace=exception.stack_trace,
+            )
         return cls(
             message=str(exception),
             type=type(exception).__name__,
@@ -263,13 +275,38 @@ class ErrorObject:
             result["StackTrace"] = self.stack_trace
         return result
 
-    def to_callable_runtime_error(self) -> CallableRuntimeError:
-        return CallableRuntimeError(
+    def to_durable_operation_error(self) -> DurableOperationError:
+        return DurableOperationError.from_error_fields(
+            error_type=self.type,
+            message=self.message,
+            data=self.data,
+            stack_trace=self.stack_trace,
+        )
+
+    def raise_as_operation_error(
+        self, operation_error_cls: builtins.type[DurableOperationError]
+    ) -> NoReturn:
+        """Raise the operation's typed error reconstructed from this ErrorObject.
+
+        Used by both the first-run terminal-failure path and replay, so the
+        surfaced error is identical (a durable-execution determinism guarantee):
+        the wrapper is ``operation_error_cls`` carrying this object's
+        ``error_type``/``data``/``stack_trace``, and ``__cause__`` is the escaping
+        error rebuilt via the registry (a typed subclass when known, else the
+        base ``DurableOperationError``).
+        """
+        cause: DurableOperationError = DurableOperationError.from_error_fields(
+            error_type=self.type,
+            message=self.message,
+            data=self.data,
+            stack_trace=self.stack_trace,
+        )
+        raise operation_error_cls(
             message=self.message,
             error_type=self.type,
             data=self.data,
             stack_trace=self.stack_trace,
-        )
+        ) from cause
 
 
 @dataclass(frozen=True)

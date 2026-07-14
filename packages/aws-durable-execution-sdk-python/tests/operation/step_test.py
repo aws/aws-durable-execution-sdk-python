@@ -13,8 +13,9 @@ from aws_durable_execution_sdk_python.config import (
     StepSemantics,
 )
 from aws_durable_execution_sdk_python.exceptions import (
-    CallableRuntimeError,
+    DurableOperationError,
     ExecutionError,
+    StepError,
     StepInterruptedError,
     SuspendExecution,
 )
@@ -132,7 +133,7 @@ def test_step_handler_already_failed():
     mock_callable = Mock()
     mock_logger = Mock(spec=Logger)
 
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(StepError):
         step_handler(
             mock_callable,
             mock_state,
@@ -424,7 +425,7 @@ def test_step_handler_retry_exhausted():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(StepError):
         step_handler(
             mock_callable,
             mock_state,
@@ -450,10 +451,14 @@ def test_step_handler_retry_exhausted():
     assert fail_operation.operation_type is OperationType.STEP
     assert fail_operation.sub_type is OperationSubType.STEP
     assert fail_operation.action is OperationAction.FAIL
+    # The checkpoint records the raw escaping error's type; the StepError wrapper
+    # is surfaced to the caller and recorded one level up.
+    assert fail_operation.error is not None
+    assert fail_operation.error.type == "RuntimeError"
 
 
 def test_step_handler_retry_interrupted_error():
-    """Test step_handler with StepInterruptedError in retry."""
+    """A StepInterruptedError that exhausts retries surfaces as a StepError."""
     mock_state = Mock(spec=ExecutionState)
     mock_result = CheckpointedResult.create_not_found()
     mock_state.get_checkpoint_result.return_value = mock_result
@@ -469,7 +474,7 @@ def test_step_handler_retry_interrupted_error():
     mock_logger = Mock(spec=Logger)
     mock_logger.with_log_info.return_value = mock_logger
 
-    with pytest.raises(StepInterruptedError, match="Step interrupted"):
+    with pytest.raises(StepError, match="Step interrupted") as exc_info:
         step_handler(
             mock_callable,
             mock_state,
@@ -477,6 +482,13 @@ def test_step_handler_retry_interrupted_error():
             config,
             mock_logger,
         )
+
+    # First run and replay both reconstruct from the checkpointed error, so the
+    # surfaced StepError carries the interrupted error's type/message and a
+    # reconstructed (stand-in) cause rather than the live object.
+    assert exc_info.value.error_type == "StepInterruptedError"
+    assert isinstance(exc_info.value.__cause__, DurableOperationError)
+    assert exc_info.value.__cause__.error_type == "StepInterruptedError"
 
 
 def test_step_handler_retry_with_existing_attempts():
@@ -1024,7 +1036,7 @@ def test_step_immediate_response_immediate_failure():
     )
 
     # Verify operation raises error after executing step function
-    with pytest.raises(CallableRuntimeError, match="Step execution error"):
+    with pytest.raises(StepError, match="Step execution error"):
         step_handler(
             mock_callable,
             mock_state,

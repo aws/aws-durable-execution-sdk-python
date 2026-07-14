@@ -11,6 +11,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from aws_durable_execution_sdk_python.exceptions import (
+    ChildContextError,
     InvalidStateError,
     SuspendExecution,
 )
@@ -260,8 +261,12 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
             (item.error for item in self.all if item.status is BatchItemStatus.FAILED),
             None,
         )
-        if first_error:
-            raise first_error.to_callable_runtime_error()
+        if first_error is not None:
+            # Each item runs in a child context, so a failed item surfaces as a
+            # ChildContextError wrapping the escaping error (reconstructed as its
+            # typed form where possible, with __cause__ set). Remaining errors
+            # stay in get_errors().
+            first_error.raise_as_operation_error(ChildContextError)
 
     def get_results(self) -> list[R]:
         return [
