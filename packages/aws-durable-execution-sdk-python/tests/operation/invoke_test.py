@@ -234,7 +234,7 @@ def test_invoke_handler_already_started_suspends(status):
 
     config = InvokeConfig[str, str]()
 
-    with pytest.raises(SuspendExecution):
+    with pytest.raises(SuspendExecution) as exc_info:
         invoke_handler(
             function_name="test_function",
             payload="test_input",
@@ -244,6 +244,7 @@ def test_invoke_handler_already_started_suspends(status):
             ),
             config=config,
         )
+    assert type(exc_info.value) is SuspendExecution
 
 
 def test_invoke_handler_new_operation():
