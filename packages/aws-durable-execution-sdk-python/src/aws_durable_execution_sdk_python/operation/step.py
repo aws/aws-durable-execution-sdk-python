@@ -249,7 +249,17 @@ class StepOperationExecutor(OperationExecutor[T]):
                 self.operation_identifier.operation_id,
                 self.operation_identifier.name,
             )
-            return raw_result  # noqa: TRY300
+            # Return the round-tripped value so the first run matches replay,
+            # which reconstructs the result by deserializing the checkpoint.
+            # A None payload is returned as-is, mirroring the replay path.
+            if serialized_result is None:
+                return None  # type: ignore[return-value]
+            return deserialize(  # noqa: TRY300
+                serdes=self.config.serdes,
+                data=serialized_result,
+                operation_id=self.operation_identifier.operation_id,
+                durable_execution_arn=self.state.durable_execution_arn,
+            )
         except Exception as e:
             if isinstance(e, ExecutionError):
                 # No retry on fatal - e.g checkpoint exception

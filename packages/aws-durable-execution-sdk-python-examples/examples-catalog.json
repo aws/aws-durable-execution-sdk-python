@@ -46,6 +46,17 @@
       "path": "./src/step/step_with_retry.py"
     },
     {
+      "name": "Step with Custom SerDes",
+      "description": "Step with a non-identity custom SerDes; the step returns the canonical round-tripped value, consistent across first run and replay",
+      "handler": "step_with_custom_serdes.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/step/step_with_custom_serdes.py"
+    },
+    {
       "name": "Wait State",
       "description": "Basic usage of context.wait() to pause execution",
       "handler": "wait.handler",

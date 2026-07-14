@@ -2,6 +2,7 @@
 
 import datetime
 import json
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -30,6 +31,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python.logger import Logger
 from aws_durable_execution_sdk_python.operation.step import StepOperationExecutor
 from aws_durable_execution_sdk_python.retries import RetryDecision
+from aws_durable_execution_sdk_python.serdes import SerDes, SerDesContext
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 from tests.serdes_test import CustomDictSerDes
 
@@ -603,6 +605,126 @@ def test_step_handler_custom_serdes_already_succeeded():
     )
 
     assert result == {"key": "value", "number": 42, "list": [1, 2, 3]}
+
+
+def test_step_handler_first_run_returns_round_tripped_result():
+    """First-run result must match the replay (deserialized-from-checkpoint) result.
+
+    With a non-identity SerDes whose serialize/deserialize is not a round-trip
+    identity, returning the raw in-memory result on the first run diverges from
+    the value returned on replay. The first run must return the value obtained by
+    serializing then deserializing, so both runs agree.
+    """
+
+    class NonIdentitySerDes(SerDes[Any]):
+        """deserialize() adds a marker that serialize() never removes."""
+
+        def serialize(self, value: Any, _: SerDesContext) -> str:
+            payload = dict(value)
+            payload.pop("deserialized", None)
+            return json.dumps(payload)
+
+        def deserialize(self, data: str, _: SerDesContext) -> dict[str, Any]:
+            parsed = json.loads(data)
+            return {**parsed, "deserialized": True}
+
+    serdes = NonIdentitySerDes()
+    raw_result = {"key": "value"}
+
+    # --- First run ---
+    first_run_state = Mock(spec=ExecutionState)
+    first_run_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    first_run_state.durable_execution_arn = "test_arn"
+    mock_callable = Mock(return_value=raw_result)
+    first_run_state.wrap_user_function.return_value = mock_callable
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    config = StepConfig(
+        step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY, serdes=serdes
+    )
+    first_run_result = step_handler(
+        mock_callable,
+        first_run_state,
+        OperationIdentifier("step_rt", OperationSubType.STEP, None, "test_step"),
+        config,
+        mock_logger,
+    )
+
+    # Grab the payload that was actually checkpointed.
+    success_call = first_run_state.create_checkpoint.call_args_list[1]
+    checkpointed_payload = success_call[1]["operation_update"].payload
+
+    # --- Replay: checkpoint already SUCCEEDED with the serialized payload ---
+    replay_state = Mock(spec=ExecutionState)
+    replay_state.durable_execution_arn = "test_arn"
+    succeeded_op = Operation(
+        operation_id="step_rt",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        step_details=StepDetails(result=checkpointed_payload),
+    )
+    replay_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_from_operation(succeeded_op)
+    )
+    replay_result = step_handler(
+        Mock(return_value="should_not_call"),
+        replay_state,
+        OperationIdentifier("step_rt", OperationSubType.STEP, None, "test_step"),
+        config,
+        Mock(spec=Logger),
+    )
+
+    # First run must return the round-tripped value, which equals the replay value,
+    # and must NOT equal the raw in-memory result.
+    assert first_run_result == {"key": "value", "deserialized": True}
+    assert first_run_result == replay_result
+    assert first_run_result != raw_result
+
+
+def test_step_handler_first_run_none_payload_skips_deserialize():
+    """A None serialized payload is returned as-is without deserializing.
+
+    This mirrors the replay path, which returns None without calling deserialize
+    when the checkpointed result is None. A serdes whose serialize returns None
+    must therefore see its deserialize skipped on the first run too.
+    """
+
+    class NonePayloadSerDes(SerDes[Any]):
+        """serialize() yields None; deserialize() must never be called for None."""
+
+        def serialize(self, _value: Any, _ctx: SerDesContext) -> str:
+            return None  # type: ignore[return-value]
+
+        def deserialize(self, _data: str, _ctx: SerDesContext) -> Any:
+            msg = "deserialize should not be called for a None payload"
+            raise AssertionError(msg)
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    mock_state.durable_execution_arn = "test_arn"
+    mock_callable = Mock(return_value={"key": "value"})
+    mock_state.wrap_user_function.return_value = mock_callable
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    config = StepConfig(
+        step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY,
+        serdes=NonePayloadSerDes(),
+    )
+    result = step_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier("step_none", OperationSubType.STEP, None, "test_step"),
+        config,
+        mock_logger,
+    )
+
+    assert result is None
 
 
 # Tests for immediate response handling
