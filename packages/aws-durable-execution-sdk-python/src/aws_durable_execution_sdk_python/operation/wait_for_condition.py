@@ -242,7 +242,7 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
             if delay_seconds is not None and delay_seconds < 1:
                 logger.warning(
                     (
-                        "WaitDecision delay_seconds step for id: %s, name: %s,"
+                        "wait_for_condition delay_seconds for id: %s, name: %s,"
                         "is %d < 1. Setting to minimum of 1 seconds."
                     ),
                     self.operation_identifier.operation_id,
