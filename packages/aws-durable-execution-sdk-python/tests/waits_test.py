@@ -2,31 +2,17 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from aws_durable_execution_sdk_python.config import Duration, JitterStrategy
+from aws_durable_execution_sdk_python.exceptions import WaitForConditionError
 from aws_durable_execution_sdk_python.serdes import JsonSerDes
 from aws_durable_execution_sdk_python.waits import (
-    WaitDecision,
     WaitForConditionConfig,
     WaitForConditionDecision,
     WaitStrategyConfig,
     create_wait_strategy,
 )
-
-
-class TestWaitDecision:
-    """Test WaitDecision factory methods."""
-
-    def test_wait_factory(self):
-        """Test wait factory method."""
-        decision = WaitDecision.wait(Duration.from_seconds(30))
-        assert decision.should_wait is True
-        assert decision.delay_seconds == 30
-
-    def test_no_wait_factory(self):
-        """Test no_wait factory method."""
-        decision = WaitDecision.no_wait()
-        assert decision.should_wait is False
-        assert decision.delay_seconds == 0
 
 
 class TestWaitForConditionDecision:
@@ -62,25 +48,34 @@ class TestWaitStrategyConfig:
 class TestCreateWaitStrategy:
     """Test wait strategy creation and behavior."""
 
-    def test_condition_met_returns_no_wait(self):
-        """Test strategy returns no_wait when condition is met."""
+    def test_condition_met_stops_polling(self):
+        """Test strategy stops polling when the condition is met."""
         config = WaitStrategyConfig(should_continue_polling=lambda x: False)
         strategy = create_wait_strategy(config)
 
         result = "completed"
         decision = strategy(result, 1)
-        assert decision.should_wait is False
+        assert decision.should_continue is False
 
-    def test_max_attempts_exceeded(self):
-        """Test strategy returns no_wait when max attempts exceeded."""
+    def test_max_attempts_exceeded_raises(self):
+        """Test strategy raises once attempts are exhausted."""
         config = WaitStrategyConfig(
             should_continue_polling=lambda x: True, max_attempts=5
         )
         strategy = create_wait_strategy(config)
 
-        result = "pending"
-        decision = strategy(result, 5)
-        assert decision.should_wait is False
+        with pytest.raises(WaitForConditionError):
+            strategy("pending", 5)
+
+    def test_condition_met_on_final_attempt_still_succeeds(self):
+        """Condition satisfied on the last attempt wins over exhaustion."""
+        config = WaitStrategyConfig(
+            should_continue_polling=lambda x: False, max_attempts=5
+        )
+        strategy = create_wait_strategy(config)
+
+        decision = strategy("done", 5)
+        assert decision.should_continue is False
 
     def test_should_continue_polling(self):
         """Test strategy continues when condition not met."""
@@ -89,7 +84,7 @@ class TestCreateWaitStrategy:
 
         result = "pending"
         decision = strategy(result, 1)
-        assert decision.should_wait is True
+        assert decision.should_continue is True
 
     @patch("random.random")
     def test_exponential_backoff_calculation(self, mock_random):
@@ -205,12 +200,12 @@ class TestWaitStrategyWithStatefulConditions:
         # Should continue when count < 3
         state1 = State(1)
         decision1 = strategy(state1, 1)
-        assert decision1.should_wait is True
+        assert decision1.should_continue is True
 
         # Should stop when count >= 3
         state2 = State(3)
         decision2 = strategy(state2, 1)
-        assert decision2.should_wait is False
+        assert decision2.should_continue is False
 
     def test_complex_condition_logic(self):
         """Test complex condition logic."""
@@ -224,17 +219,17 @@ class TestWaitStrategyWithStatefulConditions:
         # Should continue
         result1 = {"status": "pending", "retries": 2}
         decision1 = strategy(result1, 1)
-        assert decision1.should_wait is True
+        assert decision1.should_continue is True
 
         # Should stop - status changed
         result2 = {"status": "completed", "retries": 2}
         decision2 = strategy(result2, 1)
-        assert decision2.should_wait is False
+        assert decision2.should_continue is False
 
         # Should stop - retries exceeded
         result3 = {"status": "pending", "retries": 5}
         decision3 = strategy(result3, 1)
-        assert decision3.should_wait is False
+        assert decision3.should_continue is False
 
 
 class TestEdgeCases:
@@ -295,13 +290,13 @@ class TestEdgeCases:
 
         result = "pending"
 
-        # At boundary - should not wait
-        decision = strategy(result, 3)
-        assert decision.should_wait is False
+        # At boundary - out of attempts, so it fails
+        with pytest.raises(WaitForConditionError):
+            strategy(result, 3)
 
-        # Just before boundary - should wait
+        # Just before boundary - should continue
         decision = strategy(result, 2)
-        assert decision.should_wait is True
+        assert decision.should_continue is True
 
     def test_negative_delay_clamped_to_one(self):
         """Test negative delay is clamped to 1."""
@@ -364,6 +359,18 @@ class TestWaitForConditionConfig:
 
         assert config.serdes is serdes
 
+    def test_built_in_strategy_wires_into_config(self):
+        """The built-in strategy returns the type wait_for_condition consumes."""
+        config = WaitForConditionConfig(
+            wait_strategy=create_wait_strategy(
+                WaitStrategyConfig(should_continue_polling=lambda x: x < 3)
+            ),
+            initial_state=0,
+        )
+
+        decision = config.wait_strategy(1, 1)
+        assert decision.should_continue is True
+
 
 class TestWaitStrategyCallableConditions:
     """Test wait strategy with various callable conditions."""
@@ -374,10 +381,10 @@ class TestWaitStrategyCallableConditions:
         strategy = create_wait_strategy(config)
 
         decision1 = strategy(5, 1)
-        assert decision1.should_wait is True
+        assert decision1.should_continue is True
 
         decision2 = strategy(10, 1)
-        assert decision2.should_wait is False
+        assert decision2.should_continue is False
 
     def test_function_condition(self):
         """Test with function condition."""
@@ -389,10 +396,10 @@ class TestWaitStrategyCallableConditions:
         strategy = create_wait_strategy(config)
 
         decision1 = strategy("pending", 1)
-        assert decision1.should_wait is True
+        assert decision1.should_continue is True
 
         decision2 = strategy("completed", 1)
-        assert decision2.should_wait is False
+        assert decision2.should_continue is False
 
     def test_method_condition(self):
         """Test with method condition."""
@@ -409,7 +416,7 @@ class TestWaitStrategyCallableConditions:
         strategy = create_wait_strategy(config)
 
         decision1 = strategy(50, 1)
-        assert decision1.should_wait is True
+        assert decision1.should_continue is True
 
         decision2 = strategy(100, 1)
-        assert decision2.should_wait is False
+        assert decision2.should_continue is False

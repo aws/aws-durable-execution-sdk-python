@@ -35,6 +35,8 @@ from aws_durable_execution_sdk_python.types import WaitForConditionCheckContext
 from aws_durable_execution_sdk_python.waits import (
     WaitForConditionConfig,
     WaitForConditionDecision,
+    WaitStrategyConfig,
+    create_wait_strategy,
 )
 from tests.serdes_test import CustomDictSerDes
 
@@ -1569,6 +1571,95 @@ def test_wait_for_condition_executes_check_when_checkpoint_not_terminal():
     assert result == "final_state"
     assert mock_state.get_checkpoint_result.call_count == 1  # Single check (async)
     assert mock_state.create_checkpoint.call_count == 2  # START + SUCCESS checkpoints
+
+
+def test_wait_for_condition_exhaustion_raises_and_checkpoints_fail():
+    """Live path: the built-in strategy runs out of attempts, so it raises
+    WaitForConditionError, which is checkpointed as a FAIL and propagated."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "arn:aws:test"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
+
+    def check_func(state, context):
+        return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
+
+    # max_attempts=1 means attempt 1 is already the last one.
+    config = WaitForConditionConfig(
+        initial_state=5,
+        wait_strategy=create_wait_strategy(
+            WaitStrategyConfig(should_continue_polling=lambda x: True, max_attempts=1)
+        ),
+    )
+
+    with pytest.raises(WaitForConditionError):
+        wait_for_condition_handler(
+            state=mock_state,
+            operation_identifier=op_id,
+            check=check_func,
+            config=config,
+            context_logger=mock_logger,
+        )
+
+    assert mock_state.create_checkpoint.call_count == 2  # START and FAIL
+    fail_operation = mock_state.create_checkpoint.call_args_list[1][1][
+        "operation_update"
+    ]
+    assert fail_operation.error.type == "WaitForConditionError"
+
+
+def test_wait_for_condition_exhaustion_surfaces_on_replay():
+    """Replay path: the FAILED checkpoint short-circuits on the next invocation
+    and is reconstructed as the typed WaitForConditionError carrying the original
+    error_type, without re-running the check."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.FAILED,
+        step_details=StepDetails(
+            error=ErrorObject("exhausted attempts", "WaitForConditionError", None, None)
+        ),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    mock_logger = Mock(spec=Logger)
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
+
+    def check_func(state, context):
+        msg = "Check function should not be called on replay of a failure"
+        raise AssertionError(msg)
+
+    config = WaitForConditionConfig(
+        initial_state=5,
+        wait_strategy=lambda s, a: WaitForConditionDecision.stop_polling(),
+    )
+
+    with pytest.raises(WaitForConditionError) as exc_info:
+        wait_for_condition_handler(
+            state=mock_state,
+            operation_identifier=op_id,
+            check=check_func,
+            config=config,
+            context_logger=mock_logger,
+        )
+
+    assert exc_info.value.error_type == "WaitForConditionError"
+    assert mock_state.create_checkpoint.call_count == 0  # Nothing new on replay
 
 
 def test_wait_for_condition_executes_check_when_checkpoint_not_terminal_duplicate():

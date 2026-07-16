@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic
 
 from aws_durable_execution_sdk_python.config import Duration, JitterStrategy, T
+from aws_durable_execution_sdk_python.exceptions import WaitForConditionError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -14,29 +15,6 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.serdes import SerDes
 
 Numeric = int | float
-
-
-@dataclass
-class WaitDecision:
-    """Decision about whether to wait a step and with what delay."""
-
-    should_wait: bool
-    delay: Duration
-
-    @property
-    def delay_seconds(self) -> int:
-        """Get delay in seconds."""
-        return self.delay.to_seconds()
-
-    @classmethod
-    def wait(cls, delay: Duration) -> WaitDecision:
-        """Create a wait decision."""
-        return cls(should_wait=True, delay=delay)
-
-    @classmethod
-    def no_wait(cls) -> WaitDecision:
-        """Create a no-wait decision."""
-        return cls(should_wait=False, delay=Duration())
 
 
 @dataclass
@@ -69,35 +47,6 @@ class WaitStrategyConfig(Generic[T]):
         return self.timeout.to_seconds()
 
 
-def create_wait_strategy(
-    config: WaitStrategyConfig[T],
-) -> Callable[[T, int], WaitDecision]:
-    def wait_strategy(result: T, attempts_made: int) -> WaitDecision:
-        # Check if condition is met
-        if not config.should_continue_polling(result):
-            return WaitDecision.no_wait()
-
-        # Check if we've exceeded max attempts
-        if attempts_made >= config.max_attempts:
-            return WaitDecision.no_wait()
-
-        # Calculate delay with exponential backoff
-        base_delay: float = min(
-            config.initial_delay_seconds * (config.backoff_rate ** (attempts_made - 1)),
-            config.max_delay_seconds,
-        )
-
-        # Apply jitter to get final delay
-        delay_with_jitter: float = config.jitter_strategy.apply_jitter(base_delay)
-
-        # Round up and ensure minimum of 1 second
-        final_delay: int = max(1, math.ceil(delay_with_jitter))
-
-        return WaitDecision.wait(Duration(seconds=final_delay))
-
-    return wait_strategy
-
-
 @dataclass(frozen=True)
 class WaitForConditionDecision:
     """Decision about whether to continue waiting."""
@@ -119,6 +68,41 @@ class WaitForConditionDecision:
     def stop_polling(cls) -> WaitForConditionDecision:
         """Create a decision to stop polling."""
         return cls(should_continue=False, delay=Duration())
+
+
+def create_wait_strategy(
+    config: WaitStrategyConfig[T],
+) -> Callable[[T, int], WaitForConditionDecision]:
+    def wait_strategy(result: T, attempts_made: int) -> WaitForConditionDecision:
+        # Condition satisfied wins over exhaustion, so a condition met on the final
+        # attempt still succeeds (matches the JS and Java SDKs).
+        if not config.should_continue_polling(result):
+            return WaitForConditionDecision.stop_polling()
+
+        # Out of attempts: fail rather than stop, otherwise the executor would treat
+        # this as success and return partial state.
+        if attempts_made >= config.max_attempts:
+            msg = (
+                f"wait_for_condition exhausted {config.max_attempts} attempts "
+                "before the condition was met"
+            )
+            raise WaitForConditionError(msg)
+
+        # Calculate delay with exponential backoff
+        base_delay: float = min(
+            config.initial_delay_seconds * (config.backoff_rate ** (attempts_made - 1)),
+            config.max_delay_seconds,
+        )
+
+        # Apply jitter to get final delay
+        delay_with_jitter: float = config.jitter_strategy.apply_jitter(base_delay)
+
+        # Round up and ensure minimum of 1 second
+        final_delay: int = max(1, math.ceil(delay_with_jitter))
+
+        return WaitForConditionDecision.continue_waiting(Duration(seconds=final_delay))
+
+    return wait_strategy
 
 
 @dataclass(frozen=True)
