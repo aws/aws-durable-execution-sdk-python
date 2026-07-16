@@ -247,6 +247,35 @@ def test_operation_end_without_start_emits_continuation_span_with_link():
     )
 
 
+def test_continuation_span_uses_recorded_start_and_end_times():
+    """Continuation spans use the recorded operation start/end times."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id="fast-step",
+            operation_type=OperationType.STEP,
+            sub_type=None,
+            name="fast-step",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+
+    span = exporter.get_finished_spans()[0]
+    expected_start = int(START_TIME.timestamp() * 1_000_000_000)
+    expected_end = int(END_TIME.timestamp() * 1_000_000_000)
+    assert span.start_time == expected_start
+    assert span.end_time == expected_end
+    # Duration must be non-negative.
+    assert span.end_time >= span.start_time
+
+
 def test_replayed_operation_start_emits_continuation_span_with_link():
     """Replayed operation spans should not reuse the original deterministic span ID."""
     plugin, exporter = _create_plugin()
