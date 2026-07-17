@@ -738,7 +738,10 @@ def test_durable_execution_execution_error_handling():
     error_data = result["Error"]
 
     assert error_data["ErrorMessage"] == "Retriable invocation error occurred"
-    assert error_data["ErrorType"] == "ExecutionError"
+    assert (
+        error_data["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.ExecutionError"
+    )
 
 
 def test_durable_execution_client_selection_default():
@@ -1040,7 +1043,10 @@ def test_durable_execution_checkpoint_error_in_background_thread():
 
     response = test_handler(invocation_input, lambda_context)
     assert response["Status"] == InvocationStatus.FAILED.value
-    assert response["Error"]["ErrorType"] == "CheckpointError"
+    assert (
+        response["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+    )
 
 
 # endregion durable_execution
@@ -1095,7 +1101,10 @@ def test_durable_execution_checkpoint_execution_error_stops_background():
     ):
         response = test_handler(invocation_input, lambda_context)
         assert response["Status"] == InvocationStatus.FAILED.value
-        assert response["Error"]["ErrorType"] == "CheckpointError"
+        assert (
+            response["Error"]["ErrorType"]
+            == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+        )
 
 
 def test_durable_execution_checkpoint_invocation_error_retries():
@@ -1186,7 +1195,10 @@ def test_durable_execution_background_thread_execution_error_returns_failed():
 
     response = test_handler(invocation_input, lambda_context)
     assert response["Status"] == InvocationStatus.FAILED.value
-    assert response["Error"]["ErrorType"] == "CheckpointError"
+    assert (
+        response["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+    )
 
 
 def test_durable_execution_background_thread_invocation_error_retries():
@@ -1274,7 +1286,10 @@ def test_durable_execution_final_success_checkpoint_execution_error_returns_fail
 
     response = test_handler(invocation_input, lambda_context)
     assert response["Status"] == InvocationStatus.FAILED.value
-    assert response["Error"]["ErrorType"] == "CheckpointError"
+    assert (
+        response["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+    )
 
 
 def test_durable_execution_final_success_checkpoint_invocation_error_retries():
@@ -1366,7 +1381,10 @@ def test_durable_execution_final_failure_checkpoint_execution_error_returns_fail
 
     response = test_handler(invocation_input, lambda_context)
     assert response["Status"] == InvocationStatus.FAILED.value
-    assert response["Error"]["ErrorType"] == "CheckpointError"
+    assert (
+        response["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+    )
 
 
 def test_durable_execution_final_failure_checkpoint_invocation_error_retries():
@@ -1778,7 +1796,10 @@ def test_durable_execution_logs_checkpoint_error_extras_from_background_thread()
     with patch("aws_durable_execution_sdk_python.execution.logger", mock_logger):
         response = test_handler(invocation_input, lambda_context)
         assert response["Status"] == InvocationStatus.FAILED.value
-        assert response["Error"]["ErrorType"] == "CheckpointError"
+        assert (
+            response["Error"]["ErrorType"]
+            == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+        )
 
     mock_logger.exception.assert_called()
     # First call: "Checkpoint processing failed" with error extras
@@ -1893,7 +1914,10 @@ def test_durable_execution_logs_checkpoint_error_extras_from_user_code():
     with patch("aws_durable_execution_sdk_python.execution.logger", mock_logger):
         response = test_handler(invocation_input, lambda_context)
         assert response["Status"] == InvocationStatus.FAILED.value
-        assert response["Error"]["ErrorType"] == "CheckpointError"
+        assert (
+            response["Error"]["ErrorType"]
+            == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+        )
 
     mock_logger.exception.assert_called_once()
     call_args = mock_logger.exception.call_args
@@ -2752,7 +2776,10 @@ def test_durable_execution_non_retryable_invocation_error_returns_failed():
 
     result = test_handler(_make_invocation_input(mock_client), _make_lambda_context())
     assert result["Status"] == InvocationStatus.FAILED.value
-    assert result["Error"]["ErrorType"] == "GetExecutionStateError"
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.GetExecutionStateError"
+    )
 
 
 def test_durable_execution_retryable_invocation_error_raises():
@@ -2792,7 +2819,10 @@ def test_durable_execution_non_retryable_background_thread_error_returns_failed(
 
     result = test_handler(_make_invocation_input(mock_client), _make_lambda_context())
     assert result["Status"] == InvocationStatus.FAILED.value
-    assert result["Error"]["ErrorType"] == "GetExecutionStateError"
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.GetExecutionStateError"
+    )
 
 
 @pytest.mark.parametrize(
@@ -2824,7 +2854,10 @@ def test_durable_execution_non_retryable_initial_pagination_error_returns_failed
         _make_lambda_context(),
     )
     assert result["Status"] == InvocationStatus.FAILED.value
-    assert result["Error"]["ErrorType"] == "GetExecutionStateError"
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.GetExecutionStateError"
+    )
 
 
 def test_durable_execution_retryable_initial_pagination_error_raises():

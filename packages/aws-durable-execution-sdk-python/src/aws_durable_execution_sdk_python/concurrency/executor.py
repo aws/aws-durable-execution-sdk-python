@@ -30,6 +30,7 @@ from aws_durable_execution_sdk_python.config import (
 from aws_durable_execution_sdk_python.exceptions import (
     DurableOperationError,
     InvalidStateError,
+    InvocationError,
     OrphanedChildException,
     SuspendExecution,
     TimedSuspendExecution,
@@ -177,6 +178,10 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         running: int = 0
         succeeded: int = 0
         failed: int = 0
+        # A retryable branch error, re-raised after the drain (or before
+        # suspension) so the invocation fails and the backend retries rather
+        # than recording a permanent item.
+        retryable_error: InvocationError | None = None
 
         pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=max_in_flight)
         # Registered so ExecutionState.close() joins any branches still
@@ -224,6 +229,11 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                     continue
 
                 if running == 0:
+                    # A retryable error takes priority over suspension: fail
+                    # the invocation so the backend retries rather than
+                    # returning PENDING while a retryable failure is pending.
+                    if retryable_error is not None:
+                        raise retryable_error
                     # Every in-flight branch is suspended and no slot is
                     # free (or no work remains): suspend the parent.
                     if timed_resumes:
@@ -256,6 +266,11 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                         failed += 1
                         running -= 1
                         in_flight -= 1
+                        if (
+                            isinstance(event.error, InvocationError)
+                            and event.error.is_retryable()
+                        ):
+                            retryable_error = event.error
                     case BranchEventKind.SUSPENDED:
                         applied.suspend()
                         running -= 1
@@ -310,11 +325,22 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 raced_branch.complete(raced.result)
             elif raced.kind is BranchEventKind.FAILED and raced.error is not None:
                 raced_branch.fail(raced.error)
+                if (
+                    isinstance(raced.error, InvocationError)
+                    and raced.error.is_retryable()
+                ):
+                    retryable_error = raced.error
             elif raced.kind is BranchEventKind.FATAL and raced.fatal_error is not None:
                 # A straggler hit a system-level failure after the completion
                 # decision. The same failure would reject the parent's own
                 # checkpoint, so propagate instead of returning a result.
                 raise raced.fatal_error
+
+        # Re-raise a retryable branch error so the whole invocation fails and
+        # the backend retries, instead of returning a batch that records it as a
+        # permanent failed item.
+        if retryable_error is not None:
+            raise retryable_error
 
         return self._create_result(completion_reason)
 
@@ -404,6 +430,10 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             )
             events.put(BranchEvent.orphaned(executable.index))
         except Exception as e:  # noqa: BLE001
+            # A retryable error (e.g. RetryableSerDesError) escapes the batch:
+            # the coordinator re-raises it so the invocation fails and the
+            # backend retries, instead of it becoming a permanent failed item.
+            # Other errors are ordinary branch failures.
             events.put(BranchEvent.failed(executable.index, e))
         except BaseException as e:
             # System-level failure (background checkpoint failure, SystemExit).
@@ -563,6 +593,10 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                     executor_context, executable
                 )
             except Exception as e:  # noqa: BLE001
+                if isinstance(e, InvocationError) and e.is_retryable():
+                    # Escape the batch so the invocation fails and the backend
+                    # retries, matching the live path.
+                    raise
                 return BatchItem(
                     executable.index,
                     BatchItemStatus.FAILED,

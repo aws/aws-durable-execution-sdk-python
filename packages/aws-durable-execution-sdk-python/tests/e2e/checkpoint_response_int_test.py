@@ -835,6 +835,7 @@ def test_parallel_and_child_context_agree_on_custom_error_type():
         my_handler(event, lambda_context)
 
     # Both operations surface the caller's original type, and they agree.
-    assert captured["child"] == "PermanentFailure"
-    assert captured["parallel"] == "PermanentFailure"
+    expected: str = f"{PermanentFailure.__module__}.{PermanentFailure.__qualname__}"
+    assert captured["child"] == expected
+    assert captured["parallel"] == expected
     assert captured["child"] == captured["parallel"]
