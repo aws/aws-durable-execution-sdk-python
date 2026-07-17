@@ -393,7 +393,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
                 operation_id=info.operation_id,
                 name=info.name or info.operation_id,
                 attributes=attributes,
-                start_time=datetime.datetime.now(datetime.UTC),
+                start_time=info.start_time,
                 parent_span=parent_span,
                 existed=True,
             )
