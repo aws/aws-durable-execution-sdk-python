@@ -14,7 +14,7 @@ dependencies = [
   "pytest",
   "pytest-cov",
   "pytest-xdist",
-  "opentelemetry-sdk>=1.20.0",
+  "opentelemetry-sdk>=1.20.0,<=1.42.1",
   "aws-durable-execution-sdk-python-testing",
 ]
 
@@ -46,7 +46,7 @@ extra-dependencies = [
   "mypy>=1.0.0",
   "pytest",
   "boto3-stubs[lambda]",
-  "opentelemetry-sdk>=1.20.0",
+  "opentelemetry-sdk>=1.20.0,<=1.42.1",
 ]
 
 [tool.hatch.envs.types.scripts]
@@ -77,7 +77,7 @@ dependencies = [
   "pytest",
   "pytest-cov",
   "coverage[toml]",
-  "opentelemetry-sdk>=1.20.0",
+  "opentelemetry-sdk>=1.20.0,<=1.42.1",
   "mypy>=1.0.0",
 ]
 
@@ -121,7 +121,7 @@ test = "pytest packages/aws-durable-execution-sdk-python-examples/test {args}"
 [tool.hatch.envs.test-pypi-otel]
 dependencies = [
   "aws-durable-execution-sdk-python",
-  "opentelemetry-sdk>=1.20.0",
+  "opentelemetry-sdk>=1.20.0,<=1.42.1",
   "pytest",
   "pytest-cov",
   "coverage[toml]",

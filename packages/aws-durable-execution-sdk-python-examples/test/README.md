@@ -34,6 +34,18 @@ Tests run against actual AWS Lambda functions using `DurableFunctionCloudTestRun
 hatch run examples:build
 hatch run examples:generate-sam-template
 sam build --template-file packages/aws-durable-execution-sdk-python-examples/template.generated.json
+AWS_REGION=us-west-2
+ADOT_LAYER_ARN=$(
+  gh api repos/aws-observability/aws-otel-python-instrumentation/releases/latest \
+    --jq .body |
+    awk -F '|' -v region="$AWS_REGION" '
+      $2 ~ "^[[:space:]]*" region "[[:space:]]*$" {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3)
+        print $3
+        exit
+      }
+    '
+)
 sam deploy \
   --template-file .aws-sam/build/template.yaml \
   --stack-name python-examples-test \
@@ -43,7 +55,8 @@ sam deploy \
     PythonRuntime=python3.13 \
     FunctionNamePrefix=PythonTest- \
     LambdaEndpoint=https://lambda.us-west-2.amazonaws.com \
-    LambdaExecutionRoleArn=arn:aws:iam::123456789012:role/example-lambda-role
+    LambdaExecutionRoleArn=arn:aws:iam::123456789012:role/example-lambda-role \
+    AdotLayerArn="$ADOT_LAYER_ARN"
 
 # Optional: invoke a deployed example directly with SAM remote execution.
 # The logical ID comes from template.generated.json; hello_world.handler maps to HelloWorld.

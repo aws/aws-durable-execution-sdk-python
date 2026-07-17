@@ -73,6 +73,26 @@ def test_build_template_preserves_existing_logging_config():
     }
 
 
+def test_build_template_references_adot_layer_parameter():
+    template = generate_sam_template.build_template(
+        [
+            {
+                "handler": "execution_with_otel.handler",
+                "description": "OTel example",
+                "layers": [{"Ref": "AdotLayerArn"}],
+            }
+        ]
+    )
+
+    assert template["Parameters"]["AdotLayerArn"] == {
+        "Type": "String",
+        "Description": "ARN of the ADOT Python Lambda layer.",
+    }
+    assert template["Resources"]["ExecutionWithOtel"]["Properties"]["Layers"] == [
+        {"Ref": "AdotLayerArn"}
+    ]
+
+
 def test_log_group_resources_match_generated_template_names(monkeypatch):
     monkeypatch.setattr(
         cleanup_unmanaged_log_groups,

@@ -677,7 +677,9 @@
       },
       "tracing": "Active",
       "layers": [
-        "arn:aws:lambda:us-west-2:615299751070:layer:AWSOpenTelemetryDistroPython:32"
+        {
+          "Ref": "AdotLayerArn"
+        }
       ],
       "environment": {
         "AWS_LAMBDA_EXEC_WRAPPER": "/opt/otel-instrument"
@@ -699,7 +701,9 @@
       },
       "tracing": "Active",
       "layers": [
-        "arn:aws:lambda:us-west-2:615299751070:layer:AWSOpenTelemetryDistroPython:32"
+        {
+          "Ref": "AdotLayerArn"
+        }
       ],
       "environment": {
         "AWS_LAMBDA_EXEC_WRAPPER": "/opt/otel-instrument",

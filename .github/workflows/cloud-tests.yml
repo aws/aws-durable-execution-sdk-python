@@ -89,14 +89,38 @@ jobs:
         PYTHON_RUNTIME: python${{ matrix.python-version }}
         STACK_NAME: ${{ matrix.python-prefix }}-python-examples
         FUNCTION_NAME_PREFIX: ${{ matrix.python-prefix }}-
+        GH_TOKEN: ${{ github.token }}
       run: |
         echo "Building SAM application"
         sam build --template-file packages/aws-durable-execution-sdk-python-examples/template.generated.json
+
+        ADOT_LAYER_ARN=$(
+          gh api repos/aws-observability/aws-otel-python-instrumentation/releases/latest \
+            --jq .body |
+            awk -F '|' -v region="$AWS_REGION" '
+              $2 ~ "^[[:space:]]*" region "[[:space:]]*$" {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3)
+                print $3
+                exit
+              }
+            '
+        )
+        if [ -z "$ADOT_LAYER_ARN" ]; then
+          echo "Could not resolve the latest ADOT Python layer for $AWS_REGION"
+          exit 1
+        fi
+        aws lambda get-layer-version-by-arn \
+          --arn "$ADOT_LAYER_ARN" \
+          --region "$AWS_REGION" \
+          --query LayerVersionArn \
+          --output text > /dev/null
+        echo "Using ADOT Python layer $ADOT_LAYER_ARN"
 
         PARAMETER_OVERRIDES=(
           PythonRuntime="$PYTHON_RUNTIME"
           FunctionNamePrefix="$FUNCTION_NAME_PREFIX"
           LambdaExecutionRoleArn="$LAMBDA_EXECUTION_ROLE_ARN"
+          AdotLayerArn="$ADOT_LAYER_ARN"
         )
         if [ -n "$LAMBDA_ENDPOINT_OVERRIDE" ]; then
           PARAMETER_OVERRIDES+=(LambdaEndpoint="$LAMBDA_ENDPOINT_OVERRIDE")
