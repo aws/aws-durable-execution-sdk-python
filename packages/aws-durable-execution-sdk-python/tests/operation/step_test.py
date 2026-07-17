@@ -33,6 +33,7 @@ from aws_durable_execution_sdk_python.operation.step import StepOperationExecuto
 from aws_durable_execution_sdk_python.retries import RetryDecision
 from aws_durable_execution_sdk_python.serdes import SerDes, SerDesContext
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
+from aws_durable_execution_sdk_python.types import StepContext
 from tests.serdes_test import CustomDictSerDes
 
 
@@ -237,6 +238,52 @@ def test_step_handler_success_at_least_once():
     assert success_operation.operation_type is OperationType.STEP
     assert success_operation.sub_type is OperationSubType.STEP
     assert success_operation.action is OperationAction.SUCCEED
+
+
+@pytest.mark.parametrize(
+    ("checkpointed_attempts", "expected_attempt"),
+    [(None, 1), (2, 3)],
+)
+def test_step_context_exposes_current_attempt(
+    checkpointed_attempts: int | None, expected_attempt: int
+) -> None:
+    """Step context exposes the 1-based current attempt."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    if checkpointed_attempts is None:
+        checkpointed_result: CheckpointedResult = CheckpointedResult.create_not_found()
+    else:
+        operation: Operation = Operation(
+            operation_id="step-attempt",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.STARTED,
+            step_details=StepDetails(attempt=checkpointed_attempts),
+        )
+        checkpointed_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = checkpointed_result
+
+    captured_context: StepContext | None = None
+
+    def step_func(context: StepContext) -> str:
+        nonlocal captured_context
+        captured_context = context
+        return "success_result"
+
+    mock_state.wrap_user_function.return_value = step_func
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    result: str = step_handler(
+        step_func,
+        mock_state,
+        OperationIdentifier("step-attempt", OperationSubType.STEP, None, "test_step"),
+        StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY),
+        mock_logger,
+    )
+
+    assert result == "success_result"
+    assert isinstance(captured_context, StepContext)
+    assert captured_context.attempt == expected_attempt
 
 
 def test_step_handler_success_at_most_once():

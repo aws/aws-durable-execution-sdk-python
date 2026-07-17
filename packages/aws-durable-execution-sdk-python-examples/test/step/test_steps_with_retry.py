@@ -1,10 +1,33 @@
 """Tests for steps_with_retry."""
 
+from unittest.mock import Mock
+
 import pytest
+from aws_durable_execution_sdk_python.context import StepContext
 from aws_durable_execution_sdk_python.execution import InvocationStatus
 from aws_durable_execution_sdk_python.lambda_service import OperationType
 from src.step import steps_with_retry
 from test.conftest import deserialize_operation_payload
+
+
+def test_simulated_get_item_uses_availability_and_durable_attempt():
+    """Polling behavior is independent of process-level state."""
+    first_attempt = StepContext(logger=Mock(), attempt=1)
+    second_attempt = StepContext(logger=Mock(), attempt=2)
+
+    with pytest.raises(RuntimeError, match="Random failure"):
+        steps_with_retry.simulated_get_item(first_attempt, "test-item", False)
+
+    assert (
+        steps_with_retry.simulated_get_item(second_attempt, "test-item", False) is None
+    )
+    assert steps_with_retry.simulated_get_item(first_attempt, "test-item", True) == {
+        "id": "test-item",
+        "data": "item data",
+    }
+
+    with pytest.raises(RuntimeError, match="Random failure"):
+        steps_with_retry.simulated_get_item(first_attempt, "test-item", False)
 
 
 @pytest.mark.example
@@ -15,10 +38,10 @@ from test.conftest import deserialize_operation_payload
 def test_steps_with_retry(durable_runner):
     """Test steps_with_retry pattern.
 
-    With counter-based deterministic behavior:
-    - Poll 1, Attempt 1: counter = 1 → raises RuntimeError ❌
-    - Poll 1, Attempt 2: counter = 2 → returns None
-    - Poll 2, Attempt 1: counter = 3 → returns item ✓
+    With poll- and durable-attempt-based deterministic behavior:
+    - Poll 1, Attempt 1: raises RuntimeError.
+    - Poll 1, Attempt 2: returns None.
+    - Poll 2, Attempt 1: returns the item.
 
     The function finds the item on poll 2 after 1 retry on poll 1.
     """
@@ -27,7 +50,7 @@ def test_steps_with_retry(durable_runner):
 
     assert result.status is InvocationStatus.SUCCEEDED
 
-    # With counter-based deterministic behavior, finds item on poll 2
+    # With poll- and durable-attempt-based deterministic behavior, finds item on poll 2
     result_data = deserialize_operation_payload(result.result)
     assert isinstance(result_data, dict)
     assert result_data.get("success") is True

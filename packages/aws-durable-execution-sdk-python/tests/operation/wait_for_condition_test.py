@@ -443,6 +443,7 @@ def test_wait_for_condition_check_context():
 
     assert isinstance(captured_context, WaitForConditionCheckContext)
     assert captured_context.logger is mock_logger
+    assert captured_context.attempt == 1
 
 
 def test_wait_for_condition_delay_seconds_none():
@@ -619,7 +620,7 @@ def test_wait_for_condition_attempt_number_passed_to_strategy():
     """Test that attempt number is correctly passed to wait strategy."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "arn:aws:test"
-    operation = Operation(
+    operation: Operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
         status=OperationStatus.STARTED,
@@ -658,6 +659,49 @@ def test_wait_for_condition_attempt_number_passed_to_strategy():
     )
 
     assert captured_attempt == 4
+
+
+def test_wait_for_condition_context_exposes_current_attempt():
+    """Check context exposes the 1-based current attempt."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "arn:aws:test"
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.STARTED,
+        step_details=StepDetails(result=json.dumps(10), attempt=3),
+    )
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_from_operation(operation)
+    )
+
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+    captured_context: WaitForConditionCheckContext | None = None
+
+    def check_func(state: int, context: WaitForConditionCheckContext) -> int:
+        nonlocal captured_context
+        captured_context = context
+        return state + 1
+
+    mock_state.wrap_user_function.return_value = check_func
+    config = WaitForConditionConfig(
+        initial_state=5,
+        wait_strategy=lambda s, a: WaitForConditionDecision.stop_polling(),
+    )
+
+    wait_for_condition_handler(
+        state=mock_state,
+        operation_identifier=OperationIdentifier(
+            "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+        ),
+        check=check_func,
+        config=config,
+        context_logger=mock_logger,
+    )
+
+    assert isinstance(captured_context, WaitForConditionCheckContext)
+    assert captured_context.attempt == 4
 
 
 def test_wait_for_condition_attempt_sequence_is_monotonic():

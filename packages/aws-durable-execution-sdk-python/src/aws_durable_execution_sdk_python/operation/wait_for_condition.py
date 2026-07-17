@@ -185,7 +185,8 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
                         op_id=self.operation_identifier,
                         attempt=attempt,
                     )
-                )
+                ),
+                attempt=attempt,
             )
 
             wrapped_user_func = self.state.wrap_user_function(
