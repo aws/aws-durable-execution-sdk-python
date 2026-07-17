@@ -13,6 +13,11 @@ dependencies = [
   "aws-durable-execution-sdk-python-otel"
 ]
 
+[project.optional-dependencies]
+pydantic-ai = [
+  "pydantic-ai-slim[bedrock]",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
