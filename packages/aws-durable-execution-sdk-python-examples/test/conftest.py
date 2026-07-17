@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -305,28 +306,14 @@ class XRaySpanFetcher:
     def _query_trace_summaries(
         self, start_time: datetime, end_time: datetime
     ) -> list[dict]:
-        """Query trace summaries in a window, retrying for consistency."""
-        import time
-
-        for attempt in range(_XRAY_QUERY_RETRIES):
-            response = self._client.get_trace_summaries(
-                StartTime=start_time,
-                EndTime=end_time,
-                TimeRangeType="Event",
-                Sampling=False,
-            )
-            summaries = response.get("TraceSummaries", [])
-            if summaries:
-                return summaries
-
-            logger.info(
-                "X-Ray query returned 0 traces, retrying in %ss (attempt %d/%d)",
-                _XRAY_RETRY_DELAY_SECONDS,
-                attempt + 1,
-                _XRAY_QUERY_RETRIES,
-            )
-            time.sleep(_XRAY_RETRY_DELAY_SECONDS)
-        return []
+        """Query trace summaries in a window."""
+        response = self._client.get_trace_summaries(
+            StartTime=start_time,
+            EndTime=end_time,
+            TimeRangeType="Event",
+            Sampling=False,
+        )
+        return response.get("TraceSummaries", [])
 
     def fetch_trace_with_span(
         self,
@@ -348,25 +335,40 @@ class XRaySpanFetcher:
         Returns:
             A tuple of (trace_id, concatenated segment-document JSON text).
         """
-        summaries = self._query_trace_summaries(start_time, end_time)
-        assert summaries, "Expected at least one trace in X-Ray after execution"
+        seen_trace_ids: set[str] = set()
+        for attempt in range(_XRAY_QUERY_RETRIES):
+            summaries = self._query_trace_summaries(start_time, end_time)
+            trace_ids = [summary["Id"] for summary in summaries]
+            seen_trace_ids.update(trace_ids)
 
-        trace_ids = [s["Id"] for s in summaries]
+            for i in range(0, len(trace_ids), 5):
+                batch = trace_ids[i : i + 5]
+                result = self._client.batch_get_traces(TraceIds=batch)
+                for trace in result.get("Traces", []):
+                    documents = [
+                        segment.get("Document", "")
+                        for segment in trace.get("Segments", [])
+                    ]
+                    segment_text = "\n".join(documents)
+                    if marker_span in segment_text:
+                        return trace["Id"], segment_text
 
-        for i in range(0, len(trace_ids), 5):
-            batch = trace_ids[i : i + 5]
-            result = self._client.batch_get_traces(TraceIds=batch)
-            for trace in result.get("Traces", []):
-                documents = [
-                    seg.get("Document", "") for seg in trace.get("Segments", [])
-                ]
-                segment_text = "\n".join(documents)
-                if marker_span in segment_text:
-                    return trace["Id"], segment_text
+            if attempt < _XRAY_QUERY_RETRIES - 1:
+                logger.info(
+                    "X-Ray traces do not yet contain span '%s', retrying in %ss "
+                    "(attempt %d/%d)",
+                    marker_span,
+                    _XRAY_RETRY_DELAY_SECONDS,
+                    attempt + 1,
+                    _XRAY_QUERY_RETRIES,
+                )
+                time.sleep(_XRAY_RETRY_DELAY_SECONDS)
+
+        assert seen_trace_ids, "Expected at least one trace in X-Ray after execution"
 
         pytest.fail(
             f"Did not find a trace containing span '{marker_span}' in the time "
-            f"window across {len(trace_ids)} trace(s)"
+            f"window across {len(seen_trace_ids)} trace(s)"
         )
 
 
