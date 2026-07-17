@@ -10,22 +10,24 @@ from src.step import steps_with_retry
 from test.conftest import deserialize_operation_payload
 
 
-def test_simulated_get_item_uses_poll_and_durable_attempt():
+def test_simulated_get_item_uses_availability_and_durable_attempt():
     """Polling behavior is independent of process-level state."""
     first_attempt = StepContext(logger=Mock(), attempt=1)
     second_attempt = StepContext(logger=Mock(), attempt=2)
 
     with pytest.raises(RuntimeError, match="Random failure"):
-        steps_with_retry.simulated_get_item(first_attempt, "test-item", 1)
+        steps_with_retry.simulated_get_item(first_attempt, "test-item", False)
 
-    assert steps_with_retry.simulated_get_item(second_attempt, "test-item", 1) is None
-    assert steps_with_retry.simulated_get_item(first_attempt, "test-item", 2) == {
+    assert (
+        steps_with_retry.simulated_get_item(second_attempt, "test-item", False) is None
+    )
+    assert steps_with_retry.simulated_get_item(first_attempt, "test-item", True) == {
         "id": "test-item",
         "data": "item data",
     }
 
     with pytest.raises(RuntimeError, match="Random failure"):
-        steps_with_retry.simulated_get_item(first_attempt, "test-item", 1)
+        steps_with_retry.simulated_get_item(first_attempt, "test-item", False)
 
 
 @pytest.mark.example

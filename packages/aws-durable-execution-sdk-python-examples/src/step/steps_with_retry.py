@@ -12,18 +12,16 @@ from aws_durable_execution_sdk_python.retries import (
 
 
 def simulated_get_item(
-    step_context: StepContext, name: str, poll_count: int
+    step_context: StepContext, name: str, item_available: bool
 ) -> dict[str, Any] | None:
     """Simulate getting an item with deterministic attempt-based behavior."""
-    # Poll 1 fails once, then returns no item on its retry.
-    if poll_count == 1 and step_context.attempt == 1:
+    if not item_available and step_context.attempt == 1:
         msg = "Random failure"
         raise RuntimeError(msg)
 
-    if poll_count == 1:
+    if not item_available:
         return None
 
-    # Poll 2 returns the item on its first attempt.
     return {"id": name, "data": "item data"}
 
 
@@ -48,10 +46,16 @@ def handler(event: Any, context: DurableContext) -> dict[str, Any]:
         while poll_count < max_polls:
             poll_count += 1
 
+            # Each poll is a new step whose attempt starts at 1. Availability
+            # models the external item state independently from retry attempts.
+            item_available: bool = poll_count > 1
+
             # Try to get the item with retry
             get_response = context.step(
-                lambda step_context, n=name, p=poll_count: simulated_get_item(
-                    step_context, n, p
+                lambda step_context,
+                n=name,
+                available=item_available: simulated_get_item(
+                    step_context, n, available
                 ),
                 name=f"get_item_poll_{poll_count}",
                 config=step_config,
