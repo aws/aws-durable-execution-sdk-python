@@ -2074,9 +2074,14 @@ def test_create_result_no_failed_executables():
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
+    # wrap_user_function must return the real function so the branch result is
+    # the (serializable) "result_N" string that the child round-trips.
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *a, **k: func
+
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     result = executor.execute(execution_state, executor_context)
 

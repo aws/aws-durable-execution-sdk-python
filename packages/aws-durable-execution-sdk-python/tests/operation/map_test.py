@@ -437,8 +437,10 @@ def test_map_handler_with_serdes():
         operation_identifier,
     )
 
-    # Verify execute was called
-    assert result.all[0].result == "RESULT_TEST_ITEM"
+    # Verify execute was called. The item result is the serdes round-tripped
+    # value: CustomStrSerDes uppercases on serialize and lowercases on
+    # deserialize, so "RESULT_TEST_ITEM" round-trips to "result_test_item".
+    assert result.all[0].result == "result_test_item"
 
 
 def test_map_handler_with_summary_generator():
@@ -455,7 +457,9 @@ def test_map_handler_with_summary_generator():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = Mock(side_effect=["1", "2"])  # noqa SLF001
-    executor_context.create_child_context = Mock(return_value=Mock())
+    _child_ctx = Mock()
+    _child_ctx.state.wrap_user_function = lambda func, *a, **k: func
+    executor_context.create_child_context = Mock(return_value=_child_ctx)
 
     class MockExecutionState:
         def get_checkpoint_result(self, operation_id):
@@ -515,7 +519,9 @@ def test_map_handler_default_summary_generator():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = Mock(return_value="1")  # noqa SLF001
-    executor_context.create_child_context = Mock(return_value=Mock())  # SLF001
+    _child_ctx = Mock()
+    _child_ctx.state.wrap_user_function = lambda func, *a, **k: func
+    executor_context.create_child_context = Mock(return_value=_child_ctx)  # SLF001
 
     class MockExecutionState:
         def get_checkpoint_result(self, operation_id):
@@ -595,7 +601,9 @@ def test_map_handler_with_explicit_none_summary_generator():
     executor_context._create_step_id_for_logical_step = Mock(  # noqa: SLF001
         side_effect=["1", "2", "3"]
     )
-    executor_context.create_child_context = Mock(return_value=Mock())
+    _child_ctx = Mock()
+    _child_ctx.state.wrap_user_function = lambda func, *a, **k: func
+    executor_context.create_child_context = Mock(return_value=_child_ctx)
 
     # Call map_handler
     map_handler(
@@ -962,9 +970,13 @@ def test_map_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
         call.kwargs["operation_id"]: call.kwargs
         for call in mock_deserialize.call_args_list
     }
-    assert set(deserialize_calls) == {"child-0", "child-1"}
+    # Children deserialize from their checkpoints with the item serdes; the
+    # parent also deserializes its BatchResult (the first-run round-trip) with
+    # the batch serdes.
+    assert set(deserialize_calls) == {"child-0", "child-1", "parent"}
     assert deserialize_calls["child-0"]["serdes"] is expected
     assert deserialize_calls["child-1"]["serdes"] is expected
+    assert deserialize_calls["parent"]["serdes"] is batch_serdes
 
 
 def test_map_result_serialization_roundtrip():
@@ -1068,7 +1080,14 @@ def test_map_handler_serializes_batch_result():
 
             assert len(mock_serdes_serialize.call_args_list) == 3
             parent_call = mock_serdes_serialize.call_args_list[2]
-            assert parent_call[1]["value"] is result
+            # The value serialized (checkpointed) at the parent level is the raw
+            # BatchResult.
+            assert isinstance(parent_call[1]["value"], BatchResult)
+            # The first run returns the round-trip of that checkpointed payload,
+            # matching what replay would deserialize from the checkpoint (with
+            # serialize mocked to a plain string, the round-trip yields that
+            # string).
+            assert result == "serialized"
     finally:
         importlib.reload(child)
 
@@ -1130,7 +1149,10 @@ def test_map_default_serdes_serializes_batch_result():
             parent_call = mock_serialize.call_args_list[2]
             assert parent_call[1]["serdes"] is None
             assert isinstance(parent_call[1]["value"], BatchResult)
-            assert parent_call[1]["value"] is result
+            # First run returns the round-tripped BatchResult, which equals the
+            # value serialized into the checkpoint (default serdes round-trips
+            # as identity).
+            assert parent_call[1]["value"] == result
     finally:
         importlib.reload(child)
 
@@ -1185,8 +1207,16 @@ def test_map_custom_serdes_serializes_batch_result():
                     else f"child-{i}"
                 )
 
-            with patch.object(
-                DurableContext, "_create_step_id_for_logical_step", create_id
+            # serialize is mocked to a plain string, so stub deserialize to a
+            # canonical BatchResult to exercise the round-trip return.
+            round_tripped = BatchResult(
+                all=[], completion_reason=CompletionReason.ALL_COMPLETED
+            )
+            with (
+                patch.object(child, "deserialize", return_value=round_tripped),
+                patch.object(
+                    DurableContext, "_create_step_id_for_logical_step", create_id
+                ),
             ):
                 context = create_test_context(state=mock_state)
                 result = context.map(
@@ -1195,12 +1225,14 @@ def test_map_custom_serdes_serializes_batch_result():
                     config=MapConfig(serdes=custom_serdes),
                 )
 
-            assert isinstance(result, BatchResult)
             assert len(mock_serialize.call_args_list) == 3
             parent_call = mock_serialize.call_args_list[2]
             assert parent_call[1]["serdes"] is custom_serdes
+            # The parent serializes a BatchResult with the custom serdes and
+            # returns the round-tripped BatchResult.
             assert isinstance(parent_call[1]["value"], BatchResult)
-            assert parent_call[1]["value"] is result
+            assert isinstance(result, BatchResult)
+            assert result is round_tripped
     finally:
         importlib.reload(child)
 

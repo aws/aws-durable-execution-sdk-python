@@ -232,7 +232,16 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
                     self.operation_identifier.operation_id,
                     self.operation_identifier.name,
                 )
-                return new_state
+                # Round-trip so the first run matches replay. A None payload is
+                # returned as-is.
+                if serialized_state is None:
+                    return None  # type: ignore[return-value]
+                return deserialize(
+                    serdes=self.config.serdes,
+                    data=serialized_state,
+                    operation_id=self.operation_identifier.operation_id,
+                    durable_execution_arn=self.state.durable_execution_arn,
+                )
 
             # Condition not met - schedule retry
             # We enforce a minimum delay second of 1, to match model behaviour.

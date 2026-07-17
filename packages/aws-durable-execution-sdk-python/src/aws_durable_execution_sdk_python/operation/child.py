@@ -133,6 +133,20 @@ class ChildOperationExecutor(OperationExecutor[T]):
         # Ready to execute (checkpoint exists or was just created)
         return CheckResult.create_is_ready_to_execute(checkpointed_result)
 
+    def _deserialize_payload(self, serialized: str | None) -> T:
+        """Return the round-tripped value, so the first run matches replay.
+
+        A None payload is returned as-is.
+        """
+        if serialized is None:
+            return None  # type: ignore[return-value]
+        return deserialize(
+            serdes=self.config.serdes,
+            data=serialized,
+            operation_id=self.operation_identifier.operation_id,
+            durable_execution_arn=self.state.durable_execution_arn,
+        )
+
     def execute(self, checkpointed_result: CheckpointedResult) -> T:
         """Execute child context function with error handling and large payload support.
 
@@ -162,13 +176,25 @@ class ChildOperationExecutor(OperationExecutor[T]):
             )
             raw_result: T = wrapped_user_func()
 
+            # Serialize once: used as the round-tripped return value in every
+            # mode, and as the checkpoint payload on the normal path. A custom
+            # serdes may serialize to None, which is handled below.
+            serialized_result: str | None = serialize(
+                serdes=self.config.serdes,
+                value=raw_result,
+                operation_id=self.operation_identifier.operation_id,
+                durable_execution_arn=self.state.durable_execution_arn,
+            )
+
             if self.is_virtual:
                 logger.debug(
                     "Virtual context: Exiting child context without creating another checkpoint. id: %s, name: %s",
                     self.operation_identifier.operation_id,
                     self.operation_identifier.name,
                 )
-                return raw_result
+                # Virtual contexts never checkpoint and re-execute on replay;
+                # round-trip so the first run matches replay.
+                return self._deserialize_payload(serialized_result)
 
             # If in replay_children mode, return without checkpointing
             if checkpointed_result.is_replay_children():
@@ -177,30 +203,19 @@ class ChildOperationExecutor(OperationExecutor[T]):
                     self.operation_identifier.operation_id,
                     self.operation_identifier.name,
                 )
-                return raw_result
+                # Large payloads re-execute on replay; round-trip so the first
+                # run matches replay. The checkpoint stays small (summary only).
+                return self._deserialize_payload(serialized_result)
 
-            # Serialize result
-            serialized_result: str = serialize(
-                serdes=self.config.serdes,
-                value=raw_result,
-                operation_id=self.operation_identifier.operation_id,
-                durable_execution_arn=self.state.durable_execution_arn,
-            )
-
-            # Check payload size and use ReplayChildren mode if needed
-            # Summary Generator Logic:
-            # When the serialized result exceeds 256KB, we use ReplayChildren mode to avoid
-            # checkpointing large payloads. Instead, we checkpoint a compact summary and mark
-            # the operation for replay. This matches the TypeScript implementation behavior.
-            #
-            # See TypeScript reference:
-            # - aws-durable-execution-sdk-js/src/handlers/run-in-child-context-handler/run-in-child-context-handler.ts (lines ~200-220)
-            #
-            # The summary generator creates a JSON summary with metadata (type, counts, status)
-            # instead of the full BatchResult. During replay, the child context is re-executed
-            # to reconstruct the full result rather than deserializing from the checkpoint.
+            # Large results checkpoint a compact summary and use ReplayChildren
+            # so replay re-executes instead of deserializing. The returned value
+            # always uses the full serialized_result, never the summary.
+            payload_to_checkpoint: str | None = serialized_result
             replay_children: bool = False
-            if len(serialized_result) > CHECKPOINT_SIZE_LIMIT_BYTES:
+            if (
+                serialized_result is not None
+                and len(serialized_result) > CHECKPOINT_SIZE_LIMIT_BYTES
+            ):
                 logger.debug(
                     "Large payload detected, using ReplayChildren mode: id: %s, name: %s, payload_size: %d, limit: %d",
                     self.operation_identifier.operation_id,
@@ -209,8 +224,8 @@ class ChildOperationExecutor(OperationExecutor[T]):
                     CHECKPOINT_SIZE_LIMIT_BYTES,
                 )
                 replay_children = True
-                # Use summary generator if provided, otherwise use empty string (matches TypeScript)
-                serialized_result = (
+                # Use the summary generator if provided, otherwise an empty string.
+                payload_to_checkpoint = (
                     self.config.summary_generator(raw_result)
                     if self.config.summary_generator
                     else ""
@@ -219,7 +234,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
             # Checkpoint SUCCEED
             success_operation: OperationUpdate = OperationUpdate.create_context_succeed(
                 identifier=self.operation_identifier,
-                payload=serialized_result,
+                payload=payload_to_checkpoint,
                 sub_type=self.sub_type,
                 context_options=ContextOptions(replay_children=replay_children),
             )
@@ -234,7 +249,8 @@ class ChildOperationExecutor(OperationExecutor[T]):
                 self.operation_identifier.operation_id,
                 self.operation_identifier.name,
             )
-            return raw_result  # noqa: TRY300
+            # Round-trip so the first run matches replay.
+            return self._deserialize_payload(serialized_result)  # noqa: TRY300
         except SuspendExecution:
             # Don't checkpoint SuspendExecution - let it bubble up
             raise

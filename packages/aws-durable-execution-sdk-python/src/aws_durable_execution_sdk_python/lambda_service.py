@@ -562,7 +562,7 @@ class OperationUpdate:
     def create_context_succeed(
         cls,
         identifier: OperationIdentifier,
-        payload: str,
+        payload: str | None,
         sub_type: OperationSubType,
         context_options: ContextOptions | None = None,
     ) -> OperationUpdate:
@@ -624,7 +624,7 @@ class OperationUpdate:
     # region step
     @classmethod
     def create_step_succeed(
-        cls, identifier: OperationIdentifier, payload: str
+        cls, identifier: OperationIdentifier, payload: str | None
     ) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: STEP, action: SUCCEED."""
         return cls(
@@ -726,7 +726,7 @@ class OperationUpdate:
 
     @classmethod
     def create_wait_for_condition_succeed(
-        cls, identifier: OperationIdentifier, payload: str
+        cls, identifier: OperationIdentifier, payload: str | None
     ) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: STEP, action: SUCCEED."""
         return cls(
@@ -743,7 +743,7 @@ class OperationUpdate:
     def create_wait_for_condition_retry(
         cls,
         identifier: OperationIdentifier,
-        payload: str,
+        payload: str | None,
         next_attempt_delay_seconds: int,
     ) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: STEP, action: RETRY."""

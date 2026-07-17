@@ -228,7 +228,8 @@ class StepOperationExecutor(OperationExecutor[T]):
             )
             raw_result: T = wrapped_user_func(step_context)
 
-            serialized_result: str = serialize(
+            # A custom serdes may serialize to None, which is handled below.
+            serialized_result: str | None = serialize(
                 serdes=self.config.serdes,
                 value=raw_result,
                 operation_id=self.operation_identifier.operation_id,

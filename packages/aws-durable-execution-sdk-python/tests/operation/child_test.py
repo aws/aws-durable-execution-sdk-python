@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import cast
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
@@ -21,9 +21,27 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
 )
 from aws_durable_execution_sdk_python.operation.child import child_handler
+from aws_durable_execution_sdk_python.serdes import SerDes, SerDesContext
 from aws_durable_execution_sdk_python.state import ExecutionState
 from aws_durable_execution_sdk_python.types import SummaryGenerator
 from tests.serdes_test import CustomDictSerDes
+
+
+class _NonIdentitySerDes(SerDes[Any]):
+    """deserialize() adds a marker that serialize() never removes.
+
+    Makes ``deserialize(serialize(x)) != x`` so first-run vs replay divergence
+    is observable.
+    """
+
+    def serialize(self, value: Any, _: SerDesContext) -> str:
+        payload = dict(value)
+        payload.pop("deserialized", None)
+        return json.dumps(payload)
+
+    def deserialize(self, data: str, _: SerDesContext) -> dict[str, Any]:
+        parsed = json.loads(data)
+        return {**parsed, "deserialized": True}
 
 
 # region child_handler
@@ -1006,3 +1024,169 @@ def test_child_handler_is_virtual_comparison():
 
     assert result2 == "test_result"
     assert mock_state2.create_checkpoint.call_count == 0  # No checkpoints
+
+
+# region first-run round-trip
+def test_child_handler_first_run_returns_round_tripped_result():
+    """First-run result must equal the replay (deserialized-from-checkpoint) result.
+
+    With a non-identity SerDes, returning the raw child result on the first run
+    diverges from the value replay reconstructs by deserializing the checkpoint.
+    The first run must return the serialize-then-deserialize value so both agree.
+    """
+    serdes = _NonIdentitySerDes()
+    raw_result = {"key": "value"}
+    config = ChildConfig(serdes=serdes)
+    op_id = OperationIdentifier(
+        "child_rt", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+    )
+
+    # --- First run ---
+    first_state = Mock(spec=ExecutionState)
+    first_state.durable_execution_arn = "test_arn"
+    first_result = Mock()
+    first_result.is_succeeded.return_value = False
+    first_result.is_failed.return_value = False
+    first_result.is_started.return_value = False
+    first_result.is_replay_children.return_value = False
+    first_result.is_existent.return_value = False
+    first_state.get_checkpoint_result.return_value = first_result
+    mock_callable = Mock(return_value=raw_result)
+    first_state.wrap_user_function.return_value = mock_callable
+
+    first_run_result = child_handler(mock_callable, first_state, op_id, config)
+
+    # Grab the payload actually checkpointed (START is call 0, SUCCEED is call 1).
+    success_call = first_state.create_checkpoint.call_args_list[1]
+    checkpointed_payload = success_call[1]["operation_update"].payload
+
+    # --- Replay: checkpoint already SUCCEEDED (not replay_children) ---
+    replay_state = Mock(spec=ExecutionState)
+    replay_state.durable_execution_arn = "test_arn"
+    replay_result = Mock()
+    replay_result.is_succeeded.return_value = True
+    replay_result.is_replay_children.return_value = False
+    replay_result.result = checkpointed_payload
+    replay_state.get_checkpoint_result.return_value = replay_result
+
+    replayed = child_handler(
+        Mock(return_value="should_not_call"), replay_state, op_id, config
+    )
+
+    assert first_run_result == {"key": "value", "deserialized": True}
+    assert first_run_result == replayed
+    assert first_run_result != raw_result
+
+
+def test_child_handler_first_run_none_payload_skips_deserialize():
+    """A None serialized payload is returned as-is without deserializing.
+
+    Mirrors the replay path, which returns None (without deserializing) when the
+    checkpointed result is None.
+    """
+
+    class NonePayloadSerDes(SerDes[Any]):
+        """serialize() yields None; deserialize() must never be called for None."""
+
+        def serialize(self, _value: Any, _ctx: SerDesContext) -> str:
+            return None  # type: ignore[return-value]
+
+        def deserialize(self, _data: str, _ctx: SerDesContext) -> Any:
+            msg = "deserialize should not be called for a None payload"
+            raise AssertionError(msg)
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = False
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = False
+    mock_result.is_replay_children.return_value = False
+    mock_result.is_existent.return_value = False
+    mock_state.get_checkpoint_result.return_value = mock_result
+    mock_callable = Mock(return_value={"key": "value"})
+    mock_state.wrap_user_function.return_value = mock_callable
+
+    result = child_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier(
+            "child_none", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
+        ChildConfig(serdes=NonePayloadSerDes()),
+    )
+
+    assert result is None
+
+
+def test_child_handler_virtual_returns_round_tripped_result():
+    """A virtual child returns the serdes round-tripped result.
+
+    Virtual contexts write no checkpoint and re-execute on replay, so the
+    round-trip keeps the returned value identical across first run and replay.
+    """
+    serdes = _NonIdentitySerDes()
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = False
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = False
+    mock_result.is_replay_children.return_value = False
+    mock_result.is_existent.return_value = False
+    mock_state.get_checkpoint_result.return_value = mock_result
+    mock_callable = Mock(return_value={"key": "value"})
+    mock_state.wrap_user_function.return_value = mock_callable
+
+    result = child_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier(
+            "child_virtual_rt", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
+        ChildConfig(serdes=serdes, is_virtual=True),
+    )
+
+    # Round-tripped result (deserialize adds the marker).
+    assert result == {"key": "value", "deserialized": True}
+    # Virtual contexts still write no checkpoints.
+    assert mock_state.create_checkpoint.call_count == 0
+
+
+def test_child_handler_replay_children_returns_round_tripped_result():
+    """A large-payload (ReplayChildren) child round-trips its re-executed result.
+
+    In ReplayChildren mode only a summary is checkpointed and the child
+    re-executes on replay. The re-executed result is round-tripped so it matches
+    the value the first run returned; only the checkpoint payload stays small.
+    """
+    serdes = _NonIdentitySerDes()
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = True
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = True
+    mock_result.is_replay_children.return_value = True
+    mock_result.is_existent.return_value = True
+    mock_state.get_checkpoint_result.return_value = mock_result
+    mock_callable = Mock(return_value={"key": "value"})
+    mock_state.wrap_user_function.return_value = mock_callable
+
+    result = child_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier(
+            "child_replay_rt", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        ),
+        ChildConfig(serdes=serdes),
+    )
+
+    # Round-tripped result (deserialize adds the marker).
+    assert result == {"key": "value", "deserialized": True}
+    # ReplayChildren re-executes the function and writes no new checkpoint.
+    mock_callable.assert_called_once()
+    mock_state.create_checkpoint.assert_not_called()
+
+
+# endregion first-run round-trip
