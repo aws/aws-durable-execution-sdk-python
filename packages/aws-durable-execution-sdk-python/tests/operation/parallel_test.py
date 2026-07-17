@@ -490,7 +490,10 @@ def test_parallel_handler_with_serdes():
         operation_id_namespace=_StubNamespace(),
     )
 
-    assert result.all[0].result == "RESULT1"
+    # The branch result is the serdes round-tripped value: CustomStrSerDes
+    # uppercases on serialize and lowercases on deserialize, so "RESULT1"
+    # round-trips to "result1".
+    assert result.all[0].result == "result1"
 
 
 def test_parallel_handler_with_summary_generator():
@@ -564,7 +567,9 @@ def test_parallel_handler_default_summary_generator():
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = Mock(side_effect=["1", "2"])
-    executor_context.create_child_context = Mock(return_value=Mock())
+    _child_ctx = Mock()
+    _child_ctx.state.wrap_user_function = lambda func, *a, **k: func
+    executor_context.create_child_context = Mock(return_value=_child_ctx)
 
     # Call parallel_handler with None config (should use default)
     parallel_handler(
@@ -614,7 +619,9 @@ def test_parallel_handler_with_explicit_none_summary_generator():
     executor_context._create_step_id_for_logical_step = Mock(
         side_effect=["1", "2", "3"]
     )
-    executor_context.create_child_context = Mock(return_value=Mock())
+    _child_ctx = Mock()
+    _child_ctx.state.wrap_user_function = lambda func, *a, **k: func
+    executor_context.create_child_context = Mock(return_value=_child_ctx)
 
     # Call parallel_handler
     parallel_handler(
@@ -1017,9 +1024,13 @@ def test_parallel_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
     expected = item_serdes or batch_serdes
     calls_by_operation_id = _mock_call_kwargs_by_operation_id(mock_deserialize)
 
-    assert set(calls_by_operation_id) == {"child-0", "child-1"}
+    # Branches deserialize from their checkpoints with the item serdes; the
+    # parent also deserializes its BatchResult (the first-run round-trip) with
+    # the batch serdes.
+    assert set(calls_by_operation_id) == {"child-0", "child-1", "parent"}
     assert calls_by_operation_id["child-0"]["serdes"] is expected
     assert calls_by_operation_id["child-1"]["serdes"] is expected
+    assert calls_by_operation_id["parent"]["serdes"] is batch_serdes
 
 
 def test_parallel_result_serialization_roundtrip():
@@ -1146,7 +1157,14 @@ def test_parallel_handler_serializes_batch_result():
 
             assert len(mock_serdes_serialize.call_args_list) == 3
             parent_call = mock_serdes_serialize.call_args_list[2]
-            assert parent_call[1]["value"] is result
+            # The value serialized (checkpointed) at the parent level is the raw
+            # BatchResult.
+            assert isinstance(parent_call[1]["value"], BatchResult)
+            # The first run returns the round-trip of that checkpointed payload,
+            # matching what replay would deserialize from the checkpoint (with
+            # serialize mocked to a plain string, the round-trip yields that
+            # string).
+            assert result == "serialized"
     finally:
         importlib.reload(child)
 
@@ -1215,7 +1233,10 @@ def test_parallel_default_serdes_serializes_batch_result():
             parent_call = mock_serialize.call_args_list[2]
             assert parent_call[1]["serdes"] is None
             assert isinstance(parent_call[1]["value"], BatchResult)
-            assert parent_call[1]["value"] is result
+            # First run returns the round-tripped BatchResult, which equals the
+            # value serialized into the checkpoint (default serdes round-trips
+            # as identity).
+            assert parent_call[1]["value"] == result
     finally:
         importlib.reload(child)
 
@@ -1224,12 +1245,22 @@ def test_parallel_custom_serdes_serializes_batch_result():
     """Verify custom serdes is used for BatchResult serialization."""
 
     custom_serdes = CustomStrSerDes()
+    round_tripped: BatchResult = BatchResult(
+        all=[BatchItem(index=0, status=BatchItemStatus.SUCCEEDED, result="test")],
+        completion_reason=CompletionReason.ALL_COMPLETED,
+    )
 
     try:
-        with patch(
-            "aws_durable_execution_sdk_python.serdes.serialize"
-        ) as mock_serialize:
+        with (
+            patch(
+                "aws_durable_execution_sdk_python.serdes.serialize"
+            ) as mock_serialize,
+            patch(
+                "aws_durable_execution_sdk_python.serdes.deserialize"
+            ) as mock_deserialize,
+        ):
             mock_serialize.return_value = '"serialized"'
+            mock_deserialize.return_value = round_tripped
             importlib.reload(child)
 
             parent_checkpoint = Mock()
@@ -1286,12 +1317,14 @@ def test_parallel_custom_serdes_serializes_batch_result():
                     config=ParallelConfig(serdes=custom_serdes),
                 )
 
-            assert isinstance(result, BatchResult)
             assert len(mock_serialize.call_args_list) == 3
             parent_call = mock_serialize.call_args_list[2]
             assert parent_call[1]["serdes"] is custom_serdes
+            # The parent serializes a BatchResult with the custom serdes and
+            # returns the round-tripped BatchResult.
             assert isinstance(parent_call[1]["value"], BatchResult)
-            assert parent_call[1]["value"] is result
+            assert isinstance(result, BatchResult)
+            assert result is round_tripped
     finally:
         importlib.reload(child)
 

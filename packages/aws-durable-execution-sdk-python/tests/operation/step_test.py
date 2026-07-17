@@ -15,6 +15,8 @@ from aws_durable_execution_sdk_python.config import (
 from aws_durable_execution_sdk_python.exceptions import (
     DurableOperationError,
     ExecutionError,
+    RetryableSerDesError,
+    SerDesError,
     StepError,
     StepInterruptedError,
     SuspendExecution,
@@ -39,7 +41,11 @@ from aws_durable_execution_sdk_python.serdes import (
 )
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 from aws_durable_execution_sdk_python.types import StepContext
-from tests.serdes_test import CustomDictSerDes
+from tests.serdes_test import (
+    CustomDictSerDes,
+    PermanentDeserializeSerDes,
+    RetryableDeserializeSerDes,
+)
 
 
 # Test helper - maintains old handler signature for backward compatibility in tests
@@ -1227,3 +1233,115 @@ def test_step_creates_start_checkpoint_when_status_is_ready():
     success_call = mock_state.create_checkpoint.call_args_list[1]
     success_operation = success_call[1]["operation_update"]
     assert success_operation.action is OperationAction.SUCCEED
+
+
+def test_step_handler_permanent_serdes_error_surfaces_without_double_checkpoint():
+    """A permanent round-trip failure surfaces SerDesError and never double-checkpoints.
+
+    Deserialization runs before the SUCCEED checkpoint, so a permanent failure
+    writes FAIL and never SUCCEED for the same operation.
+    """
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    mock_callable = Mock(return_value={"key": "value"})
+    mock_state.wrap_user_function.return_value = mock_callable
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    with pytest.raises(SerDesError):
+        step_handler(
+            mock_callable,
+            mock_state,
+            OperationIdentifier("stepP", OperationSubType.STEP, None, "test_step"),
+            StepConfig(
+                step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY,
+                serdes=PermanentDeserializeSerDes(),
+            ),
+            mock_logger,
+        )
+
+    actions: list[OperationAction] = [
+        call.kwargs["operation_update"].action
+        for call in mock_state.create_checkpoint.call_args_list
+    ]
+    assert OperationAction.FAIL in actions
+    assert OperationAction.SUCCEED not in actions
+
+
+def test_step_handler_permanent_serdes_error_bypasses_retry_strategy():
+    """A permanent serdes failure fails immediately, skipping the retry strategy."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    mock_callable = Mock(return_value={"key": "value"})
+    mock_state.wrap_user_function.return_value = mock_callable
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    mock_retry_strategy = Mock(
+        return_value=RetryDecision(should_retry=True, delay=Duration.from_seconds(10))
+    )
+
+    with pytest.raises(SerDesError):
+        step_handler(
+            mock_callable,
+            mock_state,
+            OperationIdentifier("stepPR", OperationSubType.STEP, None, "test_step"),
+            StepConfig(
+                step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY,
+                serdes=PermanentDeserializeSerDes(),
+                retry_strategy=mock_retry_strategy,
+            ),
+            mock_logger,
+        )
+
+    # The retry strategy is never consulted, and no RETRY is checkpointed.
+    mock_retry_strategy.assert_not_called()
+    actions: list[OperationAction] = [
+        call.kwargs["operation_update"].action
+        for call in mock_state.create_checkpoint.call_args_list
+    ]
+    assert OperationAction.FAIL in actions
+    assert OperationAction.RETRY not in actions
+    assert OperationAction.SUCCEED not in actions
+
+
+def test_step_handler_transient_serdes_error_reraised():
+    """A transient serdes failure re-raises for backend retry, with no checkpoint.
+
+    RetryableSerDesError bypasses the step retry strategy and writes neither
+    SUCCEED nor FAIL, so the invocation fails and the backend retries.
+    """
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    mock_callable = Mock(return_value={"key": "value"})
+    mock_state.wrap_user_function.return_value = mock_callable
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    with pytest.raises(RetryableSerDesError):
+        step_handler(
+            mock_callable,
+            mock_state,
+            OperationIdentifier("stepT", OperationSubType.STEP, None, "test_step"),
+            StepConfig(
+                step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY,
+                serdes=RetryableDeserializeSerDes(),
+            ),
+            mock_logger,
+        )
+
+    actions: list[OperationAction] = [
+        call.kwargs["operation_update"].action
+        for call in mock_state.create_checkpoint.call_args_list
+    ]
+    assert OperationAction.FAIL not in actions
+    assert OperationAction.SUCCEED not in actions

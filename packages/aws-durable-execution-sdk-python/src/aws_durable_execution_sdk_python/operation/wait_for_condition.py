@@ -76,6 +76,26 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
         self.operation_identifier = operation_identifier
         self.context_logger = context_logger
 
+    def _serialize(self, value: T) -> str:
+        """Serialize a value with this operation's serdes and identifiers."""
+        return serialize(
+            serdes=self.config.serdes,
+            value=value,
+            operation_id=self.operation_identifier.operation_id,
+            durable_execution_arn=self.state.durable_execution_arn,
+        )
+
+    def _deserialize(self, data: str | None) -> T:
+        """Deserialize a payload with this operation's serdes; None maps to None."""
+        if data is None:
+            return None  # type: ignore[return-value]
+        return deserialize(
+            serdes=self.config.serdes,
+            data=data,
+            operation_id=self.operation_identifier.operation_id,
+            durable_execution_arn=self.state.durable_execution_arn,
+        )
+
     def check_result_status(self) -> CheckResult[T]:
         """Check operation status and create START checkpoint if needed.
 
@@ -100,14 +120,7 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
                 self.operation_identifier.operation_id,
                 self.operation_identifier.name,
             )
-            if checkpointed_result.result is None:
-                return CheckResult.create_completed(None)  # type: ignore
-            result = deserialize(
-                serdes=self.config.serdes,
-                data=checkpointed_result.result,
-                operation_id=self.operation_identifier.operation_id,
-                durable_execution_arn=self.state.durable_execution_arn,
-            )
+            result = self._deserialize(checkpointed_result.result)
             return CheckResult.create_completed(result)
 
         # Terminal failure
@@ -153,19 +166,21 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
             Raises error if check function fails
         """
         try:
-            # Determine current state from checkpoint
+            # Determine the state passed to the check function.
             if checkpointed_result.is_started_or_ready() and checkpointed_result.result:
-                current_state = deserialize(
-                    serdes=self.config.serdes,
-                    data=checkpointed_result.result,
-                    operation_id=self.operation_identifier.operation_id,
-                    durable_execution_arn=self.state.durable_execution_arn,
-                )
+                # Resuming: restore the state checkpointed by the previous poll.
+                current_state = self._deserialize(checkpointed_result.result)
             else:
-                current_state = self.config.initial_state
+                # First poll (or a retry with no stored state): round-trip
+                # initial_state through the serdes so the check sees the same
+                # shape it gets on later polls, which come from the checkpoint.
+                current_state = self._deserialize(
+                    self._serialize(self.config.initial_state)
+                )
 
-            # Get attempt number - current attempt is checkpointed attempts + 1
-            # The checkpoint stores completed attempts, so the current attempt being executed is one more
+            # Get attempt number - current attempt is checkpointed attempts + 1.
+            # The checkpoint stores completed attempts, so the current attempt
+            # being executed is one more.
             attempt: int = 1
             if (
                 checkpointed_result.operation
@@ -193,16 +208,16 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
             )
             new_state = wrapped_user_func(current_state, check_context)
 
+            serialized_state = self._serialize(new_state)
+
+            # Round-trip before the wait strategy so it evaluates the
+            # reconstructable state, matching replay. None round-trips as None;
+            # a permanent failure fails before any checkpoint.
+            round_tripped_state: T = self._deserialize(serialized_state)
+
             # Check if condition is met with the wait strategy
             decision: WaitForConditionDecision = self.config.wait_strategy(
-                new_state, attempt
-            )
-
-            serialized_state = serialize(
-                serdes=self.config.serdes,
-                value=new_state,
-                operation_id=self.operation_identifier.operation_id,
-                durable_execution_arn=self.state.durable_execution_arn,
+                round_tripped_state, attempt
             )
 
             logger.debug(
@@ -213,7 +228,10 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
             )
 
             if not decision.should_continue:
-                # Condition is met - complete successfully
+                # Condition met - return a fresh round-trip of the checkpointed
+                # state so a mutating strategy cannot change the returned value;
+                # it equals what replay reconstructs from the checkpoint.
+                return_value: T = self._deserialize(serialized_state)
                 success_operation = OperationUpdate.create_wait_for_condition_succeed(
                     identifier=self.operation_identifier,
                     payload=serialized_state,
@@ -228,7 +246,7 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
                     self.operation_identifier.operation_id,
                     self.operation_identifier.name,
                 )
-                return new_state
+                return return_value
 
             # Condition not met - schedule retry
             # We enforce a minimum delay second of 1, to match model behaviour.

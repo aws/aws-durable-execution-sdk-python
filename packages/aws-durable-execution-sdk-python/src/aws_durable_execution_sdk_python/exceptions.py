@@ -329,6 +329,39 @@ class WaitForConditionError(DurableOperationError):
     """Raised when a wait_for_condition operation fails."""
 
 
+class SerDesError(DurableExecutionsError):
+    """Raised when serializing or deserializing an operation result fails.
+
+    Signals a permanent failure; use :class:`RetryableSerDesError` for a
+    transient one that should retry.
+
+    Attributes:
+        message: Human-readable failure message.
+        error_type: Type name of the error that escaped serdes; defaults to the
+            class name when no escaping error is known.
+        data: Optional serialized error payload.
+        stack_trace: Optional stack trace lines captured from the origin.
+    """
+
+    # Namespaced wire token used as the checkpoint ErrorType discriminator.
+    # Matching on this rather than the bare class name prevents a user
+    # exception coincidentally named "SerDesError" from being misidentified.
+    WIRE_ERROR_TYPE: str = f"{__module__}.SerDesError"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        error_type: str | None = None,
+        data: str | None = None,
+        stack_trace: list[str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message: str | None = message
+        self.error_type: str = error_type or SerDesError.WIRE_ERROR_TYPE
+        self.data: str | None = data
+        self.stack_trace: list[str] | None = stack_trace
+
+
 class CallbackError(DurableOperationError):
     """Base class for callback operation failures; catches all of them.
 
@@ -376,6 +409,26 @@ class StepInterruptedError(InvocationError):
     def __init__(self, message: str, step_id: str | None = None):
         super().__init__(message, TerminationReason.STEP_INTERRUPTED)
         self.step_id = step_id
+
+
+class RetryableSerDesError(InvocationError):
+    """Signal a transient SerDes failure that should retry the invocation.
+
+    Raised by a SerDes for a transient failure (e.g. an offloading serdes whose
+    network call timed out). It fails the invocation so the backend retries,
+    rather than surfacing to user code. Use :class:`SerDesError` for a permanent
+    failure.
+
+    In a map or parallel branch it escapes the batch rather than becoming a
+    failed item, so the invocation still fails and retries.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        termination_reason: TerminationReason = TerminationReason.SERIALIZATION_ERROR,
+    ):
+        super().__init__(message, termination_reason)
 
 
 class BackgroundThreadError(BaseException):
@@ -478,10 +531,6 @@ class OrderedLockError(DurableExecutionsError):
         )
         super().__init__(msg)
         self.source_exception: Exception | None = source_exception
-
-
-class SerDesError(DurableExecutionsError):
-    """Raised when serialization fails."""
 
 
 class OrphanedChildException(BaseException):

@@ -16,7 +16,7 @@ from aws_durable_execution_sdk_python.concurrency.models import (
 )
 from aws_durable_execution_sdk_python.exceptions import (
     DurableExecutionsError,
-    ExecutionError,
+    RetryableSerDesError,
     SerDesError,
 )
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
@@ -83,6 +83,28 @@ class CustomDictSerDes(SerDes[Any]):
         return value
 
 
+class PermanentDeserializeSerDes(SerDes[Any]):
+    """Serializes fine but always fails to deserialize (permanent failure)."""
+
+    def serialize(self, value: Any, serdes_context: SerDesContext) -> str:
+        return json.dumps(value)
+
+    def deserialize(self, data: str, serdes_context: SerDesContext) -> Any:
+        msg = "cannot deserialize"
+        raise ValueError(msg)
+
+
+class RetryableDeserializeSerDes(SerDes[Any]):
+    """Serializes fine but signals a transient failure on deserialize."""
+
+    def serialize(self, value: Any, serdes_context: SerDesContext) -> str:
+        return json.dumps(value)
+
+    def deserialize(self, data: str, serdes_context: SerDesContext) -> Any:
+        msg = "transient serdes failure"
+        raise RetryableSerDesError(msg)
+
+
 # region Abstract SerDes Tests
 def test_serdes_abstract():
     """Test SerDes abstract base class."""
@@ -131,15 +153,36 @@ def test_serialize_invalid_json():
     circular_ref = {"a": 1}
     circular_ref["self"] = circular_ref
 
-    with pytest.raises(ExecutionError) as exc_info:
+    with pytest.raises(SerDesError) as exc_info:
         serialize(None, circular_ref, "test-op", "test-arn")
     assert "Serialization failed" in str(exc_info.value)
 
 
 def test_deserialize_invalid_json():
-    with pytest.raises(ExecutionError) as exc_info:
+    with pytest.raises(SerDesError) as exc_info:
         deserialize(None, "invalid json", "test-op", "test-arn")
     assert "Deserialization failed" in str(exc_info.value)
+
+
+def test_serialize_propagates_retryable_serdes_error():
+    """A transient failure on serialize propagates unchanged (not wrapped as SerDesError)."""
+
+    class RaiseOnSerialize(SerDes[Any]):
+        def serialize(self, value: Any, serdes_context: SerDesContext) -> str:
+            msg = "transient serialize failure"
+            raise RetryableSerDesError(msg)
+
+        def deserialize(self, data: str, serdes_context: SerDesContext) -> Any:
+            return json.loads(data)
+
+    with pytest.raises(RetryableSerDesError):
+        serialize(RaiseOnSerialize(), {"a": 1}, "test-op", "test-arn")
+
+
+def test_deserialize_propagates_retryable_serdes_error():
+    """A transient failure on deserialize propagates unchanged (not wrapped as SerDesError)."""
+    with pytest.raises(RetryableSerDesError):
+        deserialize(RetryableDeserializeSerDes(), "{}", "test-op", "test-arn")
 
 
 def test_none_serdes_context():
@@ -591,7 +634,7 @@ def test_envelope_handles_json_incompatible_types():
     }
 
     # JsonSerDes should fail
-    with pytest.raises(ExecutionError):
+    with pytest.raises(SerDesError):
         serialize(json_serdes, complex_data, "test-op", "test-arn")
 
     # EnvelopeSerDes should succeed
@@ -606,11 +649,11 @@ def test_envelope_error_handling_with_main_api():
     envelope_serdes = ExtendedTypeSerDes()
 
     # Test serialization error
-    with pytest.raises(ExecutionError, match="Serialization failed"):
+    with pytest.raises(SerDesError, match="Serialization failed"):
         serialize(envelope_serdes, object(), "test-op", "test-arn")
 
     # Test deserialization error
-    with pytest.raises(ExecutionError, match="Deserialization failed"):
+    with pytest.raises(SerDesError, match="Deserialization failed"):
         deserialize(envelope_serdes, "invalid json", "test-op", "test-arn")
 
 
