@@ -6,7 +6,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 env:
   package_path: packages/aws-durable-execution-sdk-python-testing
@@ -16,6 +15,9 @@ env:
 jobs:
   build-and-upload-image-to-ecr:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     outputs:
       full_image_arm64: ${{ steps.build-publish.outputs.full_image_arm64 }}
       full_image_x86_64: ${{ steps.build-publish.outputs.full_image_x86_64 }}
@@ -86,6 +88,8 @@ jobs:
 
   create-ecr-manifest-per-arch:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
     needs: [build-and-upload-image-to-ecr]
     steps:
       - name: Configure AWS Credentials
