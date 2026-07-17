@@ -57,7 +57,13 @@ class OperationContext:
 
 @dataclass(frozen=True)
 class StepContext(OperationContext):
-    pass
+    """Context provided to step functions.
+
+    Attributes:
+        attempt: Current attempt number, starting at 1 for the first execution.
+    """
+
+    attempt: int
 
 
 @dataclass(frozen=True)
@@ -67,7 +73,13 @@ class WaitForCallbackContext(OperationContext):
 
 @dataclass(frozen=True)
 class WaitForConditionCheckContext(OperationContext):
-    pass
+    """Context provided to wait_for_condition check functions.
+
+    Attributes:
+        attempt: Current attempt number, starting at 1 for the first check.
+    """
+
+    attempt: int
 
 
 class Callback(Protocol, Generic[C_co]):
