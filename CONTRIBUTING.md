@@ -96,6 +96,18 @@ hatch build
 hatch run examples:build
 hatch run examples:generate-sam-template
 sam build --template-file packages/aws-durable-execution-sdk-python-examples/template.generated.json
+AWS_REGION=us-west-2
+ADOT_LAYER_ARN=$(
+  gh api repos/aws-observability/aws-otel-python-instrumentation/releases/latest \
+    --jq .body |
+    awk -F '|' -v region="$AWS_REGION" '
+      $2 ~ "^[[:space:]]*" region "[[:space:]]*$" {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3)
+        print $3
+        exit
+      }
+    '
+)
 sam deploy \
   --template-file .aws-sam/build/template.yaml \
   --stack-name python-examples-dev \
@@ -105,7 +117,8 @@ sam deploy \
     PythonRuntime=python3.13 \
     FunctionNamePrefix=PythonDev- \
     LambdaEndpoint=https://lambda.us-west-2.amazonaws.com \
-    LambdaExecutionRoleArn=arn:aws:iam::123456789012:role/example-lambda-role
+    LambdaExecutionRoleArn=arn:aws:iam::123456789012:role/example-lambda-role \
+    AdotLayerArn="$ADOT_LAYER_ARN"
 ```
 
 After the stack is deployed, use [SAM remote execution commands](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-cli-command-reference-sam-remote-execution.html) to invoke examples, inspect durable executions, stop executions that go wrong, and manage reusable test events. Pass the generated CloudFormation logical ID from `template.generated.json`; for example, `hello_world.handler` is generated as `HelloWorld`.
@@ -379,6 +392,18 @@ hatch run examples:generate-sam-template
 
 # Build and deploy the full stack with SAM
 sam build --template-file packages/aws-durable-execution-sdk-python-examples/template.generated.json
+AWS_REGION=us-west-2
+ADOT_LAYER_ARN=$(
+  gh api repos/aws-observability/aws-otel-python-instrumentation/releases/latest \
+    --jq .body |
+    awk -F '|' -v region="$AWS_REGION" '
+      $2 ~ "^[[:space:]]*" region "[[:space:]]*$" {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3)
+        print $3
+        exit
+      }
+    '
+)
 sam deploy \
   --template-file .aws-sam/build/template.yaml \
   --stack-name python-examples-dev \
@@ -388,7 +413,8 @@ sam deploy \
     PythonRuntime=python3.13 \
     FunctionNamePrefix=PythonDev- \
     LambdaEndpoint=https://lambda.us-west-2.amazonaws.com \
-    LambdaExecutionRoleArn=arn:aws:iam::123456789012:role/example-lambda-role
+    LambdaExecutionRoleArn=arn:aws:iam::123456789012:role/example-lambda-role \
+    AdotLayerArn="$ADOT_LAYER_ARN"
 
 # Invoke deployed examples, inspect executions, and manage saved test events
 # with SAM remote commands

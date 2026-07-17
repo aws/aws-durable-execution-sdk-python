@@ -63,6 +63,10 @@ def build_template(examples: list[dict[str, Any]]) -> dict[str, Any]:
                 "Type": "String",
                 "Description": "ARN of an existing IAM role for all example Lambda functions.",
             },
+            "AdotLayerArn": {
+                "Type": "String",
+                "Description": "ARN of the ADOT Python Lambda layer.",
+            },
         },
         "Resources": {},
     }
