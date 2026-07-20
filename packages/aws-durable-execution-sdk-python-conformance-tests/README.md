@@ -17,19 +17,18 @@ wire them to requirement IDs.
 
 ```
 handlers/
-  step/                     # one .py handler per scenario (context.step)
-  wait/                     # one .py handler per scenario (context.wait)
-template_step.yaml          # SAM template: maps each handler -> requirement ID(s)
-template_wait.yaml
+  <suite>/                  # one .py handler per conformance scenario
+template_<suite>.yaml       # maps suite handlers to requirement IDs
 scripts/
   build_examples.py         # assembles lambda-build/ from the local monorepo SDK
   inject_execution_role.py  # CI: point functions at a pre-existing role
 tests/                      # unit tests for the scripts
 ```
 
-Each SAM template is a self-contained deployment for one **suite** (operation
-category). Suites are added incrementally; today this package ships `step`
-(requirements `1-1`..`1-20`) and `wait` (`2-1`..`2-5`).
+Each `template_<suite>.yaml` is a self-contained deployment for one conformance
+suite. The checked-in templates and the CI workflow matrix are the source of
+truth for supported suites; this README intentionally does not duplicate that
+list.
 
 ## How a handler maps to a requirement
 
@@ -37,13 +36,13 @@ The link is the `TestingMetadata.TestDescription` field on each function in the
 SAM template — a list of requirement IDs the handler satisfies:
 
 ```yaml
-StepBasic:
+RequirementCase:
   Type: AWS::Serverless::Function
   TestingMetadata:
-    TestDescription: ["1-1"]      # <- requirement ID(s) in the conformance repo
+    TestDescription: ["<requirement-id>"]
   Properties:
     CodeUri: lambda-build/
-    Handler: step.step_basic.handler   # <- lambda-build/step/step_basic.py, `handler`
+    Handler: <suite>.<handler_module>.handler
     Role: !GetAtt DurableFunctionRole.Arn
     DurableConfig:
       RetentionPeriodInDays: 7
@@ -72,17 +71,17 @@ This produces:
 ```
 lambda-build/
   aws_durable_execution_sdk_python/   # copied from the local SDK package
-  step/                               # from handlers/step
-  wait/                               # from handlers/wait
+  <suite>/                            # copied from handlers/<suite>
 ```
 
 ## Running a suite
 
-Prerequisites: Python ≥ 3.11, the AWS SAM CLI, and AWS credentials for an
+Prerequisites: Python ≥ 3.14, the AWS SAM CLI, and AWS credentials for an
 account where the Durable Execution service is available.
 
 ```bash
 cd packages/aws-durable-execution-sdk-python-conformance-tests
+SUITE=<suite>
 
 # 1. Assemble lambda-build/ from the local SDK
 python3 scripts/build_examples.py
@@ -90,22 +89,21 @@ python3 scripts/build_examples.py
 # 2. Install the pinned conformance runner
 pip install aws-durable-execution-conformance-tests==0.1.0
 
-# 3. Deploy + invoke + validate one suite (step or wait)
+# 3. Deploy + invoke + validate the selected suite
 python -m aws_durable_execution_conformance_tests.app \
-  --template template_step.yaml \
+  --template "template_${SUITE}.yaml" \
   --language python \
-  --suite step \
-  --name conformance-python-step-local \
+  --suite "$SUITE" \
+  --name "conformance-python-${SUITE}-local" \
   --region us-west-2 \
-  --history-dir history-step \
-  --report junit --report-file report-step
+  --history-dir "history-${SUITE}" \
+  --report junit --report-file "report-${SUITE}"
 ```
 
-Swap `template_step.yaml`/`--suite step` for `template_wait.yaml`/`--suite wait`
-to run the wait suite. The runner deploys the template via SAM, invokes each
-function once per requirement ID, and reports `PASSED` / `FAILED` / `UNCOVERED`
-per requirement. A non-zero exit means at least one requirement failed. Stacks
-are cleaned up by the runner's default `--cleanup` behavior.
+The runner deploys the template via SAM, invokes each function once per
+requirement ID, and reports `PASSED` / `FAILED` / `UNCOVERED` per requirement. A
+non-zero exit means at least one requirement failed. Stacks are cleaned up by
+the runner's default `--cleanup` behavior.
 
 ## Authoring a new test case
 
