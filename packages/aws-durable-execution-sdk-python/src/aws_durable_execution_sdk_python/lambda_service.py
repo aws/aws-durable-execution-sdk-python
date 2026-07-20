@@ -470,7 +470,7 @@ class OperationUpdate:
             result["Name"] = self.name
         if self.sub_type:
             result["SubType"] = self.sub_type.value
-        if self.payload:
+        if self.payload is not None:
             result["Payload"] = self.payload
         if self.error:
             result["Error"] = self.error.to_dict()

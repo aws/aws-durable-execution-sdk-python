@@ -31,7 +31,11 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python.logger import Logger
 from aws_durable_execution_sdk_python.operation.step import StepOperationExecutor
 from aws_durable_execution_sdk_python.retries import RetryDecision
-from aws_durable_execution_sdk_python.serdes import SerDes, SerDesContext
+from aws_durable_execution_sdk_python.serdes import (
+    PassThroughSerDes,
+    SerDes,
+    SerDesContext,
+)
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 from aws_durable_execution_sdk_python.types import StepContext
 from tests.serdes_test import CustomDictSerDes
@@ -772,6 +776,66 @@ def test_step_handler_first_run_none_payload_skips_deserialize():
     )
 
     assert result is None
+
+
+def test_step_handler_empty_string_result_first_run():
+    """Test step_handler checkpoints an empty-string result as an empty payload."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    mock_state.durable_execution_arn = "test_arn"
+    mock_callable = Mock(return_value="")
+    mock_state.wrap_user_function.return_value = mock_callable
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    config = StepConfig(
+        step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY,
+        serdes=PassThroughSerDes(),
+    )
+    result = step_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier("step1", OperationSubType.STEP, None, "test_step"),
+        config,
+        mock_logger,
+    )
+
+    assert result == ""
+
+    success_call = mock_state.create_checkpoint.call_args_list[1]
+    success_operation = success_call[1]["operation_update"]
+    assert success_operation.payload == ""
+    assert "Payload" in success_operation.to_dict()
+
+
+def test_step_handler_already_succeeded_empty_string_result():
+    """Test step_handler when operation succeeded with an empty-string result."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    operation = Operation(
+        operation_id="step1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        step_details=StepDetails(result=""),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    mock_callable = Mock()
+    mock_logger = Mock(spec=Logger)
+
+    result = step_handler(
+        mock_callable,
+        mock_state,
+        OperationIdentifier("step1", OperationSubType.STEP, None, "test_step"),
+        StepConfig(serdes=PassThroughSerDes()),
+        mock_logger,
+    )
+
+    assert result == ""
+    mock_callable.assert_not_called()
 
 
 # Tests for immediate response handling
