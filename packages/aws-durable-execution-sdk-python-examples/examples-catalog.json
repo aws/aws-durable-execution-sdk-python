@@ -763,6 +763,20 @@
         "FILESYSTEM_MOUNT_PATH": "/mnt/s3"
       },
       "path": "./src/filesystem_serdes/filesystem_serdes_preview.py"
+    },
+    {
+      "name": "Pydantic AI Durable Agent",
+      "description": "Checkpoints Pydantic AI model requests and tool calls as durable steps",
+      "handler": "pydantic_ai_agent.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "environment": {
+        "PYDANTIC_AI_MODEL": "us.amazon.nova-micro-v1:0"
+      },
+      "path": "./src/pydantic_ai_agent/pydantic_ai_agent.py"
     }
   ]
 }
