@@ -7,11 +7,10 @@ language-agnostic conformance runner
 which invokes each function, pulls its execution history, and asserts it matches
 the shared requirement specification.
 
-The runner and the requirement specifications (the `test-requirements/` YAML
-files) are **not** in this repo — they live in
+The runner and requirement specifications are maintained in
 [`aws/aws-durable-execution-conformance-tests`](https://github.com/aws/aws-durable-execution-conformance-tests).
-This package owns only the **Python handlers** and the **SAM templates** that
-wire them to requirement IDs.
+This package owns the Python handlers and SAM templates that wire them to
+requirement IDs.
 
 ## Layout
 
@@ -20,20 +19,20 @@ handlers/
   <suite>/                  # one .py handler per conformance scenario
 template_<suite>.yaml       # maps suite handlers to requirement IDs
 scripts/
+  discover_suites.py        # derives supported suites from templates
   build_examples.py         # assembles lambda-build/ from the local monorepo SDK
   inject_execution_role.py  # CI: point functions at a pre-existing role
 tests/                      # unit tests for the scripts
 ```
 
 Each `template_<suite>.yaml` is a self-contained deployment for one conformance
-suite. The checked-in templates and the CI workflow matrix are the source of
-truth for supported suites; this README intentionally does not duplicate that
-list.
+suite. Templates are the single source of truth: the local build and GitHub
+Actions matrix discover suites from them automatically.
 
 ## How a handler maps to a requirement
 
 The link is the `TestingMetadata.TestDescription` field on each function in the
-SAM template — a list of requirement IDs the handler satisfies:
+SAM template:
 
 ```yaml
 RequirementCase:
@@ -49,47 +48,41 @@ RequirementCase:
       ExecutionTimeout: 300
 ```
 
-The runner invokes the function once per requirement ID using that requirement's
-`Input`, then diffs the resulting execution history against the requirement's
-`ExpectedExecutionHistory`.
+The runner invokes the function once per requirement ID using the requirement's
+`Input`, then compares the execution history with `ExpectedExecutionHistory`.
 
 ## Building locally
 
-`scripts/build_examples.py` assembles the Lambda deployment package under
-`lambda-build/` (git-ignored) from the **local monorepo SDK source** — not a PyPI
-release — so the handlers exercise exactly the code in this checkout. `boto3`
-(the SDK's only runtime dependency) is provided by the Lambda Python runtime and
-is intentionally not vendored.
+`scripts/build_examples.py` assembles `lambda-build/` from the local monorepo
+SDK source, not a PyPI release. `boto3` is provided by the Lambda runtime and is
+not vendored.
 
 ```bash
 cd packages/aws-durable-execution-sdk-python-conformance-tests
-python3 scripts/build_examples.py     # local SDK auto-located from the monorepo
+python3 scripts/build_examples.py
 ```
 
-This produces:
+The script discovers every `template_<suite>.yaml`, verifies a matching
+`handlers/<suite>/` directory exists, and copies all discovered suites:
 
 ```
 lambda-build/
-  aws_durable_execution_sdk_python/   # copied from the local SDK package
-  <suite>/                            # copied from handlers/<suite>
+  aws_durable_execution_sdk_python/
+  <suite>/
 ```
 
 ## Running a suite
 
 Prerequisites: Python ≥ 3.14, the AWS SAM CLI, and AWS credentials for an
-account where the Durable Execution service is available.
+account where Durable Execution is available.
 
 ```bash
 cd packages/aws-durable-execution-sdk-python-conformance-tests
 SUITE=<suite>
 
-# 1. Assemble lambda-build/ from the local SDK
 python3 scripts/build_examples.py
-
-# 2. Install the pinned conformance runner
 pip install aws-durable-execution-conformance-tests==0.1.0
 
-# 3. Deploy + invoke + validate the selected suite
 python -m aws_durable_execution_conformance_tests.app \
   --template "template_${SUITE}.yaml" \
   --language python \
@@ -100,34 +93,29 @@ python -m aws_durable_execution_conformance_tests.app \
   --report junit --report-file "report-${SUITE}"
 ```
 
-The runner deploys the template via SAM, invokes each function once per
-requirement ID, and reports `PASSED` / `FAILED` / `UNCOVERED` per requirement. A
-non-zero exit means at least one requirement failed. Stacks are cleaned up by
-the runner's default `--cleanup` behavior.
+The runner deploys the template, invokes each function, validates its result and
+history, and cleans up the stack by default.
 
 ## Authoring a new test case
 
-1. **Find (or add) the requirement** in the conformance repo under
+1. Find or add the requirement in the conformance repository under
    `test-requirements/<suite>/<id>.yaml`.
-2. **Write the handler** at `handlers/<suite>/<descriptive_name>.py` exporting a
-   `handler`. Use the SDK's **real API** — never hand-roll logic to force the
-   expected result. A handler that fails because the SDK is non-compliant is a
-   valid, valuable outcome; that failure is the signal. Naming convention:
-   descriptive `snake_case`, no numeric IDs in the filename (IDs live in
-   `TestDescription`).
-3. **Register it** in `template_<suite>.yaml` with `Handler: <suite>.<name>.handler`
-   and the matching `TestDescription: ["<id>"]`.
-4. **Rebuild and run** (above).
+2. Add `handlers/<suite>/<descriptive_name>.py` exporting `handler`. Use the
+   SDK's real API; never hand-roll behavior to force an expected result.
+3. Register it in `template_<suite>.yaml` with
+   `Handler: <suite>.<name>.handler` and `TestDescription: ["<id>"]`.
+4. Rebuild and run the suite.
+
+For a new suite, adding its template and handler directory is sufficient; the
+build and CI matrix discover it automatically.
 
 ## CI
 
-`.github/workflows/conformance-tests.yml` runs the same flow on pull requests
-that touch this package and on manual dispatch, one parallel job per suite (a
-build matrix). It assumes AWS credentials via OIDC using the repository's
-existing integration secrets (`TEST_ROLE_ARN` for the SAM-capable deploy role).
+`.github/workflows/conformance-tests.yml` first discovers all suites from
+`template_<suite>.yaml`, then runs one parallel matrix job per suite. CI assumes
+AWS credentials through the repository's existing OIDC secrets.
 
-Before deploying, CI runs `scripts/inject_execution_role.py` to point every
-function at the pre-existing execution role
-(`TEST_LAMBDA_EXECUTION_ROLE_ARN`) and drop the template's self-created
-`DurableFunctionRole` — so CI deploys don't create IAM roles. This rewrites only
-CI's checkout; the checked-in template stays self-contained for local runs.
+Before deployment, `scripts/inject_execution_role.py` points every function at
+the pre-existing execution role (`TEST_LAMBDA_EXECUTION_ROLE_ARN`) and removes
+the template's self-created `DurableFunctionRole`. The checked-in templates
+remain self-contained for local runs.
