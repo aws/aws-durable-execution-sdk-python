@@ -16,6 +16,7 @@ dependencies = [
   "pytest-xdist",
   "opentelemetry-sdk>=1.20.0,<=1.42.1",
   "aws-durable-execution-sdk-python-testing",
+  "PyYAML==6.0.2",
 ]
 
 [tool.hatch.envs.test.scripts]
@@ -31,6 +32,7 @@ testpaths = [
     "packages/aws-durable-execution-sdk-python-otel/tests",
     "packages/aws-durable-execution-sdk-python-testing/tests",
     "packages/aws-durable-execution-sdk-python-examples/test",
+    "packages/aws-durable-execution-sdk-python-conformance-tests/tests",
 ]
 markers = [
   # Used for test selection with -m example
