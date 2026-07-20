@@ -743,6 +743,19 @@ def test_operation_update_create_step_succeed():
     assert update.sub_type is OperationSubType.STEP
 
 
+def test_operation_update_to_dict_includes_empty_payload():
+    """Test OperationUpdate.to_dict includes an empty-string payload."""
+    update = OperationUpdate.create_step_succeed(
+        OperationIdentifier("step1", OperationSubType.STEP, None, "empty_result"),
+        payload="",
+    )
+
+    assert update.payload == ""
+    result = update.to_dict()
+    assert "Payload" in result
+    assert result["Payload"] == ""
+
+
 def test_operation_update_factory_methods():
     """Test all OperationUpdate factory methods."""
     error = ErrorObject(
