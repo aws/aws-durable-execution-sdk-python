@@ -1,0 +1,9 @@
+build/
+lambda-build/
+dist/
+.aws-sam/
+history-*/
+report-*.xml
+report-*.json
+__pycache__/
+*.pyc

@@ -1,0 +1,126 @@
+name: Conformance Tests
+
+# Full-integration conformance run: discovers suites from template_<suite>.yaml,
+# builds the Python handlers against the local monorepo SDK, and runs each suite
+# as its own parallel matrix job with the pinned language-agnostic runner.
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "packages/aws-durable-execution-sdk-python-conformance-tests/**"
+      - ".github/workflows/conformance-tests.yml"
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "AWS Region for deploying and running conformance tests"
+        required: false
+        default: us-west-2
+        type: string
+
+env:
+  AWS_REGION: ${{ github.event.inputs.region || 'us-west-2' }}
+
+concurrency:
+  group: ${{ github.head_ref || github.ref_name || github.run_id }}-conformance
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  discover_suites:
+    name: discover conformance suites
+    runs-on: ubuntu-latest
+    outputs:
+      suites: ${{ steps.discover.outputs.suites }}
+    steps:
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+    - name: Discover suites from templates
+      id: discover
+      working-directory: packages/aws-durable-execution-sdk-python-conformance-tests
+      run: echo "suites=$(python3 scripts/discover_suites.py)" >> "$GITHUB_OUTPUT"
+
+  conformance:
+    name: conformance (${{ matrix.suite }})
+    needs: discover_suites
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Required for AWS OIDC credentials
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(needs.discover_suites.outputs.suites) }}
+    defaults:
+      run:
+        working-directory: packages/aws-durable-execution-sdk-python-conformance-tests
+    steps:
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+    - name: Setup Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: "3.14"
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+      with:
+        role-to-assume: "${{ secrets.TEST_ROLE_ARN }}"
+        role-session-name: pythonConformanceTest
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Verify AWS test account
+      env:
+        TEST_ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
+      run: |
+        ACTUAL_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        if [ "$ACTUAL_ACCOUNT_ID" != "$TEST_ACCOUNT_ID" ]; then
+          echo "Expected AWS account $TEST_ACCOUNT_ID but assumed into $ACTUAL_ACCOUNT_ID"
+          exit 1
+        fi
+        echo "Using AWS test account $ACTUAL_ACCOUNT_ID"
+
+    - name: Setup SAM CLI
+      uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
+
+    - name: Build conformance handlers
+      run: python3 scripts/build_examples.py
+
+    - name: Install conformance runner
+      run: pip install aws-durable-execution-conformance-tests==0.1.0
+
+    - name: Inject Lambda execution role into template
+      env:
+        ROLE_ARN: ${{ secrets.TEST_LAMBDA_EXECUTION_ROLE_ARN }}
+      run: |
+        if [ -z "$ROLE_ARN" ]; then
+          echo "TEST_LAMBDA_EXECUTION_ROLE_ARN not set; template will create its own role."
+          exit 0
+        fi
+        python3 scripts/inject_execution_role.py \
+          --template template_${{ matrix.suite }}.yaml \
+          --role-arn "$ROLE_ARN"
+
+    - name: Run conformance suite
+      run: |
+        python -m aws_durable_execution_conformance_tests.app \
+          --template template_${{ matrix.suite }}.yaml \
+          --language python \
+          --suite ${{ matrix.suite }} \
+          --name conf-py-${{ matrix.suite }}-${{ github.run_id }} \
+          --region ${{ env.AWS_REGION }} \
+          --history-dir history-${{ matrix.suite }} \
+          --report junit \
+          --report-file report-${{ matrix.suite }}
+
+    - name: Upload conformance report
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: conformance-report-${{ matrix.suite }}
+        path: |
+          packages/aws-durable-execution-sdk-python-conformance-tests/report-${{ matrix.suite }}.xml
+          packages/aws-durable-execution-sdk-python-conformance-tests/history-${{ matrix.suite }}/
+        if-no-files-found: warn
