@@ -119,11 +119,16 @@ jobs:
         TEST_ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
         TEST_LAMBDA_EXECUTION_ROLE_ARN: ${{ secrets.TEST_LAMBDA_EXECUTION_ROLE_ARN }}
       run: |
+        # Stable per-suite stack name (no run id): every workflow run updates
+        # the same stack, and --no-cleanup leaves it deployed afterwards so
+        # failures can be inspected in the account. The next run's sam deploy
+        # updates the stack in place.
         python -m aws_durable_execution_conformance_tests.app \
           --template template_${{ matrix.suite }}.yaml \
           --language python \
           --suite ${{ matrix.suite }} \
-          --name conf-py-${SUITE_SLUG}-${{ github.run_id }} \
+          --name conf-py-${SUITE_SLUG} \
+          --no-cleanup \
           --region ${{ env.AWS_REGION }} \
           --history-dir history-${{ matrix.suite }} \
           --report junit \
