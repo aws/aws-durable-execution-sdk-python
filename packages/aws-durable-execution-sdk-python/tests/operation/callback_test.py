@@ -12,7 +12,12 @@ from aws_durable_execution_sdk_python.config import (
     WaitForCallbackConfig,
 )
 from aws_durable_execution_sdk_python.context import Callback
-from aws_durable_execution_sdk_python.exceptions import CallbackError, ValidationError
+from aws_durable_execution_sdk_python.exceptions import (
+    CallbackError,
+    CallbackExternalError,
+    CallbackTimeoutError,
+    ValidationError,
+)
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
@@ -1272,8 +1277,8 @@ def test_callback_result_raises_error_for_failed_callbacks():
         serdes=None,
     )
 
-    # Verify that result() raises CallbackError
-    with pytest.raises(CallbackError, match="Callback failed"):
+    # A FAILED callback surfaces as CallbackExternalError (a CallbackError).
+    with pytest.raises(CallbackExternalError, match="Callback failed"):
         callback.result()
 
 
@@ -1309,8 +1314,8 @@ def test_callback_result_raises_error_for_timed_out_callbacks():
         serdes=None,
     )
 
-    # Verify that result() raises CallbackError
-    with pytest.raises(CallbackError, match="Callback timed out"):
+    # A TIMED_OUT callback surfaces as CallbackTimeoutError (a CallbackError).
+    with pytest.raises(CallbackTimeoutError, match="Callback timed out"):
         callback.result()
 
 

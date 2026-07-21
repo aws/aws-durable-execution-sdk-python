@@ -18,6 +18,10 @@ from aws_durable_execution_sdk_python.context import (
 
 # Most common exceptions - users need to handle these exceptions
 from aws_durable_execution_sdk_python.exceptions import (
+    CallbackError,
+    CallbackExternalError,
+    CallbackSubmitterError,
+    CallbackTimeoutError,
     ChildContextError,
     DurableExecutionsError,
     DurableOperationError,
@@ -39,6 +43,10 @@ from aws_durable_execution_sdk_python.types import StepContext
 
 __all__ = [
     "BatchResult",
+    "CallbackError",
+    "CallbackExternalError",
+    "CallbackSubmitterError",
+    "CallbackTimeoutError",
     "ChildContextError",
     "DurableContext",
     "DurableExecutionsError",

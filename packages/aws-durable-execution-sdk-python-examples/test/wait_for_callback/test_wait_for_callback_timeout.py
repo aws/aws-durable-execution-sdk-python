@@ -4,6 +4,7 @@ import pytest
 from aws_durable_execution_sdk_python.execution import InvocationStatus
 from aws_durable_execution_sdk_python.lambda_service import (
     OperationStatus,
+    OperationSubType,
     OperationType,
 )
 
@@ -46,3 +47,15 @@ def test_handle_wait_for_callback_timeout_scenarios(durable_runner):
         operation.status is OperationStatus.TIMED_OUT
         for operation in callback_operations
     )
+
+    # The wait_for_callback context records the graded CallbackTimeoutError,
+    # identical on first run and replay.
+    wait_for_callback_ops = [
+        operation
+        for operation in result.get_all_operations()
+        if operation.sub_type is OperationSubType.WAIT_FOR_CALLBACK
+    ]
+    assert len(wait_for_callback_ops) == 1
+    wait_for_callback_error = wait_for_callback_ops[0].error
+    assert wait_for_callback_error is not None
+    assert wait_for_callback_error.type == "CallbackTimeoutError"

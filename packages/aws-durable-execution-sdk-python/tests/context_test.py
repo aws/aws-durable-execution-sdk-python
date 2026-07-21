@@ -26,6 +26,12 @@ from aws_durable_execution_sdk_python.context import (
 )
 from aws_durable_execution_sdk_python.exceptions import (
     CallbackError,
+    CallbackExternalError,
+    CallbackSubmitterError,
+    CallbackTimeoutError,
+    ChildContextError,
+    InvokeError,
+    StepError,
     SuspendExecution,
     ValidationError,
 )
@@ -205,8 +211,14 @@ def test_callback_result_failed():
 
     callback = Callback("callback5", "op5", mock_state)
 
-    with pytest.raises(CallbackError):
+    # A FAILED callback (external SendDurableExecutionCallbackFailure) surfaces
+    # as CallbackExternalError. The external error's own type stays on the
+    # callback operation, and there is no synthetic __cause__.
+    with pytest.raises(CallbackExternalError) as exc_info:
         callback.result()
+    assert exc_info.value.message == "Callback failed"
+    assert isinstance(exc_info.value, CallbackError)
+    assert exc_info.value.__cause__ is None
 
 
 def test_callback_result_not_started():
@@ -264,7 +276,32 @@ def test_callback_result_timed_out():
 
     callback = Callback("callback_timeout", "op_timeout", mock_state)
 
-    with pytest.raises(CallbackError):
+    # A TIMED_OUT callback surfaces as CallbackTimeoutError.
+    with pytest.raises(CallbackTimeoutError) as exc_info:
+        callback.result()
+    assert isinstance(exc_info.value, CallbackError)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [OperationStatus.CANCELLED, OperationStatus.STOPPED],
+)
+def test_callback_result_cancelled_or_stopped_is_external(status):
+    """CANCELLED/STOPPED terminal callbacks surface as CallbackExternalError."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    operation = Operation(
+        operation_id="op_cs",
+        operation_type=OperationType.CALLBACK,
+        status=status,
+        callback_details=CallbackDetails(callback_id="callback_cs"),
+    )
+    mock_result = CheckpointedResult.create_from_operation(operation)
+    mock_state.get_checkpoint_result.return_value = mock_result
+
+    callback = Callback("callback_cs", "op_cs", mock_state)
+
+    with pytest.raises(CallbackExternalError):
         callback.result()
 
 
@@ -1293,6 +1330,86 @@ def test_wait_for_callback_passes_child_context(mock_executor_class):
 
         assert result == "handler_result"
         mock_executor_class.assert_called_once()
+
+
+# region wait_for_callback error translation
+
+
+def _child_context_error_with_cause(cause: BaseException) -> ChildContextError:
+    """Build the ChildContextError that run_in_child_context raises, inner on __cause__.
+
+    Same shape on first run and replay (reconstructed from the FAILED checkpoint).
+    """
+    error = ChildContextError("child context failed")
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        CallbackError("internal callback failure"),
+        CallbackExternalError("callback failed"),
+        CallbackTimeoutError("callback timed out"),
+    ],
+)
+def test_wait_for_callback_passes_callback_errors_through(inner):
+    """Any CallbackError-family failure passes through wait_for_callback unchanged."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    context = create_test_context(state=mock_state)
+
+    with patch.object(
+        DurableContext,
+        "run_in_child_context",
+        side_effect=_child_context_error_with_cause(inner),
+    ):
+        with pytest.raises(CallbackError) as exc_info:
+            context.wait_for_callback(Mock())
+    assert exc_info.value is inner
+
+
+def test_wait_for_callback_translates_submitter_step_failure():
+    """A failed submitter step (StepError inner) becomes CallbackSubmitterError."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    context = create_test_context(state=mock_state)
+
+    inner = StepError("submitter blew up", data="payload", stack_trace=["frame"])
+    with patch.object(
+        DurableContext,
+        "run_in_child_context",
+        side_effect=_child_context_error_with_cause(inner),
+    ):
+        with pytest.raises(CallbackSubmitterError) as exc_info:
+            context.wait_for_callback(Mock())
+    # The original StepError is preserved as the cause, and its data/stack_trace
+    # carry onto the CallbackSubmitterError.
+    assert exc_info.value.__cause__ is inner
+    assert "submitter blew up" in str(exc_info.value)
+    assert exc_info.value.data == "payload"
+    assert exc_info.value.stack_trace == ["frame"]
+
+
+def test_wait_for_callback_reraises_unrelated_child_context_error():
+    """A non-callback, non-step failure re-raises the original ChildContextError."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    context = create_test_context(state=mock_state)
+
+    inner = InvokeError("nested invoke failed")
+    child_error = _child_context_error_with_cause(inner)
+    with patch.object(
+        DurableContext,
+        "run_in_child_context",
+        side_effect=child_error,
+    ):
+        with pytest.raises(ChildContextError) as exc_info:
+            context.wait_for_callback(Mock())
+    assert exc_info.value is child_error
+
+
+# endregion wait_for_callback error translation
 
 
 # endregion wait_for_callback

@@ -24,7 +24,10 @@ def test_fail_after_exhausting_retries_when_submitter_always_fails(durable_runne
     # Execution should fail after retries are exhausted
     assert result.status is InvocationStatus.FAILED
 
-    # Verify error details
+    # A failed submitter step surfaces as CallbackSubmitterError (the submitter's
+    # StepError is translated at the wait_for_callback call site). The type is
+    # identical on first run and replay, so the execution-level record pins it.
     error = result.error
     assert error is not None
+    assert error.type == "CallbackSubmitterError"
     assert "Simulated submitter failure" in error.message

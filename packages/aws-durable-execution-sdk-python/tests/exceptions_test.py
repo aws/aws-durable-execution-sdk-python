@@ -9,6 +9,10 @@ from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 from aws_durable_execution_sdk_python.exceptions import (
     _DURABLE_OPERATION_ERROR_REGISTRY,
     BotoClientError,
+    CallbackError,
+    CallbackExternalError,
+    CallbackSubmitterError,
+    CallbackTimeoutError,
     ChildContextError,
     CheckpointError,
     CheckpointErrorCategory,
@@ -242,7 +246,16 @@ def test_durable_operation_error_with_none_message():
 
 @pytest.mark.parametrize(
     "error_cls",
-    [StepError, InvokeError, ChildContextError, WaitForConditionError],
+    [
+        StepError,
+        InvokeError,
+        ChildContextError,
+        WaitForConditionError,
+        CallbackError,
+        CallbackExternalError,
+        CallbackTimeoutError,
+        CallbackSubmitterError,
+    ],
 )
 def test_operation_error_subclasses(error_cls):
     """Each per-operation subclass derives from DurableOperationError and self-types."""
@@ -262,6 +275,78 @@ def test_operation_error_registry_contains_all_subclasses():
         _DURABLE_OPERATION_ERROR_REGISTRY["WaitForConditionError"]
         is WaitForConditionError
     )
+    assert _DURABLE_OPERATION_ERROR_REGISTRY["CallbackError"] is CallbackError
+    assert (
+        _DURABLE_OPERATION_ERROR_REGISTRY["CallbackExternalError"]
+        is CallbackExternalError
+    )
+    assert (
+        _DURABLE_OPERATION_ERROR_REGISTRY["CallbackTimeoutError"]
+        is CallbackTimeoutError
+    )
+    assert (
+        _DURABLE_OPERATION_ERROR_REGISTRY["CallbackSubmitterError"]
+        is CallbackSubmitterError
+    )
+
+
+# =============================================================================
+# Callback error hierarchy
+# =============================================================================
+
+
+def test_callback_error_is_durable_operation_error_not_termination():
+    """CallbackError is a DurableOperationError, separate from the termination tree."""
+    error = CallbackError("callback failed")
+    assert isinstance(error, DurableOperationError)
+    assert isinstance(error, DurableExecutionsError)
+    # Termination-tree errors are a separate hierarchy carrying a termination_reason.
+    assert not isinstance(error, ExecutionError)
+    assert not isinstance(error, UnrecoverableError)
+    assert not hasattr(error, "termination_reason")
+
+
+def test_callback_error_defaults():
+    """CallbackError defaults error_type to its class name and carries no callback_id."""
+    error = CallbackError("boom")
+    assert error.message == "boom"
+    assert error.error_type == "CallbackError"
+    assert error.data is None
+    assert error.stack_trace is None
+    assert not hasattr(error, "callback_id")
+
+
+@pytest.mark.parametrize(
+    "error_cls",
+    [CallbackExternalError, CallbackTimeoutError, CallbackSubmitterError],
+)
+def test_graded_callback_errors_subclass_callback_error(error_cls):
+    """The graded callback errors subclass CallbackError so `except CallbackError` catches all."""
+    error = error_cls("failed")
+    assert isinstance(error, CallbackError)
+    assert isinstance(error, DurableOperationError)
+    assert error.error_type == error_cls.__name__
+
+
+@pytest.mark.parametrize(
+    "error_cls",
+    [
+        CallbackError,
+        CallbackExternalError,
+        CallbackTimeoutError,
+        CallbackSubmitterError,
+    ],
+)
+def test_from_error_fields_reconstructs_callback_types(error_cls):
+    """from_error_fields rebuilds each callback type from its class-name discriminator."""
+    error = DurableOperationError.from_error_fields(
+        error_cls.__name__, "callback boom", "payload", ["frame"]
+    )
+    assert isinstance(error, error_cls)
+    assert error.error_type == error_cls.__name__
+    assert error.message == "callback boom"
+    assert error.data == "payload"
+    assert error.stack_trace == ["frame"]
 
 
 def test_from_error_fields_user_subclass_falls_back_without_typeerror():
