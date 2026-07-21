@@ -751,7 +751,9 @@ class ExecutionState:
                         output.new_execution_state.next_marker,
                     )
                     for update in updates:
-                        self._plugin_executor.on_operation_action(update)
+                        self._plugin_executor.on_operation_action(
+                            update, self.operations.get(update.operation_id)
+                        )
 
                     self._plugin_executor.on_operation_update(
                         updated_operations,

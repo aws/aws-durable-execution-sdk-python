@@ -554,6 +554,36 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
         self.assertIn("operation_start:op-1", self.plugin.calls)
         self.assertEqual(captured[0].status, OperationStatus.STARTED)
 
+    def test_start_action_uses_server_start_timestamp(self):
+        captured: list[OperationStartInfo] = []
+
+        class _CapturingPlugin(_TrackingPlugin):
+            def on_operation_start(self, info: OperationStartInfo) -> None:
+                super().on_operation_start(info)
+                captured.append(info)
+
+        self.plugin = _CapturingPlugin()
+        self.executor = PluginExecutor(plugins=[self.plugin])
+        update = MagicMock()
+        update.action = OperationAction.START
+        update.operation_id = "op-1"
+        update.operation_type = OperationType.STEP
+        update.sub_type = OperationSubType.STEP
+        update.name = "my-step"
+        update.parent_id = "parent-1"
+
+        operation = Operation(
+            operation_id="op-1",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.STARTED,
+            start_timestamp=START_TS,
+        )
+
+        with self.executor.run():
+            self.executor.on_operation_action(update, operation)
+
+        self.assertEqual(captured[0].start_time, START_TS)
+
     def test_non_start_action_does_not_fire(self):
         update = MagicMock()
         update.action = OperationAction.SUCCEED

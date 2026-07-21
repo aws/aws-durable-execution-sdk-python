@@ -4,10 +4,10 @@ import contextlib
 import datetime
 import functools
 import logging
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from collections.abc import Mapping, Sequence
 from typing import Any, Callable, MutableMapping, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -381,7 +381,9 @@ class PluginExecutor:
             UserFunctionEndInfo.from_start_info(start_info, error), sync=True
         )
 
-    def on_operation_action(self, update: OperationUpdate):
+    def on_operation_action(
+        self, update: OperationUpdate, operation: Operation | None = None
+    ):
         """Execute any registered plugins for a given operation when an update is checkpointed
 
         Args:
@@ -398,7 +400,7 @@ class PluginExecutor:
                     sub_type=update.sub_type,
                     name=update.name,
                     parent_id=update.parent_id,
-                    start_time=datetime.datetime.now(datetime.UTC),
+                    start_time=operation.start_timestamp if operation else None,
                     is_replayed=False,
                     status=OperationStatus.STARTED,
                 ),
