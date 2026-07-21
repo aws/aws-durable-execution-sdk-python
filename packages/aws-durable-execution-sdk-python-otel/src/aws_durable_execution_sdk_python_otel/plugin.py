@@ -320,7 +320,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
         logger.debug("Durable invocation started: %s", info)
         self._execution_arn = info.execution_arn or ""
         self._extracted_context = self._context_extractor(info)
-        self._id_generator.set_trace_id(self._execution_arn, info.start_time)
+        self._id_generator.set_trace_id(self._execution_arn, info.execution_start_time)
 
         self._start_span(
             operation_id=None,
@@ -331,16 +331,15 @@ class OtelPlugin(DurableInstrumentationPlugin):
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         """Called at the end of each invocation. Ends the invocation span and flushes."""
         logger.debug("Durable invocation ended: %s", info)
-        end_time = info.end_time
         # end all pending spans
         with self._operation_spans_lock:
             operation_ids = list(self._operation_spans.keys())
         for operation_id in operation_ids:
             if operation_id:
-                self._end_span(operation_id, end_time)
+                self._end_span(operation_id)
 
         # end the invocation span
-        self._end_span(None, end_time)
+        self._end_span(None)
 
         # Clear all per-invocation state to prevent leaks across warm Lambda reuses
         self._execution_arn = ""
