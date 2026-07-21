@@ -36,7 +36,7 @@ from aws_durable_execution_sdk_python.context import (
     ExecutionContext,
 )
 from aws_durable_execution_sdk_python.exceptions import (
-    CallableRuntimeError,
+    ChildContextError,
     InvalidStateError,
     SuspendExecution,
     TimedSuspendExecution,
@@ -221,12 +221,12 @@ def test_batch_result_throw_if_error():
     result = BatchResult(items, CompletionReason.ALL_COMPLETED)
     result.throw_if_error()  # Should not raise
 
-    # Has error
-    error = ErrorObject("test message", "TestError", None, None)
+    # Has error - reconstructs the typed operation error from its discriminator
+    error = ErrorObject("test message", "ChildContextError", None, None)
     items = [BatchItem(0, BatchItemStatus.FAILED, error=error)]
     result = BatchResult(items, CompletionReason.ALL_COMPLETED)
 
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(ChildContextError, match="test message"):
         result.throw_if_error()
 
 
@@ -1795,6 +1795,68 @@ def test_concurrent_executor_create_result_with_failed_status():
     assert result.all[0].status == BatchItemStatus.FAILED
     assert result.all[0].error is not None
     assert result.all[0].error.message == "Test error"
+
+
+def test_failed_branch_error_type_matches_across_execute_and_replay():
+    """A failed branch's error_type must be identical on first run and replay.
+
+    First run builds the item error in _create_result; replay reads the branch's
+    FAIL checkpoint (which records the raw escaping type). Both must surface the
+    raw type ("ValueError"), not the ChildContextError wrapper class name.
+    """
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            msg = "Test error"
+            raise ValueError(msg)
+
+    completion_config = CompletionConfig(
+        min_successful=1,
+        tolerated_failure_count=0,
+        tolerated_failure_percentage=None,
+    )
+
+    def make_executor():
+        return TestExecutor(
+            executables=[Executable(0, lambda: "test")],
+            max_concurrency=1,
+            completion_config=completion_config,
+            sub_type_top="TOP",
+            sub_type_iteration="ITER",
+            name_prefix="test_",
+            serdes=None,
+        )
+
+    # First run: execute() runs the branch and builds the result live.
+    execution_state = Mock()
+    execution_state.create_checkpoint = Mock()
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa: SLF001
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    live_error = make_executor().execute(execution_state, executor_context).all[0].error
+    assert live_error is not None
+
+    # Replay: replay() reads the child's FAIL checkpoint, which stored the raw type.
+    failed_checkpoint = Mock()
+    failed_checkpoint.is_succeeded.return_value = False
+    failed_checkpoint.is_failed.return_value = True
+    failed_checkpoint.error = ErrorObject(
+        message="Test error", type="ValueError", data=None, stack_trace=None
+    )
+    replay_state = Mock()
+    replay_state.get_checkpoint_result = Mock(return_value=failed_checkpoint)
+    replay_context = Mock()
+    replay_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa: SLF001
+
+    replay_error = make_executor().replay(replay_state, replay_context).all[0].error
+    assert replay_error is not None
+
+    # Both paths must carry the same raw error_type.
+    assert replay_error.type == "ValueError"
+    assert live_error.type == replay_error.type
 
 
 def test_timer_scheduler_can_resume_false():

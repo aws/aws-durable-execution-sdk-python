@@ -15,10 +15,10 @@ import pytest
 
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
-    CallableRuntimeError,
     DurableApiErrorCategory,
     GetExecutionStateError,
     OrphanedChildException,
+    StepError,
     TimedSuspendExecution,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -368,32 +368,39 @@ def test_checkpointed_result_is_started():
     assert result_no_op.is_started() is False
 
 
-def test_checkpointed_result_raise_callable_error():
-    """Test CheckpointedResult.raise_callable_error method."""
-    error = Mock(spec=ErrorObject)
-    error.to_callable_runtime_error.return_value = RuntimeError("Test error")
+def test_checkpointed_result_raise_operation_error():
+    """raise_operation_error wraps the checkpoint error in the given operation type."""
+    error = ErrorObject(
+        message="Test error", type="ValueError", data="d", stack_trace=["l"]
+    )
     result = CheckpointedResult(error=error)
 
-    with pytest.raises(RuntimeError, match="Test error"):
-        result.raise_callable_error()
+    with pytest.raises(StepError, match="Test error") as exc_info:
+        result.raise_operation_error(StepError)
 
-    error.to_callable_runtime_error.assert_called_once()
+    # error_type carries the escaping/original error type from the checkpoint,
+    # and a typed __cause__ is reattached so replay matches the first run.
+    assert exc_info.value.error_type == "ValueError"
+    assert exc_info.value.data == "d"
+    assert exc_info.value.stack_trace == ["l"]
+    assert exc_info.value.__cause__ is not None
+    assert str(exc_info.value.__cause__) == "Test error"
 
 
-def test_checkpointed_result_raise_callable_error_no_error():
-    """Test CheckpointedResult.raise_callable_error with no error."""
+def test_checkpointed_result_raise_operation_error_no_error():
+    """raise_operation_error with no error raises the operation type with a default message."""
     result = CheckpointedResult()
 
-    with pytest.raises(CallableRuntimeError, match="Unknown error"):
-        result.raise_callable_error()
+    with pytest.raises(StepError, match="Unknown error"):
+        result.raise_operation_error(StepError)
 
 
-def test_checkpointed_result_raise_callable_error_no_error_with_message():
-    """Test CheckpointedResult.raise_callable_error with no error and custom message."""
+def test_checkpointed_result_raise_operation_error_no_error_with_message():
+    """raise_operation_error with no error uses the provided custom message."""
     result = CheckpointedResult()
 
-    with pytest.raises(CallableRuntimeError, match="Custom error message"):
-        result.raise_callable_error("Custom error message")
+    with pytest.raises(StepError, match="Custom error message"):
+        result.raise_operation_error(StepError, "Custom error message")
 
 
 def test_checkpointed_result_immutable():

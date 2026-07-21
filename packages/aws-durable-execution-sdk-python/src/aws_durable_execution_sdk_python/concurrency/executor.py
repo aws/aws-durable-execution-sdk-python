@@ -25,6 +25,7 @@ from aws_durable_execution_sdk_python.config import (
     NestingType,
 )
 from aws_durable_execution_sdk_python.exceptions import (
+    DurableOperationError,
     OrphanedChildException,
     SuspendExecution,
     TimedSuspendExecution,
@@ -418,11 +419,26 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
                         )
                     )
                 case BranchStatus.FAILED:
+                    err = executable.error
+                    # Record the raw escaping type so first-run matches the
+                    # branch's FAIL checkpoint that replay reads back;
+                    # from_exception on the ChildContextError wrapper would
+                    # instead record the wrapper class name.
+                    error_object = (
+                        ErrorObject(
+                            message=err.message,
+                            type=err.error_type,
+                            data=err.data,
+                            stack_trace=err.stack_trace,
+                        )
+                        if isinstance(err, DurableOperationError)
+                        else ErrorObject.from_exception(err)
+                    )
                     batch_items.append(
                         BatchItem(
                             executable.index,
                             BatchItemStatus.FAILED,
-                            error=ErrorObject.from_exception(executable.error),
+                            error=error_object,
                         )
                     )
                 case (

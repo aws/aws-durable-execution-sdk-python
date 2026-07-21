@@ -18,9 +18,15 @@ from aws_durable_execution_sdk_python.context import (
 
 # Most common exceptions - users need to handle these exceptions
 from aws_durable_execution_sdk_python.exceptions import (
+    ChildContextError,
     DurableExecutionsError,
+    DurableOperationError,
+    ExecutionError,
     InvocationError,
+    InvokeError,
+    StepError,
     ValidationError,
+    WaitForConditionError,
 )
 
 # Core decorator - used in every durable function
@@ -33,12 +39,18 @@ from aws_durable_execution_sdk_python.types import StepContext
 
 __all__ = [
     "BatchResult",
+    "ChildContextError",
     "DurableContext",
     "DurableExecutionsError",
+    "DurableOperationError",
+    "ExecutionError",
     "InvocationError",
+    "InvokeError",
     "ParallelBranch",
     "StepContext",
+    "StepError",
     "ValidationError",
+    "WaitForConditionError",
     "WithRetryConfig",
     "__version__",
     "durable_execution",

@@ -763,6 +763,17 @@
         "FILESYSTEM_MOUNT_PATH": "/mnt/s3"
       },
       "path": "./src/filesystem_serdes/filesystem_serdes_preview.py"
+    },
+    {
+      "name": "Catch Typed Step Error",
+      "description": "Catch a typed StepError raised by a failed step",
+      "handler": "catch_typed_step_error.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/error_handling/catch_typed_step_error.py"
     }
   ]
 }

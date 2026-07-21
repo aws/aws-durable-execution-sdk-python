@@ -6,7 +6,6 @@ Avoid any non-stdlib references in this module, it is at the bottom of the depen
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Self, TypedDict
 
@@ -266,25 +265,88 @@ class InvalidStateError(DurableExecutionsError):
     """Raised when an operation is attempted on an object in an invalid state."""
 
 
-class UserlandError(DurableExecutionsError):
-    """Failure in user-land - i.e code passed into durable executions from the caller."""
+class DurableOperationError(DurableExecutionsError):
+    """Base class for typed, per-operation failures.
 
+    Wraps a failure that escaped a Durable Function operation (step, invoke,
+    child context, wait_for_condition). The concrete class identifies the
+    operation kind (so callers can ``except StepError``); the escaping error is
+    preserved as ``__cause__`` on the first run and reconstructed on replay.
 
-class CallableRuntimeError(UserlandError):
-    """This error wraps any failure from inside the callable code that you pass to a Durable Function operation."""
+    Attributes:
+        message: Human-readable failure message.
+        error_type: Type name of the error that escaped the operation (the
+            original/inner error, e.g. ``"ValueError"``), not the operation
+            class. Defaults to the class name only when no escaping error is
+            known.
+        data: Optional serialized error payload, preserved across operation
+            boundaries.
+        stack_trace: Optional stack trace lines captured from the origin.
+    """
 
     def __init__(
         self,
-        message: str | None,
-        error_type: str | None,
-        data: str | None,
-        stack_trace: list[str] | None,
+        message: str | None = None,
+        error_type: str | None = None,
+        data: str | None = None,
+        stack_trace: list[str] | None = None,
     ) -> None:
         super().__init__(message)
-        self.message = message
-        self.error_type = error_type
-        self.data = data
-        self.stack_trace = stack_trace
+        self.message: str | None = message
+        self.error_type: str = error_type or type(self).__name__
+        self.data: str | None = data
+        self.stack_trace: list[str] | None = stack_trace
+
+    @classmethod
+    def from_error_fields(
+        cls,
+        error_type: str | None,
+        message: str | None,
+        data: str | None,
+        stack_trace: list[str] | None,
+    ) -> DurableOperationError:
+        """Rebuild the correct subclass from serialized checkpoint error fields.
+
+        Looks the discriminator up in the reconstruction registry, falling back
+        to the base :class:`DurableOperationError` when ``error_type`` is unknown
+        (e.g. a downstream error surfaced by an async invoke/callback checkpoint).
+        """
+        target_cls: type[DurableOperationError] = _DURABLE_OPERATION_ERROR_REGISTRY.get(
+            error_type or "", DurableOperationError
+        )
+        return target_cls(
+            message=message,
+            error_type=error_type,
+            data=data,
+            stack_trace=stack_trace,
+        )
+
+
+class StepError(DurableOperationError):
+    """Raised when a step operation fails."""
+
+
+class InvokeError(DurableOperationError):
+    """Raised when a durable invoke operation fails."""
+
+
+class ChildContextError(DurableOperationError):
+    """Raised when a child context (run_in_child_context, map, parallel) fails."""
+
+
+class WaitForConditionError(DurableOperationError):
+    """Raised when a wait_for_condition operation fails."""
+
+
+# Reconstruction registry for replay: only the SDK's own operation-error types.
+# Any other discriminator falls back to DurableOperationError in
+# from_error_fields, so we never call a constructor the SDK doesn't control.
+_DURABLE_OPERATION_ERROR_REGISTRY: dict[str, type[DurableOperationError]] = {
+    "StepError": StepError,
+    "InvokeError": InvokeError,
+    "ChildContextError": ChildContextError,
+    "WaitForConditionError": WaitForConditionError,
+}
 
 
 class StepInterruptedError(InvocationError):
@@ -395,37 +457,6 @@ class OrderedLockError(DurableExecutionsError):
         )
         super().__init__(msg)
         self.source_exception: Exception | None = source_exception
-
-
-@dataclass(frozen=True)
-class CallableRuntimeErrorSerializableDetails:
-    """Serializable error details."""
-
-    type: str
-    message: str
-
-    @classmethod
-    def from_exception(
-        cls, exception: Exception
-    ) -> CallableRuntimeErrorSerializableDetails:
-        """Create an instance from an Exception, using its type and message.
-
-        Args:
-            exception: An Exception instance
-
-        Returns:
-            A CallableRuntimeErrorDetails instance with the exception's type name and message
-        """
-        return cls(type=exception.__class__.__name__, message=str(exception))
-
-    def __str__(self) -> str:
-        """
-        Return a string representation of the object.
-
-        Returns:
-            A string in the format "type: message"
-        """
-        return f"{self.type}: {self.message}"
 
 
 class SerDesError(DurableExecutionsError):

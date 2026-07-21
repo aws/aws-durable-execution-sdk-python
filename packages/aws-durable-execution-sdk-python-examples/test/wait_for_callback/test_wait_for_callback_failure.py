@@ -21,7 +21,11 @@ def test_wait_for_callback_failure(durable_runner):
 
     assert result.status is InvocationStatus.FAILED
     assert isinstance(result.error, ErrorObject)
+    # The callback failure raises CallbackError inside the child context that
+    # wait_for_callback runs in; it is wrapped as ChildContextError so first run
+    # and replay surface an identical type. The original CallbackError type is
+    # preserved on the error's error_type/__cause__.
     assert result.error.to_dict() == {
         "ErrorMessage": "my callback error",
-        "ErrorType": "CallableRuntimeError",
+        "ErrorType": "ChildContextError",
     }

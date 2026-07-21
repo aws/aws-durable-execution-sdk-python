@@ -9,8 +9,8 @@ import pytest
 
 from aws_durable_execution_sdk_python.config import InvokeConfig
 from aws_durable_execution_sdk_python.exceptions import (
-    CallableRuntimeError,
     ExecutionError,
+    InvokeError,
     SuspendExecution,
     TimedSuspendExecution,
 )
@@ -147,7 +147,7 @@ def test_invoke_handler_already_terminated(kind: OperationStatus):
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
 
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(InvokeError):
         invoke_handler(
             function_name="test_function",
             payload="test_input",
@@ -176,7 +176,7 @@ def test_invoke_handler_already_timed_out():
     mock_result = CheckpointedResult.create_from_operation(operation)
     mock_state.get_checkpoint_result.return_value = mock_result
 
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(InvokeError):
         invoke_handler(
             function_name="test_function",
             payload="test_input",
@@ -914,7 +914,7 @@ def test_invoke_immediate_response_immediate_failure(status: OperationStatus):
     mock_state.get_checkpoint_result.side_effect = [not_found, failed]
 
     # Verify error is raised without suspend
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(InvokeError):
         invoke_handler(
             function_name="test_function",
             payload="test_input",

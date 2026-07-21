@@ -7,25 +7,28 @@ import pytest
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 
 from aws_durable_execution_sdk_python.exceptions import (
+    _DURABLE_OPERATION_ERROR_REGISTRY,
     BotoClientError,
-    CallableRuntimeError,
-    CallableRuntimeErrorSerializableDetails,
+    ChildContextError,
     CheckpointError,
     CheckpointErrorCategory,
     DurableApiErrorCategory,
     DurableExecutionsError,
+    DurableOperationError,
     ExecutionError,
     GetExecutionStateError,
     InvocationError,
+    InvokeError,
     OrderedLockError,
     OrphanedChildException,
+    StepError,
     StepInterruptedError,
     SuspendExecution,
     TerminationReason,
     TimedSuspendExecution,
     UnrecoverableError,
-    UserlandError,
     ValidationError,
+    WaitForConditionError,
 )
 
 
@@ -207,31 +210,102 @@ def test_validation_error():
     assert isinstance(error, DurableExecutionsError)
 
 
-def test_userland_error():
-    """Test UserlandError exception."""
-    error = UserlandError("userland error")
-    assert str(error) == "userland error"
+def test_durable_operation_error_defaults_error_type_to_class_name():
+    """Base DurableOperationError defaults error_type to its class name."""
+    error = DurableOperationError("boom")
+    assert str(error) == "boom"
+    assert error.message == "boom"
+    assert error.error_type == "DurableOperationError"
+    assert error.data is None
+    assert error.stack_trace is None
     assert isinstance(error, DurableExecutionsError)
 
 
-def test_callable_runtime_error():
-    """Test CallableRuntimeError exception."""
-    error = CallableRuntimeError(
+def test_durable_operation_error_explicit_fields():
+    """DurableOperationError preserves explicitly provided fields."""
+    error = DurableOperationError(
         "runtime error", "ValueError", "error data", ["line1", "line2"]
     )
-    assert str(error) == "runtime error"
     assert error.message == "runtime error"
     assert error.error_type == "ValueError"
     assert error.data == "error data"
-    assert isinstance(error, UserlandError)
+    assert error.stack_trace == ["line1", "line2"]
 
 
-def test_callable_runtime_error_with_none_values():
-    """Test CallableRuntimeError with None values."""
-    error = CallableRuntimeError(None, None, None, None)
+def test_durable_operation_error_with_none_message():
+    """DurableOperationError tolerates a None message."""
+    error = DurableOperationError(None)
     assert error.message is None
-    assert error.error_type is None
+    assert error.error_type == "DurableOperationError"
     assert error.data is None
+
+
+@pytest.mark.parametrize(
+    "error_cls",
+    [StepError, InvokeError, ChildContextError, WaitForConditionError],
+)
+def test_operation_error_subclasses(error_cls):
+    """Each per-operation subclass derives from DurableOperationError and self-types."""
+    error = error_cls("failed")
+    assert isinstance(error, DurableOperationError)
+    assert isinstance(error, DurableExecutionsError)
+    assert error.error_type == error_cls.__name__
+    assert error.message == "failed"
+
+
+def test_operation_error_registry_contains_all_subclasses():
+    """The reconstruction registry is keyed by class name for every subclass."""
+    assert _DURABLE_OPERATION_ERROR_REGISTRY["StepError"] is StepError
+    assert _DURABLE_OPERATION_ERROR_REGISTRY["InvokeError"] is InvokeError
+    assert _DURABLE_OPERATION_ERROR_REGISTRY["ChildContextError"] is ChildContextError
+    assert (
+        _DURABLE_OPERATION_ERROR_REGISTRY["WaitForConditionError"]
+        is WaitForConditionError
+    )
+
+
+def test_from_error_fields_user_subclass_falls_back_without_typeerror():
+    """A user subclass with an incompatible __init__ must not be reconstructed.
+
+    Only the SDK's own operation-error types are in the registry, so an unknown
+    discriminator (including a user subclass) falls back to the base
+    DurableOperationError instead of calling a constructor the SDK doesn't control.
+    """
+
+    class CustomError(StepError):
+        def __init__(self, my_arg: str):
+            super().__init__(f"arb: {my_arg}")
+
+    # The user subclass is not registered, so reconstruction never calls its __init__.
+    assert "CustomError" not in _DURABLE_OPERATION_ERROR_REGISTRY
+    reconstructed = DurableOperationError.from_error_fields(
+        error_type="CustomError",
+        message="boom",
+        data=None,
+        stack_trace=None,
+    )
+    assert type(reconstructed) is DurableOperationError
+    assert reconstructed.error_type == "CustomError"
+    assert reconstructed.message == "boom"
+
+
+def test_from_error_fields_by_name():
+    """from_error_fields rebuilds the correct subclass from its discriminator."""
+    error = DurableOperationError.from_error_fields(
+        "StepError", "step failed", "data", ["frame"]
+    )
+    assert isinstance(error, StepError)
+    assert error.error_type == "StepError"
+    assert error.message == "step failed"
+    assert error.data == "data"
+    assert error.stack_trace == ["frame"]
+
+
+def test_from_error_fields_unknown_falls_back_to_base():
+    """Unknown discriminators fall back to the base DurableOperationError."""
+    error = DurableOperationError.from_error_fields("ValueError", "boom", None, None)
+    assert type(error) is DurableOperationError
+    assert error.error_type == "ValueError"
 
 
 def test_step_interrupted_error():
@@ -265,27 +339,6 @@ def test_ordered_lock_error_with_source():
     error = OrderedLockError("lock error", source)
     assert str(error) == "lock error ValueError: source error"
     assert error.source_exception is source
-
-
-def test_callable_runtime_error_serializable_details_from_exception():
-    """Test CallableRuntimeErrorSerializableDetails.from_exception."""
-    exception = ValueError("test error")
-    details = CallableRuntimeErrorSerializableDetails.from_exception(exception)
-    assert details.type == "ValueError"
-    assert details.message == "test error"
-
-
-def test_callable_runtime_error_serializable_details_str():
-    """Test CallableRuntimeErrorSerializableDetails.__str__."""
-    details = CallableRuntimeErrorSerializableDetails("TypeError", "type error message")
-    assert str(details) == "TypeError: type error message"
-
-
-def test_callable_runtime_error_serializable_details_frozen():
-    """Test CallableRuntimeErrorSerializableDetails is frozen."""
-    details = CallableRuntimeErrorSerializableDetails("Error", "message")
-    with pytest.raises(AttributeError):
-        details.type = "NewError"
 
 
 def test_timed_suspend_execution():

@@ -10,7 +10,10 @@ import pytest
 
 from aws_durable_execution_sdk_python.config import ChildConfig
 from aws_durable_execution_sdk_python.exceptions import (
-    CallableRuntimeError,
+    BotoClientError,
+    ChildContextError,
+    DurableApiErrorCategory,
+    ExecutionError,
     InvocationError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -173,13 +176,13 @@ def test_child_handler_already_failed():
     mock_result = Mock()
     mock_result.is_succeeded.return_value = False
     mock_result.is_failed.return_value = True
-    mock_result.raise_callable_error.side_effect = CallableRuntimeError(
-        "Previous failure", "TestError", None, None
+    mock_result.raise_operation_error.side_effect = ChildContextError(
+        "Previous failure"
     )
     mock_state.get_checkpoint_result.return_value = mock_result
     mock_callable = Mock()
 
-    with pytest.raises(CallableRuntimeError, match="Previous failure"):
+    with pytest.raises(ChildContextError, match="Previous failure"):
         child_handler(
             mock_callable,
             mock_state,
@@ -287,7 +290,7 @@ def test_child_handler_callable_exception(
     mock_callable = Mock(side_effect=ValueError("Test error"))
     mock_state.wrap_user_function.return_value = mock_callable
 
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(ChildContextError):
         child_handler(
             mock_callable,
             mock_state,
@@ -322,14 +325,18 @@ def test_child_handler_callable_exception(
     assert fail_operation.operation_type is OperationType.CONTEXT
     assert fail_operation.sub_type is expected_sub_type
     assert fail_operation.action is OperationAction.FAIL
-    assert fail_operation.error == ErrorObject.from_exception(ValueError("Test error"))
+    # The checkpoint records the escaping error as-is (its own type); the
+    # ChildContextError wrapper is raised and recorded one level up.
+    assert fail_operation.error == ErrorObject(
+        message="Test error", type="ValueError", data=None, stack_trace=None
+    )
 
 
 def test_child_handler_error_wrapped():
-    """Test child_handler wraps regular errors as CallableRuntimeError.
+    """Test child_handler wraps regular errors as ChildContextError.
 
     Verifies:
-    - Regular exceptions are wrapped as CallableRuntimeError
+    - Regular exceptions are wrapped as ChildContextError
     - FAIL checkpoint is created
     """
     mock_state = Mock(spec=ExecutionState)
@@ -344,7 +351,7 @@ def test_child_handler_error_wrapped():
     mock_callable = Mock(side_effect=test_error)
     mock_state.wrap_user_function.return_value = mock_callable
 
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(ChildContextError):
         child_handler(
             mock_callable,
             mock_state,
@@ -359,14 +366,7 @@ def test_child_handler_error_wrapped():
 
 
 def test_child_handler_invocation_error_reraised():
-    """Test child_handler re-raises InvocationError after checkpointing FAIL.
-
-    Verifies:
-    - InvocationError: checkpoints FAIL and re-raises (for retry)
-    - FAIL checkpoint is created
-    - Original InvocationError is re-raised (not wrapped)
-    """
-
+    """InvocationError propagates unchanged and writes no FAIL checkpoint."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
@@ -379,6 +379,7 @@ def test_child_handler_invocation_error_reraised():
     mock_callable = Mock(side_effect=test_error)
     mock_state.wrap_user_function.return_value = mock_callable
 
+    # Raises the original InvocationError, NOT ChildContextError.
     with pytest.raises(InvocationError, match="Invocation failed"):
         child_handler(
             mock_callable,
@@ -389,10 +390,83 @@ def test_child_handler_invocation_error_reraised():
             None,
         )
 
+    # Only the async START checkpoint is written - no FAIL.
+    assert mock_state.create_checkpoint.call_count == 1  # start only
+    actions = [
+        call.kwargs["operation_update"].action
+        for call in mock_state.create_checkpoint.call_args_list
+    ]
+    assert OperationAction.FAIL not in actions
+
+
+def test_child_handler_execution_error_wrapped():
+    """ExecutionError is wrapped as ChildContextError (replay-safe), not raised raw."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = False
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = False
+    mock_result.is_existent.return_value = False
+    mock_state.get_checkpoint_result.return_value = mock_result
+    test_error = ExecutionError("execution failed")
+    mock_callable = Mock(side_effect=test_error)
+    mock_state.wrap_user_function.return_value = mock_callable
+
+    with pytest.raises(ChildContextError) as exc_info:
+        child_handler(
+            mock_callable,
+            mock_state,
+            OperationIdentifier(
+                "op7c", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            ),
+            None,
+        )
+
+    # Not the raw ExecutionError; the original type survives on error_type.
+    assert not isinstance(exc_info.value, ExecutionError)
+    assert exc_info.value.error_type == "ExecutionError"
+
     # Verify FAIL checkpoint was created
     assert mock_state.create_checkpoint.call_count == 2  # start and fail
+    fail_call = mock_state.create_checkpoint.call_args_list[1]
+    fail_operation = fail_call[1]["operation_update"]
+    assert fail_operation.action is OperationAction.FAIL
 
-    # Verify fail checkpoint
+
+def test_child_handler_non_retryable_invocation_error_wrapped():
+    """Non-retryable InvocationError is terminal: writes FAIL and wraps as ChildContextError."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = False
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = False
+    mock_result.is_existent.return_value = False
+    mock_state.get_checkpoint_result.return_value = mock_result
+    test_error = BotoClientError(
+        "boto failure", error_category=DurableApiErrorCategory.EXECUTION
+    )
+    assert test_error.is_retryable() is False
+    mock_callable = Mock(side_effect=test_error)
+    mock_state.wrap_user_function.return_value = mock_callable
+
+    with pytest.raises(ChildContextError) as exc_info:
+        child_handler(
+            mock_callable,
+            mock_state,
+            OperationIdentifier(
+                "op7d", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            ),
+            None,
+        )
+
+    # Not re-raised raw; the escaping type survives on error_type.
+    assert not isinstance(exc_info.value, InvocationError)
+    assert exc_info.value.error_type == "BotoClientError"
+
+    # FAIL checkpoint IS written so the op is not left STARTED in a FAILED execution.
+    assert mock_state.create_checkpoint.call_count == 2  # start and fail
     fail_call = mock_state.create_checkpoint.call_args_list[1]
     fail_operation = fail_call[1]["operation_update"]
     assert fail_operation.action is OperationAction.FAIL
@@ -881,7 +955,7 @@ def test_child_handler_is_virtual_with_exception():
     A virtual branch emits no lifecycle entries in the execution
     history, so a failure inside the branch does not get its own FAIL
     checkpoint. The exception still propagates (wrapped as
-    CallableRuntimeError for non-InvocationError exceptions) so the
+    ChildContextError for non-InvocationError exceptions) so the
     concurrency executor records the failure in the BatchResult and
     its completion-tolerance logic still applies.
     """
@@ -899,7 +973,7 @@ def test_child_handler_is_virtual_with_exception():
 
     config = ChildConfig(is_virtual=True)
 
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(ChildContextError):
         child_handler(
             mock_callable,
             mock_state,
@@ -931,7 +1005,7 @@ def test_child_handler_not_is_virtual_with_exception():
 
     config = ChildConfig(is_virtual=False)
 
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(ChildContextError):
         child_handler(
             mock_callable,
             mock_state,

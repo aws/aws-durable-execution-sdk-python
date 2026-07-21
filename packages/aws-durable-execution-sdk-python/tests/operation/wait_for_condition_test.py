@@ -8,14 +8,19 @@ import pytest
 
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.exceptions import (
-    CallableRuntimeError,
+    BotoClientError,
+    DurableApiErrorCategory,
+    DurableOperationError,
+    ExecutionError,
     InvocationError,
     SuspendExecution,
+    WaitForConditionError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     Operation,
+    OperationAction,
     OperationStatus,
     OperationType,
     StepDetails,
@@ -232,7 +237,7 @@ def test_wait_for_condition_already_failed():
         wait_strategy=lambda s, a: WaitForConditionDecision.stop_polling(),
     )
 
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(WaitForConditionError):
         wait_for_condition_handler(
             state=mock_state,
             operation_identifier=op_id,
@@ -392,7 +397,10 @@ def test_wait_for_condition_check_function_exception():
         wait_strategy=lambda s, a: WaitForConditionDecision.stop_polling(),
     )
 
-    with pytest.raises(ValueError, match="Test error"):
+    # A check-function failure surfaces as the typed WaitForConditionError. First
+    # run and replay both reconstruct from the checkpointed error, so error_type
+    # is the original type and __cause__ is a reconstructed stand-in.
+    with pytest.raises(WaitForConditionError, match="Test error") as exc_info:
         wait_for_condition_handler(
             state=mock_state,
             operation_identifier=op_id,
@@ -401,7 +409,140 @@ def test_wait_for_condition_check_function_exception():
             context_logger=mock_logger,
         )
 
+    assert exc_info.value.error_type == "ValueError"
+    assert isinstance(exc_info.value.__cause__, DurableOperationError)
+    assert exc_info.value.__cause__.error_type == "ValueError"
     assert mock_state.create_checkpoint.call_count == 2  # START and FAIL
+
+
+def test_wait_for_condition_invocation_error_not_wrapped():
+    """InvocationError propagates unchanged and writes no FAIL checkpoint."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "arn:aws:test"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
+
+    def check_func(state, context):
+        raise InvocationError("control-flow failure")
+
+    mock_state.wrap_user_function.return_value = check_func
+
+    config = WaitForConditionConfig(
+        initial_state=5,
+        wait_strategy=lambda s, a: WaitForConditionDecision.stop_polling(),
+    )
+
+    # Not wrapped in WaitForConditionError - propagates with its own type.
+    with pytest.raises(InvocationError, match="control-flow failure"):
+        wait_for_condition_handler(
+            state=mock_state,
+            operation_identifier=op_id,
+            check=check_func,
+            config=config,
+            context_logger=mock_logger,
+        )
+
+    # Only the async START checkpoint is written - no FAIL.
+    assert mock_state.create_checkpoint.call_count == 1  # START only
+    actions = [
+        call.kwargs["operation_update"].action
+        for call in mock_state.create_checkpoint.call_args_list
+    ]
+    assert OperationAction.FAIL not in actions
+
+
+def test_wait_for_condition_execution_error_wrapped():
+    """ExecutionError from the check function is wrapped as WaitForConditionError (replay-safe)."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "arn:aws:test"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
+
+    def check_func(state, context):
+        raise ExecutionError("execution failure")
+
+    mock_state.wrap_user_function.return_value = check_func
+
+    config = WaitForConditionConfig(
+        initial_state=5,
+        wait_strategy=lambda s, a: WaitForConditionDecision.stop_polling(),
+    )
+
+    with pytest.raises(WaitForConditionError, match="execution failure") as exc_info:
+        wait_for_condition_handler(
+            state=mock_state,
+            operation_identifier=op_id,
+            check=check_func,
+            config=config,
+            context_logger=mock_logger,
+        )
+
+    # Not the raw ExecutionError; the original type survives on error_type.
+    assert not isinstance(exc_info.value, ExecutionError)
+    assert exc_info.value.error_type == "ExecutionError"
+    assert mock_state.create_checkpoint.call_count == 2  # START and FAIL
+
+
+def test_wait_for_condition_non_retryable_invocation_error_wrapped():
+    """Non-retryable InvocationError is terminal: writes FAIL and wraps as WaitForConditionError."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "arn:aws:test"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    op_id = OperationIdentifier(
+        "op1", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
+
+    test_error = BotoClientError(
+        "boto failure", error_category=DurableApiErrorCategory.EXECUTION
+    )
+    assert test_error.is_retryable() is False
+
+    def check_func(state, context):
+        raise test_error
+
+    mock_state.wrap_user_function.return_value = check_func
+
+    config = WaitForConditionConfig(
+        initial_state=5,
+        wait_strategy=lambda s, a: WaitForConditionDecision.stop_polling(),
+    )
+
+    with pytest.raises(WaitForConditionError) as exc_info:
+        wait_for_condition_handler(
+            state=mock_state,
+            operation_identifier=op_id,
+            check=check_func,
+            config=config,
+            context_logger=mock_logger,
+        )
+
+    # Not re-raised raw; the escaping type survives on error_type.
+    assert not isinstance(exc_info.value, InvocationError)
+    assert exc_info.value.error_type == "BotoClientError"
+    # FAIL checkpoint IS written (START + FAIL).
+    assert mock_state.create_checkpoint.call_count == 2
 
 
 def test_wait_for_condition_check_context():
@@ -1234,7 +1375,7 @@ def test_wait_for_condition_immediate_failure_without_executing_check():
     )
 
     # Verify error raised without executing check function
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(WaitForConditionError):
         wait_for_condition_handler(
             state=mock_state,
             operation_identifier=op_id,
