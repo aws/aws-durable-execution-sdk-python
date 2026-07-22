@@ -103,6 +103,52 @@ Resources:
       DurableConfig:
         RetentionPeriodInDays: 7
         ExecutionTimeout: 300
+  ParallelFailFast:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-6"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_fail_fast.handler
+      Description: Parallel with a fail-fast completion config (tolerated-failure-count=0) stops on
+        the first branch failure
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelThrowIfError:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-7"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_throw_if_error.handler
+      Description: Parallel where the handler rethrows, propagating a branch failure
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelMinSuccessful:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-8"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_min_successful.handler
+      Description: Parallel with a min-successful completion config stops early
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
   ParallelTolerated:
     Type: AWS::Serverless::Function
     TestingMetadata:
@@ -111,6 +157,21 @@ Resources:
       CodeUri: lambda-build/
       Handler: parallel.parallel_tolerated_within.handler
       Description: Parallel tolerating one failure completes all branches
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelToleratedExceeded:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-10"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_tolerated_exceeded.handler
+      Description: Parallel stops early once the failure count exceeds the tolerated-failure-count
       Role:
         Fn::GetAtt:
         - DurableFunctionRole
@@ -141,6 +202,21 @@ Resources:
       CodeUri: lambda-build/
       Handler: parallel.parallel_flat.handler
       Description: Parallel with FLAT nesting executes branches in virtual contexts
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelToleratedPct:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-13"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_tolerated_pct.handler
+      Description: Parallel stops early once the failure percentage exceeds the tolerated-failure-percentage
       Role:
         Fn::GetAtt:
         - DurableFunctionRole
@@ -186,6 +262,51 @@ Resources:
       CodeUri: lambda-build/
       Handler: parallel.parallel_all_fail.handler
       Description: Parallel where all branches fail (within tolerance)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelMinNotReached:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-17"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_min_not_reached.handler
+      Description: Parallel min-successful not reached (all branches run)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelCombinedConfig:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-18"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_combined_config.handler
+      Description: Parallel combined completion config (min-successful + tolerated-failure-count)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelBadConcurrency:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-19"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_bad_concurrency.handler
+      Description: Parallel with invalid max-concurrency raises a validation error
       Role:
         Fn::GetAtt:
         - DurableFunctionRole
