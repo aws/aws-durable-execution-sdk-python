@@ -68,17 +68,16 @@ OPERATION_CHANGE_INFO = OperationChangeInfo(
 INVOCATION_START_INFO = InvocationStartInfo(
     request_id="req-1",
     execution_arn="arn:aws:lambda:us-east-1:123:durable:abc",
-    start_time=START_TS,
+    execution_start_time=START_TS,
     is_first_invocation=True,
 )
 INVOCATION_END_INFO = InvocationEndInfo(
     request_id="req-1",
     execution_arn="arn:test",
-    start_time=START_TS,
+    execution_start_time=START_TS,
     status=InvocationStatus.FAILED,
     error=ERROR,
     is_first_invocation=False,
-    end_time=END_TS,
 )
 
 USER_FUNCTION_START_INFO = UserFunctionStartInfo(
@@ -137,17 +136,16 @@ class TestDataClasses(unittest.TestCase):
             INVOCATION_START_INFO.execution_arn,
             "arn:aws:lambda:us-east-1:123:durable:abc",
         )
-        self.assertEqual(INVOCATION_START_INFO.start_time, START_TS)
+        self.assertEqual(INVOCATION_START_INFO.execution_start_time, START_TS)
         self.assertTrue(INVOCATION_START_INFO.is_first_invocation)
 
     def test_invocation_end_info(self):
         self.assertEqual(INVOCATION_END_INFO.request_id, "req-1")
         self.assertEqual(INVOCATION_END_INFO.execution_arn, "arn:test")
-        self.assertEqual(INVOCATION_END_INFO.start_time, START_TS)
+        self.assertEqual(INVOCATION_END_INFO.execution_start_time, START_TS)
         self.assertFalse(INVOCATION_END_INFO.is_first_invocation)
         self.assertEqual(INVOCATION_END_INFO.status, InvocationStatus.FAILED)
         self.assertEqual(INVOCATION_END_INFO.error.message, "boom")
-        self.assertEqual(INVOCATION_END_INFO.end_time, END_TS)
 
     def test_user_function_start_info(self):
         self.assertEqual(USER_FUNCTION_START_INFO.operation_id, "op-1")
@@ -408,7 +406,9 @@ class TestPluginExecutorOnInvocationStart(unittest.TestCase):
             self.assertEqual(
                 LAMBDA_CTX.aws_request_id, self.executor._invocation_status.request_id
             )
-            self.assertEqual(START_TS, self.executor._invocation_status.start_time)
+            self.assertEqual(
+                START_TS, self.executor._invocation_status.execution_start_time
+            )
             self.assertFalse(self.executor._invocation_status.is_first_invocation)
 
         self.assertIsNone(self.executor._invocation_status)
