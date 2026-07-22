@@ -1,0 +1,240 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 60
+    MemorySize: 128
+Resources:
+  DurableFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: DurableExecutionPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:CheckpointDurableExecution
+            - lambda:GetDurableExecutionState
+            Resource: '*'
+  ParallelBasic:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-1"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_basic.handler
+      Description: Parallel basic (two branches, each a single step, all succeed)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelBranchesOnly:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-2"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_branches_only.handler
+      Description: Parallel invoked with the branches-only form (no name argument)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelNamed:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-3"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_named_branches.handler
+      Description: Parallel invoked with named-branch objects (a name plus a function)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelHetero:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-4"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_heterogeneous.handler
+      Description: Parallel whose branches return different types (string, number, object)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelEmpty:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-5"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_empty.handler
+      Description: Parallel invoked with an empty branches list completes immediately
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelTolerated:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-9"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_tolerated_within.handler
+      Description: Parallel tolerating one failure completes all branches
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelConcurrent:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-11"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_concurrent.handler
+      Description: Parallel executing branches concurrently returns index-ordered results
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelFlat:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-12"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_flat.handler
+      Description: Parallel with FLAT nesting executes branches in virtual contexts
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelReplay:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-14"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_replay_skips_succeeded.handler
+      Description: Parallel replay skips succeeded branches across a wait suspension
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelCustomSerde:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-15"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_custom_serde.handler
+      Description: Parallel with a custom per-branch serde (item_serdes)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelAllFail:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-16"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_all_fail.handler
+      Description: Parallel where all branches fail (within tolerance)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelAccessors:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-20"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_accessors.handler
+      Description: Parallel BatchResult accessors (succeeded/failed/get_errors/has_failure)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelNested:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-21"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_nested.handler
+      Description: Nested parallel (parallel inside a parallel branch)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  ParallelPctBoundary:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["8-22"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: parallel.parallel_pct_boundary.handler
+      Description: Parallel tolerated-failure-percentage at the boundary
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
