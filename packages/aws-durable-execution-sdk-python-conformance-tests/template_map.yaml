@@ -88,6 +88,51 @@ Resources:
       DurableConfig:
         RetentionPeriodInDays: 7
         ExecutionTimeout: 300
+  MapFailFast:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["9-5"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: map.map_fail_fast.handler
+      Description: Map fail-fast (tolerated-failure-count=0) stops after first failure
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  MapThrowIfError:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["9-6"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: map.map_throw_if_error.handler
+      Description: Map throw-if-error propagates an item failure to the execution
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  MapMinSuccessful:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["9-7"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: map.map_min_successful.handler
+      Description: Map min-successful early completion
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
   MapToleratedWithin:
     Type: AWS::Serverless::Function
     TestingMetadata:
@@ -96,6 +141,36 @@ Resources:
       CodeUri: lambda-build/
       Handler: map.map_tolerated_within.handler
       Description: Map tolerated-failure-count within tolerance (all items complete)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  MapToleratedExceeded:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["9-9"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: map.map_tolerated_exceeded.handler
+      Description: Map tolerated-failure-count exceeded (stops early)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  MapToleratedPct:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["9-10"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: map.map_tolerated_pct.handler
+      Description: Map tolerated-failure-percentage exceeded (stops early)
       Role:
         Fn::GetAtt:
         - DurableFunctionRole
