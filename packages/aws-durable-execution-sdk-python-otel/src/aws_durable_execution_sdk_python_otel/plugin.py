@@ -545,3 +545,10 @@ class OtelPlugin(DurableInstrumentationPlugin):
                 attributes["durable.attempt.outcome"] = info.outcome.value
 
         return attributes
+
+
+# The invocation-scoped plugin (relies on external ADOT auto-instrumentation and
+# the global TracerProvider) is now named InvocationOtelPlugin, matching the JS
+# SDK rename in aws-durable-execution-sdk-js#729. ``OtelPlugin`` is retained as a
+# backward-compatible alias because it is already published public API.
+InvocationOtelPlugin = OtelPlugin
