@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 60
+    MemorySize: 128
+Resources:
+  DurableFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: DurableExecutionPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:CheckpointDurableExecution
+            - lambda:GetDurableExecutionState
+            Resource: '*'
+  WaitForConditionBasic:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["6-1"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: wait_for_condition.wait_for_condition_basic.handler
+      Description: Wait-for-condition basic (polls until threshold met)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  WaitForConditionImmediate:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["6-2"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: wait_for_condition.wait_for_condition_immediate.handler
+      Description: Wait-for-condition immediate stop (condition already met)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  WaitForConditionWithName:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["6-3"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: wait_for_condition.wait_for_condition_with_name.handler
+      Description: Wait-for-condition with explicit name
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  WaitForConditionCustomInitialState:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["6-4"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: wait_for_condition.wait_for_condition_custom_initial_state.handler
+      Description: Wait-for-condition with custom initial state
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  WaitForConditionCheckThrows:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["6-7"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: wait_for_condition.wait_for_condition_check_throws.handler
+      Description: Wait-for-condition check throws (uncaught failure)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  WaitForConditionCheckThrowsCaught:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["6-8"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: wait_for_condition.wait_for_condition_check_throws_caught.handler
+      Description: Wait-for-condition check throws, caught by handler
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  WaitForConditionComplexObject:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["6-9"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: wait_for_condition.wait_for_condition_complex_object.handler
+      Description: Wait-for-condition with complex object state
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  WaitForConditionNullResult:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["6-10"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: wait_for_condition.wait_for_condition_null_result.handler
+      Description: Wait-for-condition null result
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  WaitForConditionCustomSerdes:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["6-11"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: wait_for_condition.wait_for_condition_custom_serdes.handler
+      Description: Wait-for-condition with custom state serdes
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  WaitForConditionThenStep:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["6-12"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: wait_for_condition.wait_for_condition_then_step.handler
+      Description: Wait-for-condition followed by a step
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  WaitForConditionMultipleSequential:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["6-13"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: wait_for_condition.wait_for_condition_multiple_sequential.handler
+      Description: Multiple sequential wait_for_condition operations
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
