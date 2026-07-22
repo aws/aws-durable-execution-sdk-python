@@ -36,11 +36,7 @@ class CfnTag:
         self.value = value
 
 
-class CfnLoader(yaml.SafeLoader):
-    """SafeLoader that wraps unknown (CloudFormation) tags instead of failing."""
-
-
-def _construct_cfn_tag(loader: CfnLoader, suffix: str, node: yaml.Node) -> CfnTag:
+def _construct_cfn_tag(loader: yaml.SafeLoader, suffix: str, node: yaml.Node) -> CfnTag:
     if isinstance(node, yaml.ScalarNode):
         value: object = loader.construct_scalar(node)
     elif isinstance(node, yaml.SequenceNode):
@@ -50,7 +46,10 @@ def _construct_cfn_tag(loader: CfnLoader, suffix: str, node: yaml.Node) -> CfnTa
     return CfnTag(node.tag, value)
 
 
-CfnLoader.add_multi_constructor("!", _construct_cfn_tag)
+# Teach SafeLoader to wrap CloudFormation short-form tags instead of failing,
+# so the template can be parsed with yaml.safe_load (no arbitrary object
+# construction -- every unknown tag becomes an inert CfnTag holder).
+yaml.SafeLoader.add_multi_constructor("!", _construct_cfn_tag)
 
 
 class CfnDumper(yaml.SafeDumper):
@@ -71,7 +70,7 @@ CfnDumper.add_representer(CfnTag, _represent_cfn_tag)
 def inject(template_path: str, role_arn: str) -> int:
     """Rewrite template_path in place; return the number of functions updated."""
     with open(template_path, encoding="utf-8") as f:
-        doc = yaml.load(f, Loader=CfnLoader)  # noqa: S506 - CfnLoader extends SafeLoader
+        doc = yaml.safe_load(f)
 
     resources = doc.get("Resources")
     if not isinstance(resources, dict):
