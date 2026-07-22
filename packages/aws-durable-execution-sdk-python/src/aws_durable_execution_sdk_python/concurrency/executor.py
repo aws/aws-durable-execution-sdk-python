@@ -252,6 +252,13 @@ class ConcurrentExecutor(ABC, Generic[CallableType, ResultType]):
             """
             try:
                 execution_state.create_checkpoint()
+            except OrphanedChildException:
+                # The execution has already completed, so there is nothing left
+                # to resume. Stop cleanly instead of recording a resume error.
+                # OrphanedChildException is a BaseException and so is not caught
+                # by the except below.
+                self._completion_event.set()
+                return
             except Exception as exc:  # noqa: BLE001
                 # resubmitter runs only on the single timer thread, so this
                 # check-then-set needs no lock. First error wins: keep the
