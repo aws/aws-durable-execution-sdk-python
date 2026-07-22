@@ -70,7 +70,7 @@ def _invocation_start_info() -> InvocationStartInfo:
     return InvocationStartInfo(
         request_id="request-1",
         execution_arn=EXECUTION_ARN,
-        start_time=START_TIME,
+        execution_start_time=START_TIME,
         is_first_invocation=True,
     )
 
@@ -80,10 +80,9 @@ def _invocation_end_info() -> InvocationEndInfo:
     return InvocationEndInfo(
         request_id="request-1",
         execution_arn=EXECUTION_ARN,
-        start_time=START_TIME,
+        execution_start_time=START_TIME,
         is_first_invocation=True,
         status=InvocationStatus.SUCCEEDED,
-        end_time=END_TIME,
         error=None,
     )
 

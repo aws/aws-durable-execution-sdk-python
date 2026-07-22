@@ -161,8 +161,8 @@ class UserFunctionEndInfo(OperationInfo):
 class InvocationInfo:
     request_id: str | None
     execution_arn: str | None
-    start_time: datetime.datetime | None
     is_first_invocation: bool
+    execution_start_time: datetime.datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -172,9 +172,8 @@ class InvocationStartInfo(InvocationInfo):
 
 @dataclass(frozen=True)
 class InvocationEndInfo(InvocationInfo):
-    status: InvocationStatus
-    end_time: datetime.datetime | None
-    error: ErrorObject | None
+    status: InvocationStatus | None = None
+    error: ErrorObject | None = None
 
     @classmethod
     def from_durable_execution_invocation_output(
@@ -185,10 +184,9 @@ class InvocationEndInfo(InvocationInfo):
         return InvocationEndInfo(
             request_id=invocation_start_info.request_id,
             execution_arn=invocation_start_info.execution_arn,
-            start_time=invocation_start_info.start_time,
             is_first_invocation=invocation_start_info.is_first_invocation,
+            execution_start_time=invocation_start_info.execution_start_time,
             status=output.status,
-            end_time=datetime.datetime.now(datetime.UTC),
             error=output.error,
         )
 
@@ -325,16 +323,11 @@ class PluginExecutor:
         lambda_context: LambdaContext | None,
     ) -> None:
         aws_request_id = lambda_context.aws_request_id if lambda_context else None
-        invocation_start_time = (
-            datetime.datetime.now(datetime.UTC)
-            if is_first_invocation
-            else execution_start_time
-        )
         self._invocation_status = InvocationStartInfo(
             execution_arn=execution_arn,
             request_id=aws_request_id,
             is_first_invocation=is_first_invocation,
-            start_time=invocation_start_time,
+            execution_start_time=execution_start_time,
         )
         self.execute_plugins(self._invocation_status, sync=True)
 
