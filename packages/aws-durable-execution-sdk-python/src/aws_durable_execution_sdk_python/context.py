@@ -5,7 +5,15 @@ import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Concatenate, Generic, ParamSpec, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Concatenate,
+    Generic,
+    NoReturn,
+    ParamSpec,
+    TypeVar,
+)
 
 from aws_durable_execution_sdk_python.config import (
     BatchedInput,
@@ -21,6 +29,11 @@ from aws_durable_execution_sdk_python.config import (
 )
 from aws_durable_execution_sdk_python.exceptions import (
     CallbackError,
+    CallbackExternalError,
+    CallbackSubmitterError,
+    CallbackTimeoutError,
+    ChildContextError,
+    StepError,
     SuspendExecution,
     ValidationError,
 )
@@ -69,6 +82,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from aws_durable_execution_sdk_python.concurrency.models import BatchResult
+    from aws_durable_execution_sdk_python.lambda_service import ErrorObject
     from aws_durable_execution_sdk_python.state import CheckpointedResult
     from aws_durable_execution_sdk_python.types import LambdaContext
     from aws_durable_execution_sdk_python.waits import WaitForConditionConfig
@@ -252,8 +266,10 @@ class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
         )
 
         if not checkpointed_result.is_existent():
+            # Should never happen (create_callback already checkpointed this op).
+            # Not external/timeout/submitter, so raise the base CallbackError.
             msg = "Callback operation must exist"
-            raise CallbackError(message=msg, callback_id=self.callback_id)
+            raise CallbackError(message=msg)
 
         if (
             checkpointed_result.is_failed()
@@ -261,12 +277,7 @@ class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
             or checkpointed_result.is_timed_out()
             or checkpointed_result.is_stopped()
         ):
-            msg = (
-                checkpointed_result.error.message
-                if checkpointed_result.error and checkpointed_result.error.message
-                else "Callback failed"
-            )
-            raise CallbackError(message=msg, callback_id=self.callback_id)
+            self._raise_terminal_failure(checkpointed_result)
 
         if checkpointed_result.is_succeeded():
             if checkpointed_result.result is None:
@@ -283,6 +294,29 @@ class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
         # therefore we should wait
         msg = "Callback result not received yet. Suspending execution while waiting for result."
         raise SuspendExecution(msg)
+
+    def _raise_terminal_failure(
+        self, checkpointed_result: CheckpointedResult
+    ) -> NoReturn:
+        """Raise the graded error for a terminal callback failure.
+
+        TIMED_OUT -> CallbackTimeoutError; any other non-succeeded terminal
+        (external FAILED, cancelled, stopped) -> CallbackExternalError.
+        Carries the message/data/stack_trace; the external error's own type
+        stays on the callback operation's details.
+        """
+        error: ErrorObject | None = checkpointed_result.error
+        is_timeout: bool = checkpointed_result.is_timed_out()
+        error_cls: type[CallbackError] = (
+            CallbackTimeoutError if is_timeout else CallbackExternalError
+        )
+        default_message: str = "Callback timed out" if is_timeout else "Callback failed"
+        message: str = error.message if error and error.message else default_message
+        raise error_cls(
+            message=message,
+            data=error.data if error else None,
+            stack_trace=error.stack_trace if error else None,
+        )
 
 
 class DurableContext(DurableContextProtocol):
@@ -825,11 +859,29 @@ class DurableContext(DurableContextProtocol):
         def wait_in_child_context(context: DurableContext):
             return wait_for_callback_handler(context, submitter, step_name, config)
 
-        return self.run_in_child_context(
-            wait_in_child_context,
-            step_name,
-            ChildConfig(sub_type=OperationSubType.WAIT_FOR_CALLBACK),
-        )
+        # run_in_child_context is generic and raises ChildContextError with the
+        # inner failure on __cause__; translate to callback-typed errors here, at
+        # the call site, so it re-fires identically on replay.
+        try:
+            return self.run_in_child_context(
+                wait_in_child_context,
+                step_name,
+                ChildConfig(sub_type=OperationSubType.WAIT_FOR_CALLBACK),
+            )
+        except ChildContextError as e:
+            inner: BaseException | None = e.__cause__
+            # Callback failures (external/timeout/base) pass through.
+            if isinstance(inner, CallbackError):
+                raise inner
+            # A failed submitter step surfaces as CallbackSubmitterError, keeping
+            # the step's data/stack_trace (the StepError stays as its cause).
+            if isinstance(inner, StepError):
+                raise CallbackSubmitterError(
+                    inner.message or "Callback submitter failed",
+                    data=inner.data,
+                    stack_trace=inner.stack_trace,
+                ) from inner
+            raise
 
     def wait_for_condition(
         self,

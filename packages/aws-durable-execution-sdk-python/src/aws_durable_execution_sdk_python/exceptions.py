@@ -55,7 +55,6 @@ class TerminationReason(Enum):
     CHECKPOINT_FAILED = "CHECKPOINT_FAILED"
     NON_DETERMINISTIC_EXECUTION = "NON_DETERMINISTIC_EXECUTION"
     STEP_INTERRUPTED = "STEP_INTERRUPTED"
-    CALLBACK_ERROR = "CALLBACK_ERROR"
     SERIALIZATION_ERROR = "SERIALIZATION_ERROR"
 
 
@@ -99,14 +98,6 @@ class InvocationError(UnrecoverableError):
         error codes and HTTP status codes.
         """
         return True
-
-
-class CallbackError(ExecutionError):
-    """Error in callback handling."""
-
-    def __init__(self, message: str, callback_id: str | None = None):
-        super().__init__(message, TerminationReason.CALLBACK_ERROR)
-        self.callback_id = callback_id
 
 
 class DurableApiErrorCategory(Enum):
@@ -338,6 +329,32 @@ class WaitForConditionError(DurableOperationError):
     """Raised when a wait_for_condition operation fails."""
 
 
+class CallbackError(DurableOperationError):
+    """Base class for callback operation failures; catches all of them.
+
+    Graded subclasses distinguish the cause: :class:`CallbackExternalError`
+    (external system reported failure), :class:`CallbackTimeoutError` (timeout
+    or heartbeat expiry), and :class:`CallbackSubmitterError` (submitter step
+    failed). The base is raised directly for internal callback failures.
+    """
+
+
+class CallbackExternalError(CallbackError):
+    """Raised when the external system reports a callback failure.
+
+    Corresponds to the callback operation reaching FAILED because an external
+    entity called ``SendDurableExecutionCallbackFailure``.
+    """
+
+
+class CallbackTimeoutError(CallbackError):
+    """Raised when a callback times out (timeout or heartbeat expiry)."""
+
+
+class CallbackSubmitterError(CallbackError):
+    """Raised when the submitter step of a wait_for_callback fails."""
+
+
 # Reconstruction registry for replay: only the SDK's own operation-error types.
 # Any other discriminator falls back to DurableOperationError in
 # from_error_fields, so we never call a constructor the SDK doesn't control.
@@ -346,6 +363,10 @@ _DURABLE_OPERATION_ERROR_REGISTRY: dict[str, type[DurableOperationError]] = {
     "InvokeError": InvokeError,
     "ChildContextError": ChildContextError,
     "WaitForConditionError": WaitForConditionError,
+    "CallbackError": CallbackError,
+    "CallbackExternalError": CallbackExternalError,
+    "CallbackTimeoutError": CallbackTimeoutError,
+    "CallbackSubmitterError": CallbackSubmitterError,
 }
 
 
