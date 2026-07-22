@@ -250,6 +250,21 @@ Resources:
       DurableConfig:
         RetentionPeriodInDays: 7
         ExecutionTimeout: 300
+  ChildCustomSerdes:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["3-14"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: child.child_custom_serdes.handler
+      Description: Child context with custom serdes (succeed)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
   ChildErrorNoStep:
     Type: AWS::Serverless::Function
     TestingMetadata:
