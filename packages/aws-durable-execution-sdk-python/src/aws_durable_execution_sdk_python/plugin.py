@@ -172,7 +172,7 @@ class InvocationStartInfo(InvocationInfo):
 
 @dataclass(frozen=True)
 class InvocationEndInfo(InvocationInfo):
-    status: InvocationStatus | None = None
+    status: InvocationStatus = field(kw_only=True)
     error: ErrorObject | None = None
 
     @classmethod
