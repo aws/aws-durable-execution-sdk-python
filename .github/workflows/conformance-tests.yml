@@ -23,8 +23,13 @@ env:
   AWS_REGION: ${{ github.event.inputs.region || 'us-west-2' }}
 
 concurrency:
-  group: ${{ github.head_ref || github.ref_name || github.run_id }}-conformance
-  cancel-in-progress: true
+  # Global lock: every branch/PR deploys to the same per-suite stacks
+  # (conf-py-<suite>), so only one conformance run may execute at a time
+  # across the whole repo. Queue rather than cancel: aborting a mid-deploy
+  # run can leave a CloudFormation update in progress that breaks the next
+  # run against the shared stack.
+  group: conformance-tests-global
+  cancel-in-progress: false
 
 permissions:
   contents: read
