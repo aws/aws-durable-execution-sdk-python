@@ -538,7 +538,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             attributes["durable.operation.name"] = info.name
         if getattr(info, "operation_type", None) is not OperationType.CONTEXT:
             if getattr(info, "attempt", None) is not None:
-                attributes["durable.operation.attempt"] = info.attempt
+                attributes["durable.attempt.number"] = info.attempt
             if getattr(info, "outcome", None) is not None:
                 attributes["durable.attempt.outcome"] = info.outcome.value
         return attributes
