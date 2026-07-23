@@ -30,6 +30,7 @@ from aws_durable_execution_sdk_python_otel.execution_plugin_config import (
 if TYPE_CHECKING:
     from opentelemetry.sdk.trace import IdGenerator
     from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
+    from opentelemetry.trace import TracerProvider
 
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ OTLP_ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"
 class ProviderResult:
     """Result of provider resolution: the provider and whether we own it."""
 
-    tracer_provider: object
+    tracer_provider: TracerProvider
     owns_provider: bool
 
 

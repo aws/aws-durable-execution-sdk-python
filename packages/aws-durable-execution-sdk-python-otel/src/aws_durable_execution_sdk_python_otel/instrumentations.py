@@ -20,11 +20,11 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
-    from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
+    from opentelemetry.trace import TracerProvider
 
     from aws_durable_execution_sdk_python_otel.execution_plugin_config import (
         ExecutionOtelPluginConfig,
@@ -90,7 +90,7 @@ def _register_http_instrumentation(tracer_provider: object | None) -> None:
 
     instrumentor = URLLib3Instrumentor()
     if not instrumentor.is_instrumented_by_opentelemetry:
-        kwargs = {"request_hook": request_hook}
+        kwargs: dict[str, Any] = {"request_hook": request_hook}
         if tracer_provider is not None:
             kwargs["tracer_provider"] = tracer_provider
         instrumentor.instrument(**kwargs)
@@ -98,7 +98,7 @@ def _register_http_instrumentation(tracer_provider: object | None) -> None:
 
 def register_standalone_instrumentations(
     config: ExecutionOtelPluginConfig,
-    tracer_provider: SdkTracerProvider | None,
+    tracer_provider: TracerProvider | None,
     *,
     owns_provider: bool,
     use_default_tracer_provider: bool,
