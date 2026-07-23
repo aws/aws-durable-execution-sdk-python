@@ -7,7 +7,10 @@ import logging
 import threading
 from typing import Any
 
-from aws_durable_execution_sdk_python.lambda_service import OperationType
+from aws_durable_execution_sdk_python.lambda_service import (
+    InvocationStatus,
+    OperationType,
+)
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationEndInfo,
@@ -25,6 +28,7 @@ from opentelemetry.trace import (
     Link,
     Span,
     SpanContext,
+    SpanKind,
     StatusCode,
     TraceFlags,
     Tracer,
@@ -42,6 +46,8 @@ from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
 
 
 logger = logging.getLogger(__name__)
+
+_SpanAttributes = dict[str, str | bool | int]
 
 
 def _to_otel_timestamp(dt: datetime.datetime | None) -> int | None:
@@ -211,7 +217,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
         self,
         operation_id: str | None,
         name: str,
-        attributes: dict[str, str],
+        attributes: _SpanAttributes,
         start_time: datetime.datetime | None = None,
         parent_span: Span | None = None,
         existed: bool = False,
@@ -282,6 +288,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
                 )
             span = self._tracer.start_span(
                 name=name,
+                kind=SpanKind.INTERNAL,
                 attributes=attributes,
                 start_time=_to_otel_timestamp(start_time),
                 context=parent_context,
@@ -337,6 +344,18 @@ class OtelPlugin(DurableInstrumentationPlugin):
         for operation_id in operation_ids:
             if operation_id:
                 self._end_span(operation_id)
+
+        invocation_span = self._get_span(None)
+        if invocation_span:
+            invocation_span.set_attribute(
+                "durable.invocation.status", info.status.value
+            )
+            if info.status is InvocationStatus.FAILED:
+                invocation_span.set_status(
+                    StatusCode.ERROR, info.error.message if info.error else ""
+                )
+            elif info.status is InvocationStatus.SUCCEEDED:
+                invocation_span.set_status(StatusCode.OK)
 
         # end the invocation span
         self._end_span(None)
@@ -512,7 +531,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
                 trace.set_span_in_context(parent_span, self._extracted_context)
             )
 
-    def _extract_attributes(self, info: Any) -> dict[str, str]:
+    def _extract_attributes(self, info: Any) -> _SpanAttributes:
         """Extract durable execution fields as OpenTelemetry span attributes.
 
         Args:
@@ -521,10 +540,12 @@ class OtelPlugin(DurableInstrumentationPlugin):
         Returns:
             A dictionary of durable execution attributes suitable for a span.
         """
-        attributes: dict[str, str] = {
+        attributes: _SpanAttributes = {
             "durable.execution.arn": self._execution_arn,
         }
 
+        if isinstance(info, InvocationStartInfo):
+            attributes["durable.invocation.first"] = info.is_first_invocation
         if hasattr(info, "operation_id") and info.operation_id is not None:
             attributes["durable.operation.id"] = info.operation_id
         if hasattr(info, "operation_type") and info.operation_type is not None:
