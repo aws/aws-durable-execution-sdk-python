@@ -22,7 +22,7 @@ from aws_durable_execution_sdk_python_otel.log_filter import (
     OtelContextLogFilter,
     install_log_filter,
 )
-from aws_durable_execution_sdk_python_otel.plugin import InvocationOtelPlugin
+from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)

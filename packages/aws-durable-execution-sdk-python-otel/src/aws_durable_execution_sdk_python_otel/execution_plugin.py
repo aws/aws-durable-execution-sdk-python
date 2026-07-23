@@ -15,7 +15,7 @@ aws-durable-execution-sdk-js#729. Because the Python plugin interface differs
 from JS (there is no ``wrapInvocation``/``wrapChildContextFn``/``enrichLogContext``
 - context is attached inside the synchronous ``on_user_function_*`` hooks and
 log correlation is handled by :mod:`log_filter`), the hook wiring mirrors the
-existing :class:`~aws_durable_execution_sdk_python_otel.plugin.InvocationOtelPlugin`.
+existing :class:`~aws_durable_execution_sdk_python_otel.invocation_plugin.InvocationOtelPlugin`.
 """
 
 from __future__ import annotations

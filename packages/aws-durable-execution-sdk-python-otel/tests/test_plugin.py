@@ -32,7 +32,7 @@ from opentelemetry.trace import SpanKind, StatusCode
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
-from aws_durable_execution_sdk_python_otel.plugin import InvocationOtelPlugin
+from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)

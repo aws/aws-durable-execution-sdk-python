@@ -25,7 +25,7 @@ from aws_durable_execution_sdk_python_otel.log_filter import (
     OtelContextLogFilter,
     install_log_filter,
 )
-from aws_durable_execution_sdk_python_otel.plugin import (
+from aws_durable_execution_sdk_python_otel.invocation_plugin import (
     InvocationOtelPlugin,
 )
 from aws_durable_execution_sdk_python_otel.provider import (
