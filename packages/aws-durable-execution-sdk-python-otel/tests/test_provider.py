@@ -22,9 +22,7 @@ from aws_durable_execution_sdk_python_otel.provider import (
 
 def test_explicit_provider_is_used_and_not_owned():
     provider = TracerProvider()
-    result = create_tracer_provider(
-        ExecutionOtelPluginConfig(tracer_provider=provider)
-    )
+    result = create_tracer_provider(ExecutionOtelPluginConfig(tracer_provider=provider))
     assert result.tracer_provider is provider
     assert result.owns_provider is False
 

@@ -217,9 +217,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         logger.debug("Durable invocation started: %s", info)
         self._execution_arn = info.execution_arn or ""
         self._extracted_context = self._context_extractor(info)
-        self._id_generator.set_trace_id(
-            self._execution_arn, info.execution_start_time
-        )
+        self._id_generator.set_trace_id(self._execution_arn, info.execution_start_time)
 
         # Capture the ambient context for link-building in default mode (Req 20).
         if self._use_default:
@@ -233,9 +231,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # created during the invocation become its children (JS Req 13).
         if self._workflow_span is not None:
             otel_context.attach(
-                trace.set_span_in_context(
-                    self._workflow_span, self._extracted_context
-                )
+                trace.set_span_in_context(self._workflow_span, self._extracted_context)
             )
 
         self._is_cold_start = False
@@ -247,9 +243,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._id_generator.set_next_span_id(
             derive_workflow_span_id(self._execution_arn)
         )
-        start_time = _to_otel_timestamp(info.execution_start_time) or _to_otel_timestamp(
-            datetime.datetime.now(datetime.UTC)
-        )
+        start_time = _to_otel_timestamp(
+            info.execution_start_time
+        ) or _to_otel_timestamp(datetime.datetime.now(datetime.UTC))
         # Empty context => root span with no parent (JS Req 9.2).
         self._workflow_span = self._tracer.start_span(
             name=self._workflow_span_name,
@@ -420,9 +416,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             if parent is None:
                 parent_ctx = self._extracted_context or Context()
             else:
-                parent_ctx = trace.set_span_in_context(
-                    parent, self._extracted_context
-                )
+                parent_ctx = trace.set_span_in_context(parent, self._extracted_context)
             span = self._tracer.start_span(
                 name=name,
                 attributes=self._operation_attributes(info),

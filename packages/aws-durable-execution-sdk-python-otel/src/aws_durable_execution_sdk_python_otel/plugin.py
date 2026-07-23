@@ -545,4 +545,3 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 attributes["durable.attempt.outcome"] = info.outcome.value
 
         return attributes
-
