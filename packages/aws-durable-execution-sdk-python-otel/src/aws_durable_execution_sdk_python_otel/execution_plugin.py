@@ -60,8 +60,8 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     derive_workflow_span_id,
     operation_id_to_span_id,
 )
-from aws_durable_execution_sdk_python_otel.execution_plugin_config import (
-    ExecutionOtelPluginConfig,
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
+    OtelPluginConfig,
 )
 from aws_durable_execution_sdk_python_otel.instrumentations import (
     register_standalone_instrumentations,
@@ -95,8 +95,8 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             (auto-configured provider, X-Ray extractor, "Workflow" root span).
     """
 
-    def __init__(self, config: ExecutionOtelPluginConfig | None = None) -> None:
-        self._config = config or ExecutionOtelPluginConfig()
+    def __init__(self, config: OtelPluginConfig | None = None) -> None:
+        self._config = config or OtelPluginConfig()
         self._context_extractor: ContextExtractor = (
             self._config.context_extractor or xray_context_extractor
         )

@@ -7,8 +7,8 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.sampling import ALWAYS_ON, TraceIdRatioBased
 
-from aws_durable_execution_sdk_python_otel.execution_plugin_config import (
-    ExecutionOtelPluginConfig,
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
+    OtelPluginConfig,
     ExporterConfig,
 )
 from aws_durable_execution_sdk_python_otel.provider import (
@@ -22,15 +22,13 @@ from aws_durable_execution_sdk_python_otel.provider import (
 
 def test_explicit_provider_is_used_and_not_owned():
     provider = TracerProvider()
-    result = create_tracer_provider(ExecutionOtelPluginConfig(tracer_provider=provider))
+    result = create_tracer_provider(OtelPluginConfig(tracer_provider=provider))
     assert result.tracer_provider is provider
     assert result.owns_provider is False
 
 
 def test_use_default_provider_returns_global_and_not_owned():
-    result = create_tracer_provider(
-        ExecutionOtelPluginConfig(use_default_tracer_provider=True)
-    )
+    result = create_tracer_provider(OtelPluginConfig(use_default_tracer_provider=True))
     assert result.tracer_provider is trace.get_tracer_provider()
     assert result.owns_provider is False
 
@@ -38,15 +36,13 @@ def test_use_default_provider_returns_global_and_not_owned():
 def test_default_use_global_flag_applies_when_unset():
     # InvocationOtelPlugin passes default_use_global=True so an unset config
     # resolves to the global provider (JS Req 26.3).
-    result = create_tracer_provider(
-        ExecutionOtelPluginConfig(), default_use_global=True
-    )
+    result = create_tracer_provider(OtelPluginConfig(), default_use_global=True)
     assert result.tracer_provider is trace.get_tracer_provider()
     assert result.owns_provider is False
 
 
 def test_auto_configured_provider_is_owned_sdk_provider():
-    result = create_tracer_provider(ExecutionOtelPluginConfig())
+    result = create_tracer_provider(OtelPluginConfig())
     assert result.owns_provider is True
     assert isinstance(result.tracer_provider, TracerProvider)
 
@@ -54,9 +50,7 @@ def test_auto_configured_provider_is_owned_sdk_provider():
 def test_explicit_provider_takes_precedence_over_use_default():
     provider = TracerProvider()
     result = create_tracer_provider(
-        ExecutionOtelPluginConfig(
-            tracer_provider=provider, use_default_tracer_provider=True
-        )
+        OtelPluginConfig(tracer_provider=provider, use_default_tracer_provider=True)
     )
     assert result.tracer_provider is provider
     assert result.owns_provider is False
@@ -106,7 +100,7 @@ def test_resource_populates_lambda_attributes(monkeypatch):
 
 def test_resolve_endpoint_appends_signal_path(monkeypatch):
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
-    config = ExecutionOtelPluginConfig(
+    config = OtelPluginConfig(
         exporter_config=ExporterConfig(endpoint="http://collector:4318")
     )
     assert _resolve_endpoint(config) == "http://collector:4318/v1/traces"
@@ -114,7 +108,7 @@ def test_resolve_endpoint_appends_signal_path(monkeypatch):
 
 def test_resolve_endpoint_does_not_double_append(monkeypatch):
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
-    config = ExecutionOtelPluginConfig(
+    config = OtelPluginConfig(
         exporter_config=ExporterConfig(endpoint="http://collector:4318/v1/traces")
     )
     assert _resolve_endpoint(config) == "http://collector:4318/v1/traces"

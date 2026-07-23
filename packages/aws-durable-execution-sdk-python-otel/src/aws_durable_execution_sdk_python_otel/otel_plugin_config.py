@@ -1,7 +1,7 @@
 """Shared configuration for the durable-execution OpenTelemetry plugins.
 
 Both :class:`ExecutionOtelPlugin` and :class:`InvocationOtelPlugin` accept a
-single :class:`ExecutionOtelPluginConfig`, so configuration options are
+single :class:`OtelPluginConfig`, so configuration options are
 consistent and not duplicated across plugins (JS Requirements 24 & 25).
 """
 
@@ -36,7 +36,7 @@ class ExporterConfig:
 
 
 @dataclass
-class ExecutionOtelPluginConfig:
+class OtelPluginConfig:
     """Canonical configuration shared by both OTel plugins.
 
     Fields relevant only to :class:`ExecutionOtelPlugin` (e.g. ``workflow_span_name``)

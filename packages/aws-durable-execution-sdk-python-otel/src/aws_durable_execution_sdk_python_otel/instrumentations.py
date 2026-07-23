@@ -26,8 +26,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from opentelemetry.trace import TracerProvider
 
-    from aws_durable_execution_sdk_python_otel.execution_plugin_config import (
-        ExecutionOtelPluginConfig,
+    from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
+        OtelPluginConfig,
     )
 
 
@@ -97,7 +97,7 @@ def _register_http_instrumentation(tracer_provider: object | None) -> None:
 
 
 def register_standalone_instrumentations(
-    config: ExecutionOtelPluginConfig,
+    config: OtelPluginConfig,
     tracer_provider: TracerProvider | None,
     *,
     owns_provider: bool,

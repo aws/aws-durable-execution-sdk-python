@@ -28,8 +28,8 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     derive_workflow_span_id,
 )
 from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
-from aws_durable_execution_sdk_python_otel.execution_plugin_config import (
-    ExecutionOtelPluginConfig,
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
+    OtelPluginConfig,
 )
 
 
@@ -58,7 +58,7 @@ def _create_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     plugin = ExecutionOtelPlugin(
-        ExecutionOtelPluginConfig(
+        OtelPluginConfig(
             tracer_provider=provider,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
@@ -245,7 +245,7 @@ def _create_default_mode_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExpo
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     plugin = ExecutionOtelPlugin(
-        ExecutionOtelPluginConfig(
+        OtelPluginConfig(
             tracer_provider=provider,
             use_default_tracer_provider=True,
             context_extractor=lambda _: Context(),

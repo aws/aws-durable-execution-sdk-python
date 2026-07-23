@@ -21,9 +21,9 @@ from typing import TYPE_CHECKING
 from opentelemetry import propagate, trace
 from opentelemetry.propagators.composite import CompositePropagator
 
-from aws_durable_execution_sdk_python_otel.execution_plugin_config import (
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     DEFAULT_OTLP_ENDPOINT,
-    ExecutionOtelPluginConfig,
+    OtelPluginConfig,
 )
 
 
@@ -47,7 +47,7 @@ class ProviderResult:
     owns_provider: bool
 
 
-def _resolve_endpoint(config: ExecutionOtelPluginConfig) -> str:
+def _resolve_endpoint(config: OtelPluginConfig) -> str:
     """Resolve the OTLP traces endpoint (config -> env -> default).
 
     The Python OTLP/HTTP exporter uses an explicitly-passed ``endpoint`` verbatim
@@ -108,7 +108,7 @@ def _build_resource():
     return Resource.create(attributes)
 
 
-def _default_propagators(config: ExecutionOtelPluginConfig):
+def _default_propagators(config: OtelPluginConfig):
     """Return configured propagators or the X-Ray + W3C default (JS Req 3.10)."""
     if config.propagators is not None:
         return list(config.propagators)
@@ -121,7 +121,7 @@ def _default_propagators(config: ExecutionOtelPluginConfig):
 
 
 def _create_auto_provider(
-    config: ExecutionOtelPluginConfig,
+    config: OtelPluginConfig,
     id_generator: IdGenerator | None,
 ) -> SdkTracerProvider:
     """Create a fully self-configured SDK TracerProvider with OTLP export."""
@@ -149,7 +149,7 @@ def _create_auto_provider(
 
 
 def create_tracer_provider(
-    config: ExecutionOtelPluginConfig,
+    config: OtelPluginConfig,
     *,
     id_generator: IdGenerator | None = None,
     default_use_global: bool = False,
