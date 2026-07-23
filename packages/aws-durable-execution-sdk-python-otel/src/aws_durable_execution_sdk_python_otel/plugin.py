@@ -7,7 +7,10 @@ import logging
 import threading
 from typing import Any
 
-from aws_durable_execution_sdk_python.lambda_service import OperationType
+from aws_durable_execution_sdk_python.lambda_service import (
+    InvocationStatus,
+    OperationType,
+)
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationEndInfo,
@@ -25,6 +28,7 @@ from opentelemetry.trace import (
     Link,
     Span,
     SpanContext,
+    SpanKind,
     StatusCode,
     TraceFlags,
     Tracer,
@@ -282,6 +286,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
                 )
             span = self._tracer.start_span(
                 name=name,
+                kind=SpanKind.INTERNAL,
                 attributes=attributes,
                 start_time=_to_otel_timestamp(start_time),
                 context=parent_context,
@@ -337,6 +342,15 @@ class OtelPlugin(DurableInstrumentationPlugin):
         for operation_id in operation_ids:
             if operation_id:
                 self._end_span(operation_id)
+
+        invocation_span = self._get_span(None)
+        if invocation_span:
+            if info.status is InvocationStatus.FAILED:
+                invocation_span.set_status(
+                    StatusCode.ERROR, info.error.message if info.error else ""
+                )
+            elif info.status is InvocationStatus.SUCCEEDED:
+                invocation_span.set_status(StatusCode.OK)
 
         # end the invocation span
         self._end_span(None)

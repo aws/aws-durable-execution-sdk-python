@@ -27,6 +27,7 @@ from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind, StatusCode
 
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
@@ -75,14 +76,16 @@ def _invocation_start_info() -> InvocationStartInfo:
     )
 
 
-def _invocation_end_info() -> InvocationEndInfo:
+def _invocation_end_info(
+    status: InvocationStatus = InvocationStatus.SUCCEEDED,
+) -> InvocationEndInfo:
     """Create standard invocation end info for tests."""
     return InvocationEndInfo(
         request_id="request-1",
         execution_arn=EXECUTION_ARN,
         execution_start_time=START_TIME,
         is_first_invocation=True,
-        status=InvocationStatus.SUCCEEDED,
+        status=status,
         error=None,
     )
 
@@ -144,8 +147,33 @@ def test_invocation_start_and_end_emit_invocation_span():
 
     spans = exporter.get_finished_spans()
     assert [span.name for span in spans] == ["invocation"]
+    assert spans[0].kind is SpanKind.INTERNAL
     assert spans[0].attributes["durable.execution.arn"] == EXECUTION_ARN
     assert plugin._get_span(None) is None
+
+
+@pytest.mark.parametrize(
+    ("invocation_status", "expected_span_status"),
+    [
+        (InvocationStatus.PENDING, StatusCode.UNSET),
+        (InvocationStatus.RETRY, StatusCode.UNSET),
+        (InvocationStatus.SUCCEEDED, StatusCode.OK),
+        (InvocationStatus.FAILED, StatusCode.ERROR),
+    ],
+)
+def test_invocation_span_status_reflects_execution_status(
+    invocation_status: InvocationStatus,
+    expected_span_status: StatusCode,
+):
+    """Only terminal invocation spans receive a success or failure status."""
+    plugin, exporter = _create_plugin()
+
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_invocation_end(_invocation_end_info(invocation_status))
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    assert spans[0].status.status_code is expected_span_status
 
 
 def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
@@ -193,6 +221,7 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
     plugin.on_invocation_end(_invocation_end_info())
 
     spans_by_name = {span.name: span for span in exporter.get_finished_spans()}
+    assert all(span.kind is SpanKind.INTERNAL for span in spans_by_name.values())
     wait_span = spans_by_name["wait-for-signal"]
     invocation_span = spans_by_name["invocation"]
     assert wait_span.context.span_id == operation_id_to_span_id(
@@ -444,6 +473,8 @@ def test_step_operation_span_parents_attempt_span():
     spans_by_name = {span.name: span for span in exporter.get_finished_spans()}
     finished_step_span = spans_by_name["fetch-user"]
     attempt_span = spans_by_name["fetch-user attempt 1"]
+    assert finished_step_span.kind is SpanKind.INTERNAL
+    assert attempt_span.kind is SpanKind.INTERNAL
     assert attempt_span.parent.span_id == finished_step_span.context.span_id
     assert (
         finished_step_span.attributes["durable.operation.status"]
