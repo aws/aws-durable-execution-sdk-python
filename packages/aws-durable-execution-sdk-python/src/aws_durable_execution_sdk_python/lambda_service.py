@@ -103,18 +103,6 @@ class CallbackTimeoutType(Enum):
     HEARTBEAT = "Callback.Heartbeat"
 
 
-class ChainedInvokeFailedToStartType(Enum):
-    FAILED_TO_START = "ChainedInvoke.FailedToStart"
-
-
-class ChainedInvokeTimeoutType(Enum):
-    TIMEOUT = "ChainedInvoke.Timeout"
-
-
-class ChainedInvokeStopType(Enum):
-    STOPPED = "ChainedInvoke.Stopped"
-
-
 class OperationSubType(Enum):
     STEP = "Step"
     WAIT = "Wait"

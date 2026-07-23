@@ -12,7 +12,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from aws_durable_execution_sdk_python.config import (
-        BatchedInput,
         CallbackConfig,
         ChildConfig,
         Duration,
@@ -129,7 +128,7 @@ class DurableContext(Protocol):
     def map(
         self,
         inputs: Sequence[U],
-        func: Callable[[DurableContext, U | BatchedInput[Any, U], int, Sequence[U]], T],
+        func: Callable[[DurableContext, U, int, Sequence[U]], T],
         name: str | None = None,
         config: MapConfig | None = None,
     ) -> BatchResult[T]:

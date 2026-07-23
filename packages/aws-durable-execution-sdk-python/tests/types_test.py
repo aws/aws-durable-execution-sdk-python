@@ -3,7 +3,6 @@
 from unittest.mock import Mock
 
 from aws_durable_execution_sdk_python.config import (
-    BatchedInput,
     CallbackConfig,
     ChildConfig,
     MapConfig,
@@ -142,30 +141,6 @@ def test_durable_context_protocol_with_none_values():
     mock_context.create_callback.return_value = mock_callback
     mock_context.create_callback(name=None, config=None)
     mock_context.create_callback.assert_called_once_with(name=None, config=None)
-
-
-def test_map_with_batched_input():
-    """Test map method with BatchedInput type."""
-    mock_context = Mock(spec=DurableContext)
-
-    def map_function(ctx, item, index, items):
-        # item can be U or BatchedInput[Any, U]
-        if isinstance(item, BatchedInput):
-            return f"batched_{len(item.items)}"
-        return f"single_{item}"
-
-    # Test with regular inputs
-    inputs = ["x", "y"]
-    mock_context.map.return_value = ["single_x", "single_y"]
-    result = mock_context.map(inputs, map_function)
-    assert result == ["single_x", "single_y"]
-
-    # Test with BatchedInput (correct constructor)
-    batched_input = BatchedInput(batch_input="batch_data", items=["a", "b", "c"])
-    inputs_with_batch = [batched_input]
-    mock_context.map.return_value = ["batched_3"]
-    result = mock_context.map(inputs_with_batch, map_function)
-    assert result == ["batched_3"]
 
 
 def test_protocol_abstract_methods():
