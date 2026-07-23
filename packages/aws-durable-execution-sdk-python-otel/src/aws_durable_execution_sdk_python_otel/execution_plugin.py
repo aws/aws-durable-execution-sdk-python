@@ -195,8 +195,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             ctx = span.get_span_context()
             if ctx and ctx.is_valid:
                 return [Link(context=ctx)]
-            return []
-        if not self._use_default and self._invocation_span is not None:
+        if self._invocation_span is not None:
             ctx = self._invocation_span.get_span_context()
             if ctx and ctx.is_valid:
                 return [Link(context=ctx)]
@@ -224,8 +223,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             self._saved_invocation_context = otel_context.get_current()
 
         self._start_workflow_span(info)
-        if not self._use_default:
-            self._start_invocation_span(info)
+        # Create the Invocation span in both modes. In default-provider mode it
+        # is parented to the ambient Lambda invocation span (JS PR #756).
+        self._start_invocation_span(info)
 
         # Make the Workflow span the active span so auto-instrumented spans
         # created during the invocation become its children (JS Req 13).
@@ -255,20 +255,33 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         )
 
     def _start_invocation_span(self, info: InvocationStartInfo) -> None:
-        if self._workflow_span is None:
-            return
-        parent_ctx = trace.set_span_in_context(
-            self._workflow_span, self._extracted_context
-        )
         self._id_generator.set_next_span_id(None)
-        attributes: dict[str, Any] = {
-            "durable.execution.arn": self._execution_arn,
-            "faas.coldstart": self._is_cold_start,
-            "cloud.provider": "aws",
-            "cloud.platform": "aws_lambda",
-        }
-        if info.request_id:
-            attributes["faas.invocation_id"] = info.request_id
+        attributes: dict[str, Any]
+        if self._use_default:
+            # Default-provider mode: parent the Invocation span to the ambient
+            # Lambda invocation span (from the ADOT layer or other
+            # auto-instrumentation) captured at invocation start (JS PR #756).
+            # Lambda semantic attributes belong to that ambient span, so carry
+            # only durable correlation attributes here.
+            parent_ctx = self._saved_invocation_context or otel_context.get_current()
+            attributes = {
+                "durable.execution.arn": self._execution_arn,
+                "durable.invocation.first": info.is_first_invocation,
+            }
+        else:
+            if self._workflow_span is None:
+                return
+            parent_ctx = trace.set_span_in_context(
+                self._workflow_span, self._extracted_context
+            )
+            attributes = {
+                "durable.execution.arn": self._execution_arn,
+                "faas.coldstart": self._is_cold_start,
+                "cloud.provider": "aws",
+                "cloud.platform": "aws_lambda",
+            }
+            if info.request_id:
+                attributes["faas.invocation_id"] = info.request_id
         self._invocation_span = self._tracer.start_span(
             name="invocation",
             attributes=attributes,

@@ -18,6 +18,7 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationEndInfo,
     OperationStartInfo,
 )
+from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -229,3 +230,58 @@ def test_cross_invocation_operation_end_without_start_is_stitched():
     stitched = spans["earlier-step"]
     # Stitched span links back to the deterministic logical-operation span.
     assert len(stitched.links) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Default-provider mode: invocation span (JS PR #756 divergence)
+# ---------------------------------------------------------------------------
+def _create_default_mode_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
+    """ExecutionOtelPlugin in default-provider mode wired to an in-memory exporter.
+
+    Passing an explicit ``tracer_provider`` lets the test capture spans while
+    ``use_default_tracer_provider=True`` still selects the default-mode code path.
+    """
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    plugin = ExecutionOtelPlugin(
+        ExecutionOtelPluginConfig(
+            tracer_provider=provider,
+            use_default_tracer_provider=True,
+            context_extractor=lambda _: Context(),
+            enrich_logger=False,
+        )
+    )
+    return plugin, exporter
+
+
+def test_default_mode_creates_invocation_span():
+    plugin, exporter = _create_default_mode_plugin()
+
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_invocation_end(_invocation_end_info())
+
+    spans = {s.name: s for s in exporter.get_finished_spans()}
+    # The invocation span is now created even in default-provider mode.
+    assert "invocation" in spans
+    invocation = spans["invocation"]
+    assert invocation.attributes["durable.execution.arn"] == EXECUTION_ARN
+    assert invocation.attributes["durable.invocation.first"] is True
+
+
+def test_default_mode_invocation_span_parented_to_ambient_span():
+    plugin, exporter = _create_default_mode_plugin()
+
+    # Simulate the ambient Lambda invocation span from the ADOT layer.
+    ambient = plugin._provider.get_tracer("ambient").start_span("lambda-invocation")
+    token = otel_context.attach(trace.set_span_in_context(ambient))
+    try:
+        plugin.on_invocation_start(_invocation_start_info())
+        plugin.on_invocation_end(_invocation_end_info())
+    finally:
+        otel_context.detach(token)
+        ambient.end()
+
+    invocation = {s.name: s for s in exporter.get_finished_spans()}["invocation"]
+    assert invocation.parent is not None
+    assert invocation.parent.span_id == ambient.get_span_context().span_id
