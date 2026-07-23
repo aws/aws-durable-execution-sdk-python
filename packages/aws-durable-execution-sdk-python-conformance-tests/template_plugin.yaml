@@ -1,0 +1,135 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 60
+    MemorySize: 128
+Resources:
+  DurableFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: DurableExecutionPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:CheckpointDurableExecution
+            - lambda:GetDurableExecutionState
+            Resource: '*'
+  PluginInvocationLifecycle:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-1"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: plugin.plugin_invocation_lifecycle.handler
+      Description: Plugin invocation lifecycle hooks (start and end)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  PluginOperationLifecycle:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-2"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: plugin.plugin_operation_lifecycle.handler
+      Description: Plugin operation lifecycle hooks (step start and terminal end)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  PluginAttemptHooksRetry:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-3"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: plugin.plugin_attempt_hooks_retry.handler
+      Description: Plugin attempt hooks fire per step attempt under retry
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  PluginErrorIsolation:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-4"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: plugin.plugin_error_isolation.handler
+      Description: Plugin exceptions are swallowed and never affect the outcome
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  PluginMultiplePlugins:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-5"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: plugin.plugin_multiple_plugins.handler
+      Description: Multiple registered plugins all receive lifecycle hooks
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  PluginFirstInvocationFlag:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-6"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: plugin.plugin_first_invocation_flag.handler
+      Description: Plugin sees is-first-invocation true once, then false on replay
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  PluginTerminalFailure:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-7"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: plugin.plugin_terminal_failure.handler
+      Description: Plugin invocation-end hook receives FAILED status on failure
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
