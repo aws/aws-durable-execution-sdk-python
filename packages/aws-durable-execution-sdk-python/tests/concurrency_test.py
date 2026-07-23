@@ -1,5 +1,6 @@
 """Tests for the concurrency module."""
 
+import contextlib
 import json
 import random
 import threading
@@ -38,6 +39,7 @@ from aws_durable_execution_sdk_python.context import (
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
     InvalidStateError,
+    OrphanedChildException,
     SuspendExecution,
     TimedSuspendExecution,
 )
@@ -1572,6 +1574,77 @@ def test_concurrent_executor_resume_checkpoint_failure_propagates():
     with pytest.raises(RuntimeError, match="resume refresh failed"):
         executor.execute(execution_state, executor_context)
     executor.long_runner_release.set()
+
+
+def test_concurrent_executor_resume_orphaned_stops_cleanly():
+    """An orphaned resume refresh must be handled, not propagated.
+
+    When the execution completes while a concurrent operation is orphaned, the
+    timer resubmit's checkpoint refresh raises OrphanedChildException. That is a
+    BaseException, so the resubmitter's generic `except Exception` does not catch
+    it; it must be handled explicitly so it neither crashes the timer thread nor
+    escapes execute(). Contrast with the RuntimeError case above, which does
+    propagate.
+    """
+
+    class TestExecutor(ConcurrentExecutor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.long_runner_release = threading.Event()
+
+        def execute_item(self, child_context, executable):
+            if executable.index == 0:
+                # Long-runner keeps the map alive so task 1 resumes in-process.
+                self.long_runner_release.wait(timeout=5)
+                return "result_A"
+            # Task 1 suspends with a past timestamp -> immediate in-process resume.
+            msg = "resume-me"
+            raise TimedSuspendExecution(msg, time.time() - 1)
+
+    executables = [Executable(0, lambda: "task_A"), Executable(1, lambda: "task_B")]
+    completion_config = CompletionConfig(
+        min_successful=2,
+        tolerated_failure_count=None,
+        tolerated_failure_percentage=None,
+    )
+
+    executor = TestExecutor(
+        executables=executables,
+        max_concurrency=2,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+    )
+
+    execution_state = Mock()
+
+    def checkpoint(*args, **kwargs):
+        # The resume refresh calls create_checkpoint() with no arguments; the
+        # execution has completed, so it is orphaned.
+        if not args and not kwargs:
+            raise OrphanedChildException(
+                "execution already completed", operation_id="op"
+            )
+
+    execution_state.create_checkpoint = Mock(side_effect=checkpoint)
+
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa: SLF001
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    try:
+        # The orphaned resume must not surface as an error; the map may suspend
+        # or complete, but OrphanedChildException must never escape.
+        with contextlib.suppress(SuspendExecution):
+            executor.execute(execution_state, executor_context)
+    except OrphanedChildException:
+        pytest.fail("OrphanedChildException from the resume refresh must be handled")
+    finally:
+        executor.long_runner_release.set()
 
 
 def test_concurrent_executor_with_timed_resubmit_while_other_task_running():

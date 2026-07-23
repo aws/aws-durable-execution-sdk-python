@@ -1641,10 +1641,14 @@ def test_checkpoint_output_from_dict():
 
 
 def test_checkpoint_output_from_dict_empty():
-    """Test CheckpointOutput.from_dict with empty data."""
+    """Test CheckpointOutput.from_dict with empty data.
+
+    The service omits CheckpointToken on the terminal checkpoint; from_dict
+    surfaces that as None rather than an empty string.
+    """
     data = {}
     output = CheckpointOutput.from_dict(data)
-    assert not output.checkpoint_token
+    assert output.checkpoint_token is None
     assert len(output.new_execution_state.operations) == 0
     assert output.new_execution_state.next_marker is None
 
@@ -1823,6 +1827,37 @@ def test_lambda_client_checkpoint_with_explicit_none_client_token():
     )
     assert isinstance(result, CheckpointOutput)
     assert result.checkpoint_token == "new_token"  # noqa: S105
+
+
+@pytest.mark.parametrize("token", ["", None])
+def test_lambda_client_checkpoint_empty_token_raises(token):
+    """An empty/None checkpoint token raises a retryable CheckpointError, not a client error."""
+    mock_client = Mock()
+    lambda_client = LambdaClient(mock_client)
+    update = OperationUpdate(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        action=OperationAction.START,
+    )
+
+    with pytest.raises(CheckpointError) as exc_info:
+        lambda_client.checkpoint("arn123", token, [update], None)
+
+    assert exc_info.value.is_retryable()
+    mock_client.checkpoint_durable_execution.assert_not_called()
+
+
+@pytest.mark.parametrize("token", ["", None])
+def test_lambda_client_get_execution_state_empty_token_raises(token):
+    """An empty/None checkpoint token raises a retryable GetExecutionStateError, not a client error."""
+    mock_client = Mock()
+    lambda_client = LambdaClient(mock_client)
+
+    with pytest.raises(GetExecutionStateError) as exc_info:
+        lambda_client.get_execution_state("arn123", token, "marker")
+
+    assert exc_info.value.is_retryable()
+    mock_client.get_durable_execution_state.assert_not_called()
 
 
 def test_lambda_client_checkpoint_with_empty_string_client_token():

@@ -1098,7 +1098,8 @@ class CheckpointUpdatedExecutionState:
 class CheckpointOutput:
     """Representation of the CheckpointDurableExecutionOutput structure of the DEX CheckpointDurableExecution API."""
 
-    checkpoint_token: str
+    # None on the terminal checkpoint that ends the execution.
+    checkpoint_token: str | None
     new_execution_state: CheckpointUpdatedExecutionState
 
     @classmethod
@@ -1121,8 +1122,7 @@ class CheckpointOutput:
             new_execution_state = CheckpointUpdatedExecutionState()
 
         return cls(
-            # TODO: maybe should throw if empty?
-            checkpoint_token=data.get("CheckpointToken", ""),
+            checkpoint_token=data.get("CheckpointToken"),
             new_execution_state=new_execution_state,
         )
 
@@ -1213,6 +1213,11 @@ class LambdaClient(DurableServiceClient):
         updates: list[OperationUpdate],
         client_token: str | None,
     ) -> CheckpointOutput:
+        # A checkpoint token is required. Raise a clear, retryable error (so the
+        # invocation re-drives) rather than letting the client reject an empty
+        # value with an opaque validation error.
+        if not checkpoint_token:
+            raise CheckpointError("Cannot checkpoint without a checkpoint token.")
         try:
             optional_params: dict[str, str] = {}
             if client_token is not None:
@@ -1242,6 +1247,13 @@ class LambdaClient(DurableServiceClient):
         next_marker: str,
         max_items: int = 1000,
     ) -> StateOutput:
+        # A checkpoint token is required. Raise a clear, retryable error (so the
+        # invocation re-drives) rather than letting the client reject an empty
+        # value with an opaque validation error.
+        if not checkpoint_token:
+            raise GetExecutionStateError(
+                "Cannot get execution state without a checkpoint token."
+            )
         try:
             result: GetDurableExecutionStateResponseTypeDef = (
                 self.client.get_durable_execution_state(
