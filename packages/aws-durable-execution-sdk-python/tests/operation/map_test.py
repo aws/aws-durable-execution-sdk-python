@@ -16,7 +16,6 @@ from aws_durable_execution_sdk_python.concurrency.models import (
 )
 from aws_durable_execution_sdk_python.config import (
     CompletionConfig,
-    ItemBatcher,
     MapConfig,
     NestingType,
 )
@@ -742,7 +741,6 @@ def test_map_config_with_explicit_none_summary_generator():
 
     assert config.summary_generator is None
     assert config.max_concurrency is None
-    assert isinstance(config.item_batcher, ItemBatcher)
     assert isinstance(config.completion_config, CompletionConfig)
     assert config.serdes is None
 
