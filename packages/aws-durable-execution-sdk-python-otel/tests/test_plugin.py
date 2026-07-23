@@ -31,7 +31,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
-from aws_durable_execution_sdk_python_otel.plugin import OtelPlugin
+from aws_durable_execution_sdk_python_otel.plugin import InvocationOtelPlugin
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -53,12 +53,12 @@ def _reset_otel_context():
         otel_context.detach(token)
 
 
-def _create_plugin() -> tuple[OtelPlugin, InMemorySpanExporter]:
+def _create_plugin() -> tuple[InvocationOtelPlugin, InMemorySpanExporter]:
     """Create a plugin wired to an in-memory span exporter."""
     exporter = InMemorySpanExporter()
     trace_provider = TracerProvider()
     trace_provider.add_span_processor(SimpleSpanProcessor(exporter))
-    plugin = OtelPlugin(
+    plugin = InvocationOtelPlugin(
         trace_provider=trace_provider,
         context_extractor=lambda _: Context(),
     )
