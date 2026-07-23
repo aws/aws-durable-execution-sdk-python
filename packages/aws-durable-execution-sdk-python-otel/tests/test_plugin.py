@@ -66,13 +66,15 @@ def _create_plugin() -> tuple[OtelPlugin, InMemorySpanExporter]:
     return plugin, exporter
 
 
-def _invocation_start_info() -> InvocationStartInfo:
+def _invocation_start_info(
+    is_first_invocation: bool = True,
+) -> InvocationStartInfo:
     """Create standard invocation start info for tests."""
     return InvocationStartInfo(
         request_id="request-1",
         execution_arn=EXECUTION_ARN,
         execution_start_time=START_TIME,
-        is_first_invocation=True,
+        is_first_invocation=is_first_invocation,
     )
 
 
@@ -149,7 +151,24 @@ def test_invocation_start_and_end_emit_invocation_span():
     assert [span.name for span in spans] == ["invocation"]
     assert spans[0].kind is SpanKind.INTERNAL
     assert spans[0].attributes["durable.execution.arn"] == EXECUTION_ARN
+    assert spans[0].attributes["durable.invocation.first"] is True
+    assert (
+        spans[0].attributes["durable.invocation.status"]
+        == InvocationStatus.SUCCEEDED.value
+    )
     assert plugin._get_span(None) is None
+
+
+def test_invocation_span_records_subsequent_invocation():
+    """Invocation spans preserve a false first-invocation attribute."""
+    plugin, exporter = _create_plugin()
+
+    plugin.on_invocation_start(_invocation_start_info(is_first_invocation=False))
+    plugin.on_invocation_end(_invocation_end_info())
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    assert spans[0].attributes["durable.invocation.first"] is False
 
 
 @pytest.mark.parametrize(
@@ -173,6 +192,9 @@ def test_invocation_span_status_reflects_execution_status(
 
     spans = exporter.get_finished_spans()
     assert len(spans) == 1
+    attributes = spans[0].attributes
+    assert attributes is not None
+    assert attributes["durable.invocation.status"] == invocation_status.value
     assert spans[0].status.status_code is expected_span_status
 
 

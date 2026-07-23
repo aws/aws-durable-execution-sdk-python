@@ -47,6 +47,8 @@ from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
 
 logger = logging.getLogger(__name__)
 
+_SpanAttributes = dict[str, str | bool | int]
+
 
 def _to_otel_timestamp(dt: datetime.datetime | None) -> int | None:
     """Convert a datetime to OTel timestamp (nanoseconds since epoch), or None."""
@@ -215,7 +217,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
         self,
         operation_id: str | None,
         name: str,
-        attributes: dict[str, str],
+        attributes: _SpanAttributes,
         start_time: datetime.datetime | None = None,
         parent_span: Span | None = None,
         existed: bool = False,
@@ -345,6 +347,9 @@ class OtelPlugin(DurableInstrumentationPlugin):
 
         invocation_span = self._get_span(None)
         if invocation_span:
+            invocation_span.set_attribute(
+                "durable.invocation.status", info.status.value
+            )
             if info.status is InvocationStatus.FAILED:
                 invocation_span.set_status(
                     StatusCode.ERROR, info.error.message if info.error else ""
@@ -526,7 +531,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
                 trace.set_span_in_context(parent_span, self._extracted_context)
             )
 
-    def _extract_attributes(self, info: Any) -> dict[str, str]:
+    def _extract_attributes(self, info: Any) -> _SpanAttributes:
         """Extract durable execution fields as OpenTelemetry span attributes.
 
         Args:
@@ -535,10 +540,12 @@ class OtelPlugin(DurableInstrumentationPlugin):
         Returns:
             A dictionary of durable execution attributes suitable for a span.
         """
-        attributes: dict[str, str] = {
+        attributes: _SpanAttributes = {
             "durable.execution.arn": self._execution_arn,
         }
 
+        if isinstance(info, InvocationStartInfo):
+            attributes["durable.invocation.first"] = info.is_first_invocation
         if hasattr(info, "operation_id") and info.operation_id is not None:
             attributes["durable.operation.id"] = info.operation_id
         if hasattr(info, "operation_type") and info.operation_type is not None:
