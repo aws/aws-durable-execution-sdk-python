@@ -285,3 +285,32 @@ def test_default_mode_invocation_span_parented_to_ambient_span():
     invocation = {s.name: s for s in exporter.get_finished_spans()}["invocation"]
     assert invocation.parent is not None
     assert invocation.parent.span_id == ambient.get_span_context().span_id
+
+
+def test_open_operation_span_not_exported_at_invocation_end():
+    """A suspended operation (started, not ended) must not be exported.
+
+    on_invocation_end drops the reference without ending it (JS PR #756); the
+    span is ended only when on_operation_end fires in a later invocation.
+    """
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id="wait-1",
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="wait-for-signal",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    # No on_operation_end: the operation suspended.
+    plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+
+    exported = {s.name for s in exporter.get_finished_spans()}
+    # The open operation span is NOT exported (never ended).
+    assert "wait-for-signal" not in exported

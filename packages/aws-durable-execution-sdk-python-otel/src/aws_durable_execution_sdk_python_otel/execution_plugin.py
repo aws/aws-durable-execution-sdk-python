@@ -291,13 +291,11 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         logger.debug("Durable invocation ended: %s", info)
-        # End any still-open operation spans defensively.
-        with self._lock:
-            keys = [k for k in self._operation_spans if k != _INVOCATION_KEY]
-        for key in keys:
-            span = self._pop_span(key)
-            if span is not None:
-                span.end()
+        # Operation spans still open here belong to operations that suspended
+        # (e.g. PENDING/RETRYING) rather than completed this invocation. They are
+        # ended only by on_operation_end; drop the references without ending them
+        # so they are not exported as if completed (JS PR #756). _reset_state
+        # clears the span map below.
 
         # End the invocation span regardless of terminal status (JS Req 10.7).
         if self._invocation_span is not None:
