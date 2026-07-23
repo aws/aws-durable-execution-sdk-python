@@ -233,7 +233,7 @@ def test_cross_invocation_operation_end_without_start_is_stitched():
 
 
 # ---------------------------------------------------------------------------
-# Default-provider mode: invocation span (JS PR #756 divergence)
+# Default-provider mode: invocation span
 # ---------------------------------------------------------------------------
 def _create_default_mode_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
     """ExecutionOtelPlugin in default-provider mode wired to an in-memory exporter.
@@ -290,7 +290,7 @@ def test_default_mode_invocation_span_parented_to_ambient_span():
 def test_open_operation_span_not_exported_at_invocation_end():
     """A suspended operation (started, not ended) must not be exported.
 
-    on_invocation_end drops the reference without ending it (JS PR #756); the
+    on_invocation_end drops the reference without ending it; the
     span is ended only when on_operation_end fires in a later invocation.
     """
     plugin, exporter = _create_plugin()

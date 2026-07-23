@@ -1,6 +1,6 @@
 """Shared instrumentation registration for the durable-execution OTel plugins.
 
-Mirrors the JS ``registerStandaloneInstrumentations`` (Requirements 4 & 27):
+Mirrors the JS ``registerStandaloneInstrumentations``:
 
 * A custom (explicit) provider skips ALL instrumentation registration.
 * When the global provider is in use (``use_default_tracer_provider``), only the
@@ -82,7 +82,7 @@ def _register_http_instrumentation(tracer_provider: object | None) -> None:
 
     def request_hook(span, pool, request_info) -> None:  # noqa: ANN001
         # Suppress spans to the loopback collector and the Lambda runtime API by
-        # ending them immediately with no recording (JS Req 4.4-5). urllib3 does
+        # ending them immediately with no recording. urllib3 does
         # not expose a pre-create filter, so we no-op the created span instead.
         host = getattr(pool, "host", None)
         if host in suppressed_hosts and span is not None and span.is_recording():
@@ -112,17 +112,17 @@ def register_standalone_instrumentations(
         use_default_tracer_provider: True when the global provider is in use.
     """
     # A custom, explicitly-supplied provider means the caller manages their own
-    # instrumentation: skip everything (JS Req 4.1 / 27.6).
+    # instrumentation: skip everything.
     if config.tracer_provider is not None:
         return
 
     if use_default_tracer_provider:
-        # Global provider: register AWS instrumentation only (JS Req 27.3/27.5).
+        # Global provider: register AWS instrumentation only.
         _register_aws_instrumentation(None)
         return
 
     # Auto-configured, plugin-owned provider: AWS SDK always; HTTP unless
-    # explicitly disabled (JS Req 4.3/4.6/4.8).
+    # explicitly disabled.
     _register_aws_instrumentation(tracer_provider)
     if config.enable_http_instrumentation:
         _register_http_instrumentation(tracer_provider)

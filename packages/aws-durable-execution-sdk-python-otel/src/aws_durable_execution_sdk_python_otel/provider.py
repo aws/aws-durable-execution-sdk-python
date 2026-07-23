@@ -1,7 +1,6 @@
 """Shared TracerProvider factory for the durable-execution OTel plugins.
 
-Implements the 3-level provider resolution used by both plugins (JS
-Requirements 2, 3 & 26):
+Implements the 3-level provider resolution used by both plugins:
 
 1. An explicit ``tracer_provider`` in config is used as-is (``owns_provider=False``).
 2. Otherwise, when ``use_default_tracer_provider`` resolves to True, the globally
@@ -66,11 +65,11 @@ def _resolve_endpoint(config: OtelPluginConfig) -> str:
 
 
 def _build_sampler():
-    """Build the sampler from ``OTEL_DURABLE_SAMPLING_RATIO`` (JS Req 3.4-5).
+    """Build the sampler from ``OTEL_DURABLE_SAMPLING_RATIO``.
 
     A valid ratio in ``[0, 1]`` yields a ``TraceIdRatioBased`` sampler; anything
     else falls back to ``ALWAYS_ON``. If constructing the ratio sampler raises,
-    the error propagates and fails provider setup (JS Req 3.4).
+    the error propagates and fails provider setup.
     """
     from opentelemetry.sdk.trace.sampling import ALWAYS_ON, TraceIdRatioBased
 
@@ -87,7 +86,7 @@ def _build_sampler():
 
 
 def _build_resource():
-    """Build a Lambda resource from AWS_* env vars (JS Req 3.6-8)."""
+    """Build a Lambda resource from AWS_* env vars."""
     from opentelemetry.sdk.resources import Resource
 
     function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
@@ -109,7 +108,7 @@ def _build_resource():
 
 
 def _default_propagators(config: OtelPluginConfig):
-    """Return configured propagators or the X-Ray + W3C default (JS Req 3.10)."""
+    """Return configured propagators or the X-Ray + W3C default."""
     if config.propagators is not None:
         return list(config.propagators)
     from opentelemetry.propagators.aws import AwsXRayPropagator
@@ -163,13 +162,13 @@ def create_tracer_provider(
         default_use_global: The value ``use_default_tracer_provider`` defaults to
             when it is unset in config. ``ExecutionOtelPlugin`` passes ``False``;
             ``InvocationOtelPlugin`` passes ``True`` to preserve its historical
-            behaviour of using the global provider (JS Req 26.3).
+            behaviour of using the global provider.
 
     Returns:
         A :class:`ProviderResult`.
     """
     if config.tracer_provider is not None:
-        # Explicit provider: use as-is, never wrap/modify (JS Req 2.1-2).
+        # Explicit provider: use as-is, never wrap/modify.
         return ProviderResult(config.tracer_provider, False)
 
     use_default = config.use_default_tracer_provider

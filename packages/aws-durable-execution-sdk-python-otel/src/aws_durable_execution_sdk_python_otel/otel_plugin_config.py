@@ -2,7 +2,7 @@
 
 Both :class:`ExecutionOtelPlugin` and :class:`InvocationOtelPlugin` accept a
 single :class:`OtelPluginConfig`, so configuration options are
-consistent and not duplicated across plugins (JS Requirements 24 & 25).
+consistent and not duplicated across plugins.
 """
 
 from __future__ import annotations

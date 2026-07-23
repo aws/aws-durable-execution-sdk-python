@@ -35,7 +35,7 @@ def test_use_default_provider_returns_global_and_not_owned():
 
 def test_default_use_global_flag_applies_when_unset():
     # InvocationOtelPlugin passes default_use_global=True so an unset config
-    # resolves to the global provider (JS Req 26.3).
+    # resolves to the global provider.
     result = create_tracer_provider(OtelPluginConfig(), default_use_global=True)
     assert result.tracer_provider is trace.get_tracer_provider()
     assert result.owns_provider is False

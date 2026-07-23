@@ -189,7 +189,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     # Links
     # ------------------------------------------------------------------
     def _build_invocation_links(self) -> list[Link]:
-        """Link operation/attempt spans to the invocation span (JS Req 19)."""
+        """Link operation/attempt spans to the invocation span."""
         if self._use_default and self._saved_invocation_context is not None:
             span = trace.get_current_span(self._saved_invocation_context)
             ctx = span.get_span_context()
@@ -218,17 +218,17 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._extracted_context = self._context_extractor(info)
         self._id_generator.set_trace_id(self._execution_arn, info.execution_start_time)
 
-        # Capture the ambient context for link-building in default mode (Req 20).
+        # Capture the ambient context for link-building in default mode.
         if self._use_default:
             self._saved_invocation_context = otel_context.get_current()
 
         self._start_workflow_span(info)
         # Create the Invocation span in both modes. In default-provider mode it
-        # is parented to the ambient Lambda invocation span (JS PR #756).
+        # is parented to the ambient Lambda invocation span.
         self._start_invocation_span(info)
 
         # Make the Workflow span the active span so auto-instrumented spans
-        # created during the invocation become its children (JS Req 13).
+        # created during the invocation become its children.
         if self._workflow_span is not None:
             otel_context.attach(
                 trace.set_span_in_context(self._workflow_span, self._extracted_context)
@@ -246,7 +246,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         start_time = _to_otel_timestamp(
             info.execution_start_time
         ) or _to_otel_timestamp(datetime.datetime.now(datetime.UTC))
-        # Empty context => root span with no parent (JS Req 9.2).
+        # Empty context => root span with no parent.
         self._workflow_span = self._tracer.start_span(
             name=self._workflow_span_name,
             attributes={"durable.execution.arn": self._execution_arn},
@@ -260,7 +260,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         if self._use_default:
             # Default-provider mode: parent the Invocation span to the ambient
             # Lambda invocation span (from the ADOT layer or other
-            # auto-instrumentation) captured at invocation start (JS PR #756).
+            # auto-instrumentation) captured at invocation start.
             # Lambda semantic attributes belong to that ambient span, so carry
             # only durable correlation attributes here.
             parent_ctx = self._saved_invocation_context or otel_context.get_current()
@@ -294,15 +294,15 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # Operation spans still open here belong to operations that suspended
         # (e.g. PENDING/RETRYING) rather than completed this invocation. They are
         # ended only by on_operation_end; drop the references without ending them
-        # so they are not exported as if completed (JS PR #756). _reset_state
+        # so they are not exported as if completed. _reset_state
         # clears the span map below.
 
-        # End the invocation span regardless of terminal status (JS Req 10.7).
+        # End the invocation span regardless of terminal status.
         if self._invocation_span is not None:
             self._invocation_span.end()
 
         # The Workflow span is exported only on a terminal status; otherwise its
-        # reference is dropped without ending it (JS Req 9.7-8).
+        # reference is dropped without ending it.
         if self._workflow_span is not None:
             if info.status in _TERMINAL_INVOCATION_STATUSES:
                 self._workflow_span.set_attribute(
@@ -358,7 +358,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         span = self._get_span(info.operation_id)
         if span is None:
             # Cross-invocation stitching: operation started in a prior
-            # invocation. Create + immediately end a linked span (JS Req 15.3).
+            # invocation. Create + immediately end a linked span.
             parent = self._resolve_parent(info.parent_id)
             span = self._start_span(
                 operation_id=info.operation_id,
