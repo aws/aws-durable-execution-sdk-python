@@ -553,6 +553,7 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
 
         self.assertIn("operation_start:op-1", self.plugin.calls)
         self.assertEqual(captured[0].status, OperationStatus.STARTED)
+        self.assertFalse(captured[0].is_replayed)
 
     def test_start_action_uses_server_start_timestamp(self):
         captured: list[OperationStartInfo] = []
@@ -583,6 +584,44 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
             self.executor.on_operation_action(update, operation)
 
         self.assertEqual(captured[0].start_time, START_TS)
+
+    def test_start_action_for_existing_operation_is_replayed(self):
+        captured: list[OperationStartInfo] = []
+
+        class _CapturingPlugin(_TrackingPlugin):
+            def on_operation_start(self, info: OperationStartInfo) -> None:
+                super().on_operation_start(info)
+                captured.append(info)
+
+        self.plugin = _CapturingPlugin()
+        self.executor = PluginExecutor(plugins=[self.plugin])
+        update = MagicMock()
+        update.action = OperationAction.START
+        update.operation_id = "op-1"
+        update.operation_type = OperationType.STEP
+        update.sub_type = OperationSubType.STEP
+        update.name = "my-step"
+        update.parent_id = "parent-1"
+
+        current_operation = Operation(
+            operation_id="op-1",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.STARTED,
+        )
+        previous_operation = Operation(
+            operation_id="op-1",
+            operation_type=OperationType.STEP,
+            status=OperationStatus.READY,
+        )
+
+        with self.executor.run():
+            self.executor.on_operation_action(
+                update,
+                operation=current_operation,
+                previous_operation=previous_operation,
+            )
+
+        self.assertTrue(captured[0].is_replayed)
 
     def test_non_start_action_does_not_fire(self):
         update = MagicMock()

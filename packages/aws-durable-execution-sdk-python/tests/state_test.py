@@ -41,6 +41,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
+    OperationStartInfo,
     PluginExecutor,
     UserFunctionEndInfo,
 )
@@ -3867,6 +3868,7 @@ class _RecordingPlugin(DurableInstrumentationPlugin):
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.operation_starts: list[OperationStartInfo] = []
 
     def on_execution_start(self, info):
         self.calls.append("execution_start")
@@ -3882,6 +3884,7 @@ class _RecordingPlugin(DurableInstrumentationPlugin):
 
     def on_operation_start(self, info):
         self.calls.append(f"operation_start:{info.operation_id}")
+        self.operation_starts.append(info)
 
     def on_operation_end(self, info):
         self.calls.append(f"operation_end:{info.operation_id}")
@@ -3963,6 +3966,59 @@ def test_plugin_executor_on_operation_action_called_on_checkpoint():
 
     # on_operation_action is called for START updates
     assert "operation_start:step-1" in plugin.calls
+    assert plugin.operation_starts[0].is_replayed is False
+
+
+def test_existing_operation_start_is_reported_as_replayed():
+    """A repeated START checkpoint reports that the operation already existed."""
+    mock_client = create_autospec(LambdaClient)
+    previous_step = Operation(
+        operation_id="step-1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.READY,
+        step_details=StepDetails(attempt=1),
+    )
+    completed_step = Operation(
+        operation_id="step-1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        step_details=StepDetails(attempt=2, result='"done"'),
+    )
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(
+            operations=[completed_step],
+            next_marker=None,
+        ),
+    )
+
+    plugin = _RecordingPlugin()
+    plugin_executor = PluginExecutor(plugins=[plugin])
+    with plugin_executor.run():
+        state = ExecutionState(
+            durable_execution_arn="test_arn",
+            initial_checkpoint_token="token123",  # noqa: S106
+            operations={"step-1": previous_step},
+            service_client=mock_client,
+            plugin_executor=plugin_executor,
+        )
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        executor.submit(state.checkpoint_batches_forever)
+
+        try:
+            operation_update = OperationUpdate(
+                operation_id="step-1",
+                operation_type=OperationType.STEP,
+                action=OperationAction.START,
+                name="my-step",
+            )
+            state.create_checkpoint(operation_update, is_sync=True)
+        finally:
+            state.stop_checkpointing()
+            executor.shutdown(wait=True)
+
+    assert plugin.operation_starts[0].is_replayed is True
 
 
 def test_plugin_executor_on_operation_update_called_for_terminal_operations():

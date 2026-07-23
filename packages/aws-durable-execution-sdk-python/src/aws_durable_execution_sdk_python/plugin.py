@@ -375,14 +375,18 @@ class PluginExecutor:
         )
 
     def on_operation_action(
-        self, update: OperationUpdate, operation: Operation | None = None
+        self,
+        update: OperationUpdate,
+        operation: Operation | None = None,
+        previous_operation: Operation | None = None,
     ):
         """Execute any registered plugins for a given operation when an update is checkpointed
 
         Args:
             update: the operation update that is checkpointed
+            operation: the operation after the checkpoint
+            previous_operation: the operation before the checkpoint
         """
-        # todo: this could be called more than once for step when it's retried
         if update.action is OperationAction.START:
             # we handle only START action here because on_operation_update may not be able to see a STARTED update
             # when START is checkpointed in batch with terminal status updates.
@@ -394,7 +398,7 @@ class PluginExecutor:
                     name=update.name,
                     parent_id=update.parent_id,
                     start_time=operation.start_timestamp if operation else None,
-                    is_replayed=False,
+                    is_replayed=previous_operation is not None,
                     status=OperationStatus.STARTED,
                 ),
                 sync=True,

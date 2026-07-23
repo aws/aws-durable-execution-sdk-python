@@ -761,7 +761,9 @@ class ExecutionState:
                     )
                     for update in updates:
                         self._plugin_executor.on_operation_action(
-                            update, self.operations.get(update.operation_id)
+                            update,
+                            self.operations.get(update.operation_id),
+                            previous_operations.get(update.operation_id),
                         )
 
                     self._plugin_executor.on_operation_update(
