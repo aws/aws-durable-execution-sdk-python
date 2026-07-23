@@ -342,7 +342,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         if info.operation_type is OperationType.CONTEXT:
             return  # tracked via on_user_function_start
         parent = self._resolve_parent(info.parent_id)
-        self._start_operation_span(
+        self._start_span(
             operation_id=info.operation_id,
             name=info.name or info.operation_id,
             info=info,
@@ -360,7 +360,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             # Cross-invocation stitching: operation started in a prior
             # invocation. Create + immediately end a linked span (JS Req 15.3).
             parent = self._resolve_parent(info.parent_id)
-            span = self._start_operation_span(
+            span = self._start_span(
                 operation_id=info.operation_id,
                 name=info.name or info.operation_id,
                 info=info,
@@ -386,7 +386,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         if popped is not None:
             popped.end(end_time=_to_otel_timestamp(end_time))
 
-    def _start_operation_span(
+    def _start_span(
         self,
         *,
         operation_id: str,
@@ -452,7 +452,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 info.parent_id
             )
             name = f"{info.name or info.operation_id} attempt {info.attempt or 1}"
-            span = self._start_operation_span(
+            span = self._start_span(
                 operation_id=info.operation_id,
                 name=name,
                 info=info,
@@ -464,7 +464,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             )
         else:  # CONTEXT
             parent = self._resolve_parent(info.parent_id)
-            span = self._start_operation_span(
+            span = self._start_span(
                 operation_id=info.operation_id,
                 name=info.name or info.operation_id,
                 info=info,
