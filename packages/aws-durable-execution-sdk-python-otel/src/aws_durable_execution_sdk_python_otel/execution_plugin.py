@@ -47,7 +47,6 @@ from opentelemetry.trace import (
     Span,
     SpanContext,
     StatusCode,
-    TraceFlags,
     Tracer,
 )
 
@@ -348,7 +347,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             info=info,
             parent=parent,
             start_time=info.start_time,
-            existed=info.is_replayed,
         )
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
@@ -366,7 +364,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 info=info,
                 parent=parent,
                 start_time=info.start_time,
-                existed=True,
             )
         else:
             span.set_attributes(self._operation_attributes(info))
@@ -394,7 +391,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         info: Any,
         parent: Span | None,
         start_time: datetime.datetime | None,
-        existed: bool,
         span_key: str | None = None,
         deterministic: bool = True,
     ) -> Span:
@@ -402,27 +398,15 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         key = span_key if span_key is not None else operation_id
         with self._lock:
             links = self._build_invocation_links()
-            if not deterministic:
-                self._id_generator.set_next_span_id(None)
-            elif existed:
-                # Continuation span: keep a link back to the deterministic
-                # logical-operation span so viewers can relate the stitched span.
-                span_id = operation_id_to_span_id(self._execution_arn, operation_id)
-                links.append(
-                    Link(
-                        context=SpanContext(
-                            trace_id=self._id_generator.generate_trace_id(),
-                            span_id=span_id,
-                            is_remote=False,
-                            trace_flags=TraceFlags(TraceFlags.SAMPLED),
-                        )
-                    )
-                )
-                self._id_generator.set_next_span_id(None)
-            else:
+            if deterministic:
+                # Operation spans always use the deterministic logical-operation
+                # span ID so a suspended-then-completed operation exports a
+                # single span (on completion) with a stable ID across invocations.
                 self._id_generator.set_next_span_id(
                     operation_id_to_span_id(self._execution_arn, operation_id)
                 )
+            else:
+                self._id_generator.set_next_span_id(None)
 
             if parent is None:
                 parent_ctx = self._extracted_context or Context()
@@ -458,7 +442,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 info=info,
                 parent=parent,
                 start_time=info.start_time,
-                existed=False,
                 span_key=self._attempt_key(info),
                 deterministic=False,
             )
@@ -470,7 +453,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 info=info,
                 parent=parent,
                 start_time=info.start_time,
-                existed=False,
             )
         otel_context.attach(trace.set_span_in_context(span, self._extracted_context))
 

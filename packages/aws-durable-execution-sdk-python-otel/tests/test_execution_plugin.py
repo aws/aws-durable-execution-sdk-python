@@ -26,6 +26,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     derive_workflow_span_id,
+    operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
@@ -204,7 +205,7 @@ def test_operation_parented_under_workflow_and_linked_to_invocation():
     assert invocation.context.span_id in linked_span_ids
 
 
-def test_cross_invocation_operation_end_without_start_is_stitched():
+def test_cross_invocation_operation_end_uses_deterministic_span_id():
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
 
@@ -225,11 +226,13 @@ def test_cross_invocation_operation_end_without_start_is_stitched():
     )
     plugin.on_invocation_end(_invocation_end_info())
 
-    spans = {s.name: s for s in exporter.get_finished_spans()}
-    assert "earlier-step" in spans
-    stitched = spans["earlier-step"]
-    # Stitched span links back to the deterministic logical-operation span.
-    assert len(stitched.links) >= 1
+    matching = [s for s in exporter.get_finished_spans() if s.name == "earlier-step"]
+    # Exported exactly once, using the deterministic logical-operation span ID
+    # (no separate continuation span).
+    assert len(matching) == 1
+    assert matching[0].context.span_id == operation_id_to_span_id(
+        EXECUTION_ARN, "step-earlier"
+    )
 
 
 # ---------------------------------------------------------------------------
