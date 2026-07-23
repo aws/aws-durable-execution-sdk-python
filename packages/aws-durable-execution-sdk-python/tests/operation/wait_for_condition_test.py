@@ -332,8 +332,8 @@ def test_wait_for_condition_retry_without_state():
     assert result == 6  # 5 (initial) + 1
 
 
-def test_wait_for_condition_retry_invalid_json_state():
-    """Test wait_for_condition on retry with invalid JSON state."""
+def test_wait_for_condition_retry_invalid_json_state_fails():
+    """Test invalid checkpointed state fails instead of restarting polling."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "arn:aws:test"
     operation = Operation(
@@ -362,15 +362,21 @@ def test_wait_for_condition_retry_invalid_json_state():
         wait_strategy=lambda s, a: WaitForConditionDecision.stop_polling(),
     )
 
-    result = wait_for_condition_handler(
-        state=mock_state,
-        operation_identifier=op_id,
-        check=check_func,
-        config=config,
-        context_logger=mock_logger,
-    )
+    with pytest.raises(WaitForConditionError) as exc_info:
+        wait_for_condition_handler(
+            state=mock_state,
+            operation_identifier=op_id,
+            check=check_func,
+            config=config,
+            context_logger=mock_logger,
+        )
 
-    assert result == 6  # Falls back to initial state
+    assert exc_info.value.error_type == "ExecutionError"
+    mock_state.create_checkpoint.assert_called_once()
+    assert (
+        mock_state.create_checkpoint.call_args.kwargs["operation_update"].action
+        == OperationAction.FAIL
+    )
 
 
 def test_wait_for_condition_check_function_exception():

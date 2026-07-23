@@ -152,33 +152,27 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
             Suspends if condition not met
             Raises error if check function fails
         """
-        # Determine current state from checkpoint
-        if checkpointed_result.is_started_or_ready() and checkpointed_result.result:
-            try:
+        try:
+            # Determine current state from checkpoint
+            if checkpointed_result.is_started_or_ready() and checkpointed_result.result:
                 current_state = deserialize(
                     serdes=self.config.serdes,
                     data=checkpointed_result.result,
                     operation_id=self.operation_identifier.operation_id,
                     durable_execution_arn=self.state.durable_execution_arn,
                 )
-            except Exception:
-                # Default to initial state if there's an error getting checkpointed state
-                logger.exception(
-                    "⚠️ wait_for_condition failed to deserialize state for id: %s, name: %s. Using initial state.",
-                    self.operation_identifier.operation_id,
-                    self.operation_identifier.name,
-                )
+            else:
                 current_state = self.config.initial_state
-        else:
-            current_state = self.config.initial_state
 
-        # Get attempt number - current attempt is checkpointed attempts + 1
-        # The checkpoint stores completed attempts, so the current attempt being executed is one more
-        attempt: int = 1
-        if checkpointed_result.operation and checkpointed_result.operation.step_details:
-            attempt = checkpointed_result.operation.step_details.attempt + 1
+            # Get attempt number - current attempt is checkpointed attempts + 1
+            # The checkpoint stores completed attempts, so the current attempt being executed is one more
+            attempt: int = 1
+            if (
+                checkpointed_result.operation
+                and checkpointed_result.operation.step_details
+            ):
+                attempt = checkpointed_result.operation.step_details.attempt + 1
 
-        try:
             # Execute the check function with the injected logger
             check_context = WaitForConditionCheckContext(
                 logger=self.context_logger.with_log_info(
