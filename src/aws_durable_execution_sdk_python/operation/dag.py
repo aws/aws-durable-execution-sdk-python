@@ -45,6 +45,8 @@ _DAG_VALIDATION_ERRORS = (
     DagExecutionError,
 )
 
+_DAG_ERROR_BY_NAME = {cls.__name__: cls for cls in _DAG_VALIDATION_ERRORS}
+
 _warned = False
 
 
@@ -84,12 +86,21 @@ def unwrap_dag_error(exc: CallableRuntimeError) -> None:
     ``child_handler`` wraps body exceptions as ``CallableRuntimeError`` with the
     original on ``__cause__`` (``raise ... from e``). This restores the clean
     typed throw for DAG validation / execution errors, mirroring the
-    ``wait_for_callback`` precedent. If the cause is not a Dag* error, re-raises
-    the original wrapper unchanged.
+    ``wait_for_callback`` precedent.
+
+    On **replay**, the failure is rebuilt from a checkpoint via
+    ``ErrorObject.to_callable_runtime_error()``, which sets ``error_type`` (the
+    original class name) but leaves ``__cause__`` as ``None``. In that case we
+    reconstruct the typed Dag* error from ``error_type`` so a nested DAG's error
+    surfaces identically on the first run and on replay. If neither path
+    identifies a Dag* error, re-raise the original wrapper unchanged.
     """
     cause = exc.__cause__
     if isinstance(cause, _DAG_VALIDATION_ERRORS):
         raise cause from None
+    dag_cls = _DAG_ERROR_BY_NAME.get(exc.error_type or "")
+    if dag_cls is not None:
+        raise dag_cls(exc.message) from None
     raise exc
 
 

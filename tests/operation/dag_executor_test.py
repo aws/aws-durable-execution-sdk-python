@@ -297,3 +297,133 @@ def test_explicit_trigger_rule_overrides_config_default():
 
     result, _ = run_dag(register, DagConfig(default_trigger_rule=TriggerRule.ALL_DONE))
     assert result.get_status("b") is TaskStatus.SKIPPED
+
+
+# region run_if-raises regression (worker-thread callback swallowed exceptions)
+import signal  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+
+
+@contextmanager
+def _fail_on_hang(seconds: int = 10):
+    """Turn a scheduler hang into an assertion failure instead of blocking the
+    whole test session. SIGALRM fires on the main thread (where pytest runs)."""
+
+    def _handler(_signum, _frame):
+        raise AssertionError("DagExecutor.run() hung (run_if regression)")
+
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def test_run_if_raises_on_non_root_fails_task_and_drains():
+    """A run_if that raises on a downstream task (evaluated inside a worker-thread
+    completion callback) must not hang: the task FAILS and the DAG drains."""
+
+    def register(d):
+        a = d.step(lambda deps, sc: "A", name="a")
+        # run_if dereferences a missing dep -> KeyError, evaluated after `a` done
+        d.step(
+            lambda deps, sc: "ran",
+            deps=[a],
+            name="b",
+            run_if=lambda deps: deps["missing"] > 0,
+        )
+        # independent root task must still run (drain, not fail-fast)
+        d.step(lambda deps, sc: "c-ran", name="c")
+
+    with _fail_on_hang():
+        result, _ = run_dag(register, DagConfig(default_retry_strategy=NO_RETRY))
+
+    assert result.get_status("a") is TaskStatus.SUCCEEDED
+    assert result.get_status("b") is TaskStatus.FAILED
+    assert result.results["b"].error is not None
+    assert result.get_result("c") == "c-ran"
+    assert result.failure_count == 1
+    assert result.completion_reason is DagCompletionReason.COMPLETED_WITH_FAILURES
+    with pytest.raises(DagExecutionError):
+        result.throw_if_error()
+
+
+def test_run_if_raises_on_root_fails_task():
+    """A raising run_if on a root task fails that task (consistent with the
+    non-root path) rather than aborting the whole DAG."""
+
+    def register(d):
+        d.step(
+            lambda deps, sc: "ran",
+            name="a",
+            run_if=lambda deps: 1 // 0 == 0,
+        )
+        d.step(lambda deps, sc: "b-ran", name="b")
+
+    with _fail_on_hang():
+        result, _ = run_dag(register, DagConfig(default_retry_strategy=NO_RETRY))
+
+    assert result.get_status("a") is TaskStatus.FAILED
+    assert result.get_result("b") == "b-ran"
+    assert result.failure_count == 1
+
+
+# endregion run_if-raises regression
+
+
+# region threshold-completion fidelity (mirrors ExecutionCounters.should_complete)
+def _threshold_executor(task_count, config):
+    state, _ = make_state()
+    ctx = make_context(state, parent_id="dag")
+    d = DagContextImpl(ctx, config)
+    for i in range(task_count):
+        d.step(lambda deps, sc: 1, name=f"t{i}")
+    return DagExecutor(ctx, d.get_tasks(), config)
+
+
+def test_threshold_success_checked_before_failure():
+    """When both min_successful and failure-tolerance fire, success wins (matches
+    batch ExecutionCounters ordering)."""
+    ex = _threshold_executor(
+        3,
+        DagConfig(
+            completion_config=CompletionConfig(
+                min_successful=2, tolerated_failure_count=0
+            )
+        ),
+    )
+    ex._success = 2
+    ex._failure = 1
+    assert ex._threshold_reason_locked() is DagCompletionReason.MIN_SUCCESSFUL_REACHED
+
+
+def test_threshold_impossible_to_succeed_stops_early():
+    """Once min_successful can no longer be reached, stop (reported as
+    FAILURE_TOLERANCE_EXCEEDED, matching batch _create_result)."""
+    ex = _threshold_executor(
+        3, DagConfig(completion_config=CompletionConfig(min_successful=3))
+    )
+    ex._failure = 1  # max reachable successes = 3 - 1 = 2 < 3
+    assert (
+        ex._threshold_reason_locked() is DagCompletionReason.FAILURE_TOLERANCE_EXCEEDED
+    )
+
+
+def test_threshold_percentage_denominator_excludes_skipped():
+    """Skipped tasks are excluded from the failure-percentage denominator so
+    they do not dilute the ratio."""
+    ex = _threshold_executor(
+        4, DagConfig(completion_config=CompletionConfig(tolerated_failure_percentage=40))
+    )
+    ex._skip = 2
+    ex._failure = 1
+    ex._success = 1
+    # denom = 4 - 2 = 2 -> 50% > 40% -> exceeded. (Old denom=4 -> 25%, would NOT.)
+    assert (
+        ex._threshold_reason_locked() is DagCompletionReason.FAILURE_TOLERANCE_EXCEEDED
+    )
+
+
+# endregion threshold-completion fidelity

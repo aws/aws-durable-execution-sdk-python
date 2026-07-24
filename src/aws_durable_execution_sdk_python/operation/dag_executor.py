@@ -46,8 +46,8 @@ _TERMINAL = (TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.SKIPPED)
 
 # task scheduling decisions
 _RUN = "RUN"
-_SKIP_TRIGGER = "SKIP_TRIGGER"
-_SKIP_RUN_IF = "SKIP_RUN_IF"
+_SKIP = "SKIP"
+_FAIL = "FAIL"
 
 
 def _trigger_passes(rule, statuses: list[TaskStatus]) -> bool:
@@ -100,6 +100,7 @@ class DagExecutor:
         self._failure = 0
         self._skip = 0
         self._suspend_exception: SuspendExecution | None = None
+        self._scheduler_exception: Exception | None = None
         self._early_reason: DagCompletionReason | None = None
         self._pool: ThreadPoolExecutor | None = None
 
@@ -115,6 +116,8 @@ class DagExecutor:
             self._pool = pool
             self._pump()
             self._completion_event.wait()
+            if self._scheduler_exception is not None:
+                raise self._scheduler_exception
             if self._suspend_exception is not None:
                 raise self._suspend_exception
         return self._build_result()
@@ -134,21 +137,21 @@ class DagExecutor:
                 for name, task in self._tasks.items():
                     if name in self._scheduled or not self._deps_terminal_locked(name):
                         continue
-                    decision = self._evaluate_locked(task)
+                    decision, payload = self._evaluate_locked(task)
                     self._scheduled.add(name)
                     if decision == _RUN:
                         self._in_flight.add(name)
                         to_submit.append((name, task))
-                    else:
-                        reason = (
-                            SkipReason.TRIGGER_RULE
-                            if decision == _SKIP_TRIGGER
-                            else SkipReason.RUN_IF_PREDICATE
-                        )
+                    elif decision == _SKIP:
                         self._results[name] = TaskExecution(
-                            name=name, status=TaskStatus.SKIPPED, skip_reason=reason
+                            name=name, status=TaskStatus.SKIPPED, skip_reason=payload
                         )
                         self._skip += 1
+                    else:  # _FAIL: run_if raised — treat as task failure (drain)
+                        self._results[name] = TaskExecution(
+                            name=name, status=TaskStatus.FAILED, error=payload
+                        )
+                        self._failure += 1
                     progressed = True
             done = self._is_done_locked()
 
@@ -194,7 +197,24 @@ class DagExecutor:
                 )
                 self._failure += 1
                 self._in_flight.discard(name)
-        self._pump()
+        self._safe_pump()
+
+    def _safe_pump(self) -> None:
+        """Run ``_pump`` from a worker-thread completion callback.
+
+        ``concurrent.futures`` swallows exceptions raised inside
+        ``add_done_callback``. If ``_pump`` ever raised there (e.g. an
+        unexpected scheduler bug) the completion event would never be set and
+        ``run()`` would block forever. Capture any escaping exception and set
+        the event so ``run()`` re-raises it instead of hanging.
+        """
+        try:
+            self._pump()
+        except Exception as e:  # noqa: BLE001
+            with self._lock:
+                if self._scheduler_exception is None:
+                    self._scheduler_exception = e
+            self._completion_event.set()
     # endregion scheduling
 
     # region helpers (lock held)
@@ -206,15 +226,28 @@ class DagExecutor:
                 return False
         return True
 
-    def _evaluate_locked(self, task: TaskDef) -> str:
+    def _evaluate_locked(self, task: TaskDef) -> tuple[str, Any]:
+        """Decide a ready task's fate: ``(_RUN, None)``, ``(_SKIP, SkipReason)``
+        or ``(_FAIL, ErrorObject)``.
+
+        The trigger rule is a pure function of upstream enum statuses. ``run_if``
+        is user code: if it raises, we treat the task as FAILED (spec §5.5's
+        "raise ⇒ FAILED", drain model) rather than letting the exception escape
+        the scheduler. This keeps root and non-root ``run_if`` behaviour
+        identical and never hangs the scheduler.
+        """
         statuses = [self._results[dep.name].status for dep in task.all_deps]
         if not _trigger_passes(task.trigger_rule, statuses):
-            return _SKIP_TRIGGER
+            return (_SKIP, SkipReason.TRIGGER_RULE)
         if task.run_if is not None:
             deps_map = self._build_deps_map(task)
-            if not task.run_if(deps_map):
-                return _SKIP_RUN_IF
-        return _RUN
+            try:
+                should_run = task.run_if(deps_map)
+            except Exception as e:  # noqa: BLE001
+                return (_FAIL, ErrorObject.from_exception(e))
+            if not should_run:
+                return (_SKIP, SkipReason.RUN_IF_PREDICATE)
+        return (_RUN, None)
 
     def _build_deps_map(self, task: TaskDef) -> DepsMap:
         by_name: dict[str, Any] = {}
@@ -224,21 +257,40 @@ class DagExecutor:
         return DepsMap(by_name)
 
     def _threshold_reason_locked(self) -> DagCompletionReason | None:
+        """Early-completion reason, mirroring ``ExecutionCounters.should_complete``.
+
+        Order matches the reused batch logic: success threshold first, then the
+        failure-tolerance conditions, then the impossible-to-succeed early stop
+        (which batch reports as ``FAILURE_TOLERANCE_EXCEEDED`` — see
+        ``ConcurrentExecutor._create_result``). The failure-percentage
+        denominator excludes SKIPPED tasks (they neither succeed nor fail) so
+        skips do not dilute the ratio.
+        """
         cc = self._config.completion_config
         if cc is None:
             return None
-        total = len(self._tasks)
+        min_successful = cc.min_successful
+        # Success condition (checked before failure, matching batch semantics).
+        if min_successful is not None and self._success >= min_successful:
+            return DagCompletionReason.MIN_SUCCESSFUL_REACHED
+        # Failure-tolerance conditions (count, then percentage).
         if (
             cc.tolerated_failure_count is not None
             and self._failure > cc.tolerated_failure_count
         ):
             return DagCompletionReason.FAILURE_TOLERANCE_EXCEEDED
-        if cc.tolerated_failure_percentage is not None and total > 0:
-            pct = (self._failure / total) * 100
-            if pct > cc.tolerated_failure_percentage:
+        if cc.tolerated_failure_percentage is not None:
+            denom = len(self._tasks) - self._skip
+            if denom > 0:
+                pct = (self._failure / denom) * 100
+                if pct > cc.tolerated_failure_percentage:
+                    return DagCompletionReason.FAILURE_TOLERANCE_EXCEEDED
+        # Impossible-to-succeed early stop: max reachable successes is every task
+        # that has not already failed or been skipped.
+        if min_successful is not None:
+            reachable = len(self._tasks) - self._failure - self._skip
+            if reachable < min_successful:
                 return DagCompletionReason.FAILURE_TOLERANCE_EXCEEDED
-        if cc.min_successful is not None and self._success >= cc.min_successful:
-            return DagCompletionReason.MIN_SUCCESSFUL_REACHED
         return None
 
     def _stopping_locked(self) -> bool:

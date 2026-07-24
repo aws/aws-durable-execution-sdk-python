@@ -163,3 +163,35 @@ def test_nested_dag_summary_generator_wired():
         dag_mod.child_handler = original  # type: ignore[assignment]
     assert captured["config"].summary_generator is gen
 
+
+
+def test_unwrap_dag_error_reconstructs_typed_error_on_replay():
+    """On replay the checkpointed failure rebuilds a CallableRuntimeError with
+    error_type set but __cause__ absent; unwrap must still surface the typed
+    Dag* error so replay matches the first run."""
+    from aws_durable_execution_sdk_python.exceptions import (
+        CallableRuntimeError,
+        DagExecutionError,
+    )
+    from aws_durable_execution_sdk_python.operation.dag import unwrap_dag_error
+
+    exc = CallableRuntimeError(
+        message="2 task(s) FAILED",
+        error_type="DagExecutionError",
+        data=None,
+        stack_trace=None,
+    )
+    assert exc.__cause__ is None
+    with pytest.raises(DagExecutionError, match="FAILED"):
+        unwrap_dag_error(exc)
+
+
+def test_unwrap_dag_error_passthrough_for_non_dag_error():
+    from aws_durable_execution_sdk_python.exceptions import CallableRuntimeError
+    from aws_durable_execution_sdk_python.operation.dag import unwrap_dag_error
+
+    exc = CallableRuntimeError(
+        message="boom", error_type="ValueError", data=None, stack_trace=None
+    )
+    with pytest.raises(CallableRuntimeError):
+        unwrap_dag_error(exc)
