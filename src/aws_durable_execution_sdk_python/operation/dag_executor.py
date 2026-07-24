@@ -36,9 +36,9 @@ from aws_durable_execution_sdk_python.operation.dag_result import DagResultImpl
 if TYPE_CHECKING:
     from concurrent.futures import Future
 
+    from aws_durable_execution_sdk_python.context import DurableContext
     from aws_durable_execution_sdk_python.dag import DagConfig
     from aws_durable_execution_sdk_python.operation.dag_context import TaskDef
-    from aws_durable_execution_sdk_python.types import DurableContext
 
 logger = logging.getLogger(__name__)
 
@@ -154,9 +154,11 @@ class DagExecutor:
 
         for name, task in to_submit:
             future = self._pool.submit(self._run_task, name, task)  # type: ignore[union-attr]
-            future.add_done_callback(
-                lambda f, n=name: self._on_done(n, f)
-            )
+
+            def _done(f: Future, n: str = name) -> None:
+                self._on_done(n, f)
+
+            future.add_done_callback(_done)
 
         if done:
             self._completion_event.set()

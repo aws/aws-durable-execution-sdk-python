@@ -36,9 +36,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from aws_durable_execution_sdk_python.config import StepConfig
+    from aws_durable_execution_sdk_python.context import DurableContext
     from aws_durable_execution_sdk_python.dag import DagConfig
     from aws_durable_execution_sdk_python.serdes import SerDesContext
-    from aws_durable_execution_sdk_python.types import DurableContext
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +277,7 @@ class DagContextImpl(DagContext):
         def executor(ctx: DurableContext, deps_map: DepsMap):
             resolved = inputs(deps_map) if callable(inputs) else inputs
             serdes = config.serdes if (config and config.serdes) else _BatchResultSerDes()
-            cfg = ChildConfig(sub_type=OperationSubType.MAP, serdes=serdes)
+            cfg: ChildConfig = ChildConfig(sub_type=OperationSubType.MAP, serdes=serdes)
 
             def body(child: DurableContext):
                 return map_handler(
@@ -303,7 +303,7 @@ class DagContextImpl(DagContext):
 
         def executor(ctx: DurableContext, deps_map: DepsMap):
             serdes = config.serdes if (config and config.serdes) else _BatchResultSerDes()
-            cfg = ChildConfig(sub_type=OperationSubType.PARALLEL, serdes=serdes)
+            cfg: ChildConfig = ChildConfig(sub_type=OperationSubType.PARALLEL, serdes=serdes)
 
             def body(child: DurableContext):
                 return parallel_handler(

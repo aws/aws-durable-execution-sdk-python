@@ -33,9 +33,9 @@ from aws_durable_execution_sdk_python.operation.dag_validator import validate_da
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from aws_durable_execution_sdk_python.context import DurableContext
     from aws_durable_execution_sdk_python.dag import DagContext, DagResult
     from aws_durable_execution_sdk_python.state import ExecutionState
-    from aws_durable_execution_sdk_python.types import DurableContext
 
 _DAG_VALIDATION_ERRORS = (
     DagCyclicDependencyError,
@@ -107,7 +107,7 @@ def dag_handler(
     def body(dag_child_ctx: DurableContext) -> DagResult:
         return _run_dag_body(dag_child_ctx, register, config)
 
-    child_config = ChildConfig(
+    child_config: ChildConfig = ChildConfig(
         sub_type=OperationSubType.DAG,
         serdes=config.serdes or create_dag_result_serdes(),
     )
@@ -133,7 +133,7 @@ def run_nested_dag(
         child = ctx.create_child_context(parent_id=task_id)
         return _run_dag_body(child, register, config)
 
-    child_config = ChildConfig(
+    child_config: ChildConfig = ChildConfig(
         sub_type=OperationSubType.DAG,
         serdes=config.serdes or create_dag_result_serdes(),
     )
