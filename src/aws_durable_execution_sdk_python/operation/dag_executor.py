@@ -28,6 +28,7 @@ from aws_durable_execution_sdk_python.dag import (
 )
 from aws_durable_execution_sdk_python.exceptions import (
     SuspendExecution,
+    TimedSuspendExecution,
     ValidationError,
 )
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
@@ -99,7 +100,12 @@ class DagExecutor:
         self._success = 0
         self._failure = 0
         self._skip = 0
-        self._suspend_exception: SuspendExecution | None = None
+        # All suspends raised by tasks this run. We do NOT re-raise the first
+        # one captured; when stopping we resolve which suspend to surface with
+        # the same precedence as ConcurrentExecutor.should_execution_suspend
+        # (earliest timed wins over indefinite) so a concurrent short timer is
+        # never dropped behind an indefinite wait_for_callback.
+        self._pending_suspends: list[SuspendExecution] = []
         self._scheduler_exception: Exception | None = None
         self._early_reason: DagCompletionReason | None = None
         self._pool: ThreadPoolExecutor | None = None
@@ -118,8 +124,9 @@ class DagExecutor:
             self._completion_event.wait()
             if self._scheduler_exception is not None:
                 raise self._scheduler_exception
-            if self._suspend_exception is not None:
-                raise self._suspend_exception
+            suspend = self._resolve_suspend()
+            if suspend is not None:
+                raise suspend
         return self._build_result()
 
     # endregion public
@@ -167,7 +174,11 @@ class DagExecutor:
             self._completion_event.set()
 
     def _run_task(self, name: str, task: TaskDef) -> Any:
-        deps_map = self._build_deps_map(task)
+        # Snapshot deps under the lock: this runs on a worker thread and
+        # _build_deps_map reads self._results, which the scheduler mutates
+        # concurrently (the run_if path already builds deps under the lock).
+        with self._lock:
+            deps_map = self._build_deps_map(task)
         logger.debug("▶️ DAG task %s starting", name)
         return task.executor(self._ctx, deps_map)
 
@@ -182,8 +193,9 @@ class DagExecutor:
                 self._in_flight.discard(name)
         except SuspendExecution as se:  # includes TimedSuspendExecution
             with self._lock:
-                if self._suspend_exception is None:
-                    self._suspend_exception = se
+                # Record every suspend (timed + indefinite); precedence is
+                # resolved in _resolve_suspend when the DAG stops.
+                self._pending_suspends.append(se)
                 self._results[name] = TaskExecution(
                     name=name, status=TaskStatus.STARTED
                 )
@@ -216,6 +228,31 @@ class DagExecutor:
                     self._scheduler_exception = e
             self._completion_event.set()
     # endregion scheduling
+
+    def _resolve_suspend(self) -> SuspendExecution | None:
+        """Pick which suspend to surface, matching the base executor's contract.
+
+        Ports ``ConcurrentExecutor.should_execution_suspend`` precedence: if any
+        timed suspend is pending, raise a ``TimedSuspendExecution`` with the
+        EARLIEST ``scheduled_timestamp`` (timed wins over indefinite so the
+        platform resumes at the soonest timer); otherwise raise the indefinite
+        ``SuspendExecution``. Returns ``None`` when nothing suspended. Called
+        after the completion event fires, so no lock is needed.
+        """
+        earliest_timestamp = float("inf")
+        indefinite: SuspendExecution | None = None
+        for se in self._pending_suspends:
+            if isinstance(se, TimedSuspendExecution):
+                if se.scheduled_timestamp < earliest_timestamp:
+                    earliest_timestamp = se.scheduled_timestamp
+            else:
+                indefinite = se
+        if earliest_timestamp != float("inf"):
+            return TimedSuspendExecution(
+                "DAG suspended; resuming at the earliest pending timer.",
+                earliest_timestamp,
+            )
+        return indefinite
 
     # region helpers (lock held)
     def _deps_terminal_locked(self, name: str) -> bool:
@@ -294,7 +331,7 @@ class DagExecutor:
         return None
 
     def _stopping_locked(self) -> bool:
-        if self._suspend_exception is not None:
+        if self._pending_suspends:
             return True
         reason = self._threshold_reason_locked()
         if reason is not None:

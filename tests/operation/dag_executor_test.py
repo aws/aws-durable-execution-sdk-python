@@ -427,3 +427,81 @@ def test_threshold_percentage_denominator_excludes_skipped():
 
 
 # endregion threshold-completion fidelity
+
+
+# region multi-suspend precedence (earliest timed wins over indefinite)
+from aws_durable_execution_sdk_python.exceptions import (  # noqa: E402
+    SuspendExecution,
+    TimedSuspendExecution,
+)
+from aws_durable_execution_sdk_python.operation.dag_context import TaskDef  # noqa: E402
+
+
+def _suspend_executor(specs):
+    """Build a DagExecutor of independent root tasks that each raise `exc`.
+
+    `specs` is a list of (name, exception) pairs; every task is a root
+    (empty deps, ALL_SUCCESS) so all are submitted concurrently.
+    """
+    state, _ = make_state()
+    ctx = make_context(state, parent_id="dag")
+
+    def make_executor(exc):
+        def executor(_ctx, _deps_map):
+            raise exc
+
+        return executor
+
+    tasks = {
+        name: TaskDef(
+            name=name,
+            kind="step",
+            inline_deps=[],
+            all_deps=[],
+            trigger_rule=TriggerRule.ALL_SUCCESS,
+            run_if=None,
+            config=None,
+            executor=make_executor(exc),
+        )
+        for name, exc in specs
+    }
+    return DagExecutor(ctx, tasks, DagConfig())
+
+
+def test_two_concurrent_timed_waits_raise_earliest_timestamp():
+    """(a) Two concurrent timed suspends -> the EARLIEST timestamp is raised."""
+    now = time.time()
+    ex = _suspend_executor(
+        [
+            ("slow", TimedSuspendExecution("slow", now + 100)),
+            ("fast", TimedSuspendExecution("fast", now + 5)),
+        ]
+    )
+    with pytest.raises(TimedSuspendExecution) as ei:
+        ex.run()
+    assert ei.value.scheduled_timestamp == pytest.approx(now + 5)
+
+
+def test_timed_suspend_wins_over_indefinite():
+    """(b) Timed + indefinite concurrent -> timed wins (timer not dropped)."""
+    now = time.time()
+    ex = _suspend_executor(
+        [
+            ("callback", SuspendExecution("waiting for external callback")),
+            ("timer", TimedSuspendExecution("timer", now + 7)),
+        ]
+    )
+    with pytest.raises(TimedSuspendExecution) as ei:
+        ex.run()
+    assert ei.value.scheduled_timestamp == pytest.approx(now + 7)
+
+
+def test_indefinite_only_raises_indefinite_suspend():
+    """No timed suspend pending -> the indefinite SuspendExecution is raised."""
+    ex = _suspend_executor([("callback", SuspendExecution("external callback"))])
+    with pytest.raises(SuspendExecution) as ei:
+        ex.run()
+    assert not isinstance(ei.value, TimedSuspendExecution)
+
+
+# endregion multi-suspend precedence
