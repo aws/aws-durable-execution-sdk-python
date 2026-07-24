@@ -16,7 +16,6 @@ from typing import (
 )
 
 from aws_durable_execution_sdk_python.config import (
-    BatchedInput,
     CallbackConfig,
     ChildConfig,
     Duration,
@@ -656,7 +655,7 @@ class DurableContext(DurableContextProtocol):
     def map(
         self,
         inputs: Sequence[U],
-        func: Callable[[DurableContext, U | BatchedInput[Any, U], int, Sequence[U]], T],
+        func: Callable[[DurableContext, U, int, Sequence[U]], T],
         name: str | None = None,
         config: MapConfig | None = None,
     ) -> BatchResult[R]:
@@ -694,10 +693,6 @@ class DurableContext(DurableContextProtocol):
                 config=ChildConfig(
                     sub_type=OperationSubType.MAP,
                     serdes=getattr(config, "serdes", None),
-                    # child_handler should only know the serdes of the parent serdes,
-                    # the item serdes will be passed when we are actually executing
-                    # the branch within its own child_handler.
-                    item_serdes=None,
                 ),
             )
 
@@ -739,10 +734,6 @@ class DurableContext(DurableContextProtocol):
                 config=ChildConfig(
                     sub_type=OperationSubType.PARALLEL,
                     serdes=getattr(config, "serdes", None),
-                    # child_handler should only know the serdes of the parent serdes,
-                    # the item serdes will be passed when we are actually executing
-                    # the branch within its own child_handler.
-                    item_serdes=None,
                 ),
             )
 

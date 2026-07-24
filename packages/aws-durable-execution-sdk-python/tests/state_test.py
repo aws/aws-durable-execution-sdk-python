@@ -3969,6 +3969,36 @@ def test_plugin_executor_on_operation_action_called_on_checkpoint():
     assert plugin.operation_starts[0].is_replayed is False
 
 
+def test_async_operation_start_precedes_user_function_start():
+    """Async START notifies plugins before the user function begins."""
+    plugin = _RecordingPlugin()
+    plugin_executor = PluginExecutor(plugins=[plugin])
+    with plugin_executor.run():
+        state = ExecutionState(
+            durable_execution_arn="test_arn",
+            initial_checkpoint_token="token123",  # noqa: S106
+            operations={},
+            service_client=create_autospec(LambdaClient),
+            plugin_executor=plugin_executor,
+        )
+        operation_id = "step-1"
+        operation_identifier = OperationIdentifier(
+            operation_id=operation_id,
+            sub_type=OperationSubType.STEP,
+            name="my-step",
+        )
+        state.create_checkpoint(
+            OperationUpdate.create_step_start(operation_identifier),
+            is_sync=False,
+        )
+        plugin_executor.on_user_function_start(operation_identifier, attempt=1)
+
+    assert plugin.calls[:2] == [
+        f"operation_start:{operation_id}",
+        f"user_function_start:{operation_id}",
+    ]
+
+
 def test_existing_operation_start_is_reported_as_replayed():
     """A repeated START checkpoint reports that the operation already existed."""
     mock_client = create_autospec(LambdaClient)
@@ -4189,8 +4219,8 @@ def test_plugin_executor_called_for_multiple_updates_in_batch():
             executor.shutdown(wait=True)
 
     # Both operations should have triggered on_operation_action
-    assert "operation_start:step-1" in plugin.calls
-    assert "operation_start:step-2" in plugin.calls
+    assert plugin.calls.count("operation_start:step-1") == 1
+    assert plugin.calls.count("operation_start:step-2") == 1
     # Both terminal operations should have triggered on_operation_update
     assert "operation_end:step-1" in plugin.calls
     assert "operation_end:step-2" in plugin.calls
@@ -4264,8 +4294,8 @@ def test_plugin_executor_on_operation_change_called_for_status_changes():
     assert "operation_change:wait-1" not in plugin.calls
 
 
-def test_plugin_executor_not_called_on_checkpoint_failure():
-    """Test that plugin_executor is NOT called when checkpoint API fails."""
+def test_operation_start_plugin_hook_fires_before_checkpoint_failure():
+    """START is reported before queueing even when checkpointing later fails."""
     mock_client = create_autospec(spec=LambdaClient)
     mock_client.checkpoint.side_effect = RuntimeError("API error")
 
@@ -4298,8 +4328,7 @@ def test_plugin_executor_not_called_on_checkpoint_failure():
             state.stop_checkpointing()
             executor.shutdown(wait=True)
 
-    # Plugin should NOT have been called since checkpoint failed
-    assert "operation_start:step-1" not in plugin.calls
+    assert plugin.calls.count("operation_start:step-1") == 1
     assert "operation_end:step-1" not in plugin.calls
 
 

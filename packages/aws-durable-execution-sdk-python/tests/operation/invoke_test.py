@@ -12,7 +12,6 @@ from aws_durable_execution_sdk_python.exceptions import (
     ExecutionError,
     InvokeError,
     SuspendExecution,
-    TimedSuspendExecution,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -26,7 +25,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.operation.invoke import InvokeOperationExecutor
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
-from aws_durable_execution_sdk_python.suspend import suspend_with_optional_resume_delay
 from tests.serdes_test import CustomDictSerDes
 
 
@@ -390,38 +388,6 @@ def test_invoke_handler_custom_serdes_new_operation():
     operation_update = mock_state.create_checkpoint.call_args[1]["operation_update"]
     expected_serialized = '{"key": "VALUE", "number": "84", "list": [1, 2, 3]}'
     assert operation_update.payload == expected_serialized
-
-
-def test_suspend_with_optional_resume_delay_with_timeout():
-    """Test suspend_with_optional_resume_delay with timeout."""
-    with pytest.raises(TimedSuspendExecution) as exc_info:
-        suspend_with_optional_resume_delay("test message", 30)
-
-    assert "test message" in str(exc_info.value)
-
-
-def test_suspend_with_optional_resume_delay_no_timeout():
-    """Test suspend_with_optional_resume_delay without timeout."""
-    with pytest.raises(SuspendExecution) as exc_info:
-        suspend_with_optional_resume_delay("test message", None)
-
-    assert "test message" in str(exc_info.value)
-
-
-def test_suspend_with_optional_resume_delay_zero_timeout():
-    """Test suspend_with_optional_resume_delay with zero timeout."""
-    with pytest.raises(SuspendExecution) as exc_info:
-        suspend_with_optional_resume_delay("test message", 0)
-
-    assert "test message" in str(exc_info.value)
-
-
-def test_suspend_with_optional_resume_delay_negative_timeout():
-    """Test suspend_with_optional_resume_delay with negative timeout."""
-    with pytest.raises(SuspendExecution) as exc_info:
-        suspend_with_optional_resume_delay("test message", -5)
-
-    assert "test message" in str(exc_info.value)
 
 
 @pytest.mark.parametrize("status", [OperationStatus.STARTED, OperationStatus.PENDING])

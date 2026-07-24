@@ -1,35 +1,22 @@
 """Unit tests for config module."""
 
-from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
 from aws_durable_execution_sdk_python.config import (
-    BatchedInput,
     CallbackConfig,
     ChildConfig,
     CompletionConfig,
     Duration,
     InvokeConfig,
-    ItemBatcher,
-    ItemsPerBatchUnit,
     MapConfig,
     ParallelConfig,
     StepConfig,
-    StepFuture,
     StepSemantics,
-    TerminationMode,
 )
 from aws_durable_execution_sdk_python.waits import (
     WaitForConditionConfig,
     WaitForConditionDecision,
 )
-
-
-def test_batched_input():
-    """Test BatchedInput dataclass."""
-    batch_input = BatchedInput("batch", [1, 2, 3])
-    assert batch_input.batch_input == "batch"
-    assert batch_input.items == [1, 2, 3]
 
 
 def test_completion_config_defaults():
@@ -67,14 +54,6 @@ def test_completion_config_all_successful():
     assert config.min_successful is None
     assert config.tolerated_failure_count == 0
     assert config.tolerated_failure_percentage == 0
-
-
-def test_termination_mode_enum():
-    """Test TerminationMode enum."""
-    assert TerminationMode.TERMINATE.value == "TERMINATE"
-    assert TerminationMode.CANCEL.value == "CANCEL"
-    assert TerminationMode.WAIT.value == "WAIT"
-    assert TerminationMode.ABANDON.value == "ABANDON"
 
 
 def test_parallel_config_defaults():
@@ -183,35 +162,10 @@ def test_child_config_with_summary_generator():
     assert result == "Summary of test_data"
 
 
-def test_items_per_batch_unit_enum():
-    """Test ItemsPerBatchUnit enum."""
-    assert ItemsPerBatchUnit.COUNT.value == ("COUNT",)
-    assert ItemsPerBatchUnit.BYTES.value == "BYTES"
-
-
-def test_item_batcher_defaults():
-    """Test ItemBatcher default values."""
-    batcher = ItemBatcher()
-    assert batcher.max_items_per_batch == 0
-    assert batcher.max_item_bytes_per_batch == 0
-    assert batcher.batch_input is None
-
-
-def test_item_batcher_with_values():
-    """Test ItemBatcher with custom values."""
-    batcher = ItemBatcher(
-        max_items_per_batch=100, max_item_bytes_per_batch=1024, batch_input="test_input"
-    )
-    assert batcher.max_items_per_batch == 100
-    assert batcher.max_item_bytes_per_batch == 1024
-    assert batcher.batch_input == "test_input"
-
-
 def test_map_config_defaults():
     """Test MapConfig default values."""
     config = MapConfig()
     assert config.max_concurrency is None
-    assert isinstance(config.item_batcher, ItemBatcher)
     assert isinstance(config.completion_config, CompletionConfig)
     assert config.serdes is None
 
@@ -235,36 +189,6 @@ def test_callback_config_with_values():
     assert config.timeout_seconds == 30
     assert config.heartbeat_timeout_seconds == 10
     assert config.serdes is serdes
-
-
-def test_step_future():
-    """Test StepFuture with Future."""
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(lambda: "test_result")
-        step_future = StepFuture(future, "test_step")
-
-        result = step_future.result()
-        assert result == "test_result"
-
-
-def test_step_future_with_timeout():
-    """Test StepFuture result with timeout."""
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(lambda: "test_result")
-        step_future = StepFuture(future)
-
-        result = step_future.result(timeout_seconds=1)
-        assert result == "test_result"
-
-
-def test_step_future_without_name():
-    """Test StepFuture without name."""
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(lambda: 42)
-        step_future = StepFuture(future)
-
-        result = step_future.result()
-        assert result == 42
 
 
 def test_invoke_config_defaults():

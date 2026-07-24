@@ -42,7 +42,6 @@ class TestWaitStrategyConfig:
         assert config.max_delay_seconds == 300
         assert config.backoff_rate == 1.5
         assert config.jitter_strategy == JitterStrategy.FULL
-        assert config.timeout_seconds is None
 
 
 class TestCreateWaitStrategy:

@@ -57,9 +57,10 @@ def test_suspend_optional_timeout_with_negative():
         )
 
 
-def test_suspend_optional_timeout_with_positive():
+@pytest.mark.parametrize("delay_seconds", [1, 0])
+def test_suspend_optional_timeout_with_non_negative(delay_seconds):
     with pytest.raises(TimedSuspendExecution, match="test"):
         suspend_with_optional_resume_delay(
             "test",
-            1,
+            delay_seconds,
         )

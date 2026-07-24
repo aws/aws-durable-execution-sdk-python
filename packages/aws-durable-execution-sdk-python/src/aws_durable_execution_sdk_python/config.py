@@ -14,11 +14,9 @@ from aws_durable_execution_sdk_python.exceptions import ValidationError
 P = TypeVar("P")  # Payload type
 R = TypeVar("R")  # Result type
 T = TypeVar("T")
-U = TypeVar("U")
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from concurrent.futures import Future
 
     from aws_durable_execution_sdk_python.lambda_service import OperationSubType
     from aws_durable_execution_sdk_python.retries import RetryDecision
@@ -63,19 +61,6 @@ class Duration:
     def from_days(cls, value: float) -> Duration:
         """Create a Duration from days."""
         return cls(seconds=int(value * 86400))
-
-
-@dataclass(frozen=True)
-class BatchedInput(Generic[T, U]):
-    batch_input: T
-    items: list[U]
-
-
-class TerminationMode(Enum):
-    TERMINATE = "TERMINATE"
-    CANCEL = "CANCEL"
-    WAIT = "WAIT"
-    ABANDON = "ABANDON"
 
 
 class NestingType(Enum):
@@ -308,18 +293,6 @@ class ChildConfig(Generic[T]):
             Applied at the handler level to serialize the entire BatchResult object.
             If None, uses the default JSON serializer for BatchResult.
 
-            Backward Compatibility: If only 'serdes' is provided (no item_serdes),
-            it will be used for both individual items AND BatchResult serialization
-            to maintain existing behavior.
-
-        item_serdes: Custom serialization/deserialization configuration for individual items.
-            Applied to each item's result as tasks complete in child contexts.
-            If None, uses the default JSON serializer for individual items.
-
-            When both 'serdes' and 'item_serdes' are provided:
-            - item_serdes: Used for individual item results in child contexts
-            - serdes: Used for the entire BatchResult at handler level
-
         sub_type: Operation subtype identifier used for tracking and debugging.
             Examples: OperationSubType.MAP_ITERATION, OperationSubType.PARALLEL_BRANCH.
             Used internally by the execution engine for operation classification.
@@ -344,50 +317,9 @@ class ChildConfig(Generic[T]):
     """
 
     serdes: SerDes | None = None
-    item_serdes: SerDes | None = None
     sub_type: OperationSubType | None = None
     summary_generator: SummaryGenerator | None = None
     is_virtual: bool = False
-
-
-class ItemsPerBatchUnit(Enum):
-    COUNT = ("COUNT",)
-    BYTES = "BYTES"
-
-
-@dataclass(frozen=True)
-class ItemBatcher(Generic[T]):
-    """Configuration for batching items in map operations.
-
-    This class defines how individual items should be grouped together into batches
-    for more efficient processing in map operations.
-
-    Args:
-        max_items_per_batch: Maximum number of items to include in a single batch.
-            If 0 (default), no item count limit is applied. Use this to control
-            batch size when processing many small items.
-
-        max_item_bytes_per_batch: Maximum total size in bytes for items in a batch.
-            If 0 (default), no size limit is applied. Use this to control memory
-            usage when processing large items or when items vary significantly in size.
-
-        batch_input: Additional data to include with each batch.
-            This data is passed to the processing function along with the batched items.
-            Useful for providing context or configuration that applies to all items
-            in the batch.
-
-    Example:
-        # Batch up to 100 items or 1MB, whichever comes first
-        batcher = ItemBatcher(
-            max_items_per_batch=100,
-            max_item_bytes_per_batch=1024*1024,
-            batch_input={"processing_mode": "fast"}
-        )
-    """
-
-    max_items_per_batch: int = 0
-    max_item_bytes_per_batch: int | float = 0
-    batch_input: T | None = None
 
 
 @dataclass(frozen=True)
@@ -395,7 +327,7 @@ class MapConfig(Generic[T]):
     """Configuration options for map operations over collections.
 
     This class configures how map operations process collections of items,
-    including concurrency, batching, completion criteria, and serialization.
+    including concurrency, completion criteria, and serialization.
 
     Type Parameters:
         T: The type of items being processed in the map operation.
@@ -404,10 +336,6 @@ class MapConfig(Generic[T]):
         max_concurrency: Maximum number of items to process concurrently.
             If None, no limit is imposed and all items are processed concurrently.
             Use this to control resource usage when processing large collections.
-
-        item_batcher: Configuration for batching multiple items together for processing.
-            Allows grouping items by count or size to optimize processing efficiency.
-            Default is no batching (each item processed individually).
 
         completion_config: Defines when the map operation should complete.
             Controls success/failure criteria for the overall map operation.
@@ -449,10 +377,9 @@ class MapConfig(Generic[T]):
             If None, uses the default naming: "map-item-{index}".
 
     Example:
-        # Process 5 items at a time, batch by count, require all to succeed
+        # Process 5 items at a time, require all to succeed
         config = MapConfig(
             max_concurrency=5,
-            item_batcher=ItemBatcher(max_items_per_batch=10),
             completion_config=CompletionConfig.all_successful()
         )
 
@@ -464,7 +391,6 @@ class MapConfig(Generic[T]):
     """
 
     max_concurrency: int | None = None
-    item_batcher: ItemBatcher = field(default_factory=ItemBatcher)
     completion_config: CompletionConfig = field(default_factory=CompletionConfig)
     serdes: SerDes | None = None
     item_serdes: SerDes | None = None
@@ -494,7 +420,6 @@ class InvokeConfig(Generic[P, R]):
             If provided, the invocation will be scoped to this tenant.
     """
 
-    # retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
     serdes_payload: SerDes[P] | None = None
     serdes_result: SerDes[R] | None = None
     tenant_id: str | None = None
@@ -524,18 +449,6 @@ class WaitForCallbackConfig(CallbackConfig):
     """Configuration for wait for callback."""
 
     retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
-
-
-class StepFuture(Generic[T]):
-    """A future that will block on result() until the step returns."""
-
-    def __init__(self, future: Future[T], name: str | None = None):
-        self.name = name
-        self.future = future
-
-    def result(self, timeout_seconds: int | None = None) -> T:
-        """Return the result of the Future."""
-        return self.future.result(timeout=timeout_seconds)
 
 
 # region Jitter
