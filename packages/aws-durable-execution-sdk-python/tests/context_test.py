@@ -1839,7 +1839,9 @@ def test_context_map_handler_call():
     with patch(
         "aws_durable_execution_sdk_python.context.map_handler"
     ) as mock_map_handler:
-        mock_map_handler.return_value = Mock()
+        # The wrapping child context round-trips this result, so it must be
+        # serializable.
+        mock_map_handler.return_value = {"result": "value"}
 
         with patch.object(context, "run_in_child_context") as mock_run_in_child:
             # Set up the mock to call the nested function
@@ -1880,7 +1882,9 @@ def test_context_parallel_handler_call():
     with patch(
         "aws_durable_execution_sdk_python.context.parallel_handler"
     ) as mock_parallel_handler:
-        mock_parallel_handler.return_value = Mock()
+        # The wrapping child context round-trips this result, so it must be
+        # serializable.
+        mock_parallel_handler.return_value = {"result": "value"}
 
         with patch.object(context, "run_in_child_context") as mock_run_in_child:
             # Set up the mock to call the nested function

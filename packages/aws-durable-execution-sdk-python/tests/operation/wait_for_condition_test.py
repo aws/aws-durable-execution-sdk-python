@@ -2,6 +2,7 @@
 
 import datetime
 import json
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -30,6 +31,7 @@ from aws_durable_execution_sdk_python.logger import Logger, LogInfo
 from aws_durable_execution_sdk_python.operation.wait_for_condition import (
     WaitForConditionOperationExecutor,
 )
+from aws_durable_execution_sdk_python.serdes import SerDes, SerDesContext
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 from aws_durable_execution_sdk_python.types import WaitForConditionCheckContext
 from aws_durable_execution_sdk_python.waits import (
@@ -1710,3 +1712,137 @@ def test_wait_for_condition_executes_check_when_checkpoint_not_terminal_duplicat
     assert result == "final_state"
     assert mock_state.get_checkpoint_result.call_count == 1  # Single check (async)
     assert mock_state.create_checkpoint.call_count == 2  # START + SUCCESS checkpoints
+
+
+def test_wait_for_condition_first_run_returns_round_tripped_result():
+    """First-run result must match the replay (deserialized-from-checkpoint) result.
+
+    With a non-identity SerDes whose serialize/deserialize is not a round-trip
+    identity, returning the raw check-function result on the first run diverges
+    from the value returned on replay. The first run must return the value
+    obtained by serializing then deserializing, so both runs agree.
+    """
+
+    class NonIdentitySerDes(SerDes[Any]):
+        """deserialize() adds a marker that serialize() never removes."""
+
+        def serialize(self, value: Any, _: SerDesContext) -> str:
+            payload = dict(value)
+            payload.pop("deserialized", None)
+            return json.dumps(payload)
+
+        def deserialize(self, data: str, _: SerDesContext) -> dict[str, Any]:
+            parsed = json.loads(data)
+            return {**parsed, "deserialized": True}
+
+    serdes = NonIdentitySerDes()
+    raw_new_state = {"key": "value"}
+
+    def check_func(_state, _context):
+        return raw_new_state
+
+    config = WaitForConditionConfig(
+        initial_state={},
+        wait_strategy=lambda s, a: WaitForConditionDecision.stop_polling(),
+        serdes=serdes,
+    )
+
+    # --- First run ---
+    first_run_state = Mock(spec=ExecutionState)
+    first_run_state.durable_execution_arn = "test_arn"
+    first_run_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    first_run_state.wrap_user_function.return_value = check_func
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    op_id = OperationIdentifier(
+        "wfc_rt", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+    )
+    first_run_result = wait_for_condition_handler(
+        state=first_run_state,
+        operation_identifier=op_id,
+        check=check_func,
+        config=config,
+        context_logger=mock_logger,
+    )
+
+    # Grab the payload that was actually checkpointed (START is call 0, SUCCEED is call 1).
+    success_call = first_run_state.create_checkpoint.call_args_list[1]
+    checkpointed_payload = success_call[1]["operation_update"].payload
+
+    # --- Replay: checkpoint already SUCCEEDED with the serialized payload ---
+    replay_state = Mock(spec=ExecutionState)
+    replay_state.durable_execution_arn = "test_arn"
+    succeeded_op = Operation(
+        operation_id="wfc_rt",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        step_details=StepDetails(result=checkpointed_payload),
+    )
+    replay_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_from_operation(succeeded_op)
+    )
+    replay_result = wait_for_condition_handler(
+        state=replay_state,
+        operation_identifier=op_id,
+        check=Mock(return_value="should_not_call"),
+        config=config,
+        context_logger=Mock(spec=Logger),
+    )
+
+    # First run must return the round-tripped value, which equals the replay value,
+    # and must NOT equal the raw check-function result.
+    assert first_run_result == {"key": "value", "deserialized": True}
+    assert first_run_result == replay_result
+    assert first_run_result != raw_new_state
+
+
+def test_wait_for_condition_first_run_none_payload_skips_deserialize():
+    """A None serialized payload is returned as-is without deserializing.
+
+    This mirrors the replay path, which returns None without calling deserialize
+    when the checkpointed result is None. A serdes whose serialize returns None
+    must therefore see its deserialize skipped on the first run too.
+    """
+
+    class NonePayloadSerDes(SerDes[Any]):
+        """serialize() yields None; deserialize() must never be called for None."""
+
+        def serialize(self, _value: Any, _ctx: SerDesContext) -> str:
+            return None  # type: ignore[return-value]
+
+        def deserialize(self, _data: str, _ctx: SerDesContext) -> Any:
+            msg = "deserialize should not be called for a None payload"
+            raise AssertionError(msg)
+
+    def check_func(_state, _context):
+        return {"key": "value"}
+
+    config = WaitForConditionConfig(
+        initial_state={},
+        wait_strategy=lambda s, a: WaitForConditionDecision.stop_polling(),
+        serdes=NonePayloadSerDes(),
+    )
+
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    mock_state.wrap_user_function.return_value = check_func
+    mock_logger = Mock(spec=Logger)
+    mock_logger.with_log_info.return_value = mock_logger
+
+    result = wait_for_condition_handler(
+        state=mock_state,
+        operation_identifier=OperationIdentifier(
+            "wfc_none", OperationSubType.WAIT_FOR_CONDITION, None, "test_wait"
+        ),
+        check=check_func,
+        config=config,
+        context_logger=mock_logger,
+    )
+
+    assert result is None
