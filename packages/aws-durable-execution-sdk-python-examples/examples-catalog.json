@@ -774,6 +774,50 @@
         "ExecutionTimeout": 300
       },
       "path": "./src/error_handling/catch_typed_step_error.py"
+    },
+    {
+      "name": "DAG Diamond",
+      "description": "Diamond DAG (fetch -> ta,tb -> merge) using context.dag() with typed dependency access",
+      "handler": "dag_diamond.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/dag/dag_diamond.py"
+    },
+    {
+      "name": "DAG Compensation",
+      "description": "Compensation DAG using trigger rules (ALL_FAILED refund, ALL_SUCCESS fulfill, ALL_DONE audit) draining to COMPLETED_WITH_FAILURES",
+      "handler": "dag_compensation.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/dag/dag_compensation.py"
+    },
+    {
+      "name": "DAG Run If",
+      "description": "Conditional-branching DAG using run_if predicates so only the matching branch runs",
+      "handler": "dag_run_if.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/dag/dag_run_if.py"
+    },
+    {
+      "name": "DAG Wait Resume",
+      "description": "DAG with a wait task (start -> pause -> finish) exercising suspend/resume",
+      "handler": "dag_wait_resume.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/dag/dag_wait_resume.py"
     }
   ]
 }
