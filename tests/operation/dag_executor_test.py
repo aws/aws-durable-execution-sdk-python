@@ -505,3 +505,108 @@ def test_indefinite_only_raises_indefinite_suspend():
 
 
 # endregion multi-suspend precedence
+
+
+# region in-process timed resume (map/parallel parity)
+def _root_executor(specs, config=None):
+    """Build a DagExecutor whose independent root tasks run `specs` concurrently.
+
+    `specs` is a list of (name, func) where func(ctx, deps_map) returns a result
+    or raises. Every task is a root (empty deps, ALL_SUCCESS) so all are
+    submitted at once. Returns (executor, in_memory_client).
+    """
+    state, client = make_state()
+    ctx = make_context(state, parent_id="dag")
+    tasks = {
+        name: TaskDef(
+            name=name,
+            kind="step",
+            inline_deps=[],
+            all_deps=[],
+            trigger_rule=TriggerRule.ALL_SUCCESS,
+            run_if=None,
+            config=None,
+            executor=func,
+        )
+        for name, func in specs
+    }
+    return DagExecutor(ctx, tasks, config or DagConfig()), client
+
+
+def test_timed_wait_resumes_in_process_within_single_invocation():
+    """(a) A timed suspend is resumed IN-PROCESS by the base TimerScheduler while
+    a concurrent task keeps the invocation alive: run() returns a success result
+    (no SuspendExecution bubbles to the platform) and the timed task re-runs."""
+    calls = {"x": 0, "y": 0}
+    x_done = threading.Event()
+
+    def x(_ctx, _deps):
+        calls["x"] += 1
+        if calls["x"] == 1:
+            # First pass suspends with a short timer; the scheduler must re-run
+            # this task in-process rather than surfacing a platform suspend.
+            raise TimedSuspendExecution("wait", time.time() + 0.05)
+        x_done.set()
+        return "x-done"
+
+    def y(_ctx, _deps):
+        calls["y"] += 1
+        # Stay RUNNING until X has resumed + completed, so the DAG never settles
+        # into a platform suspend for the pure-timed case.
+        assert x_done.wait(timeout=3)
+        return "y-done"
+
+    ex, client = _root_executor([("x", x), ("y", y)])
+    result = ex.run()  # must NOT raise -> resumed within a single invocation
+
+    assert result.get_status("x") is TaskStatus.SUCCEEDED
+    assert result.get_status("y") is TaskStatus.SUCCEEDED
+    assert result.get_result("x") == "x-done"
+    assert result.completion_reason is DagCompletionReason.ALL_COMPLETED
+    assert calls["x"] == 2  # initial + in-process timed resume
+    assert calls["y"] == 1
+    # The resume checkpoints before re-running (mirrors ConcurrentExecutor).
+    assert client.checkpoint_count >= 1
+
+
+def test_indefinite_callback_suspends_the_invocation():
+    """(b) An indefinite (callback) suspend can only be resolved by the platform:
+    run() raises a plain SuspendExecution and the task is never re-run."""
+    calls = {"n": 0}
+
+    def approval(_ctx, _deps):
+        calls["n"] += 1
+        raise SuspendExecution("waiting for external callback")
+
+    ex, _ = _root_executor([("approval", approval)])
+    with pytest.raises(SuspendExecution) as ei:
+        ex.run()
+    assert not isinstance(ei.value, TimedSuspendExecution)
+    assert calls["n"] == 1  # no in-process resume for indefinite suspends
+
+
+def test_mixed_timed_and_indefinite_forces_platform_suspend():
+    """(c) Timed + indefinite concurrently: the indefinite one forces a platform
+    suspend, and timed-wins precedence still surfaces the EARLIEST timer so the
+    platform resumes as soon as possible. Neither task resumes in-process."""
+    now = time.time()
+    calls = {"cb": 0, "timer": 0}
+
+    def cb(_ctx, _deps):
+        calls["cb"] += 1
+        raise SuspendExecution("external callback")
+
+    def timer(_ctx, _deps):
+        calls["timer"] += 1
+        raise TimedSuspendExecution("timer", now + 5)
+
+    ex, _ = _root_executor([("cb", cb), ("timer", timer)])
+    with pytest.raises(TimedSuspendExecution) as ei:
+        ex.run()
+    assert ei.value.scheduled_timestamp == pytest.approx(now + 5)
+    # Indefinite forces platform suspend -> no in-process re-run of either task.
+    assert calls["cb"] == 1
+    assert calls["timer"] == 1
+
+
+# endregion in-process timed resume

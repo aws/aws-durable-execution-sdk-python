@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Generic, Self, TypeVar
+from typing import TYPE_CHECKING, Generic, Protocol, Self, TypeVar
 
 from aws_durable_execution_sdk_python.exceptions import (
     InvalidStateError,
@@ -37,6 +37,23 @@ R = TypeVar("R")
 
 CallableType = TypeVar("CallableType")
 ResultType = TypeVar("ResultType")
+
+
+class SupportsResume(Protocol):
+    """Minimal shape the ``TimerScheduler`` needs from a resumable task.
+
+    ``ExecutableWithState`` (map/parallel) and the DAG executor's own timed-task
+    adapter both satisfy this, so the same timer machinery drives both without
+    the scheduler knowing either concrete type.
+    """
+
+    @property
+    def can_resume(self) -> bool: ...
+
+    def reset_to_pending(self) -> None: ...
+
+
+TResume = TypeVar("TResume", bound=SupportsResume)
 
 
 # region Result models
@@ -401,14 +418,14 @@ class ExecutionCounters:
 
 
 # region concurrency logic
-class TimerScheduler:
+class TimerScheduler(Generic[TResume]):
     """Manage timed suspend tasks with a background timer thread."""
 
     def __init__(
-        self, resubmit_callback: Callable[[ExecutableWithState], None]
+        self, resubmit_callback: Callable[[TResume], None]
     ) -> None:
         self.resubmit_callback = resubmit_callback
-        self._pending_resumes: list[tuple[float, ExecutableWithState]] = []
+        self._pending_resumes: list[tuple[float, TResume]] = []
         self._lock = threading.Lock()
         self._shutdown = threading.Event()
         self._timer_thread = threading.Thread(target=self._timer_loop, daemon=True)
@@ -421,7 +438,7 @@ class TimerScheduler:
         self.shutdown()
 
     def schedule_resume(
-        self, exe_state: ExecutableWithState, resume_time: float
+        self, exe_state: TResume, resume_time: float
     ) -> None:
         """Schedule a task to resume at the specified time."""
         with self._lock:

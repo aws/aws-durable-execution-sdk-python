@@ -14,11 +14,13 @@ feeding only success+failure into the reused threshold ``CompletionConfig``.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
+from aws_durable_execution_sdk_python.concurrency import TimerScheduler
 from aws_durable_execution_sdk_python.dag import (
     DagCompletionReason,
     DepsMap,
@@ -77,6 +79,38 @@ def _trigger_passes(rule, statuses: list[TaskStatus]) -> bool:
     raise ValidationError(msg)  # pragma: no cover
 
 
+_resume_seq = itertools.count()
+
+
+class _TimedResume:
+    """Adapter so the DAG can reuse the base ``TimerScheduler`` unchanged.
+
+    ``TimerScheduler`` (from the concurrency module) drives
+    ``ExecutableWithState``-shaped objects: on fire it checks ``can_resume``,
+    calls ``reset_to_pending()`` then hands the object to its resubmit callback.
+    The DAG tracks task state by *name* rather than by an ``ExecutableWithState``
+    instance, so this thin adapter carries only the task name and satisfies that
+    interface. ``__lt__`` (via a monotonic sequence) keeps heap ties in the
+    scheduler total-orderable when two resumes share a timestamp.
+    """
+
+    __slots__ = ("_seq", "name")
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self._seq = next(_resume_seq)
+
+    @property
+    def can_resume(self) -> bool:
+        return True
+
+    def reset_to_pending(self) -> None:
+        """No-op: the DAG resets its own task bookkeeping in ``_resubmit``."""
+
+    def __lt__(self, other: _TimedResume) -> bool:
+        return self._seq < other._seq
+
+
 class DagExecutor:
     """Topological scheduler for a validated DAG."""
 
@@ -106,6 +140,14 @@ class DagExecutor:
         # (earliest timed wins over indefinite) so a concurrent short timer is
         # never dropped behind an indefinite wait_for_callback.
         self._pending_suspends: list[SuspendExecution] = []
+        # In-process timed-resume bookkeeping (parity with ConcurrentExecutor's
+        # TimerScheduler): a timed suspend does NOT stop the DAG. While other
+        # tasks make progress the base TimerScheduler re-runs the timed task in
+        # this same invocation at its scheduled timestamp. Only an *indefinite*
+        # (callback) suspend forces leaving the invocation for platform replay.
+        self._scheduler: TimerScheduler | None = None
+        self._pending_timers: set[str] = set()
+        self._timed_suspend_by_name: dict[str, TimedSuspendExecution] = {}
         self._scheduler_exception: Exception | None = None
         self._early_reason: DagCompletionReason | None = None
         self._pool: ThreadPoolExecutor | None = None
@@ -118,7 +160,14 @@ class DagExecutor:
             return DagResultImpl({}, DagCompletionReason.ALL_COMPLETED)
 
         max_workers = self._config.max_concurrency or total
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        # Mirror ConcurrentExecutor.execute: scheduler OUTER, pool INNER, so the
+        # pool drains (joins in-flight tasks) before the timer thread is torn
+        # down. Any suspend is raised inside the pool ``with`` (as before).
+        with (
+            TimerScheduler(self._resubmit) as scheduler,
+            ThreadPoolExecutor(max_workers=max_workers) as pool,
+        ):
+            self._scheduler = scheduler
             self._pool = pool
             self._pump()
             self._completion_event.wait()
@@ -192,6 +241,7 @@ class DagExecutor:
                 self._success += 1
                 self._in_flight.discard(name)
         except SuspendExecution as se:  # includes TimedSuspendExecution
+            schedule_ts: float | None = None
             with self._lock:
                 # Record every suspend (timed + indefinite); precedence is
                 # resolved in _resolve_suspend when the DAG stops.
@@ -200,6 +250,16 @@ class DagExecutor:
                     name=name, status=TaskStatus.STARTED
                 )
                 self._in_flight.discard(name)
+                # Timed suspend: register an in-process resume so the base timer
+                # thread re-runs this task at its timestamp WITHOUT leaving the
+                # invocation. Indefinite (callback) suspends get no timer and
+                # fall through to platform replay via _resolve_suspend.
+                if isinstance(se, TimedSuspendExecution):
+                    self._timed_suspend_by_name[name] = se
+                    self._pending_timers.add(name)
+                    schedule_ts = se.scheduled_timestamp
+            if schedule_ts is not None and self._scheduler is not None:
+                self._scheduler.schedule_resume(_TimedResume(name), schedule_ts)
         except Exception as e:  # noqa: BLE001
             with self._lock:
                 self._results[name] = TaskExecution(
@@ -228,6 +288,36 @@ class DagExecutor:
                     self._scheduler_exception = e
             self._completion_event.set()
     # endregion scheduling
+
+    def _resubmit(self, resume: _TimedResume) -> None:
+        """Base-TimerScheduler callback: re-run a timed task in-process.
+
+        Fires on the scheduler's timer thread once a task's scheduled timestamp
+        elapses. Mirrors ``ConcurrentExecutor``'s resubmitter (checkpoint, then
+        re-submit): it clears the task's timed-suspend bookkeeping and its
+        STARTED placeholder so ``_pump`` sees it as a fresh, ready task and
+        re-runs it within the same invocation. If the task already left the
+        timer set (e.g. the DAG bubbled to the platform and the scheduler was
+        torn down), this is a no-op.
+        """
+        name = resume.name
+        with self._lock:
+            if name not in self._pending_timers:
+                return
+            self._pending_timers.discard(name)
+            se = self._timed_suspend_by_name.pop(name, None)
+            if se is not None:
+                try:
+                    self._pending_suspends.remove(se)
+                except ValueError:  # pragma: no cover - defensive
+                    pass
+            # Make the task schedulable again: drop its STARTED placeholder and
+            # its scheduled mark so _pump re-evaluates and re-runs it.
+            self._scheduled.discard(name)
+            self._results.pop(name, None)
+        # Checkpoint before re-running, matching ConcurrentExecutor.resubmitter.
+        self._ctx.state.create_checkpoint()
+        self._safe_pump()
 
     def _resolve_suspend(self) -> SuspendExecution | None:
         """Pick which suspend to surface, matching the base executor's contract.
@@ -330,8 +420,23 @@ class DagExecutor:
                 return DagCompletionReason.FAILURE_TOLERANCE_EXCEEDED
         return None
 
+    def _has_indefinite_locked(self) -> bool:
+        """True if any *indefinite* (non-timed) suspend is outstanding.
+
+        Only indefinite suspends (e.g. ``wait_for_callback``) force leaving the
+        invocation for platform replay; timed suspends are resumed in-process by
+        the base ``TimerScheduler``.
+        """
+        return any(
+            not isinstance(se, TimedSuspendExecution) for se in self._pending_suspends
+        )
+
     def _stopping_locked(self) -> bool:
-        if self._pending_suspends:
+        # An indefinite suspend can only be resolved by the platform, so we stop
+        # scheduling new work and drain (unchanged pre-timer behaviour). Timed
+        # suspends do NOT stop the DAG: they are resumed in-process while other
+        # tasks keep making progress (parity with ConcurrentExecutor).
+        if self._has_indefinite_locked():
             return True
         reason = self._threshold_reason_locked()
         if reason is not None:
