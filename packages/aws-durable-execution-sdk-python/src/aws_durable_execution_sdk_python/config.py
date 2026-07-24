@@ -33,7 +33,7 @@ class Duration:
 
     seconds: int = 0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.seconds < 0:
             msg = "Duration seconds must be positive"
             raise ValidationError(msg)
@@ -137,6 +137,43 @@ class CompletionConfig:
     tolerated_failure_count: int | None = None
     tolerated_failure_percentage: int | float | None = None
 
+    def __post_init__(self) -> None:
+        if self.min_successful is not None and self.min_successful < 1:
+            msg = f"min_successful must be at least 1, got: {self.min_successful}"
+            raise ValidationError(msg)
+        if (
+            self.tolerated_failure_count is not None
+            and self.tolerated_failure_count < 0
+        ):
+            msg = (
+                "tolerated_failure_count must be non-negative, got: "
+                f"{self.tolerated_failure_count}"
+            )
+            raise ValidationError(msg)
+        if self.tolerated_failure_percentage is not None and not (
+            0 <= self.tolerated_failure_percentage <= 100  # noqa: PLR2004
+        ):
+            msg = (
+                "tolerated_failure_percentage must be between 0 and 100, got: "
+                f"{self.tolerated_failure_percentage}"
+            )
+            raise ValidationError(msg)
+
+    def _validate_for_total(self, total: int) -> None:
+        """Validate this config against the number of items it will govern.
+
+        SDK-internal: called by DurableContext.map and DurableContext.parallel
+        before the operation's child context starts, so the error surfaces as
+        a bare ValidationError (matching wait and wait_for_condition
+        validation) instead of a checkpointed operation failure.
+        """
+        if self.min_successful is not None and self.min_successful > total:
+            msg = (
+                f"min_successful cannot be greater than total items: "
+                f"{self.min_successful} > {total}"
+            )
+            raise ValidationError(msg)
+
     # TODO: reevaluate this
     # @staticmethod
     # def first_completed():
@@ -154,10 +191,12 @@ class CompletionConfig:
 
     @staticmethod
     def all_completed():
+        # 100% tolerated failures: every item runs regardless of failures.
+        # All-None fields would select the fail-fast default instead.
         return CompletionConfig(
             min_successful=None,
             tolerated_failure_count=None,
-            tolerated_failure_percentage=None,
+            tolerated_failure_percentage=100,
         )
 
     @staticmethod
@@ -202,13 +241,15 @@ class ParallelConfig:
             - item_serdes: Used for individual function results in child contexts
             - serdes: Used for the entire BatchResult at handler level
 
-        summary_generator: Function to generate compact summaries for large results (>256KB).
-            When the serialized result exceeds CHECKPOINT_SIZE_LIMIT, this generator
-            creates a JSON summary instead of checkpointing the full result. The operation
-            is marked with ReplayChildren=true to reconstruct the full result during replay.
-
-            Used internally by map/parallel operations to handle large BatchResult payloads.
-            Signature: (result: T) -> str
+        summary_generator: Function contributing a customer-facing summary for large
+            results (>256KB). When the serialized result exceeds CHECKPOINT_SIZE_LIMIT,
+            the SDK checkpoints a compact JSON payload instead of the full result and
+            marks the operation ReplayChildren=true so the full result is reconstructed
+            during replay. The SDK always writes the fields replay requires; the
+            generator's return value is stored verbatim under the payload's "summary"
+            key for observability and is never read by the SDK. The summary is
+            checkpointed as provided. An exception raised by the generator fails
+            the operation. Signature: (result: T) -> str
 
         nesting_type: How child operations should inherit context from their parent.
             - NESTED: Each branch runs in its own isolated context (default)
@@ -230,6 +271,11 @@ class ParallelConfig:
     item_serdes: SerDes | None = None
     summary_generator: SummaryGenerator | None = None
     nesting_type: NestingType = NestingType.NESTED
+
+    def __post_init__(self) -> None:
+        if self.max_concurrency is not None and self.max_concurrency < 1:
+            msg = f"max_concurrency must be at least 1, got: {self.max_concurrency}"
+            raise ValidationError(msg)
 
 
 @dataclass(frozen=True)
@@ -297,12 +343,14 @@ class ChildConfig(Generic[T]):
             Examples: OperationSubType.MAP_ITERATION, OperationSubType.PARALLEL_BRANCH.
             Used internally by the execution engine for operation classification.
 
-        summary_generator: Function to generate compact summaries for large results (>256KB).
-            When the serialized result exceeds CHECKPOINT_SIZE_LIMIT, this generator
-            creates a JSON summary instead of checkpointing the full result. The operation
-            is marked with ReplayChildren=true to reconstruct the full result during replay.
-
-            Used internally by map/parallel operations to handle large BatchResult payloads.
+        summary_generator: Function generating the checkpoint payload for large
+            results (>256KB). When the serialized result exceeds CHECKPOINT_SIZE_LIMIT,
+            the SDK checkpoints the generator's output instead of the full result and
+            marks the operation ReplayChildren=true so the full result is reconstructed
+            during replay. The output is checkpointed as provided. For map and
+            parallel operations the SDK supplies a generator that writes the
+            completion-record envelope; see MapConfig and ParallelConfig. An
+            exception raised by the generator fails the operation.
             Signature: (result: T) -> str
 
         is_virtual: When True, skip all checkpoints (START, SUCCEED,
@@ -358,13 +406,15 @@ class MapConfig(Generic[T]):
             - item_serdes: Used for individual item results in child contexts
             - serdes: Used for the entire BatchResult at handler level
 
-        summary_generator: Function to generate compact summaries for large results (>256KB).
-            When the serialized result exceeds CHECKPOINT_SIZE_LIMIT, this generator
-            creates a JSON summary instead of checkpointing the full result. The operation
-            is marked with ReplayChildren=true to reconstruct the full result during replay.
-
-            Used internally by map/parallel operations to handle large BatchResult payloads.
-            Signature: (result: T) -> str
+        summary_generator: Function contributing a customer-facing summary for large
+            results (>256KB). When the serialized result exceeds CHECKPOINT_SIZE_LIMIT,
+            the SDK checkpoints a compact JSON payload instead of the full result and
+            marks the operation ReplayChildren=true so the full result is reconstructed
+            during replay. The SDK always writes the fields replay requires; the
+            generator's return value is stored verbatim under the payload's "summary"
+            key for observability and is never read by the SDK. The summary is
+            checkpointed as provided. An exception raised by the generator fails
+            the operation. Signature: (result: T) -> str
 
         nesting_type: How child operations should inherit context from their parent.
             - NESTED: Each item runs in its own isolated context (default)
@@ -372,8 +422,11 @@ class MapConfig(Generic[T]):
 
         item_namer: Optional callable to generate custom names for each map iteration.
             When provided, replaces the default "map-item-{index}" naming scheme.
-            Receives the item and its index, and returns a string name for that iteration.
-            This affects observability (execution history names) but not replay determinism.
+            Receives the item and its index, and returns a string name for that
+            iteration. Called eagerly for every input when the map starts,
+            including items that never run due to early completion, and again
+            on every replay, so it must be deterministic and side-effect-free.
+            An exception raised by the callable fails the map operation.
             If None, uses the default naming: "map-item-{index}".
 
     Example:
@@ -397,6 +450,11 @@ class MapConfig(Generic[T]):
     summary_generator: SummaryGenerator | None = None
     nesting_type: NestingType = NestingType.NESTED
     item_namer: Callable[[T, int], str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_concurrency is not None and self.max_concurrency < 1:
+            msg = f"max_concurrency must be at least 1, got: {self.max_concurrency}"
+            raise ValidationError(msg)
 
 
 @dataclass(frozen=True)

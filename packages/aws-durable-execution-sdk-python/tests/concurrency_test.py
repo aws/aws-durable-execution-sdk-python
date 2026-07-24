@@ -1,10 +1,12 @@
 """Tests for the concurrency module."""
 
+import hashlib
 import json
+import queue
 import random
 import threading
 import time
-from concurrent.futures import Future
+from collections.abc import Callable
 from functools import partial
 from itertools import combinations
 from unittest.mock import Mock, patch
@@ -13,22 +15,26 @@ import pytest
 
 from aws_durable_execution_sdk_python.concurrency.executor import (
     ConcurrentExecutor,
-    TimerScheduler,
 )
 from aws_durable_execution_sdk_python.concurrency.models import (
     BatchItem,
     BatchItemStatus,
     BatchResult,
+    Branch,
+    BranchEventKind,
     BranchStatus,
+    CompletionPolicy,
+    CompletionRecord,
     CompletionReason,
     Executable,
-    ExecutableWithState,
-    ExecutionCounters,
+    envelope_summary_generator,
 )
 from aws_durable_execution_sdk_python.config import (
     ChildConfig,
     CompletionConfig,
     MapConfig,
+    ParallelBranch,
+    ParallelConfig,
     NestingType,
 )
 from aws_durable_execution_sdk_python.context import (
@@ -36,8 +42,11 @@ from aws_durable_execution_sdk_python.context import (
     ExecutionContext,
 )
 from aws_durable_execution_sdk_python.exceptions import (
+    BackgroundThreadError,
     ChildContextError,
+    ValidationError,
     InvalidStateError,
+    OrphanedChildException,
     SuspendExecution,
     TimedSuspendExecution,
 )
@@ -48,8 +57,21 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationSubType,
     OperationType,
 )
+from aws_durable_execution_sdk_python.identifier import OperationIdNamespace
+
+
 from aws_durable_execution_sdk_python.operation.map import MapExecutor
+from aws_durable_execution_sdk_python.operation.parallel import (
+    ParallelExecutor,
+)
 from aws_durable_execution_sdk_python.state import CheckpointedResult
+
+
+class _StubNamespace(OperationIdNamespace):
+    """Test namespace producing readable ids matching checkpoint fixtures."""
+
+    def create_id_for_step(self, step: int) -> str:
+        return f"op_{step}"
 
 
 def test_batch_item_status_enum():
@@ -453,14 +475,14 @@ def test_batch_result_from_dict_with_explicit_completion_reason():
 
 def test_batch_result_infer_completion_reason_edge_cases():
     """Test _infer_completion_reason method with various edge cases."""
-    # Test with only started items and min_successful=0
+    # Test with min_successful reached while other items are still started
     started_items = [
-        BatchItem(0, BatchItemStatus.STARTED).to_dict(),
+        BatchItem(0, BatchItemStatus.SUCCEEDED, result="ok").to_dict(),
         BatchItem(1, BatchItemStatus.STARTED).to_dict(),
     ]
     items = {"all": started_items}
-    batch = BatchResult.from_dict(items, CompletionConfig(0))  # SLF001
-    # With min_successful=0 and no failures, should be MIN_SUCCESSFUL_REACHED
+    batch = BatchResult.from_dict(items, CompletionConfig(1))  # SLF001
+    # With min_successful=1 and one success, should be MIN_SUCCESSFUL_REACHED
     assert batch.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
 
     # Test with only started items and no config
@@ -547,311 +569,6 @@ def test_executable_creation():
     assert executable.func == test_func
 
 
-def test_executable_with_state_creation():
-    """Test ExecutableWithState creation."""
-    executable = Executable(index=1, func=lambda: "test")
-    exe_state = ExecutableWithState(executable)
-
-    assert exe_state.executable == executable
-    assert exe_state.status == BranchStatus.PENDING
-    assert exe_state.index == 1
-    assert exe_state.callable == executable.func
-
-
-def test_executable_with_state_properties():
-    """Test ExecutableWithState property access."""
-
-    def test_callable():
-        return "test"
-
-    executable = Executable(index=42, func=test_callable)
-    exe_state = ExecutableWithState(executable)
-
-    assert exe_state.index == 42
-    assert exe_state.callable == test_callable
-    assert exe_state.suspend_until is None
-
-
-def test_executable_with_state_future_not_available():
-    """Test ExecutableWithState future property when not started."""
-    executable = Executable(index=1, func=lambda: "test")
-    exe_state = ExecutableWithState(executable)
-
-    with pytest.raises(InvalidStateError):
-        _ = exe_state.future
-
-
-def test_executable_with_state_result_not_available():
-    """Test ExecutableWithState result property when not completed."""
-    executable = Executable(index=1, func=lambda: "test")
-    exe_state = ExecutableWithState(executable)
-
-    with pytest.raises(InvalidStateError):
-        _ = exe_state.result
-
-
-def test_executable_with_state_error_not_available():
-    """Test ExecutableWithState error property when not failed."""
-    executable = Executable(index=1, func=lambda: "test")
-    exe_state = ExecutableWithState(executable)
-
-    with pytest.raises(InvalidStateError):
-        _ = exe_state.error
-
-
-def test_executable_with_state_is_running():
-    """Test ExecutableWithState is_running property."""
-    executable = Executable(index=1, func=lambda: "test")
-    exe_state = ExecutableWithState(executable)
-
-    assert not exe_state.is_running
-
-    future = Future()
-    exe_state.run(future)
-    assert exe_state.is_running
-
-
-def test_executable_with_state_can_resume():
-    """Test ExecutableWithState can_resume property."""
-    executable = Executable(index=1, func=lambda: "test")
-    exe_state = ExecutableWithState(executable)
-
-    # Not suspended
-    assert not exe_state.can_resume
-
-    # Suspended indefinitely
-    exe_state.suspend()
-    assert exe_state.can_resume
-
-    # Suspended with timeout in future
-    future_time = time.time() + 10
-    exe_state.suspend_with_timeout(future_time)
-    assert not exe_state.can_resume
-
-    # Suspended with timeout in past
-    past_time = time.time() - 10
-    exe_state.suspend_with_timeout(past_time)
-    assert exe_state.can_resume
-
-
-def test_executable_with_state_run():
-    """Test ExecutableWithState run method."""
-    executable = Executable(index=1, func=lambda: "test")
-    exe_state = ExecutableWithState(executable)
-    future = Future()
-
-    exe_state.run(future)
-    assert exe_state.status == BranchStatus.RUNNING
-    assert exe_state.future == future
-
-
-def test_executable_with_state_run_invalid_state():
-    """Test ExecutableWithState run method from invalid state."""
-    executable = Executable(index=1, func=lambda: "test")
-    exe_state = ExecutableWithState(executable)
-    future1 = Future()
-    future2 = Future()
-
-    exe_state.run(future1)
-
-    with pytest.raises(InvalidStateError):
-        exe_state.run(future2)
-
-
-def test_executable_with_state_suspend():
-    """Test ExecutableWithState suspend method."""
-    executable = Executable(index=1, func=lambda: "test")
-    exe_state = ExecutableWithState(executable)
-
-    exe_state.suspend()
-    assert exe_state.status == BranchStatus.SUSPENDED
-    assert exe_state.suspend_until is None
-
-
-def test_executable_with_state_suspend_with_timeout():
-    """Test ExecutableWithState suspend_with_timeout method."""
-    executable = Executable(index=1, func=lambda: "test")
-    exe_state = ExecutableWithState(executable)
-    timestamp = time.time() + 5
-
-    exe_state.suspend_with_timeout(timestamp)
-    assert exe_state.status == BranchStatus.SUSPENDED_WITH_TIMEOUT
-    assert exe_state.suspend_until == timestamp
-
-
-def test_executable_with_state_complete():
-    """Test ExecutableWithState complete method."""
-    executable = Executable(index=1, func=lambda: "test")
-    exe_state = ExecutableWithState(executable)
-
-    exe_state.complete("test_result")
-    assert exe_state.status == BranchStatus.COMPLETED
-    assert exe_state.result == "test_result"
-
-
-def test_executable_with_state_fail():
-    """Test ExecutableWithState fail method."""
-    executable = Executable(index=1, func=lambda: "test")
-    exe_state = ExecutableWithState(executable)
-    error = Exception("test error")
-
-    exe_state.fail(error)
-    assert exe_state.status == BranchStatus.FAILED
-    assert exe_state.error == error
-
-
-def test_execution_counters_creation():
-    """Test ExecutionCounters creation."""
-    counters = ExecutionCounters(
-        total_tasks=10,
-        min_successful=8,
-        tolerated_failure_count=2,
-        tolerated_failure_percentage=20.0,
-    )
-
-    assert counters.total_tasks == 10
-    assert counters.min_successful == 8
-    assert counters.tolerated_failure_count == 2
-    assert counters.tolerated_failure_percentage == 20.0
-    assert counters.success_count == 0
-    assert counters.failure_count == 0
-
-
-def test_execution_counters_complete_task():
-    """Test ExecutionCounters complete_task method."""
-    counters = ExecutionCounters(5, 3, None, None)
-
-    counters.complete_task()
-    assert counters.success_count == 1
-
-
-def test_execution_counters_fail_task():
-    """Test ExecutionCounters fail_task method."""
-    counters = ExecutionCounters(5, 3, None, None)
-
-    counters.fail_task()
-    assert counters.failure_count == 1
-
-
-def test_execution_counters_should_complete_min_successful():
-    """Test ExecutionCounters should_complete with min successful reached."""
-    counters = ExecutionCounters(5, 3, None, None)
-
-    assert not counters.should_complete()
-
-    counters.complete_task()
-    counters.complete_task()
-    counters.complete_task()
-
-    assert counters.should_complete()
-
-
-def test_execution_counters_should_complete_failure_count():
-    """Test ExecutionCounters should_complete with failure count exceeded."""
-    counters = ExecutionCounters(5, 3, 1, None)
-
-    assert not counters.should_complete()
-
-    counters.fail_task()
-    assert not counters.should_complete()
-
-    counters.fail_task()
-    assert counters.should_complete()
-
-
-def test_execution_counters_should_complete_failure_percentage():
-    """Test ExecutionCounters should_complete with failure percentage exceeded."""
-    counters = ExecutionCounters(10, 8, None, 15.0)
-
-    assert not counters.should_complete()
-
-    counters.fail_task()
-    assert not counters.should_complete()
-
-    counters.fail_task()
-    assert counters.should_complete()  # 20% > 15%
-
-
-def test_execution_counters_is_all_completed():
-    """Test ExecutionCounters is_all_completed method."""
-    counters = ExecutionCounters(3, 2, None, None)
-
-    assert not counters.is_all_completed()
-
-    counters.complete_task()
-    counters.complete_task()
-    assert not counters.is_all_completed()
-
-    counters.complete_task()
-    assert counters.is_all_completed()
-
-
-def test_execution_counters_is_min_successful_reached():
-    """Test ExecutionCounters is_min_successful_reached method."""
-    counters = ExecutionCounters(5, 3, None, None)
-
-    assert not counters.is_min_successful_reached()
-
-    counters.complete_task()
-    counters.complete_task()
-    assert not counters.is_min_successful_reached()
-
-    counters.complete_task()
-    assert counters.is_min_successful_reached()
-
-
-def test_execution_counters_is_failure_tolerance_exceeded():
-    """Test ExecutionCounters is_failure_tolerance_exceeded method."""
-    counters = ExecutionCounters(10, 8, 2, None)
-
-    assert not counters.is_failure_tolerance_exceeded()
-
-    counters.fail_task()
-    counters.fail_task()
-    assert not counters.is_failure_tolerance_exceeded()
-
-    counters.fail_task()
-    assert counters.is_failure_tolerance_exceeded()
-
-
-def test_execution_counters_zero_total_tasks():
-    """Test ExecutionCounters with zero total tasks."""
-    counters = ExecutionCounters(0, 0, None, 50.0)
-
-    # Should not fail with division by zero
-    assert not counters.is_failure_tolerance_exceeded()
-
-
-def test_execution_counters_failure_percentage_edge_case():
-    """Test ExecutionCounters failure percentage at exact threshold."""
-    counters = ExecutionCounters(10, 5, None, 20.0)
-
-    # Exactly at threshold (20%)
-    counters.failure_count = 2
-    assert not counters.is_failure_tolerance_exceeded()
-
-    # Just over threshold
-    counters.failure_count = 3
-    assert counters.is_failure_tolerance_exceeded()
-
-
-def test_execution_counters_thread_safety():
-    """Test ExecutionCounters thread safety."""
-    counters = ExecutionCounters(100, 50, None, None)
-
-    def worker():
-        for _ in range(10):
-            counters.complete_task()
-
-    threads = [threading.Thread(target=worker) for _ in range(5)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    assert counters.success_count == 50
-
-
 def test_batch_result_failed_with_none_error():
     """Test BatchResult failed method filters out None errors."""
     items = [
@@ -887,6 +604,7 @@ def test_concurrent_executor_nesting_type_parameter():
         name_prefix="test_",
         serdes=None,
         nesting_type=NestingType.NESTED,
+        operation_id_namespace=_StubNamespace(),
     )
     assert executor_nested.nesting_type is NestingType.NESTED
 
@@ -900,6 +618,7 @@ def test_concurrent_executor_nesting_type_parameter():
         name_prefix="test_",
         serdes=None,
         nesting_type=NestingType.FLAT,
+        operation_id_namespace=_StubNamespace(),
     )
     assert executor_flat.nesting_type is NestingType.FLAT
 
@@ -922,6 +641,7 @@ def test_concurrent_executor_default_nesting_type():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
     assert executor.nesting_type is NestingType.NESTED
 
@@ -947,6 +667,7 @@ def test_concurrent_executor_full_execution_path():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
@@ -963,137 +684,9 @@ def test_concurrent_executor_full_execution_path():
 
         result = executor.execute(execution_state, mock_run_in_child_context)
         assert len(result.all) >= 1
-
-
-def test_timer_scheduler_double_check_resume_queue():
-    """Test TimerScheduler double-check logic in scheduler loop."""
-    callback = Mock()
-
-    with TimerScheduler(callback) as scheduler:
-        exe_state1 = ExecutableWithState(Executable(0, lambda: "test"))
-        exe_state2 = ExecutableWithState(Executable(1, lambda: "test"))
-
-        # Schedule two tasks with different times to avoid comparison issues
-        past_time1 = time.time() - 2
-        past_time2 = time.time() - 1
-        scheduler.schedule_resume(exe_state1, past_time1)
-        scheduler.schedule_resume(exe_state2, past_time2)
-
-        # Give scheduler time to process
-        time.sleep(0.1)
-
-        # At least one callback should have been made
-        assert callback.call_count >= 0
-
-
-def test_concurrent_executor_on_task_complete_timed_suspend():
-    """Test ConcurrentExecutor _on_task_complete with TimedSuspendExecution."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [Executable(0, lambda: "test")]
-    completion_config = CompletionConfig(
-        min_successful=1,
-        tolerated_failure_count=None,
-        tolerated_failure_percentage=None,
-    )
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=1,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    exe_state = ExecutableWithState(executables[0])
-    future = Mock()
-    future.result.side_effect = TimedSuspendExecution("test message", time.time() + 1)
-    future.cancelled.return_value = False
-
-    scheduler = Mock()
-    scheduler.schedule_resume = Mock()
-
-    executor._on_task_complete(exe_state, future, scheduler)  # noqa: SLF001
-
-    assert exe_state.status == BranchStatus.SUSPENDED_WITH_TIMEOUT
-    scheduler.schedule_resume.assert_called_once()
-
-
-def test_concurrent_executor_on_task_complete_suspend():
-    """Test ConcurrentExecutor _on_task_complete with SuspendExecution."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [Executable(0, lambda: "test")]
-    completion_config = CompletionConfig(
-        min_successful=1,
-        tolerated_failure_count=None,
-        tolerated_failure_percentage=None,
-    )
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=1,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    exe_state = ExecutableWithState(executables[0])
-    future = Mock()
-    future.result.side_effect = SuspendExecution("test message")
-
-    scheduler = Mock()
-
-    executor._on_task_complete(exe_state, future, scheduler)  # noqa: SLF001
-
-    assert exe_state.status == BranchStatus.SUSPENDED
-
-
-def test_concurrent_executor_on_task_complete_exception():
-    """Test ConcurrentExecutor _on_task_complete with general exception."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [Executable(0, lambda: "test")]
-    completion_config = CompletionConfig(
-        min_successful=1,
-        tolerated_failure_count=None,
-        tolerated_failure_percentage=None,
-    )
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=1,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    exe_state = ExecutableWithState(executables[0])
-    future = Mock()
-    future.result.side_effect = ValueError("Test error")
-    future.cancelled.return_value = False
-
-    scheduler = Mock()
-
-    executor._on_task_complete(exe_state, future, scheduler)  # noqa: SLF001
-
-    assert exe_state.status == BranchStatus.FAILED
-    assert isinstance(exe_state.error, ValueError)
+        # The pool is registered so ExecutionState.close() joins branches
+        # still running after early completion at invocation end.
+        execution_state.register_branch_pool.assert_called_once()
 
 
 def test_concurrent_executor_create_result_with_early_exit():
@@ -1130,13 +723,14 @@ def test_concurrent_executor_create_result_with_early_exit():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -1173,10 +767,11 @@ def test_concurrent_executor_execute_item_in_child_context():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -1214,12 +809,13 @@ def test_execute_item_brand_new_branch_during_replay_starts_new():
         name_prefix="test_",
         serdes=None,
         nesting_type=NestingType.NESTED,
+        operation_id_namespace=_StubNamespace(),
     )
 
     # Parent (executor) context is replaying.
     executor_context = Mock()
     executor_context.is_replaying = lambda: True
-    executor_context._create_step_id_for_logical_step = lambda *args: "branch-1"  # noqa: SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "branch-1"
     executor_context._parent_id = "parent"  # noqa: SLF001
 
     # Brand-new branch: no checkpoint for the branch op.
@@ -1256,11 +852,12 @@ def test_execute_item_replayed_branch_emits_replay_hook():
         name_prefix="test_",
         serdes=None,
         nesting_type=NestingType.NESTED,
+        operation_id_namespace=_StubNamespace(),
     )
 
     executor_context = Mock()
     executor_context.is_replaying = lambda: True
-    executor_context._create_step_id_for_logical_step = lambda *args: "branch-1"  # noqa: SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "branch-1"
     executor_context._parent_id = "parent"  # noqa: SLF001
 
     # Replayed branch: a terminal checkpoint exists for the branch op.
@@ -1303,11 +900,12 @@ def test_execute_item_virtual_branch_skips_replay_status_handling():
         name_prefix="test_",
         serdes=None,
         nesting_type=NestingType.FLAT,
+        operation_id_namespace=_StubNamespace(),
     )
 
     executor_context = Mock()
     executor_context.is_replaying = lambda: True
-    executor_context._create_step_id_for_logical_step = lambda *args: "branch-1"  # noqa: SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "branch-1"
     executor_context._parent_id = "parent"  # noqa: SLF001
 
     child_context = Mock()
@@ -1318,18 +916,6 @@ def test_execute_item_virtual_branch_skips_replay_status_handling():
 
     child_context.state.emit_operation_replay_hook.assert_not_called()
     child_context._set_replay_status_new.assert_not_called()  # noqa: SLF001
-
-
-def test_execution_counters_impossible_to_succeed():
-    """Test ExecutionCounters should_complete when impossible to succeed."""
-    counters = ExecutionCounters(5, 4, None, None)
-
-    # Fail 3 tasks, leaving only 2 remaining (can't reach min_successful of 4)
-    counters.fail_task()
-    counters.fail_task()
-    counters.fail_task()
-
-    assert counters.should_complete()
 
 
 def test_concurrent_executor_create_result_failure_tolerance_exceeded():
@@ -1358,6 +944,7 @@ def test_concurrent_executor_create_result_failure_tolerance_exceeded():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
@@ -1395,13 +982,14 @@ def test_single_task_suspend_bubbles_up():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -1443,13 +1031,14 @@ def test_multiple_tasks_one_suspends_execution_continues():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -1490,13 +1079,14 @@ def test_concurrent_executor_with_single_task_resubmit():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -1549,6 +1139,7 @@ def test_concurrent_executor_resume_checkpoint_failure_propagates():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
@@ -1563,7 +1154,7 @@ def test_concurrent_executor_resume_checkpoint_failure_propagates():
     execution_state.create_checkpoint = Mock(side_effect=checkpoint)
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa: SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -1633,13 +1224,14 @@ def test_concurrent_executor_with_timed_resubmit_while_other_task_running():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -1656,100 +1248,6 @@ def test_concurrent_executor_with_timed_resubmit_while_other_task_running():
     assert executor.call_counts[1] == 3
     # Verify task A was called only once
     assert executor.call_counts[0] == 1
-
-
-def test_timer_scheduler_double_check_condition():
-    """Test TimerScheduler double-check condition in _timer_loop (line 434)."""
-    callback = Mock()
-
-    with TimerScheduler(callback) as scheduler:
-        exe_state = ExecutableWithState(Executable(0, lambda: "test"))
-        exe_state.suspend()  # Make it resumable
-
-        # Schedule a task with past time
-        past_time = time.time() - 1
-        scheduler.schedule_resume(exe_state, past_time)
-
-        # Give scheduler time to process and hit the double-check condition
-        time.sleep(0.2)
-
-        # The callback should be called
-        assert callback.call_count >= 1
-
-
-def test_concurrent_executor_should_execution_suspend_with_timeout():
-    """Test should_execution_suspend with SUSPENDED_WITH_TIMEOUT state."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [Executable(0, lambda: "test")]
-    completion_config = CompletionConfig(
-        min_successful=1,
-        tolerated_failure_count=None,
-        tolerated_failure_percentage=None,
-    )
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=1,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create executable with state in SUSPENDED_WITH_TIMEOUT
-    exe_state = ExecutableWithState(executables[0])
-    future_time = time.time() + 10
-    exe_state.suspend_with_timeout(future_time)
-
-    executor.executables_with_state = [exe_state]
-
-    result = executor.should_execution_suspend()
-
-    assert result.should_suspend
-    assert isinstance(result.exception, TimedSuspendExecution)
-    assert result.exception.scheduled_timestamp == future_time
-
-
-def test_concurrent_executor_should_execution_suspend_indefinite():
-    """Test should_execution_suspend with indefinite SUSPENDED state."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [Executable(0, lambda: "test")]
-    completion_config = CompletionConfig(
-        min_successful=1,
-        tolerated_failure_count=None,
-        tolerated_failure_percentage=None,
-    )
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=1,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create executable with state in SUSPENDED (indefinite)
-    exe_state = ExecutableWithState(executables[0])
-    exe_state.suspend()
-
-    executor.executables_with_state = [exe_state]
-
-    result = executor.should_execution_suspend()
-
-    assert result.should_suspend
-    assert isinstance(result.exception, SuspendExecution)
-    assert "pending external callback" in str(result.exception)
 
 
 def test_concurrent_executor_create_result_with_failed_status():
@@ -1778,13 +1276,14 @@ def test_concurrent_executor_create_result_with_failed_status():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -1825,13 +1324,14 @@ def test_failed_branch_error_type_matches_across_execute_and_replay():
             sub_type_iteration="ITER",
             name_prefix="test_",
             serdes=None,
+            operation_id_namespace=_StubNamespace(),
         )
 
     # First run: execute() runs the branch and builds the result live.
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa: SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -1849,7 +1349,7 @@ def test_failed_branch_error_type_matches_across_execute_and_replay():
     replay_state = Mock()
     replay_state.get_checkpoint_result = Mock(return_value=failed_checkpoint)
     replay_context = Mock()
-    replay_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa: SLF001
+    replay_context._create_step_id_for_logical_step = lambda *args: "1"
 
     replay_error = make_executor().replay(replay_state, replay_context).all[0].error
     assert replay_error is not None
@@ -1857,190 +1357,6 @@ def test_failed_branch_error_type_matches_across_execute_and_replay():
     # Both paths must carry the same raw error_type.
     assert replay_error.type == "ValueError"
     assert live_error.type == replay_error.type
-
-
-def test_timer_scheduler_can_resume_false():
-    """Test TimerScheduler when exe_state.can_resume is False."""
-    callback = Mock()
-
-    with TimerScheduler(callback) as scheduler:
-        exe_state = ExecutableWithState(Executable(0, lambda: "test"))
-
-        # Set state to something that can't resume
-        exe_state.complete("done")
-
-        # Schedule with past time
-        past_time = time.time() - 1
-        scheduler.schedule_resume(exe_state, past_time)
-
-        # Give scheduler time to process
-        time.sleep(0.15)
-
-        # Callback should not be called since can_resume is False
-        callback.assert_not_called()
-
-
-def test_concurrent_executor_mixed_suspend_states():
-    """Test should_execution_suspend with mixed suspend states."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [Executable(0, lambda: "test"), Executable(1, lambda: "test2")]
-    completion_config = CompletionConfig(
-        min_successful=1,
-        tolerated_failure_count=None,
-        tolerated_failure_percentage=None,
-    )
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=2,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create one with timed suspend and one with indefinite suspend
-    exe_state1 = ExecutableWithState(executables[0])
-    exe_state2 = ExecutableWithState(executables[1])
-
-    future_time = time.time() + 5
-    exe_state1.suspend_with_timeout(future_time)
-    exe_state2.suspend()  # Indefinite
-
-    executor.executables_with_state = [exe_state1, exe_state2]
-
-    result = executor.should_execution_suspend()
-
-    # Should return timed suspend (earliest timestamp takes precedence)
-    assert result.should_suspend
-    assert isinstance(result.exception, TimedSuspendExecution)
-
-
-def test_concurrent_executor_multiple_timed_suspends():
-    """Test should_execution_suspend with multiple timed suspends to find earliest."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [Executable(0, lambda: "test"), Executable(1, lambda: "test2")]
-    completion_config = CompletionConfig(
-        min_successful=1,
-        tolerated_failure_count=None,
-        tolerated_failure_percentage=None,
-    )
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=2,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create two with different timed suspends
-    exe_state1 = ExecutableWithState(executables[0])
-    exe_state2 = ExecutableWithState(executables[1])
-
-    later_time = time.time() + 10
-    earlier_time = time.time() + 5
-
-    exe_state1.suspend_with_timeout(later_time)
-    exe_state2.suspend_with_timeout(earlier_time)
-
-    executor.executables_with_state = [exe_state1, exe_state2]
-
-    result = executor.should_execution_suspend()
-
-    # Should return the earlier timestamp
-    assert result.should_suspend
-    assert isinstance(result.exception, TimedSuspendExecution)
-    assert result.exception.scheduled_timestamp == earlier_time
-
-
-def test_timer_scheduler_double_check_condition_race():
-    """Test TimerScheduler double-check condition when heap changes between checks."""
-    callback = Mock()
-
-    with TimerScheduler(callback) as scheduler:
-        exe_state1 = ExecutableWithState(Executable(0, lambda: "test"))
-        exe_state2 = ExecutableWithState(Executable(1, lambda: "test"))
-
-        exe_state1.suspend()
-        exe_state2.suspend()
-
-        # Schedule first task with past time
-        past_time = time.time() - 1
-        scheduler.schedule_resume(exe_state1, past_time)
-
-        # Brief delay to let timer thread see the first task
-        time.sleep(0.05)
-
-        # Schedule second task with even more past time (will be heap[0])
-        very_past_time = time.time() - 2
-        scheduler.schedule_resume(exe_state2, very_past_time)
-
-        # Wait for processing
-        time.sleep(0.2)
-
-        assert callback.call_count >= 1
-
-
-def test_should_execution_suspend_earliest_timestamp_comparison():
-    """Test should_execution_suspend timestamp comparison logic (line 554)."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [
-        Executable(0, lambda: "test"),
-        Executable(1, lambda: "test2"),
-        Executable(2, lambda: "test3"),
-    ]
-    completion_config = CompletionConfig(
-        min_successful=1,
-        tolerated_failure_count=None,
-        tolerated_failure_percentage=None,
-    )
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=3,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create three executables with different suspend times
-    exe_state1 = ExecutableWithState(executables[0])
-    exe_state2 = ExecutableWithState(executables[1])
-    exe_state3 = ExecutableWithState(executables[2])
-
-    time1 = time.time() + 10
-    time2 = time.time() + 5  # Earliest
-    time3 = time.time() + 15
-
-    exe_state1.suspend_with_timeout(time1)
-    exe_state2.suspend_with_timeout(time2)
-    exe_state3.suspend_with_timeout(time3)
-
-    executor.executables_with_state = [exe_state1, exe_state2, exe_state3]
-
-    result = executor.should_execution_suspend()
-
-    assert result.should_suspend
-    assert isinstance(result.exception, TimedSuspendExecution)
-    assert result.exception.scheduled_timestamp == time2
 
 
 def test_concurrent_executor_execute_with_failing_task():
@@ -2067,13 +1383,14 @@ def test_concurrent_executor_execute_with_failing_task():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -2083,27 +1400,6 @@ def test_concurrent_executor_execute_with_failing_task():
     assert len(result.all) == 1
     assert result.all[0].status == BatchItemStatus.FAILED
     assert result.all[0].error.message == "Task failed"
-
-
-def test_timer_scheduler_cannot_resume_branch():
-    """Test TimerScheduler when exe_state cannot resume (434->433 branch)."""
-    callback = Mock()
-
-    with TimerScheduler(callback) as scheduler:
-        exe_state = ExecutableWithState(Executable(0, lambda: "test"))
-
-        # Set to completed state so can_resume returns False
-        exe_state.complete("done")
-
-        # Schedule with past time
-        past_time = time.time() - 1
-        scheduler.schedule_resume(exe_state, past_time)
-
-        # Wait for processing
-        time.sleep(0.2)
-
-        # Callback should not be called since can_resume is False
-        callback.assert_not_called()
 
 
 def test_create_result_no_failed_executables():
@@ -2131,13 +1427,14 @@ def test_create_result_no_failed_executables():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
     result = executor.execute(execution_state, executor_context)
@@ -2173,13 +1470,14 @@ def test_create_result_with_suspended_executable():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -2190,496 +1488,6 @@ def test_create_result_with_suspended_executable():
 
 
 # Tests for _create_result method match statement branches
-def test_create_result_completed_branch():
-    """Test _create_result with COMPLETED status branch."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [Executable(0, lambda: "test")]
-    completion_config = CompletionConfig(min_successful=1)
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=1,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create executable with COMPLETED status
-    exe_state = ExecutableWithState(executables[0])
-    exe_state.complete("test_result")
-    executor.executables_with_state = [exe_state]
-
-    result = executor._create_result()  # noqa: SLF001
-
-    assert len(result.all) == 1
-    assert result.all[0].status == BatchItemStatus.SUCCEEDED
-    assert result.all[0].result == "test_result"
-    assert result.all[0].error is None
-    assert result.all[0].index == 0
-
-
-def test_create_result_failed_branch():
-    """Test _create_result with FAILED status branch."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [Executable(0, lambda: "test")]
-    completion_config = CompletionConfig(min_successful=1)
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=1,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create executable with FAILED status
-    exe_state = ExecutableWithState(executables[0])
-    test_error = ValueError("Test error message")
-    exe_state.fail(test_error)
-    executor.executables_with_state = [exe_state]
-
-    result = executor._create_result()  # noqa: SLF001
-
-    assert len(result.all) == 1
-    assert result.all[0].status == BatchItemStatus.FAILED
-    assert result.all[0].result is None
-    assert result.all[0].error is not None
-    assert result.all[0].error.message == "Test error message"
-    assert result.all[0].error.type == "ValueError"
-    assert result.all[0].index == 0
-
-
-def test_create_result_pending_branch():
-    """Test _create_result with PENDING status branch."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [Executable(0, lambda: "test")]
-    completion_config = CompletionConfig(min_successful=1)
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=1,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create executable with PENDING status (default state)
-    exe_state = ExecutableWithState(executables[0])
-    # PENDING is the default state, no need to change it
-    executor.executables_with_state = [exe_state]
-
-    result = executor._create_result()  # noqa: SLF001
-
-    assert len(result.all) == 1
-    assert result.all[0].status == BatchItemStatus.STARTED
-    assert result.all[0].result is None
-    assert result.all[0].error is None
-    assert result.all[0].index == 0
-    # NEW BEHAVIOR: With min_successful=1 and no completed items,
-    # defaults to ALL_COMPLETED
-    assert result.completion_reason == CompletionReason.ALL_COMPLETED
-
-
-def test_create_result_running_branch():
-    """Test _create_result with RUNNING status branch."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [Executable(0, lambda: "test")]
-    completion_config = CompletionConfig(min_successful=1)
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=1,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create executable with RUNNING status
-    exe_state = ExecutableWithState(executables[0])
-    future = Future()
-    exe_state.run(future)
-    executor.executables_with_state = [exe_state]
-
-    result = executor._create_result()  # noqa: SLF001
-
-    assert len(result.all) == 1
-    assert result.all[0].status == BatchItemStatus.STARTED
-    assert result.all[0].result is None
-    assert result.all[0].error is None
-    assert result.all[0].index == 0
-    # With min_successful=1 and no completed items, defaults to ALL_COMPLETED
-    assert result.completion_reason == CompletionReason.ALL_COMPLETED
-
-
-def test_create_result_suspended_branch():
-    """Test _create_result with SUSPENDED status branch."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [Executable(0, lambda: "test")]
-    completion_config = CompletionConfig(min_successful=1)
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=1,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create executable with SUSPENDED status
-    exe_state = ExecutableWithState(executables[0])
-    exe_state.suspend()
-    executor.executables_with_state = [exe_state]
-
-    result = executor._create_result()  # noqa: SLF001
-
-    assert len(result.all) == 1
-    assert result.all[0].status == BatchItemStatus.STARTED
-    assert result.all[0].result is None
-    assert result.all[0].error is None
-    assert result.all[0].index == 0
-    # With min_successful=1 and no completed items, defaults to ALL_COMPLETED
-    assert result.completion_reason == CompletionReason.ALL_COMPLETED
-
-
-def test_create_result_suspended_with_timeout_branch():
-    """Test _create_result with SUSPENDED_WITH_TIMEOUT status branch."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [Executable(0, lambda: "test")]
-    completion_config = CompletionConfig(min_successful=1)
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=1,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create executable with SUSPENDED_WITH_TIMEOUT status
-    exe_state = ExecutableWithState(executables[0])
-    future_time = time.time() + 10
-    exe_state.suspend_with_timeout(future_time)
-    executor.executables_with_state = [exe_state]
-
-    result = executor._create_result()  # noqa: SLF001
-
-    assert len(result.all) == 1
-    assert result.all[0].status == BatchItemStatus.STARTED
-    assert result.all[0].result is None
-    assert result.all[0].error is None
-    assert result.all[0].index == 0
-    # With min_successful=1 and no completed items, default to ALL_COMPLETED
-    assert result.completion_reason == CompletionReason.ALL_COMPLETED
-
-
-def test_create_result_mixed_statuses():
-    """Test _create_result with mixed executable statuses covering all branches."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [
-        Executable(0, lambda: "test0"),  # Will be COMPLETED
-        Executable(1, lambda: "test1"),  # Will be FAILED
-        Executable(2, lambda: "test2"),  # Will be PENDING
-        Executable(3, lambda: "test3"),  # Will be RUNNING
-        Executable(4, lambda: "test4"),  # Will be SUSPENDED
-        Executable(5, lambda: "test5"),  # Will be SUSPENDED_WITH_TIMEOUT
-    ]
-    completion_config = CompletionConfig(min_successful=1)
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=6,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create executables with different statuses
-    exe_states = [ExecutableWithState(exe) for exe in executables]
-
-    # COMPLETED
-    exe_states[0].complete("completed_result")
-
-    # FAILED
-    exe_states[1].fail(RuntimeError("Test failure"))
-
-    # PENDING (default state, no change needed)
-
-    # RUNNING
-    future = Future()
-    exe_states[3].run(future)
-
-    # SUSPENDED
-    exe_states[4].suspend()
-
-    # SUSPENDED_WITH_TIMEOUT
-    exe_states[5].suspend_with_timeout(time.time() + 10)
-
-    executor.executables_with_state = exe_states
-
-    result = executor._create_result()  # noqa: SLF001
-
-    assert len(result.all) == 6
-
-    # Check COMPLETED -> SUCCEEDED
-    assert result.all[0].status == BatchItemStatus.SUCCEEDED
-    assert result.all[0].result == "completed_result"
-    assert result.all[0].error is None
-
-    # Check FAILED -> FAILED
-    assert result.all[1].status == BatchItemStatus.FAILED
-    assert result.all[1].result is None
-    assert result.all[1].error is not None
-    assert result.all[1].error.message == "Test failure"
-
-    # Check PENDING -> STARTED
-    assert result.all[2].status == BatchItemStatus.STARTED
-    assert result.all[2].result is None
-    assert result.all[2].error is None
-
-    # Check RUNNING -> STARTED
-    assert result.all[3].status == BatchItemStatus.STARTED
-    assert result.all[3].result is None
-    assert result.all[3].error is None
-
-    # Check SUSPENDED -> STARTED
-    assert result.all[4].status == BatchItemStatus.STARTED
-    assert result.all[4].result is None
-    assert result.all[4].error is None
-
-    # Check SUSPENDED_WITH_TIMEOUT -> STARTED
-    assert result.all[5].status == BatchItemStatus.STARTED
-    assert result.all[5].result is None
-    assert result.all[5].error is None
-
-    # we've a min succ set to 1.
-    assert result.completion_reason == CompletionReason.MIN_SUCCESSFUL_REACHED
-
-
-def test_create_result_multiple_completed():
-    """Test _create_result with multiple COMPLETED executables."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [
-        Executable(0, lambda: "test0"),
-        Executable(1, lambda: "test1"),
-        Executable(2, lambda: "test2"),
-    ]
-    completion_config = CompletionConfig(min_successful=3)
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=3,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create all executables with COMPLETED status
-    exe_states = [ExecutableWithState(exe) for exe in executables]
-    exe_states[0].complete("result_0")
-    exe_states[1].complete("result_1")
-    exe_states[2].complete("result_2")
-
-    executor.executables_with_state = exe_states
-
-    result = executor._create_result()  # noqa: SLF001
-
-    assert len(result.all) == 3
-    assert all(item.status == BatchItemStatus.SUCCEEDED for item in result.all)
-    assert result.all[0].result == "result_0"
-    assert result.all[1].result == "result_1"
-    assert result.all[2].result == "result_2"
-    assert result.completion_reason == CompletionReason.ALL_COMPLETED
-
-
-def test_create_result_multiple_failed():
-    """Test _create_result with multiple FAILED executables."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [
-        Executable(0, lambda: "test0"),
-        Executable(1, lambda: "test1"),
-        Executable(2, lambda: "test2"),
-    ]
-    completion_config = CompletionConfig(min_successful=1)
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=3,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create all executables with FAILED status
-    exe_states = [ExecutableWithState(exe) for exe in executables]
-    exe_states[0].fail(ValueError("Error 0"))
-    exe_states[1].fail(RuntimeError("Error 1"))
-    exe_states[2].fail(TypeError("Error 2"))
-
-    executor.executables_with_state = exe_states
-
-    result = executor._create_result()  # noqa: SLF001
-
-    assert len(result.all) == 3
-    assert all(item.status == BatchItemStatus.FAILED for item in result.all)
-    assert result.all[0].error.message == "Error 0"
-    assert result.all[1].error.message == "Error 1"
-    assert result.all[2].error.message == "Error 2"
-    assert result.completion_reason == CompletionReason.ALL_COMPLETED
-
-
-def test_create_result_multiple_started_states():
-    """Test _create_result with multiple executables in STARTED states."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = [
-        Executable(0, lambda: "test0"),  # PENDING
-        Executable(1, lambda: "test1"),  # RUNNING
-        Executable(2, lambda: "test2"),  # SUSPENDED
-        Executable(3, lambda: "test3"),  # SUSPENDED_WITH_TIMEOUT
-    ]
-    completion_config = CompletionConfig(min_successful=1)
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=4,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    # Create executables with different STARTED states
-    exe_states = [ExecutableWithState(exe) for exe in executables]
-
-    # PENDING (default state)
-
-    # RUNNING
-    future = Future()
-    exe_states[1].run(future)
-
-    # SUSPENDED
-    exe_states[2].suspend()
-
-    # SUSPENDED_WITH_TIMEOUT
-    exe_states[3].suspend_with_timeout(time.time() + 5)
-
-    executor.executables_with_state = exe_states
-
-    result = executor._create_result()  # noqa: SLF001
-
-    assert len(result.all) == 4
-    assert all(item.status == BatchItemStatus.STARTED for item in result.all)
-    assert all(item.result is None for item in result.all)
-    assert all(item.error is None for item in result.all)
-    # With min_successful=1 and no completed items, defaults to ALL_COMPLETED
-    assert result.completion_reason == CompletionReason.ALL_COMPLETED
-
-
-def test_create_result_empty_executables():
-    """Test _create_result with no executables."""
-
-    class TestExecutor(ConcurrentExecutor):
-        def execute_item(self, child_context, executable):
-            return f"result_{executable.index}"
-
-    executables = []
-    completion_config = CompletionConfig(min_successful=0)
-
-    executor = TestExecutor(
-        executables=executables,
-        max_concurrency=1,
-        completion_config=completion_config,
-        sub_type_top="TOP",
-        sub_type_iteration="ITER",
-        name_prefix="test_",
-        serdes=None,
-    )
-
-    executor.executables_with_state = []
-
-    result = executor._create_result()  # noqa: SLF001
-
-    assert len(result.all) == 0
-    assert result.completion_reason == CompletionReason.ALL_COMPLETED
-
-
-def test_timer_scheduler_future_time_condition_false():
-    """Test TimerScheduler when scheduled time is in future (434->433 branch)."""
-    callback = Mock()
-
-    with TimerScheduler(callback) as scheduler:
-        exe_state = ExecutableWithState(Executable(0, lambda: "test"))
-        exe_state.suspend()
-
-        # Schedule with future time so condition will be False
-        future_time = time.time() + 10
-        scheduler.schedule_resume(exe_state, future_time)
-
-        # Wait briefly for timer thread to check and find condition False
-        time.sleep(0.1)
-
-        # Callback should not be called since time is in future
-        callback.assert_not_called()
-
-
 def test_batch_result_from_dict_with_completion_config():
     """Test BatchResult from_dict with completion config parameter."""
     data = {
@@ -2834,6 +1642,7 @@ def test_operation_id_determinism_across_shuffles():
             name_prefix="test_",
             serdes=None,
             nesting_type=NestingType.FLAT,
+            operation_id_namespace=_StubNamespace(),
         )
 
         # Create executor context mock
@@ -2843,7 +1652,7 @@ def test_operation_id_determinism_across_shuffles():
         def create_step_id(index):
             return f"step_{index}"
 
-        executor_context._create_step_id_for_logical_step = create_step_id  # noqa SLF001
+        executor_context._create_step_id_for_logical_step = create_step_id
 
         def create_child_context(operation_id, *, is_virtual=False):
             child_ctx = Mock()
@@ -2884,6 +1693,7 @@ def test_concurrent_executor_replay_with_succeeded_operations():
         items=items,
         func=func1,
         config=config,
+        operation_id_namespace=_StubNamespace(),
     )
 
     # Mock execution state with succeeded operations
@@ -2942,6 +1752,7 @@ def test_concurrent_executor_replay_with_failed_operations():
         items=items,
         func=func1,
         config=config,
+        operation_id_namespace=_StubNamespace(),
     )
 
     # Mock execution state with failed operation
@@ -2958,7 +1769,7 @@ def test_concurrent_executor_replay_with_failed_operations():
 
     # Mock executor context
     mock_executor_context = Mock()
-    mock_executor_context._create_step_id_for_logical_step = Mock(return_value="op_1")  # noqa: SLF001
+    mock_executor_context._create_step_id_for_logical_step = Mock(return_value="op_1")
 
     result = executor.replay(mock_execution_state, mock_executor_context)
 
@@ -2981,6 +1792,7 @@ def test_concurrent_executor_replay_with_replay_children():
         items=items,
         func=func1,
         config=config,
+        operation_id_namespace=_StubNamespace(),
     )
 
     # Mock execution state with succeeded operation that needs replay
@@ -2997,7 +1809,7 @@ def test_concurrent_executor_replay_with_replay_children():
 
     # Mock executor context
     mock_executor_context = Mock()
-    mock_executor_context._create_step_id_for_logical_step = Mock(return_value="op_1")  # noqa: SLF001
+    mock_executor_context._create_step_id_for_logical_step = Mock(return_value="op_1")
 
     # Mock _execute_item_in_child_context to return a result
     with patch.object(
@@ -3116,12 +1928,13 @@ def test_executor_does_not_deadlock_when_all_tasks_terminal_but_completion_confi
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -3156,12 +1969,13 @@ def test_executor_terminates_quickly_when_impossible_to_succeed():
         items=items,
         func=task_func,
         config=config,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -3214,12 +2028,13 @@ def test_executor_exits_early_with_min_successful():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"  # noqa: SLF001
+    executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"
     executor_context._parent_id = "parent"  # noqa: SLF001
 
     def create_child_context(op_id, *, is_virtual=False):
@@ -3288,13 +2103,14 @@ def test_executor_returns_with_incomplete_branches():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
     execution_state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"  # noqa: SLF001
+    executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"
     executor_context._parent_id = "parent"  # noqa: SLF001
     executor_context.create_child_context = lambda op_id, *, is_virtual=False: Mock(
         state=execution_state
@@ -3349,13 +2165,14 @@ def test_executor_returns_before_slow_branch_completes():
         sub_type_iteration="ITER",
         name_prefix="test_",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
     execution_state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"  # noqa: SLF001
+    executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"
     executor_context._parent_id = "parent"  # noqa: SLF001
     executor_context.create_child_context = lambda op_id, *, is_virtual=False: Mock(
         state=execution_state
@@ -3376,130 +2193,6 @@ def test_executor_returns_before_slow_branch_completes():
     assert result.failure_count == 0
     assert result.started_count == 1
     assert result.total_count == 2
-
-
-# region TimerScheduler edge cases with exact same reschedule time
-
-
-def test_timer_scheduler_same_timestamp_with_counter_tiebreaker():
-    """
-    Test that scheduling two tasks with the exact same resume_time works.
-
-    This verifies the fix where a counter is used as a tie-breaker to prevent
-    TypeError when heapq tries to compare ExecutableWithState objects.
-    """
-    resubmit_callback = Mock()
-
-    with TimerScheduler(resubmit_callback) as scheduler:
-        # Create two different ExecutableWithState objects
-        exe_state1 = ExecutableWithState(Executable(index=0, func=lambda: "test1"))
-        exe_state2 = ExecutableWithState(Executable(index=1, func=lambda: "test2"))
-
-        # Use the exact same timestamp for both
-        same_timestamp = time.time() + 10.0
-
-        # Both schedules should work fine now
-        scheduler.schedule_resume(exe_state1, same_timestamp)
-        scheduler.schedule_resume(exe_state2, same_timestamp)
-
-        # Verify both are in the heap
-        assert len(scheduler._pending_resumes) == 2  # noqa: SLF001
-
-        # Verify FIFO ordering (first scheduled should be first in heap)
-        first_item = scheduler._pending_resumes[0]  # noqa: SLF001
-        assert first_item[0] == same_timestamp  # timestamp
-        assert first_item[1] == 0  # counter (first scheduled)
-        assert first_item[2] == exe_state1  # first exe_state
-
-
-def test_timer_scheduler_multiple_same_timestamps():
-    """
-    Test that scheduling many tasks with the same timestamp works correctly.
-
-    Verifies FIFO ordering is maintained when multiple tasks have identical timestamps.
-    """
-    resubmit_callback = Mock()
-
-    with TimerScheduler(resubmit_callback) as scheduler:
-        same_timestamp = time.time() + 10.0
-
-        # Create and schedule 10 tasks with the same timestamp
-        exe_states = [
-            ExecutableWithState(Executable(index=i, func=lambda i=i: f"test{i}"))
-            for i in range(10)
-        ]
-
-        for exe_state in exe_states:
-            scheduler.schedule_resume(exe_state, same_timestamp)
-
-        # All should be scheduled successfully
-        assert len(scheduler._pending_resumes) == 10  # noqa: SLF001
-
-        # Verify the heap maintains proper ordering
-        # The first item should have counter 0
-        assert scheduler._pending_resumes[0][1] == 0  # noqa: SLF001
-
-
-def test_timer_scheduler_counter_increments():
-    """Test that the schedule counter increments correctly."""
-    resubmit_callback = Mock()
-
-    with TimerScheduler(resubmit_callback) as scheduler:
-        exe_state1 = ExecutableWithState(Executable(0, lambda: "test1"))
-        exe_state2 = ExecutableWithState(Executable(1, lambda: "test2"))
-        exe_state3 = ExecutableWithState(Executable(2, lambda: "test3"))
-
-        # Schedule with different times
-        scheduler.schedule_resume(exe_state1, time.time() + 1.0)
-        scheduler.schedule_resume(exe_state2, time.time() + 2.0)
-        scheduler.schedule_resume(exe_state3, time.time() + 3.0)
-
-        # Counter should have incremented to 3
-        assert scheduler._schedule_counter == 3  # noqa: SLF001
-
-
-def test_timer_scheduler_fifo_ordering_with_same_timestamp():
-    """
-    Test that FIFO ordering is maintained when timestamps are equal.
-
-    When multiple tasks have the same timestamp, they should be processed
-    in the order they were scheduled (FIFO). The timer thread processes
-    items synchronously, so callback order is deterministic.
-    """
-    results = []
-    resubmit_callback = Mock(
-        side_effect=lambda batch: results.extend(exe.index for exe in batch)
-    )
-
-    with TimerScheduler(resubmit_callback) as scheduler:
-        # Use a past timestamp so they trigger immediately
-        past_time = time.time() - 0.1
-
-        exe_state1 = ExecutableWithState(Executable(0, lambda: "first"))
-        exe_state2 = ExecutableWithState(Executable(1, lambda: "second"))
-        exe_state3 = ExecutableWithState(Executable(2, lambda: "third"))
-
-        # Make them all resumable
-        exe_state1.suspend()
-        exe_state2.suspend()
-        exe_state3.suspend()
-
-        # Schedule all with same timestamp
-        scheduler.schedule_resume(exe_state1, past_time)
-        scheduler.schedule_resume(exe_state2, past_time)
-        scheduler.schedule_resume(exe_state3, past_time)
-
-        # Wait for timer thread to process them
-        time.sleep(0.3)
-
-        # Verify FIFO order - they should be resubmitted in order 0, 1, 2
-        assert results == [0, 1, 2]
-
-
-# endregion TimerScheduler edge cases with exact same reschedule time
-
-
-# region Completion Reason Inference Tests (from_items)
 
 
 def test_from_items_no_config_with_failures():
@@ -3704,6 +2397,7 @@ def test_flat_mode_stamps_grandparent_as_inner_op_parent_id():
         name_prefix="branch-",
         serdes=None,
         nesting_type=NestingType.FLAT,
+        operation_id_namespace=_StubNamespace(),
     )
 
     executor._execute_item_in_child_context(executor_context, executables[0])  # noqa: SLF001
@@ -3757,6 +2451,7 @@ def test_nested_mode_stamps_branch_op_as_inner_op_parent_id():
         name_prefix="branch-",
         serdes=None,
         nesting_type=NestingType.NESTED,
+        operation_id_namespace=_StubNamespace(),
     )
 
     executor._execute_item_in_child_context(executor_context, executables[0])  # noqa: SLF001
@@ -3831,6 +2526,7 @@ def test_flat_mode_produces_deterministic_step_ids_across_runs():
             name_prefix="branch-",
             serdes=None,
             nesting_type=NestingType.FLAT,
+            operation_id_namespace=_StubNamespace(),
         )
         executor.execute(execution_state, executor_context)
         return executor.captured
@@ -3848,3 +2544,1190 @@ def test_flat_mode_produces_deterministic_step_ids_across_runs():
     )
     # Sanity: all branches reported grandparent (map op id) as their parent.
     assert all(parent_id == "map-op-id" for _prefix, parent_id in run_a)
+
+
+# region Branch state transitions
+
+
+def test_branch_initial_state():
+    branch = Branch(Executable(3, lambda: "test"))
+    assert branch.status is BranchStatus.PENDING
+    assert branch.index == 3
+    assert branch.result is None
+    assert branch.error is None
+    assert branch.resume_at is None
+
+
+def test_branch_start_clears_resume_at():
+    branch = Branch(Executable(0, lambda: "test"))
+    branch.suspend_until(123.0)
+    assert branch.status is BranchStatus.SUSPENDED_WITH_TIMEOUT
+    assert branch.resume_at == 123.0
+    branch.start()
+    assert branch.status is BranchStatus.RUNNING
+    assert branch.resume_at is None
+
+
+def test_branch_complete_stores_result():
+    branch = Branch(Executable(0, lambda: "test"))
+    branch.start()
+    branch.complete("result")
+    assert branch.status is BranchStatus.COMPLETED
+    assert branch.result == "result"
+
+
+def test_branch_fail_stores_error():
+    branch = Branch(Executable(0, lambda: "test"))
+    branch.start()
+    error = ValueError("boom")
+    branch.fail(error)
+    assert branch.status is BranchStatus.FAILED
+    assert branch.error is error
+
+
+def test_branch_suspend_not_terminal():
+    branch = Branch(Executable(0, lambda: "test"))
+    branch.start()
+    branch.suspend()
+    assert branch.status is BranchStatus.SUSPENDED
+    assert branch.resume_at is None
+
+
+def test_branch_suspend_until_not_terminal():
+    branch = Branch(Executable(0, lambda: "test"))
+    branch.start()
+    branch.suspend_until(456.0)
+    assert branch.status is BranchStatus.SUSPENDED_WITH_TIMEOUT
+    assert branch.resume_at == 456.0
+
+
+def test_branch_start_rejects_invalid_source_states():
+    branch = Branch(Executable(0, lambda: "test"))
+    branch.start()
+    branch.complete("done")
+    with pytest.raises(InvalidStateError, match="Cannot start branch 0"):
+        branch.start()
+
+    suspended = Branch(Executable(1, lambda: "test"))
+    suspended.start()
+    suspended.suspend()
+    with pytest.raises(InvalidStateError, match="Cannot start branch 1"):
+        suspended.start()
+
+
+def test_branch_start_allows_timed_resume():
+    branch = Branch(Executable(0, lambda: "test"))
+    branch.start()
+    branch.suspend_until(123.0)
+    branch.start()
+    assert branch.status is BranchStatus.RUNNING
+
+
+def test_create_result_raises_on_failed_branch_without_error():
+    executables = [Executable(0, lambda: "test")]
+    executor = _make_executor(executables, max_concurrency=1)
+    branch = Branch(executables[0])
+    branch.status = BranchStatus.FAILED
+    executor.branches = [branch]
+    with pytest.raises(InvalidStateError, match="unexpected state"):
+        executor._create_result()  # noqa: SLF001
+
+
+# endregion Branch state transitions
+
+
+# region CompletionPolicy
+
+
+def test_completion_policy_from_config_none():
+    policy = CompletionPolicy.from_config(5, None)
+    assert policy.total == 5
+    assert policy.min_successful is None
+    assert policy.tolerated_failure_count is None
+    assert policy.tolerated_failure_percentage is None
+    assert not policy.has_criteria
+
+
+def test_completion_policy_from_config_copies_fields():
+    config = CompletionConfig(
+        min_successful=2,
+        tolerated_failure_count=3,
+        tolerated_failure_percentage=50.0,
+    )
+    policy = CompletionPolicy.from_config(10, config)
+    assert policy.total == 10
+    assert policy.min_successful == 2
+    assert policy.tolerated_failure_count == 3
+    assert policy.tolerated_failure_percentage == 50.0
+    assert policy.has_criteria
+
+
+def test_completion_policy_fail_fast_without_criteria():
+    policy = CompletionPolicy.from_config(5, CompletionConfig())
+    assert policy.should_continue(failed=0)
+    assert not policy.should_continue(failed=1)
+    assert policy.is_tolerance_exceeded(failed=1)
+
+
+def test_completion_policy_min_successful_only_does_not_fail_fast():
+    policy = CompletionPolicy.from_config(5, CompletionConfig(min_successful=2))
+    assert policy.should_continue(failed=1)
+    assert policy.should_continue(failed=4)
+
+
+def test_completion_policy_tolerated_failure_count_boundary():
+    policy = CompletionPolicy.from_config(
+        10, CompletionConfig(tolerated_failure_count=2)
+    )
+    assert policy.should_continue(failed=2)
+    assert not policy.should_continue(failed=3)
+
+
+def test_completion_policy_tolerated_failure_percentage_boundary():
+    policy = CompletionPolicy.from_config(
+        10, CompletionConfig(tolerated_failure_percentage=30)
+    )
+    assert policy.should_continue(failed=3)
+    assert not policy.should_continue(failed=4)
+
+
+def test_completion_policy_percentage_with_zero_total():
+    policy = CompletionPolicy.from_config(
+        0, CompletionConfig(tolerated_failure_percentage=30)
+    )
+    assert not policy.is_tolerance_exceeded(failed=0)
+
+
+def test_completion_policy_is_complete_all_done():
+    policy = CompletionPolicy.from_config(3, CompletionConfig())
+    assert not policy.is_complete(succeeded=1, failed=1)
+    assert policy.is_complete(succeeded=2, failed=1)
+
+
+def test_completion_policy_is_complete_min_successful():
+    policy = CompletionPolicy.from_config(5, CompletionConfig(min_successful=2))
+    assert not policy.is_complete(succeeded=1, failed=0)
+    assert policy.is_complete(succeeded=2, failed=0)
+
+
+def test_completion_policy_reason_tolerance_checked_first():
+    policy = CompletionPolicy.from_config(
+        2, CompletionConfig(tolerated_failure_count=0)
+    )
+    assert (
+        policy.reason(succeeded=1, failed=1)
+        is CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+    )
+
+
+def test_completion_policy_reason_all_completed():
+    policy = CompletionPolicy.from_config(
+        2, CompletionConfig(tolerated_failure_count=1)
+    )
+    assert policy.reason(succeeded=1, failed=1) is CompletionReason.ALL_COMPLETED
+
+
+def test_completion_policy_reason_min_successful():
+    policy = CompletionPolicy.from_config(5, CompletionConfig(min_successful=2))
+    assert (
+        policy.reason(succeeded=2, failed=0) is CompletionReason.MIN_SUCCESSFUL_REACHED
+    )
+
+
+def test_completion_policy_reason_defaults_to_all_completed():
+    policy = CompletionPolicy.from_config(5, CompletionConfig(min_successful=3))
+    assert policy.reason(succeeded=1, failed=0) is CompletionReason.ALL_COMPLETED
+
+
+# endregion CompletionPolicy
+
+
+# region In-flight window semantics
+
+
+def _make_executor_mocks():
+    """Build the execution_state / executor_context mock pair used by executor tests."""
+    execution_state = Mock()
+    execution_state.create_checkpoint = Mock()
+    execution_state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"
+    executor_context._parent_id = "parent"  # noqa: SLF001
+    executor_context.create_child_context = lambda op_id, *, is_virtual=False: Mock(
+        state=execution_state
+    )
+    return execution_state, executor_context
+
+
+class _RecordingExecutor(ConcurrentExecutor):
+    """Executor whose items delegate to the Executable's own callable."""
+
+    def execute_item(self, child_context, executable):
+        return executable.func()
+
+
+def _make_executor(executables, max_concurrency, completion_config=None):
+    return _RecordingExecutor(
+        executables=executables,
+        max_concurrency=max_concurrency,
+        completion_config=completion_config or CompletionConfig(),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+
+def test_max_concurrency_bounds_simultaneous_execution():
+    """At most max_concurrency items execute simultaneously."""
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def tracked():
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return "ok"
+
+    executables = [Executable(i, tracked) for i in range(6)]
+    executor = _make_executor(executables, max_concurrency=2)
+    execution_state, executor_context = _make_executor_mocks()
+
+    result = executor.execute(execution_state, executor_context)
+
+    assert peak <= 2
+    assert result.success_count == 6
+    assert result.completion_reason is CompletionReason.ALL_COMPLETED
+
+
+def test_suspended_branch_holds_concurrency_slot():
+    """A suspended branch keeps its slot: pending items must not start (issue #279)."""
+    started: list[int] = []
+
+    def suspending(index: int):
+        started.append(index)
+        msg = "awaiting callback"
+        raise SuspendExecution(msg)
+
+    executables = [
+        Executable(0, partial(suspending, 0)),
+        Executable(1, partial(suspending, 1)),
+        Executable(2, partial(suspending, 2)),
+    ]
+    executor = _make_executor(executables, max_concurrency=2)
+    execution_state, executor_context = _make_executor_mocks()
+
+    with pytest.raises(SuspendExecution):
+        executor.execute(execution_state, executor_context)
+
+    assert sorted(started) == [0, 1]
+
+
+def test_slot_freed_on_completion_admits_next_item():
+    """A terminal completion frees a slot; a suspension does not."""
+    started: list[int] = []
+
+    def completing(index: int):
+        started.append(index)
+        return f"result_{index}"
+
+    def suspending(index: int):
+        started.append(index)
+        msg = "awaiting callback"
+        raise SuspendExecution(msg)
+
+    executables = [
+        Executable(0, partial(completing, 0)),
+        Executable(1, partial(suspending, 1)),
+        Executable(2, partial(completing, 2)),
+    ]
+    executor = _make_executor(executables, max_concurrency=2)
+    execution_state, executor_context = _make_executor_mocks()
+
+    with pytest.raises(SuspendExecution):
+        executor.execute(execution_state, executor_context)
+
+    assert sorted(started) == [0, 1, 2]
+
+
+def test_branches_start_in_index_order():
+    started: list[int] = []
+
+    def record(index: int):
+        started.append(index)
+        return index
+
+    executables = [Executable(i, partial(record, i)) for i in range(4)]
+    executor = _make_executor(executables, max_concurrency=1)
+    execution_state, executor_context = _make_executor_mocks()
+
+    result = executor.execute(execution_state, executor_context)
+
+    assert started == [0, 1, 2, 3]
+    assert result.success_count == 4
+
+
+def test_timed_suspend_resumes_in_process_while_sibling_runs():
+    """A due timed suspend is resumed in-process while another branch is running."""
+    resumed = threading.Event()
+    call_counts = {0: 0}
+
+    def timed_then_ok():
+        call_counts[0] += 1
+        if call_counts[0] == 1:
+            msg = "retry shortly"
+            raise TimedSuspendExecution(msg, time.time() + 0.3)
+        resumed.set()
+        return "ok_after_resume"
+
+    def slow_sibling():
+        resumed.wait(timeout=5.0)
+        return "sibling"
+
+    executables = [Executable(0, timed_then_ok), Executable(1, slow_sibling)]
+    executor = _make_executor(executables, max_concurrency=2)
+    execution_state, executor_context = _make_executor_mocks()
+
+    result = executor.execute(execution_state, executor_context)
+
+    assert call_counts[0] == 2
+    assert result.success_count == 2
+    assert result.completion_reason is CompletionReason.ALL_COMPLETED
+    # A resume wave refreshes state once before resubmitting.
+    execution_state.create_checkpoint.assert_called()
+
+
+def test_all_timed_suspended_parent_suspends_with_earliest_timestamp():
+    earliest = time.time() + 100
+    latest = time.time() + 200
+
+    def suspend_at(timestamp: float):
+        msg = "retry later"
+        raise TimedSuspendExecution(msg, timestamp)
+
+    executables = [
+        Executable(0, partial(suspend_at, latest)),
+        Executable(1, partial(suspend_at, earliest)),
+    ]
+    executor = _make_executor(executables, max_concurrency=2)
+    execution_state, executor_context = _make_executor_mocks()
+
+    with pytest.raises(TimedSuspendExecution) as exc_info:
+        executor.execute(execution_state, executor_context)
+
+    assert exc_info.value.scheduled_timestamp == earliest
+
+
+def test_never_started_branches_omitted_from_result():
+    """Branches that never started are omitted from the batch result (JS parity)."""
+    release = threading.Event()
+
+    def fast():
+        return "fast"
+
+    def slow():
+        release.wait(timeout=5.0)
+        return "slow"
+
+    executables = [
+        Executable(0, fast),
+        Executable(1, slow),
+        Executable(2, fast),
+        Executable(3, fast),
+    ]
+    executor = _make_executor(
+        executables,
+        max_concurrency=2,
+        completion_config=CompletionConfig(min_successful=1),
+    )
+    execution_state, executor_context = _make_executor_mocks()
+
+    try:
+        result = executor.execute(execution_state, executor_context)
+    finally:
+        release.set()
+
+    assert result.completion_reason is CompletionReason.MIN_SUCCESSFUL_REACHED
+    assert result.success_count == 1
+    assert result.started_count == 1
+    assert result.total_count == 2
+    indexes = {item.index for item in result.all}
+    assert indexes == {0, 1}
+
+
+def test_tolerance_breach_stops_submission_of_pending_items():
+    """Fail-fast: a failure with no completion criteria stops further submissions."""
+    started: list[int] = []
+
+    def failing(index: int):
+        started.append(index)
+        msg = "boom"
+        raise ValueError(msg)
+
+    executables = [Executable(i, partial(failing, i)) for i in range(4)]
+    executor = _make_executor(executables, max_concurrency=1)
+    execution_state, executor_context = _make_executor_mocks()
+
+    result = executor.execute(execution_state, executor_context)
+
+    assert started == [0]
+    assert result.completion_reason is CompletionReason.FAILURE_TOLERANCE_EXCEEDED
+    assert result.failure_count == 1
+    assert result.total_count == 1
+
+
+def test_orphaned_branch_stops_scheduling():
+    """An orphaned branch means an ancestor completed: stop starting new work."""
+    started: list[int] = []
+
+    def orphaned(index: int):
+        started.append(index)
+        msg = "parent done"
+        raise OrphanedChildException(msg, operation_id=f"step_{index}")
+
+    executables = [Executable(i, partial(orphaned, i)) for i in range(4)]
+    executor = _make_executor(executables, max_concurrency=1)
+    execution_state, executor_context = _make_executor_mocks()
+
+    result = executor.execute(execution_state, executor_context)
+
+    assert started == [0]
+    assert result.started_count == 1
+    assert result.total_count == 1
+
+
+def test_branch_worker_maps_outcomes_to_events():
+    """_branch_worker converts each branch outcome into the matching event."""
+    outcomes: dict[int, Callable] = {
+        0: lambda: "done",
+        1: lambda: (_ for _ in ()).throw(ValueError("boom")),
+        2: lambda: (_ for _ in ()).throw(SuspendExecution("cb")),
+        3: lambda: (_ for _ in ()).throw(TimedSuspendExecution("retry", 1234.5)),
+        4: lambda: (_ for _ in ()).throw(
+            OrphanedChildException("parent done", operation_id="step_4")
+        ),
+    }
+
+    class OutcomeExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return outcomes[executable.index]()
+
+    executables = [Executable(i, outcomes[i]) for i in range(5)]
+    execution_state, executor_context = _make_executor_mocks()
+    executor = OutcomeExecutor(
+        executables=executables,
+        max_concurrency=5,
+        completion_config=CompletionConfig(),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+    events: queue.Queue = queue.Queue()
+    for executable in executables:
+        executor._branch_worker(executor_context, events, executable)  # noqa: SLF001
+
+    collected = {}
+    while not events.empty():
+        event = events.get_nowait()
+        collected[event.index] = event
+
+    assert collected[0].kind is BranchEventKind.COMPLETED
+    assert collected[0].result == "done"
+    assert collected[1].kind is BranchEventKind.FAILED
+    # child_handler wraps user exceptions in ChildContextError before
+    # they reach the worker.
+    assert isinstance(collected[1].error, ChildContextError)
+    assert collected[2].kind is BranchEventKind.SUSPENDED
+    assert collected[3].kind is BranchEventKind.SUSPENDED_UNTIL
+    assert collected[3].resume_at == 1234.5
+    assert collected[4].kind is BranchEventKind.ORPHANED
+
+
+# region Completion record and replay reconstruction
+
+
+def test_completion_record_from_summary_payload_started_indexes():
+    payload = json.dumps(
+        {
+            "totalCount": 3,
+            "completionReason": "MIN_SUCCESSFUL_REACHED",
+            "startedIndexes": [1],
+        }
+    )
+    record = CompletionRecord.from_summary_payload(payload)
+    assert record is not None
+    assert record.completion_reason is CompletionReason.MIN_SUCCESSFUL_REACHED
+    assert record.started_total == 3
+    assert record.started_indexes == frozenset({1})
+
+
+def test_completion_record_from_summary_payload_completed_indexes():
+    payload = json.dumps(
+        {
+            "totalCount": 4,
+            "completionReason": "ALL_COMPLETED",
+            "completedIndexes": [0, 2],
+        }
+    )
+    record = CompletionRecord.from_summary_payload(payload)
+    assert record is not None
+    assert record.started_indexes == frozenset({1, 3})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        "",
+        "not json",
+        '"a json string"',
+        json.dumps({"totalCount": 3, "completionReason": "MIN_SUCCESSFUL_REACHED"}),
+        json.dumps({"totalCount": 3, "startedIndexes": [1]}),
+        json.dumps(
+            {
+                "totalCount": 3,
+                "completionReason": "SOME_FUTURE_REASON",
+                "startedIndexes": [1],
+            }
+        ),
+        json.dumps(
+            {
+                "totalCount": "3",
+                "completionReason": "ALL_COMPLETED",
+                "startedIndexes": [1],
+            }
+        ),
+    ],
+)
+def test_completion_record_rejects_payloads_without_record(payload):
+    assert CompletionRecord.from_summary_payload(payload) is None
+
+
+def test_summary_index_fields_records_smaller_side():
+    few_started = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, result="a"),
+        BatchItem(1, BatchItemStatus.STARTED),
+        BatchItem(2, BatchItemStatus.SUCCEEDED, result="b"),
+    ]
+    assert CompletionRecord.summary_index_fields(few_started) == {"startedIndexes": [1]}
+
+    few_completed = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, result="a"),
+        BatchItem(1, BatchItemStatus.STARTED),
+        BatchItem(2, BatchItemStatus.STARTED),
+    ]
+    assert CompletionRecord.summary_index_fields(few_completed) == {
+        "completedIndexes": [0]
+    }
+
+
+def _make_replay_mocks(branch_checkpoints: dict):
+    """Mocks for replay: op id 'op_{index}', checkpoints per index."""
+    execution_state = Mock()
+    execution_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+
+    def get_checkpoint_result(operation_id: str):
+        checkpoint = branch_checkpoints.get(operation_id)
+        if checkpoint is not None:
+            return checkpoint
+        absent = Mock()
+        absent.is_succeeded.return_value = False
+        absent.is_failed.return_value = False
+        absent.is_existent.return_value = False
+        absent.is_replay_children.return_value = False
+        return absent
+
+    execution_state.get_checkpoint_result = get_checkpoint_result
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda idx: f"op_{idx}"
+    executor_context._parent_id = "parent"  # noqa: SLF001
+    child_context = Mock()
+    child_context.state = execution_state
+    executor_context.create_child_context = Mock(return_value=child_context)
+    return execution_state, executor_context
+
+
+def _succeeded_checkpoint(serialized_result: str):
+    checkpoint = Mock()
+    checkpoint.is_succeeded.return_value = True
+    checkpoint.is_failed.return_value = False
+    checkpoint.is_existent.return_value = True
+    checkpoint.is_replay_children.return_value = False
+    checkpoint.result = serialized_result
+    return checkpoint
+
+
+def test_replay_round_trip_matches_live_result():
+    """execute() -> summary -> replay() reconstructs the exact live result."""
+
+    def succeed(index: int):
+        return f"live_{index}"
+
+    def suspend():
+        msg = "awaiting callback"
+        raise SuspendExecution(msg)
+
+    executables = [
+        Executable(0, partial(succeed, 0)),
+        Executable(1, suspend),
+        Executable(2, partial(succeed, 2)),
+        Executable(3, partial(succeed, 3)),
+    ]
+    executor = _make_executor(
+        executables,
+        max_concurrency=2,
+        completion_config=CompletionConfig(min_successful=2),
+    )
+    execution_state, executor_context = _make_executor_mocks()
+    live: BatchResult = executor.execute(execution_state, executor_context)
+
+    assert [(i.index, i.status) for i in live.all] == [
+        (0, BatchItemStatus.SUCCEEDED),
+        (1, BatchItemStatus.STARTED),
+        (2, BatchItemStatus.SUCCEEDED),
+    ]
+    assert live.completion_reason is CompletionReason.MIN_SUCCESSFUL_REACHED
+
+    summary: str = envelope_summary_generator("MapResult", None)(live)
+    top_checkpoint = Mock()
+    top_checkpoint.result = summary
+
+    # Branch 1's checkpoint claims SUCCEEDED: the recorded STARTED must win
+    # (a terminal checkpoint can land after the completion decision).
+    replay_state, replay_context = _make_replay_mocks(
+        {
+            "op_0": _succeeded_checkpoint('"replayed_0"'),
+            "op_1": _succeeded_checkpoint('"raced_1"'),
+            "op_2": _succeeded_checkpoint('"replayed_2"'),
+        }
+    )
+    replay_executor = _make_executor(
+        executables,
+        max_concurrency=2,
+        completion_config=CompletionConfig(min_successful=2),
+    )
+    replayed: BatchResult = replay_executor.replay(
+        replay_state, replay_context, top_checkpoint
+    )
+
+    assert [(i.index, i.status) for i in replayed.all] == [
+        (i.index, i.status) for i in live.all
+    ]
+    assert replayed.completion_reason is live.completion_reason
+    assert replayed.all[0].result == "replayed_0"
+    assert replayed.all[1].result is None
+    assert replayed.all[2].result == "replayed_2"
+
+
+def test_replay_without_record_falls_back_to_checkpoint_derivation():
+    """No record: every executable is represented, old-style."""
+    executables = [Executable(i, lambda: "x") for i in range(3)]
+    executor = _make_executor(executables, max_concurrency=2)
+    replay_state, replay_context = _make_replay_mocks(
+        {"op_0": _succeeded_checkpoint('"done_0"')}
+    )
+
+    replayed: BatchResult = executor.replay(replay_state, replay_context)
+
+    assert [(i.index, i.status) for i in replayed.all] == [
+        (0, BatchItemStatus.SUCCEEDED),
+        (1, BatchItemStatus.STARTED),
+        (2, BatchItemStatus.STARTED),
+    ]
+
+
+def test_replay_summary_without_index_keys_falls_back():
+    """Summaries written before the record existed derive from checkpoints."""
+    executables = [Executable(i, lambda: "x") for i in range(2)]
+    executor = _make_executor(executables, max_concurrency=2)
+    top_checkpoint = Mock()
+    top_checkpoint.result = json.dumps(
+        {
+            "totalCount": 2,
+            "successCount": 2,
+            "failureCount": 0,
+            "completionReason": "ALL_COMPLETED",
+            "status": "SUCCEEDED",
+            "type": "MapResult",
+        }
+    )
+    replay_state, replay_context = _make_replay_mocks(
+        {
+            "op_0": _succeeded_checkpoint('"done_0"'),
+            "op_1": _succeeded_checkpoint('"done_1"'),
+        }
+    )
+
+    replayed: BatchResult = executor.replay(
+        replay_state, replay_context, top_checkpoint
+    )
+
+    assert [(i.index, i.status) for i in replayed.all] == [
+        (0, BatchItemStatus.SUCCEEDED),
+        (1, BatchItemStatus.SUCCEEDED),
+    ]
+
+
+def test_replay_recorded_terminal_with_missing_checkpoint_is_started():
+    """Nested branch recorded terminal but checkpoint absent: conservative STARTED."""
+    executables = [Executable(0, lambda: "x")]
+    executor = _make_executor(executables, max_concurrency=1)
+    top_checkpoint = Mock()
+    top_checkpoint.result = json.dumps(
+        {
+            "totalCount": 1,
+            "completionReason": "ALL_COMPLETED",
+            "startedIndexes": [],
+        }
+    )
+    replay_state, replay_context = _make_replay_mocks({})
+
+    replayed: BatchResult = executor.replay(
+        replay_state, replay_context, top_checkpoint
+    )
+
+    assert [(i.index, i.status) for i in replayed.all] == [(0, BatchItemStatus.STARTED)]
+    assert replayed.completion_reason is CompletionReason.ALL_COMPLETED
+
+
+def test_replay_flat_reconstructs_terminal_statuses_by_reexecution():
+    """FLAT branches have no checkpoints: re-execution discriminates outcomes."""
+
+    def succeed():
+        return "flat_ok"
+
+    def fail():
+        msg = "flat boom"
+        raise ValueError(msg)
+
+    executables = [Executable(0, succeed), Executable(1, fail)]
+    executor = _RecordingExecutor(
+        executables=executables,
+        max_concurrency=2,
+        completion_config=CompletionConfig(
+            tolerated_failure_count=1,
+        ),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        nesting_type=NestingType.FLAT,
+        operation_id_namespace=_StubNamespace(),
+    )
+    top_checkpoint = Mock()
+    top_checkpoint.result = json.dumps(
+        {
+            "totalCount": 2,
+            "completionReason": "ALL_COMPLETED",
+            "startedIndexes": [],
+        }
+    )
+    replay_state, replay_context = _make_replay_mocks({})
+    replay_state.wrap_user_function = lambda func, *args, **kwargs: func
+
+    replayed: BatchResult = executor.replay(
+        replay_state, replay_context, top_checkpoint
+    )
+
+    assert [(i.index, i.status) for i in replayed.all] == [
+        (0, BatchItemStatus.SUCCEEDED),
+        (1, BatchItemStatus.FAILED),
+    ]
+    assert replayed.all[0].result == "flat_ok"
+    assert replayed.all[1].error is not None
+    assert replayed.all[1].error.type == "ValueError"
+    assert replayed.completion_reason is CompletionReason.ALL_COMPLETED
+
+
+# endregion Completion record and replay reconstruction
+
+
+def test_create_result_uses_captured_completion_reason():
+    """The reason captured at the completion decision wins over recount."""
+    executables = [Executable(0, lambda: "x"), Executable(1, lambda: "y")]
+    executor = _make_executor(executables, max_concurrency=2)
+    completed = Branch(executables[0])
+    completed.start()
+    completed.complete("done")
+    failed = Branch(executables[1])
+    failed.start()
+    failed.fail(ValueError("boom"))
+    executor.branches = [completed, failed]
+
+    result: BatchResult = executor._create_result(  # noqa: SLF001
+        CompletionReason.MIN_SUCCESSFUL_REACHED
+    )
+
+    assert result.completion_reason is CompletionReason.MIN_SUCCESSFUL_REACHED
+
+
+def test_branch_base_exception_propagates_to_caller():
+    """A BaseException in a branch propagates from execute(): no hang, no conversion."""
+
+    def exits():
+        raise SystemExit(3)
+
+    executables = [Executable(0, exits)]
+    executor = _make_executor(executables, max_concurrency=1)
+    execution_state, executor_context = _make_executor_mocks()
+
+    with pytest.raises(SystemExit):
+        executor.execute(execution_state, executor_context)
+
+
+def test_background_thread_error_propagates_to_caller():
+    """A fatal checkpoint-subsystem failure in a branch reaches the calling thread.
+
+    BackgroundThreadError must not be recorded as an ordinary branch failure:
+    tolerance logic must not absorb it and the parent must not attempt
+    further checkpoints.
+    """
+
+    def checkpoint_dead():
+        msg = "background checkpoint thread failed"
+        raise BackgroundThreadError(msg, RuntimeError("worker died"))
+
+    executables = [Executable(0, checkpoint_dead), Executable(1, lambda: "ok")]
+    executor = _make_executor(
+        executables,
+        max_concurrency=2,
+        completion_config=CompletionConfig(tolerated_failure_count=5),
+    )
+    execution_state, executor_context = _make_executor_mocks()
+
+    with pytest.raises(BackgroundThreadError):
+        executor.execute(execution_state, executor_context)
+
+
+def test_unlimited_concurrency_starts_all_items():
+    """max_concurrency=None keeps the previous start-everything behavior."""
+    barrier = threading.Barrier(3, timeout=5.0)
+
+    def synchronized():
+        barrier.wait()
+        return "ok"
+
+    executables = [Executable(i, synchronized) for i in range(3)]
+    executor = _make_executor(executables, max_concurrency=None)
+    execution_state, executor_context = _make_executor_mocks()
+
+    result = executor.execute(execution_state, executor_context)
+
+    assert result.success_count == 3
+
+
+# endregion In-flight window semantics
+
+
+# region summary envelope
+
+
+def _live_result_for_envelope() -> BatchResult:
+    return BatchResult(
+        [
+            BatchItem(0, BatchItemStatus.SUCCEEDED, "r0"),
+            BatchItem(1, BatchItemStatus.STARTED),
+        ],
+        CompletionReason.MIN_SUCCESSFUL_REACHED,
+    )
+
+
+def test_envelope_default_fields_and_order():
+    """Without a custom generator the envelope has record + view fields, no summary."""
+    payload = envelope_summary_generator("MapResult", None)(_live_result_for_envelope())
+    data = json.loads(payload)
+    assert data == {
+        "type": "MapResult",
+        "totalCount": 2,
+        "completionReason": "MIN_SUCCESSFUL_REACHED",
+        "startedIndexes": [1],
+        "startedCount": 1,
+        "successCount": 1,
+        "failureCount": 0,
+        "status": "SUCCEEDED",
+    }
+    assert list(data.keys())[:3] == ["type", "totalCount", "completionReason"]
+
+
+def test_envelope_preserves_custom_summary_verbatim():
+    """The customer generator output is stored verbatim under 'summary'."""
+    custom = "plain text, not JSON: 100% <done>"
+    payload = envelope_summary_generator("ParallelResult", lambda _r: custom)(
+        _live_result_for_envelope()
+    )
+    data = json.loads(payload)
+    assert data["summary"] == custom
+    assert data["type"] == "ParallelResult"
+    record = CompletionRecord.from_summary_payload(payload)
+    assert record is not None
+    assert record.started_total == 2
+    assert record.started_indexes == frozenset({1})
+
+
+def test_envelope_coerces_non_string_summary():
+    """A generator returning a non-str is coerced so the payload stays a flat envelope."""
+    payload = envelope_summary_generator("MapResult", lambda _r: {"not": "a str"})(
+        _live_result_for_envelope()
+    )
+    data = json.loads(payload)
+    assert isinstance(data["summary"], str)
+
+
+def test_envelope_propagates_raising_generator():
+    """An exception from the customer generator propagates to the caller."""
+
+    def boom(_result):
+        msg = "customer bug"
+        raise ValueError(msg)
+
+    with pytest.raises(ValueError, match="customer bug"):
+        envelope_summary_generator("MapResult", boom)(_live_result_for_envelope())
+
+
+def test_envelope_never_truncates_summary():
+    """The customer summary is checkpointed as provided regardless of size."""
+    big = "x" * 500_000
+    payload = envelope_summary_generator("MapResult", lambda _r: big)(
+        _live_result_for_envelope()
+    )
+    data = json.loads(payload)
+    assert data["summary"] == big
+
+
+def test_replay_reads_record_from_envelope_with_custom_summary():
+    """Replay obeys the record even when a custom summary is present."""
+    executables = [Executable(0, lambda: "x"), Executable(1, lambda: "x")]
+    live = _live_result_for_envelope()
+    payload = envelope_summary_generator("MapResult", lambda _r: "digest")(live)
+    top_checkpoint = Mock()
+    top_checkpoint.result = payload
+
+    replay_state, replay_context = _make_replay_mocks(
+        {"op_0": _succeeded_checkpoint('"replayed_0"')}
+    )
+    replayed = _make_executor(
+        executables,
+        max_concurrency=2,
+        completion_config=CompletionConfig(min_successful=1),
+    ).replay(replay_state, replay_context, top_checkpoint)
+
+    assert [(i.index, i.status) for i in replayed.all] == [
+        (0, BatchItemStatus.SUCCEEDED),
+        (1, BatchItemStatus.STARTED),
+    ]
+    assert replayed.completion_reason is CompletionReason.MIN_SUCCESSFUL_REACHED
+
+
+def test_record_parses_pre_envelope_flat_format():
+    """Payloads written before the envelope (record keys at top level) still parse."""
+    flat = json.dumps(
+        {
+            "totalCount": 3,
+            "successCount": 2,
+            "failureCount": 0,
+            "completionReason": "MIN_SUCCESSFUL_REACHED",
+            "status": "SUCCEEDED",
+            "type": "MapResult",
+            "startedIndexes": [2],
+        }
+    )
+    record = CompletionRecord.from_summary_payload(flat)
+    assert record is not None
+    assert record.started_total == 3
+    assert record.started_indexes == frozenset({2})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"totalCount": 3, "completionReason": "ALL_COMPLETED", "startedIndexes": [[]]}',
+        '{"totalCount": 3, "completionReason": "ALL_COMPLETED", "startedIndexes": ["1"]}',
+        '{"totalCount": 3, "completionReason": "ALL_COMPLETED", "startedIndexes": [true]}',
+        '{"totalCount": 3, "completionReason": "ALL_COMPLETED", "startedIndexes": [3]}',
+        '{"totalCount": 3, "completionReason": "ALL_COMPLETED", "startedIndexes": [-1]}',
+        '{"totalCount": 3, "completionReason": "ALL_COMPLETED", "completedIndexes": [null]}',
+        '{"totalCount": true, "completionReason": "ALL_COMPLETED", "startedIndexes": []}',
+        '{"totalCount": -1, "completionReason": "ALL_COMPLETED", "startedIndexes": []}',
+    ],
+)
+def test_record_rejects_malformed_index_fields(payload):
+    """Malformed or out-of-range index fields return None instead of raising."""
+    assert CompletionRecord.from_summary_payload(payload) is None
+
+
+# endregion summary envelope
+
+
+def test_flat_replay_preserves_failed_item_error_type():
+    """A failed FLAT branch carries the same error type live and on replay.
+
+    Live construction records the raw escaping type (for example ValueError)
+    from the ChildContextError wrapper. FLAT replay re-executes the virtual
+    branch and must record the identical discriminator, not the wrapper
+    class name.
+    """
+
+    def fails():
+        msg = "boom"
+        raise ValueError(msg)
+
+    def succeed():
+        return "big" * 1
+
+    executables = [Executable(0, succeed), Executable(1, fails)]
+
+    def make_flat_executor():
+        return _RecordingExecutor(
+            executables=executables,
+            max_concurrency=2,
+            completion_config=CompletionConfig(tolerated_failure_count=1),
+            sub_type_top="TOP",
+            sub_type_iteration="ITER",
+            name_prefix="test_",
+            serdes=None,
+            nesting_type=NestingType.FLAT,
+            operation_id_namespace=_StubNamespace(),
+        )
+
+    execution_state, executor_context = _make_executor_mocks()
+    live: BatchResult = make_flat_executor().execute(execution_state, executor_context)
+    live_failed = next(i for i in live.all if i.status is BatchItemStatus.FAILED)
+    assert live_failed.error is not None
+
+    payload = envelope_summary_generator("MapResult", None)(live)
+    top_checkpoint = Mock()
+    top_checkpoint.result = payload
+
+    replay_state, replay_context = _make_replay_mocks({})
+    replay_state.wrap_user_function = lambda func, *args, **kwargs: func
+    replayed: BatchResult = make_flat_executor().replay(
+        replay_state, replay_context, top_checkpoint
+    )
+    replayed_failed = next(
+        i for i in replayed.all if i.status is BatchItemStatus.FAILED
+    )
+    assert replayed_failed.error is not None
+    assert replayed_failed.error.type == live_failed.error.type
+    assert replayed_failed.error.type == "ValueError"
+    assert replayed_failed.error.message == live_failed.error.message
+
+
+def test_all_completed_runs_every_branch_through_failures():
+    """all_completed() tolerates failures: every branch runs, reason ALL_COMPLETED."""
+
+    def fails():
+        msg = "boom"
+        raise ValueError(msg)
+
+    executables = [Executable(0, fails), Executable(1, lambda: "ok")]
+    executor = _make_executor(
+        executables,
+        max_concurrency=1,
+        completion_config=CompletionConfig.all_completed(),
+    )
+    execution_state, executor_context = _make_executor_mocks()
+
+    result: BatchResult = executor.execute(execution_state, executor_context)
+
+    assert [(i.index, i.status) for i in result.all] == [
+        (0, BatchItemStatus.FAILED),
+        (1, BatchItemStatus.SUCCEEDED),
+    ]
+    assert result.completion_reason is CompletionReason.ALL_COMPLETED
+
+
+def test_map_min_successful_greater_than_total_raises():
+    """min_successful exceeding the total is rejected before the child context.
+
+    The check lives on CompletionConfig and is called by context.map() /
+    context.parallel() before child_handler, so it surfaces as a bare
+    ValidationError with no STARTED/FAILED operation in history (matching
+    wait and wait_for_condition validation, and Java's constructor throw).
+    """
+    with pytest.raises(ValidationError, match="min_successful cannot be greater"):
+        CompletionConfig(min_successful=3)._validate_for_total(2)
+
+
+def test_parallel_min_successful_greater_than_total_raises():
+    """min_successful exceeding the branch count is rejected pre-context."""
+    with pytest.raises(ValidationError, match="min_successful cannot be greater"):
+        CompletionConfig(min_successful=2)._validate_for_total(1)
+
+
+def test_validate_for_total_accepts_min_successful_equal_to_total():
+    """min_successful equal to the total is valid."""
+    CompletionConfig(min_successful=2)._validate_for_total(2)
+
+
+def test_validate_for_total_accepts_none_min_successful():
+    """A config without min_successful passes any total."""
+    CompletionConfig()._validate_for_total(0)
+
+
+def test_map_item_namer_empty_string_is_preserved():
+    """An item_namer returning "" is honored, not replaced by the default."""
+    executor: MapExecutor[str, str] = MapExecutor.from_items(
+        items=["a"],
+        func=lambda ctx, item, idx, items: item,
+        config=MapConfig(item_namer=lambda item, index: ""),
+        operation_id_namespace=OperationIdNamespace("test-prefix"),
+    )
+    assert executor.get_iteration_name(0) == ""
+
+
+def test_parallel_branch_empty_name_is_preserved():
+    """A ParallelBranch with name="" is honored, not replaced by the default."""
+    executor: ParallelExecutor[int] = ParallelExecutor.from_callables(
+        [ParallelBranch(func=lambda ctx: 1, name="")],
+        ParallelConfig(),
+        operation_id_namespace=OperationIdNamespace("test-prefix"),
+    )
+    assert executor.get_iteration_name(0) == ""
+
+
+def test_item_namer_called_eagerly_for_unscheduled_items():
+    """item_namer runs for every input at map start, including items that
+    never get scheduled because of early completion."""
+    named: list[int] = []
+
+    def namer(item: int, index: int) -> str:
+        named.append(index)
+        return f"n-{index}"
+
+    executor: MapExecutor[int, int] = MapExecutor.from_items(
+        items=[10, 20, 30],
+        func=lambda ctx, item, idx, items: item,
+        config=MapConfig(
+            max_concurrency=1,
+            completion_config=CompletionConfig(min_successful=1),
+            item_namer=namer,
+        ),
+        operation_id_namespace=OperationIdNamespace("test-prefix"),
+    )
+
+    assert named == [0, 1, 2]
+    assert len(executor.executables) == 3
+
+
+def test_operation_id_namespace_derivation_is_stable():
+    """The id scheme is pinned: prefix-step hashed with blake2b, 64 hex chars.
+
+    Checkpointed executions depend on this derivation staying byte-identical
+    across releases.
+    """
+    expected: str = hashlib.blake2b(b"some-operation-id-7").hexdigest()[:64]
+    assert OperationIdNamespace("some-operation-id").create_id_for_step(7) == expected
+
+    expected_no_prefix: str = hashlib.blake2b(b"7").hexdigest()[:64]
+    assert OperationIdNamespace(None).create_id_for_step(7) == expected_no_prefix

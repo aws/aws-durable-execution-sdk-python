@@ -73,6 +73,39 @@ def operation_id_to_span_id(durable_execution_arn: str, operation_id: str) -> in
     return int(hashed_operation_id, 16)
 
 
+def derive_workflow_span_id(durable_execution_arn: str) -> int:
+    """Derive the deterministic Workflow root span ID (64 bits) from an execution ARN.
+
+    Mirrors the JS ``deriveWorkflowSpanId``: hash ``"workflow:" + arn`` and take
+    the first 16 hex characters. All invocations of the same durable execution
+    therefore share one Workflow root span ID, allowing the Workflow span to be
+    (re-)created and exported exactly once per execution regardless of how many
+    Lambda invocations back it.
+
+    The hash algorithm is blake2b to stay consistent with
+    :func:`operation_id_to_span_id`; it does not need to match the JS SDK's
+    SHA-256 byte-for-byte because span IDs only need to be stable within a single
+    execution's trace, not across language runtimes.
+
+    Args:
+        durable_execution_arn: The durable execution ARN. Must be non-empty.
+
+    Returns:
+        A 64-bit integer span ID. If the derived value is all-zero (invalid per
+        the OTel spec) it is bumped to ``1``.
+
+    Raises:
+        ValueError: If ``durable_execution_arn`` is empty. Only emptiness is
+            validated; ARN format is not checked.
+    """
+    if not durable_execution_arn:
+        raise ValueError("execution ARN is required to derive a workflow span ID")
+    plain_value = f"workflow:{durable_execution_arn}"
+    hashed = hashlib.blake2b(plain_value.encode()).hexdigest()[:16]
+    span_id = int(hashed, 16)
+    return span_id or 1
+
+
 class DeterministicIdGenerator(RandomIdGenerator):
     """An ID generator that produces deterministic span IDs when a pending
     operation ID is set, and falls back to the provided generator otherwise.
