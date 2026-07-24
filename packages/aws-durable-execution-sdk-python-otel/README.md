@@ -21,7 +21,7 @@ pip install aws-durable-execution-sdk-python-otel
 
 1. Add the [ADOT Lambda Layer](#1-adot-lambda-layer) to your function and set `AWS_LAMBDA_EXEC_WRAPPER=/opt/otel-instrument`
 2. Enable [X-Ray Active Tracing](#2-aws-x-ray-active-tracing) on the function
-3. Pass `OtelPlugin` to your handler's `plugins` list
+3. Pass `InvocationOtelPlugin` to your handler's `plugins` list
 4. Add X-Ray write permissions
 
 ### 1. ADOT Lambda Layer
@@ -130,10 +130,10 @@ lambda_.Function(
 ```python
 from aws_durable_execution_sdk_python import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
-from aws_durable_execution_sdk_python_otel import OtelPlugin
+from aws_durable_execution_sdk_python_otel import InvocationOtelPlugin
 
 
-@durable_execution(plugins=[OtelPlugin()])
+@durable_execution(plugins=[InvocationOtelPlugin()])
 def handler(event: dict, context: DurableContext) -> dict:
     result = context.step(lambda _: fetch_data(event["id"]), name="fetch-data")
 
@@ -167,11 +167,11 @@ See the [ADOT sampling configuration](https://aws-otel.github.io/docs/getting-st
 
 ```python
 from aws_durable_execution_sdk_python_otel import (
-    OtelPlugin,
+    InvocationOtelPlugin,
     xray_context_extractor,
 )
 
-plugin = OtelPlugin(
+plugin = InvocationOtelPlugin(
     # Provide your own TracerProvider if you already have one configured.
     # Defaults to the globally configured tracer provider.
     trace_provider=None,
@@ -192,16 +192,16 @@ The plugin supports multiple strategies for extracting upstream trace context:
 
 ```python
 from aws_durable_execution_sdk_python_otel import (
-    OtelPlugin,
+    InvocationOtelPlugin,
     w3c_client_context_extractor,
     xray_context_extractor,
 )
 
 # Default: X-Ray trace header (recommended for most Lambda deployments)
-OtelPlugin(context_extractor=xray_context_extractor)
+InvocationOtelPlugin(context_extractor=xray_context_extractor)
 
 # W3C Trace Context via clientContext (requires backend propagation support)
-OtelPlugin(context_extractor=w3c_client_context_extractor)
+InvocationOtelPlugin(context_extractor=w3c_client_context_extractor)
 ```
 
 ### Log Correlation
@@ -245,12 +245,12 @@ After deploying your function with the plugin configured:
 
 ## API Reference
 
-### `OtelPlugin`
+### `InvocationOtelPlugin`
 
 The main plugin class. Implements `DurableInstrumentationPlugin` from `aws_durable_execution_sdk_python`.
 
 ```python
-OtelPlugin(
+InvocationOtelPlugin(
     trace_provider=None,
     context_extractor=None,
     instrument_name="aws-durable-execution-sdk-python",
