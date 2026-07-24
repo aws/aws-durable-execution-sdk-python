@@ -10,9 +10,9 @@ Applicability (catalog Part C): DAG-1..17 and DAG-19 apply to Python (18
 records). DAG-18 (custom result-based completion) is TS+Go only and is OMITTED
 here per the catalog's "emit only applicable scenarios" convention.
 
-Divergences from the catalog are recorded in :data:`DIVERGENCES` and asserted
-against the *actual* SDK behaviour so the suite stays green while the finding
-remains explicit for the reconciliation stage.
+All scenarios (including DAG-16/17 early completion) now conform to the
+canonical catalog outcomes; ``total_count`` equals the registered task count
+per spec §2.8.
 """
 
 from __future__ import annotations
@@ -42,8 +42,6 @@ _NAME_CHARSET = re.compile(r"[A-Za-z0-9_]+")
 
 # Records accumulate here across scenario helpers, then get written once.
 RECORDS: dict[str, dict[str, Any]] = {}
-# Real findings surfaced to the reconciliation stage.
-DIVERGENCES: list[str] = []
 
 
 # region helpers
@@ -490,14 +488,9 @@ def test_dag_16_min_successful() -> None:
     assert rec["counts"]["success"] == 3
     assert rec["counts"]["failure"] == 0
     assert rec["counts"]["skipped"] == 0
-    # DIVERGENCE: catalog expects total=5 (registered tasks); Python's
-    # DagResult.total_count counts *recorded* executions, so absent tasks are
-    # not counted -> total=3. Assert actual behaviour to keep the suite green.
-    assert rec["counts"]["total"] == 3
-    DIVERGENCES.append(
-        "DAG-16 total: catalog=5 (registered) vs python=3 (recorded executions); "
-        "absent tasks omitted from total_count"
-    )
+    # total_count = registered task count (spec §2.8): 5 tasks registered even
+    # though s4/s5 never started (absent from results) under min_successful.
+    assert rec["counts"]["total"] == 5
 
 
 def test_dag_17_tolerated_failures() -> None:
@@ -527,12 +520,9 @@ def test_dag_17_tolerated_failures() -> None:
     assert rec["counts"]["success"] == 0
     assert rec["counts"]["failure"] == 2
     assert rec["counts"]["skipped"] == 0
-    # DIVERGENCE: catalog expects total=4 (registered); python total=2 (recorded).
-    assert rec["counts"]["total"] == 2
-    DIVERGENCES.append(
-        "DAG-17 total: catalog=4 (registered) vs python=2 (recorded executions); "
-        "absent tasks omitted from total_count"
-    )
+    # total_count = registered task count (spec §2.8): 4 tasks registered even
+    # though t3/t4 never started (absent) under tolerated_failure_count.
+    assert rec["counts"]["total"] == 4
 
 
 def test_dag_19_order_independence() -> None:

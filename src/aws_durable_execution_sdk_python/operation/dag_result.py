@@ -68,10 +68,15 @@ class DagResultImpl(DagResult):
         results: dict[str, TaskExecution],
         completion_reason: DagCompletionReason,
         task_kinds: dict[str, str] | None = None,
+        total_count: int | None = None,
     ) -> None:
         self._results = results
         self._completion_reason = completion_reason
         self._task_kinds = task_kinds or {}
+        # total_count is the number of REGISTERED tasks in the DAG (spec §2.8),
+        # a fixed value independent of early completion / never-started tasks.
+        # Defaults to len(results) when omitted (fully-recorded DAGs).
+        self._total_count = total_count if total_count is not None else len(results)
 
     # region accessors
     def get_result(self, task: str | TaskHandle[Any]) -> Any:
@@ -115,7 +120,7 @@ class DagResultImpl(DagResult):
 
     @property
     def total_count(self) -> int:
-        return len(self._results)
+        return self._total_count
 
     @property
     def completion_reason(self) -> DagCompletionReason:
@@ -142,6 +147,7 @@ class DagResultImpl(DagResult):
                 name: self._task_to_dict(te) for name, te in self._results.items()
             },
             "completionReason": self._completion_reason.value,
+            "totalCount": self._total_count,
         }
 
     def _task_to_dict(self, te: TaskExecution) -> dict[str, Any]:
@@ -190,6 +196,7 @@ class DagResultImpl(DagResult):
             results=results,
             completion_reason=DagCompletionReason(data["completionReason"]),
             task_kinds=task_kinds,
+            total_count=data.get("totalCount"),
         )
 
     # endregion serialization

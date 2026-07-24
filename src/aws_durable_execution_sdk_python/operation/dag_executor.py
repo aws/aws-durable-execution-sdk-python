@@ -362,4 +362,6 @@ class DagExecutor:
         else:
             reason = DagCompletionReason.COMPLETED_WITH_FAILURES
         task_kinds = {name: task.kind for name, task in self._tasks.items()}
-        return DagResultImpl(dict(self._results), reason, task_kinds)
+        return DagResultImpl(
+            dict(self._results), reason, task_kinds, total_count=len(self._tasks)
+        )
