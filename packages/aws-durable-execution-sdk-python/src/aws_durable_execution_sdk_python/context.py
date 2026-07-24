@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -488,6 +489,61 @@ class DurableContext(DurableContextProtocol):
         new_counter: int = self._step_counter.increment()
         return self._create_step_id_for_logical_step(new_counter)
 
+    # region DAG (experimental)
+    def _create_task_id(self, name: str) -> str:
+        """Generate a deterministic, name-based operation id for a DAG task.
+
+        Unlike :meth:`_create_step_id`, this does NOT touch the per-context
+        counter, so the id is independent of run-time task-completion ordering
+        (which can vary across replays). The reserved ``DAG_NODE_T_`` token keeps
+        DAG task ids disjoint from counter-based sibling ids: counter ids are
+        opaque blake2b hex digests (``[0-9a-f]{64}``) while a task id is the
+        plain string ``{prefix}-DAG_NODE_T_{name}`` (uppercase + underscore, so
+        it can never equal a lowercase-hex digest). The container prefix is this
+        context's ``parent_id`` (the DAG container's own operation id when the
+        scheduler runs inside the DAG child context).
+
+        .. warning::
+           **Experimental.** Internal implementation detail; the id format is
+           subject to change without notice.
+        """
+        prefix = self._parent_id
+        return f"{prefix}-DAG_NODE_T_{name}" if prefix else f"DAG_NODE_T_{name}"
+
+    def _run_step_with_task_id(
+        self,
+        name: str,
+        func: Callable[[StepContext], T],
+        config: StepConfig | None = None,
+    ) -> T:
+        """Run a step under a name-based (DAG) operation id.
+
+        This is the explicit-id seam used by the DAG scheduler: it builds an
+        :class:`OperationIdentifier` from :meth:`_create_task_id` and drives the
+        step executor directly. It relies on the executor's checkpoint fast path
+        (keyed on the explicit operation id) for replay correctness rather than
+        on the per-context counter. Mirrors the order-independent child-id
+        pattern that ``concurrency`` already uses for map/parallel branches.
+
+        .. warning::
+           **Experimental.** Internal implementation detail.
+        """
+        executor: StepOperationExecutor[T] = StepOperationExecutor(
+            func=func,
+            config=config or StepConfig(),
+            state=self.state,
+            operation_identifier=OperationIdentifier(
+                operation_id=self._create_task_id(name),
+                sub_type=OperationSubType.STEP,
+                parent_id=self._parent_id,
+                name=name,
+            ),
+            context_logger=self.logger,
+        )
+        return executor.process()
+
+    # endregion DAG (experimental)
+
     # region replay status
 
     def is_replaying(self) -> bool:
@@ -948,6 +1004,37 @@ class DurableContext(DurableContextProtocol):
                 )
             )
             return executor.process()
+
+    def dag(
+        self,
+        register: Callable[[Any], None],
+        name: str | None = None,
+        config: Any = None,
+    ) -> Any:
+        """Declare and run a DAG of tasks, returning a ``DagResult`` synchronously.
+
+        ``register`` is a synchronous, deterministic callback that declares tasks
+        on the provided ``DagContext``. The runtime then validates the graph and
+        schedules tasks topologically, running independent chains concurrently.
+
+        .. warning::
+           **Experimental.** This API is experimental and may be changed or
+           removed in future releases. First use emits a ``FutureWarning``.
+        """
+        from aws_durable_execution_sdk_python.operation.dag import (
+            dag_handler,
+            emit_experimental_warning_once,
+        )
+
+        emit_experimental_warning_once()
+        resolved_name: str | None = self._resolve_step_name(name, register)
+        return dag_handler(
+            run_in_child_context=self.run_in_child_context,
+            state=self.state,
+            name=resolved_name,
+            register=register,
+            config=config,
+        )
 
 
 # endregion Operations

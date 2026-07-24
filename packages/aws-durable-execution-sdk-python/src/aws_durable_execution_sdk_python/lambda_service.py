@@ -92,6 +92,7 @@ class OperationType(Enum):
                 | OperationSubType.MAP_ITERATION
                 | OperationSubType.PARALLEL
                 | OperationSubType.PARALLEL_BRANCH
+                | OperationSubType.DAG
             ):
                 return OperationType.CONTEXT
             case _:
@@ -115,6 +116,7 @@ class OperationSubType(Enum):
     WAIT_FOR_CALLBACK = "WaitForCallback"
     WAIT_FOR_CONDITION = "WaitForCondition"
     CHAINED_INVOKE = "ChainedInvoke"
+    DAG = "Dag"
 
 
 class InvocationStatus(Enum):
