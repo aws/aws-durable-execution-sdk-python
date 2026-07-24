@@ -132,7 +132,15 @@ class InMemoryServiceClient:
 def make_state(
     client: InMemoryServiceClient | None = None,
 ) -> tuple[ExecutionState, InMemoryServiceClient]:
-    """Build a fresh ExecutionState wired to an in-memory client."""
+    """Build a fresh ExecutionState wired to an in-memory client.
+
+    Starts the background checkpoint-processing thread exactly like the real
+    runtime (``execution.py`` submits ``checkpoint_batches_forever`` to its
+    executor). Without this thread every synchronous checkpoint blocks forever
+    on its completion event — which is the deadlock DAG tasks hit when they run
+    their operations on the executor's worker threads. The thread is a daemon so
+    it never blocks interpreter exit; it idles on the queue between tests.
+    """
     client = client or InMemoryServiceClient()
     state = ExecutionState(
         durable_execution_arn="test-arn",
@@ -141,6 +149,12 @@ def make_state(
         service_client=client,
         plugin_executor=PluginExecutor(plugins=None),
     )
+    checkpoint_thread = threading.Thread(
+        target=state.checkpoint_batches_forever,
+        name="dag-test-checkpointer",
+        daemon=True,
+    )
+    checkpoint_thread.start()
     return state, client
 
 

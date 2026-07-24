@@ -38,10 +38,13 @@ def test_container_checkpointed_with_dag_subtype_and_serialized_result():
     assert side["a"] == 1
     assert r1.get_result("a") == "A"
 
-    container = client.operations["1"]
+    container = next(
+        o for o in client.operations.values() if o.sub_type is OperationSubType.DAG
+    )
     assert container.sub_type is OperationSubType.DAG
-    # step task checkpointed under a DAG_NODE_T_ id
-    assert "1-DAG_NODE_T_a" in client.operations
+    # step task checkpointed under a DAG_NODE_T_ id (prefixed by the hashed
+    # container id in the current core, so match by suffix)
+    assert any(k.endswith("-DAG_NODE_T_a") for k in client.operations)
     # the serialized container payload round-trips to an equal DagResult
     payload = container.context_details.result
     restored = create_dag_result_serdes().deserialize(payload, None)
@@ -120,7 +123,11 @@ def test_large_payload_reexecutes_to_equal_result():
     r1 = make_context(state).dag(register, name="p", config=config)
     assert side["big"] == 1
     # container stored with replay_children due to large payload
-    container = client.operations["1"]
+    from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+
+    container = next(
+        o for o in client.operations.values() if o.sub_type is OperationSubType.DAG
+    )
     assert container.context_details.replay_children is True
 
     # replay: container re-executes body (ReplayChildren), tasks fast-path

@@ -170,12 +170,12 @@ def test_unwrap_dag_error_reconstructs_typed_error_on_replay():
     error_type set but __cause__ absent; unwrap must still surface the typed
     Dag* error so replay matches the first run."""
     from aws_durable_execution_sdk_python.exceptions import (
-        CallableRuntimeError,
+        ChildContextError,
         DagExecutionError,
     )
     from aws_durable_execution_sdk_python.operation.dag import unwrap_dag_error
 
-    exc = CallableRuntimeError(
+    exc = ChildContextError(
         message="2 task(s) FAILED",
         error_type="DagExecutionError",
         data=None,
@@ -187,11 +187,11 @@ def test_unwrap_dag_error_reconstructs_typed_error_on_replay():
 
 
 def test_unwrap_dag_error_passthrough_for_non_dag_error():
-    from aws_durable_execution_sdk_python.exceptions import CallableRuntimeError
+    from aws_durable_execution_sdk_python.exceptions import ChildContextError
     from aws_durable_execution_sdk_python.operation.dag import unwrap_dag_error
 
-    exc = CallableRuntimeError(
+    exc = ChildContextError(
         message="boom", error_type="ValueError", data=None, stack_trace=None
     )
-    with pytest.raises(CallableRuntimeError):
+    with pytest.raises(ChildContextError):
         unwrap_dag_error(exc)
