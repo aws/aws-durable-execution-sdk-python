@@ -138,7 +138,7 @@ class DagContextImpl(DagContext):
         cfg = config or self._default_step_config()
 
         def executor(ctx: DurableContext, deps_map: DepsMap):
-            return ctx._run_step_with_task_id(  # noqa: SLF001
+            return ctx._run_step_with_task_id(
                 task_name, lambda step_ctx: func(deps_map, step_ctx), cfg
             )
 
@@ -157,8 +157,8 @@ class DagContextImpl(DagContext):
                 payload=payload,
                 state=ctx.state,
                 operation_identifier=OperationIdentifier(
-                    operation_id=ctx._create_task_id(task_name),  # noqa: SLF001
-                    parent_id=ctx._parent_id,  # noqa: SLF001
+                    operation_id=ctx._create_task_id(task_name),
+                    parent_id=ctx._parent_id,
                     name=task_name,
                 ),
                 config=config,
@@ -207,8 +207,8 @@ class DagContextImpl(DagContext):
                 seconds=seconds,
                 state=ctx.state,
                 operation_identifier=OperationIdentifier(
-                    operation_id=ctx._create_task_id(task_name),  # noqa: SLF001
-                    parent_id=ctx._parent_id,  # noqa: SLF001
+                    operation_id=ctx._create_task_id(task_name),
+                    parent_id=ctx._parent_id,
                     name=task_name,
                 ),
             )
@@ -227,8 +227,8 @@ class DagContextImpl(DagContext):
                 config=config,
                 state=ctx.state,
                 operation_identifier=OperationIdentifier(
-                    operation_id=ctx._create_task_id(task_name),  # noqa: SLF001
-                    parent_id=ctx._parent_id,  # noqa: SLF001
+                    operation_id=ctx._create_task_id(task_name),
+                    parent_id=ctx._parent_id,
                     name=task_name,
                 ),
                 context_logger=ctx.logger,
@@ -328,7 +328,7 @@ class DagContextImpl(DagContext):
         body_takes_child: Callable[[DurableContext], Any],
         config: ChildConfig,
     ) -> Any:
-        task_id = ctx._create_task_id(name)  # noqa: SLF001
+        task_id = ctx._create_task_id(name)
 
         def wrapped():
             return body_takes_child(ctx.create_child_context(parent_id=task_id))
@@ -338,7 +338,7 @@ class DagContextImpl(DagContext):
             state=ctx.state,
             operation_identifier=OperationIdentifier(
                 operation_id=task_id,
-                parent_id=ctx._parent_id,  # noqa: SLF001
+                parent_id=ctx._parent_id,
                 name=name,
             ),
             config=config,

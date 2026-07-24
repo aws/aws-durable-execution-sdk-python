@@ -114,7 +114,7 @@ class InMemoryServiceClient:
                 self.operations[update.operation_id] = self._to_operation(update)
             all_ops = list(self.operations.values())
         return CheckpointOutput(
-            checkpoint_token="token",  # noqa: S106
+            checkpoint_token="token",
             new_execution_state=CheckpointUpdatedExecutionState(
                 operations=all_ops, next_marker=None
             ),
@@ -136,7 +136,7 @@ def make_state(
     client = client or InMemoryServiceClient()
     state = ExecutionState(
         durable_execution_arn="test-arn",
-        initial_checkpoint_token="token",  # noqa: S106
+        initial_checkpoint_token="token",
         operations={},
         service_client=client,
     )

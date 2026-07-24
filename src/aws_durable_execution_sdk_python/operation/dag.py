@@ -50,7 +50,7 @@ _warned = False
 
 def emit_experimental_warning_once() -> None:
     """Emit a one-time ``FutureWarning`` on first use of ``context.dag()``."""
-    global _warned  # noqa: PLW0603
+    global _warned
     if not _warned:
         _warned = True
         warnings.warn(
@@ -95,7 +95,7 @@ def unwrap_dag_error(exc: CallableRuntimeError) -> None:
 
 def dag_handler(
     run_in_child_context: Callable[..., DagResult],
-    state: ExecutionState,  # noqa: ARG001 - kept for symmetry with other handlers
+    state: ExecutionState,
     name: str | None,
     register: Callable[[DagContext], None],
     config: DagConfig | None,
@@ -127,7 +127,7 @@ def run_nested_dag(
     """Run a nested DAG task under a name-based (``DAG_NODE_T_``) container id."""
     config = config or DagConfig()
     _check_max_concurrency(config)
-    task_id = ctx._create_task_id(name)  # noqa: SLF001
+    task_id = ctx._create_task_id(name)
 
     def body() -> DagResult:
         child = ctx.create_child_context(parent_id=task_id)
@@ -143,7 +143,7 @@ def run_nested_dag(
             state=ctx.state,
             operation_identifier=OperationIdentifier(
                 operation_id=task_id,
-                parent_id=ctx._parent_id,  # noqa: SLF001
+                parent_id=ctx._parent_id,
                 name=name,
             ),
             config=child_config,

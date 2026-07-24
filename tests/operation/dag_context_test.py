@@ -7,7 +7,6 @@ import pytest
 from aws_durable_execution_sdk_python.dag import (
     DagConfig,
     DepsMap,
-    TaskHandle,
     TriggerRule,
 )
 from aws_durable_execution_sdk_python.exceptions import DagInvalidTaskNameError
@@ -36,8 +35,10 @@ def test_depsmap_string_and_handle_access():
 def test_taskhandle_hash_by_name_and_identity_eq():
     d = _impl()
     a = d.step(lambda deps, sc: 1, name="a")
-    # identity equality (eq=False) -> two handles are not equal
-    assert a == a
+    b = d.step(lambda deps, sc: 1, name="b")
+    # identity equality (eq=False) -> distinct handles are not equal
+    assert a is a
+    assert a != b
     assert hash(a) == hash("a")
 
 
@@ -45,7 +46,7 @@ def test_after_adds_ordering_only_dep():
     d = _impl()
     a = d.step(lambda deps, sc: 1, name="a")
     b = d.step(lambda deps, sc: 2, name="b")
-    c = d.step(lambda deps, sc: 3, deps=[a], name="c").after(b)
+    d.step(lambda deps, sc: 3, deps=[a], name="c").after(b)
     tasks = d.get_tasks()
     cdef = tasks["c"]
     assert [h.name for h in cdef.inline_deps] == ["a"]

@@ -155,7 +155,7 @@ class DagExecutor:
         for name, task in to_submit:
             future = self._pool.submit(self._run_task, name, task)  # type: ignore[union-attr]
             future.add_done_callback(
-                lambda f, n=name: self._on_done(n, f)  # noqa: B023
+                lambda f, n=name: self._on_done(n, f)
             )
 
         if done:

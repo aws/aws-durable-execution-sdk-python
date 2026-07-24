@@ -44,8 +44,6 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.types import (
         DurableContext,
-        StepContext,
-        WaitForConditionCheckContext,
     )
 
 T = TypeVar("T")
@@ -190,7 +188,7 @@ class TaskHandle(Generic[T]):
         .. warning::
            **Experimental.**
         """
-        self._dag._register_after(self, deps)  # noqa: SLF001
+        self._dag._register_after(self, deps)
         return self
 
     def trigger_rule(self, rule: TriggerRule) -> TaskHandle[T]:
@@ -199,7 +197,7 @@ class TaskHandle(Generic[T]):
         .. warning::
            **Experimental.**
         """
-        self._dag._register_trigger_rule(self, rule)  # noqa: SLF001
+        self._dag._register_trigger_rule(self, rule)
         return self
 
 

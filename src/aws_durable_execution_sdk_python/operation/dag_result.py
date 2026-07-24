@@ -148,9 +148,7 @@ class DagResultImpl(DagResult):
         kind = _result_kind(self._task_kinds.get(te.name))
         result_value: Any = None
         if te.result is not None:
-            if kind == _KIND_BATCH and isinstance(te.result, BatchResult):
-                result_value = te.result.to_dict()
-            elif kind == _KIND_DAG and isinstance(te.result, DagResultImpl):
+            if kind == _KIND_BATCH and isinstance(te.result, BatchResult) or kind == _KIND_DAG and isinstance(te.result, DagResultImpl):
                 result_value = te.result.to_dict()
             else:
                 result_value = te.result

@@ -8,7 +8,6 @@ import pytest
 
 from aws_durable_execution_sdk_python.dag import (
     DagCompletionReason,
-    DagConfig,
     TaskStatus,
 )
 from aws_durable_execution_sdk_python.exceptions import DagCyclicDependencyError

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from aws_durable_execution_sdk_python.dag import DagConfig, TriggerRule
+from aws_durable_execution_sdk_python.dag import DagConfig
 from aws_durable_execution_sdk_python.exceptions import (
     DagCyclicDependencyError,
     DagDuplicateTaskError,
@@ -66,7 +66,7 @@ def test_deep_cycle_detected():
 def test_invalid_names(bad):
     d = _impl()
     # register with a valid name, then tamper the name to bypass registration guards
-    h = _step(d, "valid")
+    _step(d, "valid")
     d.get_tasks()["valid"].name = bad
     with pytest.raises(DagInvalidTaskNameError):
         validate_dag(d)
