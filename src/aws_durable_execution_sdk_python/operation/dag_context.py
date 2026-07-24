@@ -129,12 +129,19 @@ class DagContextImpl(DagContext):
         executor: Callable[[DurableContext, DepsMap], Any],
     ) -> TaskHandle[Any]:
         inline = list(inline_deps) if inline_deps else []
+        # A per-method `trigger_rule=None` sentinel means "not explicitly set",
+        # so it falls back to the DAG-wide default from DagConfig.
+        resolved_trigger = (
+            trigger_rule
+            if trigger_rule is not None
+            else self._config.default_trigger_rule
+        )
         task = TaskDef(
             name=name,
             kind=kind,
             inline_deps=inline,
             all_deps=list(inline),
-            trigger_rule=trigger_rule,
+            trigger_rule=resolved_trigger,
             run_if=run_if,
             config=config,
             executor=executor,
@@ -146,7 +153,7 @@ class DagContextImpl(DagContext):
     # region task kinds
     def step(
         self, func, deps=None, name=None, config=None, *,
-        trigger_rule=TriggerRule.ALL_SUCCESS, run_if=None,
+        trigger_rule=None, run_if=None,
     ):
         task_name = _resolve_name(name, func)
         cfg = config or self._default_step_config()
@@ -160,7 +167,7 @@ class DagContextImpl(DagContext):
 
     def invoke(
         self, function_name, payload_fn, deps=None, name=None, config=None, *,
-        trigger_rule=TriggerRule.ALL_SUCCESS, run_if=None,
+        trigger_rule=None, run_if=None,
     ):
         task_name = _resolve_name(name, payload_fn)
 
@@ -184,7 +191,7 @@ class DagContextImpl(DagContext):
 
     def wait_for_callback(
         self, submitter, deps=None, name=None, config=None, *,
-        trigger_rule=TriggerRule.ALL_SUCCESS, run_if=None,
+        trigger_rule=None, run_if=None,
     ):
         task_name = _resolve_name(name, submitter)
 
@@ -209,7 +216,7 @@ class DagContextImpl(DagContext):
 
     def wait(
         self, seconds, deps=None, name=None, *,
-        trigger_rule=TriggerRule.ALL_SUCCESS, run_if=None,
+        trigger_rule=None, run_if=None,
     ):
         if not name:
             msg = "wait tasks require an explicit `name=`."
@@ -231,7 +238,7 @@ class DagContextImpl(DagContext):
 
     def wait_for_condition(
         self, check, config, deps=None, name=None, *,
-        trigger_rule=TriggerRule.ALL_SUCCESS, run_if=None,
+        trigger_rule=None, run_if=None,
     ):
         task_name = _resolve_name(name, check)
 
@@ -254,7 +261,7 @@ class DagContextImpl(DagContext):
 
     def run_in_child_context(
         self, func, deps=None, name=None, config=None, *,
-        trigger_rule=TriggerRule.ALL_SUCCESS, run_if=None,
+        trigger_rule=None, run_if=None,
     ):
         task_name = _resolve_name(name, func)
         cfg = config or ChildConfig()
@@ -270,7 +277,7 @@ class DagContextImpl(DagContext):
 
     def map(
         self, inputs, func, deps=None, name=None, config=None, *,
-        trigger_rule=TriggerRule.ALL_SUCCESS, run_if=None,
+        trigger_rule=None, run_if=None,
     ):
         task_name = _resolve_name(name, func)
 
@@ -294,7 +301,7 @@ class DagContextImpl(DagContext):
 
     def parallel(
         self, functions, deps=None, name=None, config=None, *,
-        trigger_rule=TriggerRule.ALL_SUCCESS, run_if=None,
+        trigger_rule=None, run_if=None,
     ):
         if not name:
             msg = "parallel tasks require an explicit `name=`."
@@ -321,7 +328,7 @@ class DagContextImpl(DagContext):
 
     def dag(
         self, register, deps=None, name=None, config=None, *,
-        trigger_rule=TriggerRule.ALL_SUCCESS, run_if=None,
+        trigger_rule=None, run_if=None,
     ):
         task_name = _resolve_name(name, register)
 

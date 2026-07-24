@@ -110,6 +110,7 @@ def dag_handler(
     child_config: ChildConfig = ChildConfig(
         sub_type=OperationSubType.DAG,
         serdes=config.serdes or create_dag_result_serdes(),
+        summary_generator=config.summary_generator,
     )
     try:
         return run_in_child_context(body, name, child_config)
@@ -136,6 +137,7 @@ def run_nested_dag(
     child_config: ChildConfig = ChildConfig(
         sub_type=OperationSubType.DAG,
         serdes=config.serdes or create_dag_result_serdes(),
+        summary_generator=config.summary_generator,
     )
     try:
         return child_handler(

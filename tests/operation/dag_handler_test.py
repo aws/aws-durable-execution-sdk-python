@@ -110,3 +110,56 @@ def test_public_exports():
         "DagInvalidDependencyError",
     ]:
         assert hasattr(sdk, symbol), symbol
+
+
+def test_summary_generator_wired_into_child_config():
+    """DagConfig.summary_generator is passed through to the container ChildConfig."""
+    from aws_durable_execution_sdk_python.operation.dag import dag_handler
+
+    captured = {}
+
+    def fake_run_in_child_context(body, name, child_config):
+        captured["config"] = child_config
+
+    def gen(_result):  # pragma: no cover - not invoked (small payload)
+        return "summary"
+
+    state, _ = make_state()
+    dag_handler(
+        run_in_child_context=fake_run_in_child_context,
+        state=state,
+        name="p",
+        register=lambda d: None,
+        config=DagConfig(summary_generator=gen),
+    )
+    assert captured["config"].summary_generator is gen
+
+
+def test_nested_dag_summary_generator_wired():
+    """run_nested_dag builds a container ChildConfig carrying summary_generator."""
+    import aws_durable_execution_sdk_python.operation.dag as dag_mod
+
+    captured = {}
+
+    def fake_child_handler(func, state, operation_identifier, config):
+        captured["config"] = config
+        return func()
+
+    def gen(_result):  # pragma: no cover - not invoked (small payload)
+        return "nested-summary"
+
+    original = dag_mod.child_handler
+    dag_mod.child_handler = fake_child_handler  # type: ignore[assignment]
+    try:
+        state, _ = make_state()
+        ctx = make_context(state)
+        dag_mod.run_nested_dag(
+            ctx,
+            "inner",
+            lambda d: d.step(lambda deps, sc: 1, name="x"),
+            DagConfig(summary_generator=gen),
+        )
+    finally:
+        dag_mod.child_handler = original  # type: ignore[assignment]
+    assert captured["config"].summary_generator is gen
+

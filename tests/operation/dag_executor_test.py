@@ -256,3 +256,44 @@ def test_invalid_max_concurrency():
     d.step(lambda deps, sc: 1, name="a")
     with pytest.raises(ValidationError):
         DagExecutor(ctx, d.get_tasks(), DagConfig(max_concurrency=0))
+
+
+def test_default_trigger_rule_from_config_applies():
+    """DagConfig.default_trigger_rule is used when a task sets no explicit rule."""
+
+    def boom(_deps, _sc):
+        raise ValueError("x")
+
+    def register(d):
+        a = d.step(boom, name="a")
+        # no explicit trigger_rule -> inherits config default ALL_DONE, so it
+        # runs even though its upstream FAILED.
+        d.step(lambda deps, sc: "ran", deps=[a], name="b")
+
+    result, _ = run_dag(
+        register,
+        DagConfig(
+            default_retry_strategy=NO_RETRY,
+            default_trigger_rule=TriggerRule.ALL_DONE,
+        ),
+    )
+    assert result.get_status("a") is TaskStatus.FAILED
+    assert result.get_status("b") is TaskStatus.SUCCEEDED
+    assert result.get_result("b") == "ran"
+
+
+def test_explicit_trigger_rule_overrides_config_default():
+    """An explicit per-task trigger_rule wins over DagConfig.default_trigger_rule."""
+
+    def register(d):
+        a = d.step(lambda deps, sc: 1, name="a")
+        # config default is ALL_DONE, but explicit ALL_FAILED + a SUCCEEDED => skip
+        d.step(
+            lambda deps, sc: "ran",
+            deps=[a],
+            name="b",
+            trigger_rule=TriggerRule.ALL_FAILED,
+        )
+
+    result, _ = run_dag(register, DagConfig(default_trigger_rule=TriggerRule.ALL_DONE))
+    assert result.get_status("b") is TaskStatus.SKIPPED

@@ -451,6 +451,30 @@ class DagResult(ABC):
     @abstractmethod
     def skipped(self) -> list[TaskExecution]: ...  # pragma: no cover
 
+    @property
+    @abstractmethod
+    def results(self) -> Mapping[str, TaskExecution]: ...  # pragma: no cover
+
+    @property
+    @abstractmethod
+    def success_count(self) -> int: ...  # pragma: no cover
+
+    @property
+    @abstractmethod
+    def failure_count(self) -> int: ...  # pragma: no cover
+
+    @property
+    @abstractmethod
+    def skipped_count(self) -> int: ...  # pragma: no cover
+
+    @property
+    @abstractmethod
+    def total_count(self) -> int: ...  # pragma: no cover
+
+    @property
+    @abstractmethod
+    def completion_reason(self) -> DagCompletionReason: ...  # pragma: no cover
+
     @abstractmethod
     def throw_if_error(self) -> None: ...  # pragma: no cover
 
