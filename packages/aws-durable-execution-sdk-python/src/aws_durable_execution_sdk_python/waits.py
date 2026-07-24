@@ -27,7 +27,6 @@ class WaitStrategyConfig(Generic[T]):
     )  # 5 minutes
     backoff_rate: Numeric = 1.5
     jitter_strategy: JitterStrategy = field(default=JitterStrategy.FULL)
-    timeout: Duration | None = None  # Not implemented yet
 
     @property
     def initial_delay_seconds(self) -> int:
@@ -38,13 +37,6 @@ class WaitStrategyConfig(Generic[T]):
     def max_delay_seconds(self) -> int:
         """Get max delay in seconds."""
         return self.max_delay.to_seconds()
-
-    @property
-    def timeout_seconds(self) -> int | None:
-        """Get timeout in seconds."""
-        if self.timeout is None:
-            return None
-        return self.timeout.to_seconds()
 
 
 @dataclass(frozen=True)

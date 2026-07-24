@@ -597,6 +597,14 @@ class ExecutionState:
             CompletionEvent() if is_sync else None
         )
 
+        if operation_update is not None:
+            # Dispatch before queueing so START strictly precedes any user
+            # function attempt, regardless of checkpoint synchronization mode.
+            self._plugin_executor.on_operation_action(
+                operation_update,
+                previous_operation=self.operations.get(operation_update.operation_id),
+            )
+
         # Create wrapper object for queue
         queued_op = QueuedOperation(operation_update, completion_event)
 
@@ -759,13 +767,6 @@ class ExecutionState:
                         output.checkpoint_token,
                         output.new_execution_state.next_marker,
                     )
-                    for update in updates:
-                        self._plugin_executor.on_operation_action(
-                            update,
-                            self.operations.get(update.operation_id),
-                            previous_operations.get(update.operation_id),
-                        )
-
                     self._plugin_executor.on_operation_update(
                         updated_operations,
                         self.operations,

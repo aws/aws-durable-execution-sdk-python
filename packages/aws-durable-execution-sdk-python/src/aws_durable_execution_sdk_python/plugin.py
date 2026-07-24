@@ -212,8 +212,10 @@ class DurableInstrumentationPlugin:
 
     def on_operation_start(self, info: OperationStartInfo) -> None:
         """
-        Called when an operation checkpoints STARTED status, or when a prior
-        operation is replayed. This is called NOT within the thread that runs operation.
+        Called before an operation's START checkpoint is queued, or when a
+        prior operation is replayed. This guarantees that it strictly precedes
+        ``on_user_function_start``. This is called NOT within the thread that
+        runs operation.
 
         Args:
             info: Information about the operation.
@@ -380,10 +382,10 @@ class PluginExecutor:
         operation: Operation | None = None,
         previous_operation: Operation | None = None,
     ):
-        """Execute any registered plugins for a given operation when an update is checkpointed
+        """Execute registered plugins before an operation START is queued.
 
         Args:
-            update: the operation update that is checkpointed
+            update: The operation update being checkpointed.
             operation: the operation after the checkpoint
             previous_operation: the operation before the checkpoint
         """
