@@ -424,3 +424,37 @@ class DagContext(ABC):
 
 
 # endregion DagContext protocol
+
+
+# region DagResult surface
+class DagResult(ABC):
+    """Aggregate result of a DAG run. Concrete impl lives in
+    ``operation/dag_result.py``.
+
+    .. warning::
+       **Experimental.** This API is experimental and may be changed or removed
+       in future releases.
+    """
+
+    @abstractmethod
+    def get_result(self, task: str | TaskHandle[Any]) -> Any: ...  # pragma: no cover
+
+    @abstractmethod
+    def get_status(
+        self, task: str | TaskHandle[Any]
+    ) -> TaskStatus | None: ...  # pragma: no cover
+
+    @abstractmethod
+    def succeeded(self) -> list[TaskExecution]: ...  # pragma: no cover
+
+    @abstractmethod
+    def failed(self) -> list[TaskExecution]: ...  # pragma: no cover
+
+    @abstractmethod
+    def skipped(self) -> list[TaskExecution]: ...  # pragma: no cover
+
+    @abstractmethod
+    def throw_if_error(self) -> None: ...  # pragma: no cover
+
+
+# endregion DagResult surface
