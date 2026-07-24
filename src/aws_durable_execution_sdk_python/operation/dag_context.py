@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from aws_durable_execution_sdk_python.concurrency import BatchResult
 from aws_durable_execution_sdk_python.config import ChildConfig
 from aws_durable_execution_sdk_python.dag import (
     DagContext,
@@ -28,15 +30,27 @@ from aws_durable_execution_sdk_python.operation.wait import wait_handler
 from aws_durable_execution_sdk_python.operation.wait_for_condition import (
     wait_for_condition_handler,
 )
+from aws_durable_execution_sdk_python.serdes import SerDes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from aws_durable_execution_sdk_python.config import StepConfig
     from aws_durable_execution_sdk_python.dag import DagConfig
+    from aws_durable_execution_sdk_python.serdes import SerDesContext
     from aws_durable_execution_sdk_python.types import DurableContext
 
 logger = logging.getLogger(__name__)
+
+
+class _BatchResultSerDes(SerDes):
+    """Serialize a map/parallel task's ``BatchResult`` container payload."""
+
+    def serialize(self, value: BatchResult, serdes_context: SerDesContext) -> str:
+        return json.dumps(value.to_dict())
+
+    def deserialize(self, data: str, serdes_context: SerDesContext) -> BatchResult:
+        return BatchResult.from_dict(json.loads(data))
 
 
 @dataclass
@@ -262,7 +276,8 @@ class DagContextImpl(DagContext):
 
         def executor(ctx: DurableContext, deps_map: DepsMap):
             resolved = inputs(deps_map) if callable(inputs) else inputs
-            cfg = ChildConfig(sub_type=OperationSubType.MAP)
+            serdes = config.serdes if (config and config.serdes) else _BatchResultSerDes()
+            cfg = ChildConfig(sub_type=OperationSubType.MAP, serdes=serdes)
 
             def body(child: DurableContext):
                 return map_handler(
@@ -287,7 +302,8 @@ class DagContextImpl(DagContext):
         task_name = name
 
         def executor(ctx: DurableContext, deps_map: DepsMap):
-            cfg = ChildConfig(sub_type=OperationSubType.PARALLEL)
+            serdes = config.serdes if (config and config.serdes) else _BatchResultSerDes()
+            cfg = ChildConfig(sub_type=OperationSubType.PARALLEL, serdes=serdes)
 
             def body(child: DurableContext):
                 return parallel_handler(

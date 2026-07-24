@@ -231,6 +231,24 @@ def test_empty_dag():
     assert result.completion_reason is DagCompletionReason.ALL_COMPLETED
 
 
+def test_failure_tolerance_percentage_exceeded():
+    def boom(_deps, _sc):
+        raise ValueError("x")
+
+    def register(d):
+        d.step(boom, name="a")
+        d.step(lambda deps, sc: 1, name="b")
+
+    result, _ = run_dag(
+        register,
+        DagConfig(
+            default_retry_strategy=NO_RETRY,
+            completion_config=CompletionConfig(tolerated_failure_percentage=10),
+        ),
+    )
+    assert result.completion_reason is DagCompletionReason.FAILURE_TOLERANCE_EXCEEDED
+
+
 def test_invalid_max_concurrency():
     state, _ = make_state()
     ctx = make_context(state, parent_id="dag")

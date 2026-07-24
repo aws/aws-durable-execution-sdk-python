@@ -8,6 +8,7 @@ import pytest
 
 from aws_durable_execution_sdk_python.dag import (
     DagCompletionReason,
+    DagConfig,
     TaskStatus,
 )
 from aws_durable_execution_sdk_python.exceptions import DagCyclicDependencyError
@@ -75,6 +76,19 @@ def test_nested_dag_scope_isolation():
     assert result.get_status("a") is TaskStatus.SUCCEEDED
     nested = result.get_result("inner")
     assert nested.get_result("x") == "inner-x"
+
+
+def test_invalid_max_concurrency_raises_at_handler():
+    from aws_durable_execution_sdk_python.exceptions import ValidationError
+
+    state, _ = make_state()
+    ctx = make_context(state)
+    with pytest.raises(ValidationError):
+        ctx.dag(
+            lambda d: d.step(lambda deps, sc: 1, name="a"),
+            name="p",
+            config=DagConfig(max_concurrency=-1),
+        )
 
 
 def test_public_exports():
