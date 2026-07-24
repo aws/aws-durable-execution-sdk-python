@@ -317,3 +317,25 @@ def test_open_operation_span_not_exported_at_invocation_end():
     exported = {s.name for s in exporter.get_finished_spans()}
     # The open operation span is NOT exported (never ended).
     assert "wait-for-signal" not in exported
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [
+        (InvocationStatus.PENDING, trace.StatusCode.UNSET),
+        (InvocationStatus.SUCCEEDED, trace.StatusCode.OK),
+        (InvocationStatus.FAILED, trace.StatusCode.ERROR),
+    ],
+)
+def test_invocation_span_status_kind_and_attributes(status, expected_code):
+    """Invocation span is INTERNAL, carries status/first, ERROR only on FAILED."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_invocation_end(_invocation_end_info(status=status))
+
+    invocation = {s.name: s for s in exporter.get_finished_spans()}["invocation"]
+    assert invocation.kind is trace.SpanKind.INTERNAL
+    assert invocation.attributes is not None
+    assert invocation.attributes["durable.invocation.status"] == status.value
+    assert invocation.attributes["durable.invocation.first"] is True
+    assert invocation.status.status_code is expected_code

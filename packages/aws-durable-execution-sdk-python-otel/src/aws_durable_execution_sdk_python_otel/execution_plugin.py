@@ -46,6 +46,7 @@ from opentelemetry.trace import (
     Link,
     Span,
     SpanContext,
+    SpanKind,
     StatusCode,
     Tracer,
 )
@@ -275,6 +276,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             )
             attributes = {
                 "durable.execution.arn": self._execution_arn,
+                "durable.invocation.first": info.is_first_invocation,
                 "faas.coldstart": self._is_cold_start,
                 "cloud.provider": "aws",
                 "cloud.platform": "aws_lambda",
@@ -283,6 +285,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 attributes["faas.invocation_id"] = info.request_id
         self._invocation_span = self._tracer.start_span(
             name="invocation",
+            kind=SpanKind.INTERNAL,
             attributes=attributes,
             context=parent_ctx,
         )
@@ -296,8 +299,20 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # so they are not exported as if completed. _reset_state
         # clears the span map below.
 
-        # End the invocation span regardless of terminal status.
+        # End the invocation span regardless of terminal status. Record the
+        # invocation status; the terminal invocation is marked OK on success and
+        # ERROR on failure, while non-terminal invocations stay UNSET.
         if self._invocation_span is not None:
+            self._invocation_span.set_attribute(
+                "durable.invocation.status",
+                info.status.value if info.status else "",
+            )
+            if info.status is InvocationStatus.FAILED:
+                self._invocation_span.set_status(
+                    StatusCode.ERROR, info.error.message if info.error else ""
+                )
+            elif info.status is InvocationStatus.SUCCEEDED:
+                self._invocation_span.set_status(StatusCode.OK)
             self._invocation_span.end()
 
         # The Workflow span is exported only on a terminal status; otherwise its
