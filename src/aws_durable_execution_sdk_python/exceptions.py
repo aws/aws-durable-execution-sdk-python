@@ -29,6 +29,52 @@ class InvalidStateError(DurableExecutionsError):
     """Raised when an operation is attempted on an object in an invalid state."""
 
 
+class DagExecutionError(DurableExecutionsError):
+    """Raised by ``DagResult.throw_if_error()`` when one or more DAG tasks FAILED.
+
+    .. warning::
+       **Experimental.** This API is experimental and may be changed or removed
+       in future releases.
+    """
+
+
+class DagCyclicDependencyError(ValidationError):
+    """Raised when the DAG contains a dependency cycle.
+
+    .. warning::
+       **Experimental.** This API is experimental and may be changed or removed
+       in future releases.
+    """
+
+
+class DagInvalidTaskNameError(ValidationError):
+    """Raised when a task name is empty, unresolvable, too long, or uses a
+    reserved / disallowed character.
+
+    .. warning::
+       **Experimental.** This API is experimental and may be changed or removed
+       in future releases.
+    """
+
+
+class DagDuplicateTaskError(ValidationError):
+    """Raised when two tasks in the same DAG scope share a name.
+
+    .. warning::
+       **Experimental.** This API is experimental and may be changed or removed
+       in future releases.
+    """
+
+
+class DagInvalidDependencyError(ValidationError):
+    """Raised when a task depends on a handle not registered in this DAG scope.
+
+    .. warning::
+       **Experimental.** This API is experimental and may be changed or removed
+       in future releases.
+    """
+
+
 class UserlandError(DurableExecutionsError):
     """Failure in user-land - i.e code passed into durable executions from the caller."""
 

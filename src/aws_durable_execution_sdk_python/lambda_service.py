@@ -64,6 +64,7 @@ class OperationSubType(Enum):
     WAIT_FOR_CALLBACK = "WaitForCallback"
     WAIT_FOR_CONDITION = "WaitForCondition"
     INVOKE = "Invoke"
+    DAG = "Dag"
 
 
 @dataclass(frozen=True)
