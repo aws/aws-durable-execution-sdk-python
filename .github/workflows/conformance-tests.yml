@@ -95,7 +95,7 @@ jobs:
       run: python3 scripts/build_examples.py
 
     - name: Install conformance runner
-      run: pip install aws-durable-execution-conformance-tests==0.1.0
+      run: pip install "git+https://github.com/aws/aws-durable-execution-conformance-tests.git@main#subdirectory=packages/aws-durable-execution-conformance-tests"
 
     - name: Inject Lambda execution role into template
       env:
