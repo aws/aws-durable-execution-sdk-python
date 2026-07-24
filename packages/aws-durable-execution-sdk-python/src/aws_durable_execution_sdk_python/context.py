@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -26,6 +25,9 @@ from aws_durable_execution_sdk_python.config import (
     StepConfig,
     WaitForCallbackConfig,
 )
+from aws_durable_execution_sdk_python.concurrency.models import (
+    envelope_summary_generator,
+)
 from aws_durable_execution_sdk_python.exceptions import (
     CallbackError,
     CallbackExternalError,
@@ -36,7 +38,10 @@ from aws_durable_execution_sdk_python.exceptions import (
     SuspendExecution,
     ValidationError,
 )
-from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+from aws_durable_execution_sdk_python.identifier import (
+    OperationIdentifier,
+    OperationIdNamespace,
+)
 from aws_durable_execution_sdk_python.lambda_service import (
     OperationSubType,
     OperationType,
@@ -339,6 +344,9 @@ class DurableContext(DurableContextProtocol):
         self._step_id_prefix: str | None = (
             step_id_prefix if step_id_prefix is not None else parent_id
         )
+        self._operation_id_namespace: OperationIdNamespace = OperationIdNamespace(
+            self._step_id_prefix
+        )
         # cached at construction to make invariant even if parent/prefix mutates.
         self._is_virtual: bool = self._parent_id != self._step_id_prefix
         self._step_counter: OrderedCounter = OrderedCounter()
@@ -469,9 +477,7 @@ class DurableContext(DurableContextProtocol):
         This allows us to recover operation ids or even look
         forward without changing the internal state of this context.
         """
-        prefix: str | None = self._step_id_prefix
-        step_id: str = f"{prefix}-{step}" if prefix else str(step)
-        return hashlib.blake2b(step_id.encode()).hexdigest()[:64]
+        return self._operation_id_namespace.create_id_for_step(step)
 
     def _create_step_id(self) -> str:
         """Generate a thread-safe step id, incrementing in order of invocation.
@@ -662,6 +668,12 @@ class DurableContext(DurableContextProtocol):
         """Execute a callable for each item in parallel."""
         map_name: str | None = self._resolve_step_name(name, func)
 
+        # Validate before the child context starts, so the error surfaces as
+        # a bare ValidationError (matching wait and wait_for_condition) with
+        # no STARTED/FAILED map operation in history.
+        if config is not None:
+            config.completion_config._validate_for_total(len(inputs))
+
         with self._replay_aware():
             operation_id = self._create_step_id()
             operation_identifier = OperationIdentifier(
@@ -684,6 +696,7 @@ class DurableContext(DurableContextProtocol):
                     execution_state=self.state,
                     map_context=map_context,
                     operation_identifier=operation_identifier,
+                    operation_id_namespace=OperationIdNamespace(operation_id),
                 )
 
             return child_handler(
@@ -692,7 +705,14 @@ class DurableContext(DurableContextProtocol):
                 operation_identifier=operation_identifier,
                 config=ChildConfig(
                     sub_type=OperationSubType.MAP,
-                    serdes=getattr(config, "serdes", None),
+                    serdes=config.serdes if config else None,
+                    # The SDK-owned envelope records the completion decision for
+                    # replay. A configured summary_generator only contributes the
+                    # customer-facing summary field.
+                    summary_generator=envelope_summary_generator(
+                        "MapResult",
+                        config.summary_generator if config else None,
+                    ),
                 ),
             )
 
@@ -703,6 +723,12 @@ class DurableContext(DurableContextProtocol):
         config: ParallelConfig | None = None,
     ) -> BatchResult[T]:
         """Execute multiple callables in parallel."""
+        # Validate before the child context starts, so the error surfaces as
+        # a bare ValidationError (matching wait and wait_for_condition) with
+        # no STARTED/FAILED parallel operation in history.
+        if config is not None:
+            config.completion_config._validate_for_total(len(functions))
+
         with self._replay_aware():
             # _create_step_id() is thread-safe. rest of method is safe, since using local copy of parent id
             operation_id = self._create_step_id()
@@ -725,6 +751,7 @@ class DurableContext(DurableContextProtocol):
                     execution_state=self.state,
                     parallel_context=parallel_context,
                     operation_identifier=operation_identifier,
+                    operation_id_namespace=OperationIdNamespace(operation_id),
                 )
 
             return child_handler(
@@ -733,7 +760,14 @@ class DurableContext(DurableContextProtocol):
                 operation_identifier=operation_identifier,
                 config=ChildConfig(
                     sub_type=OperationSubType.PARALLEL,
-                    serdes=getattr(config, "serdes", None),
+                    serdes=config.serdes if config else None,
+                    # The SDK-owned envelope records the completion decision for
+                    # replay. A configured summary_generator only contributes the
+                    # customer-facing summary field.
+                    summary_generator=envelope_summary_generator(
+                        "ParallelResult",
+                        config.summary_generator if config else None,
+                    ),
                 ),
             )
 

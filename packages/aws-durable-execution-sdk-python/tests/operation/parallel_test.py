@@ -9,6 +9,8 @@ from unittest.mock import Mock, patch
 import pytest
 
 from aws_durable_execution_sdk_python.concurrency.executor import ConcurrentExecutor
+from aws_durable_execution_sdk_python.identifier import OperationIdNamespace
+
 
 # Mock the executor.execute method to return a BatchResult
 from aws_durable_execution_sdk_python.concurrency.models import (
@@ -34,6 +36,13 @@ from aws_durable_execution_sdk_python.operation.parallel import (
 from aws_durable_execution_sdk_python.serdes import serialize
 from aws_durable_execution_sdk_python.state import ExecutionState
 from tests.serdes_test import CustomStrSerDes
+
+
+class _StubNamespace(OperationIdNamespace):
+    """Test namespace producing readable ids matching checkpoint fixtures."""
+
+    def create_id_for_step(self, step: int) -> str:
+        return f"op_{step}"
 
 
 def create_test_context(
@@ -73,6 +82,7 @@ def test_parallel_executor_init():
         name_prefix="test-",
         serdes=None,
         nesting_type=NestingType.FLAT,
+        operation_id_namespace=_StubNamespace(),
     )
 
     assert executor.executables == executables
@@ -96,7 +106,11 @@ def test_parallel_executor_from_callables():
     callables = [func1, func2]
     config = ParallelConfig(max_concurrency=3, nesting_type=NestingType.FLAT)
 
-    executor = ParallelExecutor.from_callables(callables, config)
+    executor = ParallelExecutor.from_callables(
+        callables,
+        config,
+        operation_id_namespace=_StubNamespace(),
+    )
 
     assert len(executor.executables) == 2
     assert executor.executables[0].index == 0
@@ -119,7 +133,11 @@ def test_parallel_executor_from_callables_default_config():
     callables = [func1]
     config = ParallelConfig()
 
-    executor = ParallelExecutor.from_callables(callables, config)
+    executor = ParallelExecutor.from_callables(
+        callables,
+        config,
+        operation_id_namespace=_StubNamespace(),
+    )
 
     assert len(executor.executables) == 1
     assert executor.max_concurrency is None
@@ -142,6 +160,7 @@ def test_parallel_executor_execute_item():
         iteration_sub_type=OperationSubType.PARALLEL_BRANCH,
         name_prefix="test-",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     child_context = "test-context"
@@ -166,6 +185,7 @@ def test_parallel_executor_execute_item_with_exception():
         iteration_sub_type=OperationSubType.PARALLEL_BRANCH,
         name_prefix="test-",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     child_context = "test-context"
@@ -187,6 +207,9 @@ def test_parallel_handler():
     config = ParallelConfig(max_concurrency=2)
 
     class MockExecutionState:
+        def register_branch_pool(self, pool):
+            pass
+
         def get_checkpoint_result(self, operation_id):
             mock_result = Mock()
             mock_result.is_succeeded.return_value = False
@@ -213,6 +236,7 @@ def test_parallel_handler():
             execution_state,
             mock_run_in_child_context,
             operation_identifier,
+            operation_id_namespace=_StubNamespace(),
         )
 
         assert result == mock_batch_result
@@ -227,6 +251,9 @@ def test_parallel_handler_with_none_config():
     callables = [func1]
 
     class MockExecutionState:
+        def register_branch_pool(self, pool):
+            pass
+
         def get_checkpoint_result(self, operation_id):
             mock_result = Mock()
             mock_result.is_succeeded.return_value = False
@@ -252,6 +279,7 @@ def test_parallel_handler_with_none_config():
             execution_state,
             mock_run_in_child_context,
             operation_identifier,
+            operation_id_namespace=_StubNamespace(),
         )
 
         assert result == mock_batch_result
@@ -267,6 +295,9 @@ def test_parallel_handler_creates_executor_with_correct_config():
     config = ParallelConfig(max_concurrency=5)
 
     class MockExecutionState:
+        def register_branch_pool(self, pool):
+            pass
+
         def get_checkpoint_result(self, operation_id):
             mock_result = Mock()
             mock_result.is_succeeded.return_value = False
@@ -278,7 +309,7 @@ def test_parallel_handler_creates_executor_with_correct_config():
     )
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
     with patch.object(ParallelExecutor, "from_callables") as mock_from_callables:
@@ -288,10 +319,19 @@ def test_parallel_handler_creates_executor_with_correct_config():
         mock_from_callables.return_value = mock_executor
 
         result = parallel_handler(
-            callables, config, execution_state, executor_context, operation_identifier
+            callables,
+            config,
+            execution_state,
+            executor_context,
+            operation_identifier,
+            operation_id_namespace=_StubNamespace(),
         )
 
-        mock_from_callables.assert_called_once_with(callables, config)
+        mock_from_callables.assert_called_once()
+        passed_callables, passed_config = mock_from_callables.call_args.args
+        assert passed_callables == callables
+        assert passed_config.max_concurrency == 5
+        assert passed_config.summary_generator is None
         mock_executor.execute.assert_called_once_with(
             execution_state, executor_context=executor_context
         )
@@ -307,6 +347,9 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
     callables = [func1]
 
     class MockExecutionState:
+        def register_branch_pool(self, pool):
+            pass
+
         def get_checkpoint_result(self, operation_id):
             mock_result = Mock()
             mock_result.is_succeeded.return_value = False
@@ -318,7 +361,7 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
     )
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
     with patch.object(ParallelExecutor, "from_callables") as mock_from_callables:
@@ -328,7 +371,12 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
         mock_from_callables.return_value = mock_executor
 
         result = parallel_handler(
-            callables, None, execution_state, executor_context, operation_identifier
+            callables,
+            None,
+            execution_state,
+            executor_context,
+            operation_identifier,
+            operation_id_namespace=_StubNamespace(),
         )
 
         assert result == mock_batch_result
@@ -351,6 +399,7 @@ def test_parallel_executor_inheritance():
         iteration_sub_type=OperationSubType.PARALLEL_BRANCH,
         name_prefix="test-",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     assert isinstance(executor, ConcurrentExecutor)
@@ -361,7 +410,11 @@ def test_parallel_executor_from_callables_empty_list():
     callables = []
     config = ParallelConfig()
 
-    executor = ParallelExecutor.from_callables(callables, config)
+    executor = ParallelExecutor.from_callables(
+        callables,
+        config,
+        operation_id_namespace=_StubNamespace(),
+    )
 
     assert len(executor.executables) == 0
     assert executor.max_concurrency is None
@@ -387,6 +440,7 @@ def test_parallel_executor_execute_item_return_type():
         iteration_sub_type=OperationSubType.PARALLEL_BRANCH,
         name_prefix="test-",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     # Test different return types
@@ -408,6 +462,9 @@ def test_parallel_handler_with_serdes():
     callables = [func1]
 
     class MockExecutionState:
+        def register_branch_pool(self, pool):
+            pass
+
         def get_checkpoint_result(self, operation_id):
             mock_result = Mock()
             mock_result.is_succeeded.return_value = False
@@ -419,7 +476,7 @@ def test_parallel_handler_with_serdes():
     )
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = lambda *args: "1"  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
     child_context = Mock()
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
@@ -430,6 +487,7 @@ def test_parallel_handler_with_serdes():
         execution_state,
         executor_context,
         operation_identifier,
+        operation_id_namespace=_StubNamespace(),
     )
 
     assert result.all[0].result == "RESULT1"
@@ -448,6 +506,9 @@ def test_parallel_handler_with_summary_generator():
     config = ParallelConfig(summary_generator=mock_summary_generator)
 
     class MockExecutionState:
+        def register_branch_pool(self, pool):
+            pass
+
         def get_checkpoint_result(self, operation_id):
             mock_result = Mock()
             mock_result.is_succeeded.return_value = False
@@ -459,37 +520,21 @@ def test_parallel_handler_with_summary_generator():
     )
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = Mock(return_value="1")  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = Mock(return_value="1")
     executor_context.create_child_context = Mock(return_value=Mock())
 
     # Call parallel_handler
     parallel_handler(
-        callables, config, execution_state, executor_context, operation_identifier
+        callables,
+        config,
+        execution_state,
+        executor_context,
+        operation_identifier,
+        operation_id_namespace=_StubNamespace(),
     )
 
     # Verify that create_child_context was called once (N=1 job)
     assert executor_context.create_child_context.call_count == 1
-
-    # Verify that _create_step_id_for_logical_step was called once with unique value
-    assert executor_context._create_step_id_for_logical_step.call_count == 1  # noqa SLF001
-
-
-def test_parallel_executor_from_callables_with_summary_generator():
-    """Test ParallelExecutor.from_callables preserves summary_generator."""
-
-    def func1(ctx):
-        return "result1"
-
-    def mock_summary_generator(result):
-        return f"Summary: {result}"
-
-    callables = [func1]
-    config = ParallelConfig(summary_generator=mock_summary_generator)
-
-    executor = ParallelExecutor.from_callables(callables, config)
-
-    # Verify that the summary_generator is preserved in the executor
-    assert executor.summary_generator is mock_summary_generator
 
 
 def test_parallel_handler_default_summary_generator():
@@ -504,6 +549,9 @@ def test_parallel_handler_default_summary_generator():
     callables = [func1, func2]
 
     class MockExecutionState:
+        def register_branch_pool(self, pool):
+            pass
+
         def get_checkpoint_result(self, operation_id):
             mock_result = Mock()
             mock_result.is_succeeded.return_value = False
@@ -515,22 +563,21 @@ def test_parallel_handler_default_summary_generator():
     )
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = Mock(side_effect=["1", "2"])  # noqa SLF001
+    executor_context._create_step_id_for_logical_step = Mock(side_effect=["1", "2"])
     executor_context.create_child_context = Mock(return_value=Mock())
 
     # Call parallel_handler with None config (should use default)
     parallel_handler(
-        callables, None, execution_state, executor_context, operation_identifier
+        callables,
+        None,
+        execution_state,
+        executor_context,
+        operation_identifier,
+        operation_id_namespace=_StubNamespace(),
     )
 
     # Verify that create_child_context was called twice (N=2 jobs)
     assert executor_context.create_child_context.call_count == 2
-
-    # Verify that _create_step_id_for_logical_step was called twice with unique values
-    assert executor_context._create_step_id_for_logical_step.call_count == 2  # noqa SLF001
-    calls = executor_context._create_step_id_for_logical_step.call_args_list  # noqa SLF001
-    # Verify unique values were passed
-    assert calls[0] != calls[1]
 
 
 def test_parallel_handler_with_explicit_none_summary_generator():
@@ -550,6 +597,9 @@ def test_parallel_handler_with_explicit_none_summary_generator():
     config = ParallelConfig(summary_generator=None)
 
     class MockExecutionState:
+        def register_branch_pool(self, pool):
+            pass
+
         def get_checkpoint_result(self, operation_id):
             mock_result = Mock()
             mock_result.is_succeeded.return_value = False
@@ -561,7 +611,7 @@ def test_parallel_handler_with_explicit_none_summary_generator():
     )
 
     executor_context = Mock()
-    executor_context._create_step_id_for_logical_step = Mock(  # noqa: SLF001
+    executor_context._create_step_id_for_logical_step = Mock(
         side_effect=["1", "2", "3"]
     )
     executor_context.create_child_context = Mock(return_value=Mock())
@@ -573,6 +623,7 @@ def test_parallel_handler_with_explicit_none_summary_generator():
         execution_state=execution_state,
         parallel_context=executor_context,
         operation_identifier=operation_identifier,
+        operation_id_namespace=_StubNamespace(),
     )
 
     # Verify that create_child_context was called 3 times (N=3 jobs)
@@ -592,6 +643,9 @@ def test_parallel_handler_replay_mechanism():
 
     # Mock execution state that indicates operation already succeeded
     class MockExecutionState:
+        def register_branch_pool(self, pool):
+            pass
+
         durable_execution_arn = "arn:aws:durable:us-east-1:123456789012:execution/test"
 
         def get_checkpoint_result(self, operation_id):
@@ -610,7 +664,7 @@ def test_parallel_handler_replay_mechanism():
 
     # Mock parallel context
     parallel_context = Mock()
-    parallel_context._create_step_id_for_logical_step = Mock(  # noqa: SLF001
+    parallel_context._create_step_id_for_logical_step = Mock(
         side_effect=["child_1", "child_2"]
     )
 
@@ -634,11 +688,17 @@ def test_parallel_handler_replay_mechanism():
         mock_replay.return_value = expected_batch_result
 
         result = parallel_handler(
-            callables, config, execution_state, parallel_context, operation_identifier
+            callables,
+            config,
+            execution_state,
+            parallel_context,
+            operation_identifier,
+            operation_id_namespace=_StubNamespace(),
         )
 
         # Verify replay was called instead of execute
-        mock_replay.assert_called_once_with(execution_state, parallel_context)
+        mock_replay.assert_called_once()
+        assert mock_replay.call_args.args[:2] == (execution_state, parallel_context)
         assert result == expected_batch_result
 
 
@@ -652,6 +712,9 @@ def test_parallel_handler_replay_with_replay_children():
 
     # Mock execution state that indicates operation succeeded but children need replay
     class MockExecutionState:
+        def register_branch_pool(self, pool):
+            pass
+
         def get_checkpoint_result(self, operation_id):
             mock_result = Mock()
             if operation_id == "test_op":
@@ -669,7 +732,7 @@ def test_parallel_handler_replay_with_replay_children():
 
     # Mock parallel context
     parallel_context = Mock()
-    parallel_context._create_step_id_for_logical_step = Mock(return_value="child_1")  # noqa: SLF001
+    parallel_context._create_step_id_for_logical_step = Mock(return_value="child_1")
 
     # Mock the executor's replay method and _execute_item_in_child_context
     with (
@@ -692,10 +755,16 @@ def test_parallel_handler_replay_with_replay_children():
         mock_replay.return_value = expected_batch_result
 
         result = parallel_handler(
-            callables, config, execution_state, parallel_context, operation_identifier
+            callables,
+            config,
+            execution_state,
+            parallel_context,
+            operation_identifier,
+            operation_id_namespace=_StubNamespace(),
         )
 
-        mock_replay.assert_called_once_with(execution_state, parallel_context)
+        mock_replay.assert_called_once()
+        assert mock_replay.call_args.args[:2] == (execution_state, parallel_context)
         assert result == expected_batch_result
 
 
@@ -744,6 +813,9 @@ def test_parallel_handler_first_execution_then_replay():
     execution_count = 0
 
     class MockExecutionState:
+        def register_branch_pool(self, pool):
+            pass
+
         durable_execution_arn = "arn:aws:durable:us-east-1:123456789012:execution/test"
 
         def get_checkpoint_result(self, operation_id):
@@ -778,7 +850,12 @@ def test_parallel_handler_first_execution_then_replay():
         # FIRST EXECUTION - should call execute
         execution_count = 0
         parallel_handler(
-            callables, config, execution_state, parallel_context, operation_identifier
+            callables,
+            config,
+            execution_state,
+            parallel_context,
+            operation_identifier,
+            operation_id_namespace=_StubNamespace(),
         )
 
         # Verify execute was called, replay was not
@@ -792,7 +869,12 @@ def test_parallel_handler_first_execution_then_replay():
         # SECOND EXECUTION - should call replay
         execution_count = 1
         parallel_handler(
-            callables, config, execution_state, parallel_context, operation_identifier
+            callables,
+            config,
+            execution_state,
+            parallel_context,
+            operation_identifier,
+            operation_id_namespace=_StubNamespace(),
         )
 
         # Verify replay was called, execute was not
@@ -849,7 +931,14 @@ def test_parallel_item_serialize(mock_serialize, item_serdes, batch_serdes):
             else f"child-{i}"
         )
 
-    with patch.object(DurableContext, "_create_step_id_for_logical_step", create_id):
+    with (
+        patch.object(DurableContext, "_create_step_id_for_logical_step", create_id),
+        patch.object(
+            OperationIdNamespace,
+            "create_id_for_step",
+            lambda self, step: f"child-{step}",
+        ),
+    ):
         context = create_test_context(state=mock_state)
         context.parallel(
             [lambda ctx: "a", lambda ctx: "b"],
@@ -911,7 +1000,14 @@ def test_parallel_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
             else f"child-{i}"
         )
 
-    with patch.object(DurableContext, "_create_step_id_for_logical_step", create_id):
+    with (
+        patch.object(DurableContext, "_create_step_id_for_logical_step", create_id),
+        patch.object(
+            OperationIdNamespace,
+            "create_id_for_step",
+            lambda self, step: f"child-{step}",
+        ),
+    ):
         context = create_test_context(state=mock_state)
         context.parallel(
             [lambda ctx: "a", lambda ctx: "b"],
@@ -941,6 +1037,9 @@ def test_parallel_result_serialization_roundtrip():
     callables = [func1, func2, func3]
 
     class MockExecutionState:
+        def register_branch_pool(self, pool):
+            pass
+
         durable_execution_arn = "arn:test"
 
         def get_checkpoint_result(self, operation_id):
@@ -950,7 +1049,7 @@ def test_parallel_result_serialization_roundtrip():
 
     execution_state = MockExecutionState()
     parallel_context = Mock()
-    parallel_context._create_step_id_for_logical_step = Mock(  # noqa SLF001
+    parallel_context._create_step_id_for_logical_step = Mock(
         side_effect=["1", "2", "3"]
     )
     child_context = Mock()
@@ -967,6 +1066,7 @@ def test_parallel_result_serialization_roundtrip():
         execution_state,
         parallel_context,
         operation_identifier,
+        operation_id_namespace=_StubNamespace(),
     )
 
     # Serialize the BatchResult
@@ -1031,8 +1131,15 @@ def test_parallel_handler_serializes_batch_result():
                     else f"child-{i}"
                 )
 
-            with patch.object(
-                DurableContext, "_create_step_id_for_logical_step", create_id
+            with (
+                patch.object(
+                    DurableContext, "_create_step_id_for_logical_step", create_id
+                ),
+                patch.object(
+                    OperationIdNamespace,
+                    "create_id_for_step",
+                    lambda self, step: f"child-{step}",
+                ),
             ):
                 context = create_test_context(state=mock_state)
                 result = context.parallel([lambda ctx: "a", lambda ctx: "b"])
@@ -1090,8 +1197,15 @@ def test_parallel_default_serdes_serializes_batch_result():
                     else f"child-{i}"
                 )
 
-            with patch.object(
-                DurableContext, "_create_step_id_for_logical_step", create_id
+            with (
+                patch.object(
+                    DurableContext, "_create_step_id_for_logical_step", create_id
+                ),
+                patch.object(
+                    OperationIdNamespace,
+                    "create_id_for_step",
+                    lambda self, step: f"child-{step}",
+                ),
             ):
                 context = create_test_context(state=mock_state)
                 result = context.parallel([lambda ctx: "a", lambda ctx: "b"])
@@ -1156,8 +1270,15 @@ def test_parallel_custom_serdes_serializes_batch_result():
                     else f"child-{i}"
                 )
 
-            with patch.object(
-                DurableContext, "_create_step_id_for_logical_step", create_id
+            with (
+                patch.object(
+                    DurableContext, "_create_step_id_for_logical_step", create_id
+                ),
+                patch.object(
+                    OperationIdNamespace,
+                    "create_id_for_step",
+                    lambda self, step: f"child-{step}",
+                ),
             ):
                 context = create_test_context(state=mock_state)
                 result = context.parallel(
@@ -1216,7 +1337,11 @@ def test_parallel_executor_get_iteration_name_default():
     callables = [lambda ctx: "a", lambda ctx: "b", lambda ctx: "c"]
     config = ParallelConfig()
 
-    executor = ParallelExecutor.from_callables(callables, config)
+    executor = ParallelExecutor.from_callables(
+        callables,
+        config,
+        operation_id_namespace=_StubNamespace(),
+    )
 
     assert executor.get_iteration_name(0) == "parallel-branch-0"
     assert executor.get_iteration_name(1) == "parallel-branch-1"
@@ -1233,7 +1358,11 @@ def test_parallel_executor_get_iteration_name_with_named_branches():
     ]
     config = ParallelConfig()
 
-    executor = ParallelExecutor.from_callables(branches, config)
+    executor = ParallelExecutor.from_callables(
+        branches,
+        config,
+        operation_id_namespace=_StubNamespace(),
+    )
 
     assert executor.get_iteration_name(0) == "fetch-user-data"
     assert executor.get_iteration_name(1) == "fetch-order-history"
@@ -1250,7 +1379,11 @@ def test_parallel_executor_get_iteration_name_mixed():
     ]
     config = ParallelConfig()
 
-    executor = ParallelExecutor.from_callables(branches, config)
+    executor = ParallelExecutor.from_callables(
+        branches,
+        config,
+        operation_id_namespace=_StubNamespace(),
+    )
 
     assert executor.get_iteration_name(0) == "named-branch"
     assert executor.get_iteration_name(1) == "parallel-branch-1"
@@ -1266,7 +1399,11 @@ def test_parallel_executor_get_iteration_name_none_name():
     ]
     config = ParallelConfig()
 
-    executor = ParallelExecutor.from_callables(branches, config)
+    executor = ParallelExecutor.from_callables(
+        branches,
+        config,
+        operation_id_namespace=_StubNamespace(),
+    )
 
     assert executor.get_iteration_name(0) == "parallel-branch-0"
 
@@ -1286,6 +1423,7 @@ def test_parallel_branch_execute_item():
         iteration_sub_type=OperationSubType.PARALLEL_BRANCH,
         name_prefix="parallel-branch-",
         serdes=None,
+        operation_id_namespace=_StubNamespace(),
     )
 
     result = executor.execute_item("test-ctx", executable)
@@ -1293,3 +1431,47 @@ def test_parallel_branch_execute_item():
 
 
 # endregion
+
+
+def test_parallel_handler_defaults_summary_generator_for_user_config():
+    """A user config without a summary generator gets the default (JS parity)."""
+
+    class MockExecutionState:
+        def register_branch_pool(self, pool):
+            pass
+
+        durable_execution_arn = "arn:aws:durable:us-east-1:123456789012:execution/test"
+
+        def get_checkpoint_result(self, operation_id):
+            mock_result = Mock()
+            mock_result.is_succeeded.return_value = False
+            mock_result.is_failed.return_value = False
+            mock_result.is_existent.return_value = False
+            return mock_result
+
+    captured_configs: list[ParallelConfig] = []
+    original_from_callables = ParallelExecutor.from_callables.__func__
+
+    def capturing_from_callables(cls, callables, config, operation_id_namespace):
+        captured_configs.append(config)
+        return original_from_callables(cls, callables, config, operation_id_namespace)
+
+    operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+    )
+    with patch.object(
+        ParallelExecutor, "from_callables", classmethod(capturing_from_callables)
+    ):
+        result = parallel_handler(
+            [],
+            ParallelConfig(max_concurrency=3),
+            MockExecutionState(),
+            Mock(),
+            operation_identifier,
+            operation_id_namespace=_StubNamespace(),
+        )
+
+    assert len(captured_configs) == 1
+    assert captured_configs[0].summary_generator is None
+    assert captured_configs[0].max_concurrency == 3
+    assert result.total_count == 0

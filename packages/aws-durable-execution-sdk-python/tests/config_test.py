@@ -2,6 +2,8 @@
 
 from unittest.mock import Mock
 
+import pytest
+
 from aws_durable_execution_sdk_python.config import (
     CallbackConfig,
     ChildConfig,
@@ -13,6 +15,7 @@ from aws_durable_execution_sdk_python.config import (
     StepConfig,
     StepSemantics,
 )
+from aws_durable_execution_sdk_python.exceptions import ValidationError
 from aws_durable_execution_sdk_python.waits import (
     WaitForConditionConfig,
     WaitForConditionDecision,
@@ -45,7 +48,7 @@ def test_completion_config_all_completed():
     config = CompletionConfig.all_completed()
     assert config.min_successful is None
     assert config.tolerated_failure_count is None
-    assert config.tolerated_failure_percentage is None
+    assert config.tolerated_failure_percentage == 100
 
 
 def test_completion_config_all_successful():
@@ -201,3 +204,62 @@ def test_invoke_config_with_tenant_id():
     """Test InvokeConfig with explicit tenant_id."""
     config = InvokeConfig(tenant_id="test-tenant")
     assert config.tenant_id == "test-tenant"
+
+
+# region Config validation
+
+
+def test_completion_config_rejects_min_successful_below_one():
+    with pytest.raises(ValidationError, match="min_successful must be at least 1"):
+        CompletionConfig(min_successful=0)
+
+
+def test_completion_config_rejects_negative_tolerated_failure_count():
+    with pytest.raises(
+        ValidationError, match="tolerated_failure_count must be non-negative"
+    ):
+        CompletionConfig(tolerated_failure_count=-1)
+
+
+def test_completion_config_rejects_out_of_range_failure_percentage():
+    with pytest.raises(
+        ValidationError, match="tolerated_failure_percentage must be between 0 and 100"
+    ):
+        CompletionConfig(tolerated_failure_percentage=101)
+    with pytest.raises(
+        ValidationError, match="tolerated_failure_percentage must be between 0 and 100"
+    ):
+        CompletionConfig(tolerated_failure_percentage=-0.1)
+
+
+def test_completion_config_accepts_boundary_values():
+    assert CompletionConfig(min_successful=1).min_successful == 1
+    assert CompletionConfig(tolerated_failure_count=0).tolerated_failure_count == 0
+    assert (
+        CompletionConfig(tolerated_failure_percentage=0).tolerated_failure_percentage
+        == 0
+    )
+    assert (
+        CompletionConfig(tolerated_failure_percentage=100).tolerated_failure_percentage
+        == 100
+    )
+
+
+def test_map_config_rejects_max_concurrency_below_one():
+    with pytest.raises(ValidationError, match="max_concurrency must be at least 1"):
+        MapConfig(max_concurrency=0)
+    with pytest.raises(ValidationError, match="max_concurrency must be at least 1"):
+        MapConfig(max_concurrency=-1)
+
+
+def test_parallel_config_rejects_max_concurrency_below_one():
+    with pytest.raises(ValidationError, match="max_concurrency must be at least 1"):
+        ParallelConfig(max_concurrency=0)
+
+
+def test_configs_accept_none_max_concurrency_as_unlimited():
+    assert MapConfig().max_concurrency is None
+    assert ParallelConfig(max_concurrency=1).max_concurrency == 1
+
+
+# endregion Config validation
