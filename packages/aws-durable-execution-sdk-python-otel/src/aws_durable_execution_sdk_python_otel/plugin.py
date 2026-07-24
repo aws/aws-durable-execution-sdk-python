@@ -350,7 +350,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
             invocation_span.set_attribute(
                 "durable.invocation.status", info.status.value
             )
-            if info.status is InvocationStatus.FAILED:
+            if info.status in (InvocationStatus.FAILED, InvocationStatus.RETRY):
                 invocation_span.set_status(
                     StatusCode.ERROR, info.error.message if info.error else ""
                 )

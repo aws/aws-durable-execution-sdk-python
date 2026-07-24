@@ -18,6 +18,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     ExecutionError,
     GetExecutionStateError,
     InvocationError,
+    StepError,
     SuspendExecution,
 )
 from aws_durable_execution_sdk_python.execution import (
@@ -2934,8 +2935,8 @@ def test_durable_execution_with_plugins_success():
     assert "invocation_end:SUCCEEDED" in plugin.calls
 
 
-def test_durable_execution_with_plugins_failure():
-    """Test that plugins receive invocation end and execution end on user error."""
+def test_durable_execution_with_plugins_uncaught_error():
+    """Test that plugins classify an uncaught user error as a retry."""
     mock_client = Mock(spec=DurableServiceClient)
     mock_output = CheckpointOutput(
         checkpoint_token="new_token",  # noqa: S106
@@ -2949,6 +2950,31 @@ def test_durable_execution_with_plugins_failure():
     def test_handler(event: Any, context: DurableContext) -> dict:
         msg = "user error"
         raise ValueError(msg)
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert "invocation_start" in plugin.calls
+    assert "invocation_end:RETRY" in plugin.calls
+
+
+def test_durable_execution_with_plugins_operation_failure():
+    """Test that plugins classify a durable operation error as failed."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_output = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    mock_client.checkpoint.return_value = mock_output
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        raise StepError("step failed")
 
     result = test_handler(
         _make_invocation_input(mock_client),

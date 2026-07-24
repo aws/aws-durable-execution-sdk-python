@@ -14,6 +14,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     BotoClientError,
     CheckpointError,
+    DurableExecutionsError,
     ExecutionError,
     InvocationError,
     SuspendExecution,
@@ -423,6 +424,11 @@ def durable_execution(
             except Exception as e:
                 # all user-space errors go here
                 logger.exception("Execution failed")
+
+                if not isinstance(e, DurableExecutionsError):
+                    # Preserve the terminal execution response while identifying
+                    # the uncaught handler error in invocation telemetry.
+                    plugin_executor.override_invocation_status(InvocationStatus.RETRY)
 
                 result = DurableExecutionInvocationOutput(
                     status=InvocationStatus.FAILED, error=ErrorObject.from_exception(e)

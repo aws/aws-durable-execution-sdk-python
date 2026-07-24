@@ -175,7 +175,7 @@ def test_invocation_span_records_subsequent_invocation():
     ("invocation_status", "expected_span_status"),
     [
         (InvocationStatus.PENDING, StatusCode.UNSET),
-        (InvocationStatus.RETRY, StatusCode.UNSET),
+        (InvocationStatus.RETRY, StatusCode.ERROR),
         (InvocationStatus.SUCCEEDED, StatusCode.OK),
         (InvocationStatus.FAILED, StatusCode.ERROR),
     ],
@@ -184,7 +184,7 @@ def test_invocation_span_status_reflects_execution_status(
     invocation_status: InvocationStatus,
     expected_span_status: StatusCode,
 ):
-    """Only terminal invocation spans receive a success or failure status."""
+    """Invocation spans reflect successful, failed, and retry outcomes."""
     plugin, exporter = _create_plugin()
 
     plugin.on_invocation_start(_invocation_start_info())

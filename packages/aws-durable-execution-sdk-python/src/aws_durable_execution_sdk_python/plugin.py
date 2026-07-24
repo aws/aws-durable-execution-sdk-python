@@ -263,6 +263,7 @@ class PluginExecutor:
         self._plugins = plugins or []
         self._executor: ThreadPoolExecutor | None = None
         self._invocation_status: InvocationStartInfo | None = None
+        self._invocation_status_override: InvocationStatus | None = None
 
     @contextlib.contextmanager
     def run(self):
@@ -275,6 +276,7 @@ class PluginExecutor:
             yield
         finally:
             self._invocation_status = None
+            self._invocation_status_override = None
             # Shut down the thread pool, waiting for pending tasks to complete.
             if self._executor:
                 self._executor.shutdown(wait=True)
@@ -329,7 +331,12 @@ class PluginExecutor:
             is_first_invocation=is_first_invocation,
             execution_start_time=execution_start_time,
         )
+        self._invocation_status_override = None
         self.execute_plugins(self._invocation_status, sync=True)
+
+    def override_invocation_status(self, status: InvocationStatus) -> None:
+        """Override the status reported to plugins without changing the output."""
+        self._invocation_status_override = status
 
     def on_invocation_end(
         self,
@@ -338,6 +345,14 @@ class PluginExecutor:
         if self._invocation_status is None:
             # on_invocation_start not called, skip
             return
+
+        if self._invocation_status_override is not None:
+            output = DurableExecutionInvocationOutput(
+                status=self._invocation_status_override,
+                result=output.result,
+                error=output.error,
+            )
+            self._invocation_status_override = None
 
         invocation_end_info = (
             InvocationEndInfo.from_durable_execution_invocation_output(
