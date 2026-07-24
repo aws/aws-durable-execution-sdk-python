@@ -93,8 +93,8 @@ statuses:
 | `ALL_SUCCESS` | every dep SUCCEEDED (default); empty upstream ⇒ runs  |
 | `ALL_FAILED`  | every dep FAILED and there is at least one            |
 | `ALL_DONE`    | every dep is terminal, regardless of outcome          |
-| `ONE_SUCCESS` | at least one dep SUCCEEDED                             |
-| `ONE_FAILED`  | at least one dep FAILED                               |
+| `ANY_SUCCESS` | at least one dep SUCCEEDED                             |
+| `ANY_FAILED`  | at least one dep FAILED                               |
 | `NONE_FAILED` | no dep FAILED (SUCCEEDED/SKIPPED allowed)             |
 
 ```python

@@ -270,8 +270,8 @@ def test_dag_5_trigger_matrix_empty_upstream() -> None:
         ("r_all_success", TriggerRule.ALL_SUCCESS, "SUCCEEDED"),
         ("r_all_failed", TriggerRule.ALL_FAILED, "SKIPPED"),
         ("r_all_done", TriggerRule.ALL_DONE, "SUCCEEDED"),
-        ("r_one_success", TriggerRule.ONE_SUCCESS, "SKIPPED"),
-        ("r_one_failed", TriggerRule.ONE_FAILED, "SKIPPED"),
+        ("r_one_success", TriggerRule.ANY_SUCCESS, "SKIPPED"),
+        ("r_one_failed", TriggerRule.ANY_FAILED, "SKIPPED"),
         ("r_none_failed", TriggerRule.NONE_FAILED, "SUCCEEDED"),
     ]
 
@@ -296,8 +296,8 @@ def test_dag_6_trigger_matrix_mixed() -> None:
         ("c_all_success", TriggerRule.ALL_SUCCESS, "SKIPPED"),
         ("c_all_failed", TriggerRule.ALL_FAILED, "SKIPPED"),
         ("c_all_done", TriggerRule.ALL_DONE, "SUCCEEDED"),
-        ("c_one_success", TriggerRule.ONE_SUCCESS, "SUCCEEDED"),
-        ("c_one_failed", TriggerRule.ONE_FAILED, "SUCCEEDED"),
+        ("c_one_success", TriggerRule.ANY_SUCCESS, "SUCCEEDED"),
+        ("c_one_failed", TriggerRule.ANY_FAILED, "SUCCEEDED"),
         ("c_none_failed", TriggerRule.NONE_FAILED, "SKIPPED"),
     ]
 
@@ -324,8 +324,8 @@ def test_dag_7_trigger_matrix_all_failed() -> None:
         ("k_all_success", TriggerRule.ALL_SUCCESS, "SKIPPED"),
         ("k_all_failed", TriggerRule.ALL_FAILED, "SUCCEEDED"),
         ("k_all_done", TriggerRule.ALL_DONE, "SUCCEEDED"),
-        ("k_one_success", TriggerRule.ONE_SUCCESS, "SKIPPED"),
-        ("k_one_failed", TriggerRule.ONE_FAILED, "SUCCEEDED"),
+        ("k_one_success", TriggerRule.ANY_SUCCESS, "SKIPPED"),
+        ("k_one_failed", TriggerRule.ANY_FAILED, "SUCCEEDED"),
         ("k_none_failed", TriggerRule.NONE_FAILED, "SKIPPED"),
     ]
 

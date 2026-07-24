@@ -67,9 +67,9 @@ def _trigger_passes(rule, statuses: list[TaskStatus]) -> bool:
         return len(statuses) > 0 and all(s is TaskStatus.FAILED for s in statuses)
     if rule is TriggerRule.ALL_DONE:
         return True
-    if rule is TriggerRule.ONE_SUCCESS:
+    if rule is TriggerRule.ANY_SUCCESS:
         return has_succeeded
-    if rule is TriggerRule.ONE_FAILED:
+    if rule is TriggerRule.ANY_FAILED:
         return has_failed
     if rule is TriggerRule.NONE_FAILED:
         return not has_failed

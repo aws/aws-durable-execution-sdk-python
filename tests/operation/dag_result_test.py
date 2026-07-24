@@ -12,6 +12,7 @@ from aws_durable_execution_sdk_python.dag import (
     DagCompletionReason,
     SkipReason,
     TaskExecution,
+    TaskHandle,
     TaskStatus,
 )
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
@@ -44,6 +45,10 @@ def test_accessors():
     assert r.total_count == 3
     assert r.get_status("a") is TaskStatus.SUCCEEDED
     assert r.get_result("a") == {"v": 1}
+    # C3: a TaskHandle arg resolves by its name (typed path), same as string.
+    handle: TaskHandle = TaskHandle(_name="a", _dag=None)
+    assert r.get_result(handle) == {"v": 1}
+    assert r.get_status(handle) is TaskStatus.SUCCEEDED
     assert r.get_status("missing") is None
     assert [t.name for t in r.succeeded()] == ["a"]
     assert [t.name for t in r.failed()] == ["b"]

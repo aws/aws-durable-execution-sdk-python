@@ -64,8 +64,8 @@ class TriggerRule(Enum):
     ALL_SUCCESS = "ALL_SUCCESS"  # default: run only if every dep SUCCEEDED
     ALL_FAILED = "ALL_FAILED"  # run only if every dep FAILED (and there is >=1)
     ALL_DONE = "ALL_DONE"  # run once every dep is terminal, regardless of outcome
-    ONE_SUCCESS = "ONE_SUCCESS"  # run if at least one dep SUCCEEDED
-    ONE_FAILED = "ONE_FAILED"  # run if at least one dep FAILED
+    ANY_SUCCESS = "ANY_SUCCESS"  # run if at least one dep SUCCEEDED
+    ANY_FAILED = "ANY_FAILED"  # run if at least one dep FAILED
     NONE_FAILED = "NONE_FAILED"  # run if no dep FAILED (SUCCEEDED/SKIPPED allowed)
 
 
@@ -434,6 +434,10 @@ class DagResult(ABC):
        in future releases.
     """
 
+    @overload
+    def get_result(self, task: TaskHandle[T]) -> T: ...  # pragma: no cover
+    @overload
+    def get_result(self, task: str) -> Any: ...  # pragma: no cover
     @abstractmethod
     def get_result(self, task: str | TaskHandle[Any]) -> Any: ...  # pragma: no cover
 

@@ -38,14 +38,14 @@ EMPTY: list[TaskStatus] = []
         (TriggerRule.ALL_DONE, MIXED, True),
         (TriggerRule.ALL_DONE, INCLUDES_SKIP, True),
         (TriggerRule.ALL_DONE, EMPTY, True),
-        # ONE_SUCCESS
-        (TriggerRule.ONE_SUCCESS, MIXED, True),
-        (TriggerRule.ONE_SUCCESS, ALL_FAIL, False),
-        (TriggerRule.ONE_SUCCESS, EMPTY, False),
-        # ONE_FAILED
-        (TriggerRule.ONE_FAILED, MIXED, True),
-        (TriggerRule.ONE_FAILED, ALL_SUCC, False),
-        (TriggerRule.ONE_FAILED, EMPTY, False),
+        # ANY_SUCCESS
+        (TriggerRule.ANY_SUCCESS, MIXED, True),
+        (TriggerRule.ANY_SUCCESS, ALL_FAIL, False),
+        (TriggerRule.ANY_SUCCESS, EMPTY, False),
+        # ANY_FAILED
+        (TriggerRule.ANY_FAILED, MIXED, True),
+        (TriggerRule.ANY_FAILED, ALL_SUCC, False),
+        (TriggerRule.ANY_FAILED, EMPTY, False),
         # NONE_FAILED
         (TriggerRule.NONE_FAILED, ALL_SUCC, True),
         (TriggerRule.NONE_FAILED, INCLUDES_SKIP, True),

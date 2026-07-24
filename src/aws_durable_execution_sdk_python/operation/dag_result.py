@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from aws_durable_execution_sdk_python.concurrency import (
     BatchResult,
@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from aws_durable_execution_sdk_python.serdes import SerDesContext
+
+T = TypeVar("T")
 
 # result_kind discriminators
 _KIND_PLAIN = "plain"
@@ -79,8 +81,17 @@ class DagResultImpl(DagResult):
         self._total_count = total_count if total_count is not None else len(results)
 
     # region accessors
+    @overload
+    def get_result(self, task: TaskHandle[T]) -> T: ...
+    @overload
+    def get_result(self, task: str) -> Any: ...
     def get_result(self, task: str | TaskHandle[Any]) -> Any:
-        """Return a task's result (or ``None`` if absent / not succeeded)."""
+        """Return a task's result (or ``None`` if absent / not succeeded).
+
+        Passing the originating :class:`TaskHandle` preserves the task's result
+        type for static typing (``get_result(handle) -> T``); passing a name
+        string returns ``Any``. Both resolve by task name at runtime.
+        """
         te = self._results.get(_name_of(task))
         return te.result if te else None
 
