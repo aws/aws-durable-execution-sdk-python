@@ -34,13 +34,13 @@ class AttemptPlugin(DurableInstrumentationPlugin):
     def on_user_function_start(self, info: UserFunctionStartInfo) -> None:
         if not _is_step(info):
             return
-        print(f"CONFPLUGIN attempt-start n={info.attempt}", flush=True)
+        print(f"CONFPLUGIN attempt-start n={info.attempt} op={info.operation_id}", flush=True)
 
     def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
         if not _is_step(info):
             return
         print(
-            f"CONFPLUGIN attempt-end n={info.attempt} outcome={info.outcome.name}",
+            f"CONFPLUGIN attempt-end n={info.attempt} outcome={info.outcome.name} op={info.operation_id}",
             flush=True,
         )
 

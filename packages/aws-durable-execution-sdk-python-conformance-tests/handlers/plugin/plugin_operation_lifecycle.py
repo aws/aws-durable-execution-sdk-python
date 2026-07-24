@@ -28,13 +28,13 @@ class OperationLifecyclePlugin(DurableInstrumentationPlugin):
     def on_operation_start(self, info: OperationStartInfo) -> None:
         if not _is_step(info):
             return
-        print("CONFPLUGIN operation-start", flush=True)
+        print(f"CONFPLUGIN operation-start op={info.operation_id}", flush=True)
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
         if not _is_step(info):
             return
         status = info.status.name if info.status is not None else "NONE"
-        print(f"CONFPLUGIN operation-end status={status}", flush=True)
+        print(f"CONFPLUGIN operation-end op={info.operation_id} status={status}", flush=True)
 
 
 @durable_step
