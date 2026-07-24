@@ -175,6 +175,8 @@ class DagContextImpl(DagContext):
         task_name = _resolve_name(name, payload_fn)
 
         def executor(ctx: DurableContext, deps_map: DepsMap):
+            from aws_durable_execution_sdk_python.config import InvokeConfig
+
             payload = payload_fn(deps_map) if callable(payload_fn) else payload_fn
             return InvokeOperationExecutor(
                 function_name=function_name,
@@ -186,7 +188,7 @@ class DagContextImpl(DagContext):
                     parent_id=ctx._parent_id,
                     name=task_name,
                 ),
-                config=config,
+                config=config or InvokeConfig(),
             ).process()
 
         return self._add(
@@ -207,7 +209,7 @@ class DagContextImpl(DagContext):
             def body(child: DurableContext):
                 return wait_for_callback_handler(
                     child,
-                    lambda cb_id: submitter(deps_map, cb_id, child),
+                    lambda cb_id, cb_ctx: submitter(deps_map, cb_id, cb_ctx),
                     task_name,
                     config,
                 )
