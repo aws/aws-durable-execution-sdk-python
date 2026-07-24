@@ -258,6 +258,58 @@ class DurableContext(LambdaContext, DurableContextProtocol):
             f"{self._parent_id}-{new_counter}" if self._parent_id else str(new_counter)
         )
 
+    # region DAG (experimental)
+    def _create_task_id(self, name: str) -> str:
+        """Generate a deterministic, name-based operation id for a DAG task.
+
+        Unlike :meth:`_create_step_id`, this does NOT touch the per-context
+        counter, so the id is independent of run-time task-completion ordering
+        (which can vary across replays). The reserved ``DAG_NODE_T_`` token keeps
+        DAG task ids disjoint from counter-based sibling ids: a counter id is
+        ``{prefix}-{int}`` while a task id is ``{prefix}-DAG_NODE_T_{name}``
+        (the segment after ``{prefix}-`` starts with a letter, never a digit).
+        The container prefix is this context's ``parent_id`` (the DAG container's
+        own operation id when the scheduler runs inside the DAG child context).
+
+        .. warning::
+           **Experimental.** Internal implementation detail; the id format is
+           subject to change without notice.
+        """
+        prefix = self._parent_id
+        return f"{prefix}-DAG_NODE_T_{name}" if prefix else f"DAG_NODE_T_{name}"
+
+    def _run_step_with_task_id(
+        self,
+        name: str,
+        func: Callable[[StepContext], T],
+        config: StepConfig | None = None,
+    ) -> T:
+        """Run a step under a name-based (DAG) operation id.
+
+        This is the explicit-id seam used by the DAG scheduler: it builds an
+        :class:`OperationIdentifier` from :meth:`_create_task_id` and calls the
+        step handler directly. It relies on the handler's checkpoint fast path
+        (keyed on the explicit operation id) for replay correctness rather than
+        on the per-context counter. Mirrors the order-independent child-id
+        pattern that ``concurrency`` already uses for map/parallel branches.
+
+        .. warning::
+           **Experimental.** Internal implementation detail.
+        """
+        return step_handler(
+            func=func,
+            config=config,
+            state=self.state,
+            operation_identifier=OperationIdentifier(
+                operation_id=self._create_task_id(name),
+                parent_id=self._parent_id,
+                name=name,
+            ),
+            context_logger=self.logger,
+        )
+
+    # endregion DAG (experimental)
+
     # region Operations
 
     def create_callback(
