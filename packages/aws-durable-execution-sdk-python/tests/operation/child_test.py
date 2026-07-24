@@ -15,6 +15,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     DurableApiErrorCategory,
     ExecutionError,
     InvocationError,
+    StepError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -470,6 +471,75 @@ def test_child_handler_non_retryable_invocation_error_wrapped():
     fail_call = mock_state.create_checkpoint.call_args_list[1]
     fail_operation = fail_call[1]["operation_update"]
     assert fail_operation.action is OperationAction.FAIL
+
+
+def test_child_handler_preserves_data_across_nested_boundaries():
+    """Error data and stack_trace survive >=2 nested run_in_child_context
+    boundaries.
+
+    Each boundary carries the escaping error's data and stack_trace forward,
+    both on the raised ChildContextError and on the FAIL checkpoint that a
+    replay reconstructs from.
+    """
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_result = Mock()
+    mock_result.is_succeeded.return_value = False
+    mock_result.is_failed.return_value = False
+    mock_result.is_started.return_value = False
+    mock_result.is_replay_children.return_value = False
+    mock_result.is_existent.return_value = False
+    mock_state.get_checkpoint_result.return_value = mock_result
+    # Return each function unchanged so both nested bodies actually run.
+    mock_state.wrap_user_function.side_effect = lambda func, *args, **kwargs: func
+
+    # Innermost failure carries a serialized payload and stack trace, as an
+    # operation error reconstructed from a checkpoint would.
+    inner_error: StepError = StepError(
+        "inner step failed",
+        error_type="ValueError",
+        data="serialized-payload",
+        stack_trace=["frame-a", "frame-b"],
+    )
+
+    def inner_body():
+        raise inner_error
+
+    def outer_body():
+        return child_handler(
+            inner_body,
+            mock_state,
+            OperationIdentifier(
+                "inner", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "inner_name"
+            ),
+            None,
+        )
+
+    with pytest.raises(ChildContextError) as exc_info:
+        child_handler(
+            outer_body,
+            mock_state,
+            OperationIdentifier(
+                "outer", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "outer_name"
+            ),
+            None,
+        )
+
+    # Data and stack_trace survive both boundaries on the surfaced error.
+    assert exc_info.value.data == "serialized-payload"
+    assert exc_info.value.stack_trace == ["frame-a", "frame-b"]
+
+    # Both FAIL checkpoints (inner and outer) recorded the same payload, so the
+    # value also survives a replay that rebuilds from either checkpoint.
+    fail_operations = [
+        call.kwargs["operation_update"]
+        for call in mock_state.create_checkpoint.call_args_list
+        if call.kwargs["operation_update"].action is OperationAction.FAIL
+    ]
+    assert len(fail_operations) == 2
+    for fail_operation in fail_operations:
+        assert fail_operation.error.data == "serialized-payload"
+        assert fail_operation.error.stack_trace == ["frame-a", "frame-b"]
 
 
 def test_child_handler_with_config():
