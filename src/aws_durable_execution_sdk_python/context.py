@@ -548,5 +548,36 @@ class DurableContext(LambdaContext, DurableContextProtocol):
             context_logger=self.logger,
         )
 
+    def dag(
+        self,
+        register: Callable[[Any], None],
+        name: str | None = None,
+        config: Any = None,
+    ) -> Any:
+        """Declare and run a DAG of tasks, returning a ``DagResult`` synchronously.
+
+        ``register`` is a synchronous, deterministic callback that declares tasks
+        on the provided ``DagContext``. The runtime then validates the graph and
+        schedules tasks topologically, running independent chains concurrently.
+
+        .. warning::
+           **Experimental.** This API is experimental and may be changed or
+           removed in future releases. First use emits a ``FutureWarning``.
+        """
+        from aws_durable_execution_sdk_python.operation.dag import (
+            dag_handler,
+            emit_experimental_warning_once,
+        )
+
+        emit_experimental_warning_once()
+        resolved_name: str | None = self._resolve_step_name(name, register)
+        return dag_handler(
+            run_in_child_context=self.run_in_child_context,
+            state=self.state,
+            name=resolved_name,
+            register=register,
+            config=config,
+        )
+
 
 # endregion Operations
