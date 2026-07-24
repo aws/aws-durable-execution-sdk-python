@@ -496,19 +496,32 @@ class DurableContext(DurableContextProtocol):
         Unlike :meth:`_create_step_id`, this does NOT touch the per-context
         counter, so the id is independent of run-time task-completion ordering
         (which can vary across replays). The reserved ``DAG_NODE_T_`` token keeps
-        DAG task ids disjoint from counter-based sibling ids: counter ids are
-        opaque blake2b hex digests (``[0-9a-f]{64}``) while a task id is the
-        plain string ``{prefix}-DAG_NODE_T_{name}`` (uppercase + underscore, so
-        it can never equal a lowercase-hex digest). The container prefix is this
-        context's ``parent_id`` (the DAG container's own operation id when the
-        scheduler runs inside the DAG child context).
+        the *pre-image* of a DAG task id disjoint from counter-based sibling
+        pre-images: counter pre-images are ``{prefix}-{int}`` while a task
+        pre-image is ``{prefix}-DAG_NODE_T_{name}`` (uppercase + underscore, so
+        it can never equal a ``{prefix}-{int}`` counter pre-image). The container
+        prefix is this context's ``parent_id`` (the DAG container's own operation
+        id when the scheduler runs inside the DAG child context).
+
+        The composed name-based pre-image is then fed through the SAME
+        ``blake2b(...).hexdigest()[:64]`` bounding the core applies to ordinary
+        counter operation ids (see :meth:`_create_step_id_for_logical_step`), so
+        the final backend operation id is a fixed 64-hex-char digest. This keeps
+        the id within the backend's 64-char ``updates[].id`` limit while
+        preserving determinism, injectivity (distinct pre-image => distinct
+        digest w.h.p.), and name-based replay stability (same ``(scope, name)``
+        => same digest on every replay). Nested DAGs re-hash per level: a nested
+        container's digest becomes the child scope's ``parent_id`` prefix.
 
         .. warning::
            **Experimental.** Internal implementation detail; the id format is
            subject to change without notice.
         """
         prefix = self._parent_id
-        return f"{prefix}-DAG_NODE_T_{name}" if prefix else f"DAG_NODE_T_{name}"
+        logical_id = (
+            f"{prefix}-DAG_NODE_T_{name}" if prefix else f"DAG_NODE_T_{name}"
+        )
+        return hashlib.blake2b(logical_id.encode()).hexdigest()[:64]
 
     def _run_step_with_task_id(
         self,

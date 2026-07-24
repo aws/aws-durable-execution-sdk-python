@@ -42,9 +42,18 @@ def test_container_checkpointed_with_dag_subtype_and_serialized_result():
         o for o in client.operations.values() if o.sub_type is OperationSubType.DAG
     )
     assert container.sub_type is OperationSubType.DAG
-    # step task checkpointed under a DAG_NODE_T_ id (prefixed by the hashed
-    # container id in the current core, so match by suffix)
-    assert any(k.endswith("-DAG_NODE_T_a") for k in client.operations)
+    # step task checkpointed under a name-based id: the {parent}-DAG_NODE_T_{name}
+    # pre-image, blake2b-bounded to <=64 hex (backend id-length limit).
+    import hashlib
+
+    task_a = next(
+        o
+        for o in client.operations.values()
+        if o.name == "a" and o.sub_type is not OperationSubType.DAG
+    )
+    preimage = f"{task_a.parent_id}-DAG_NODE_T_a"
+    assert task_a.operation_id == hashlib.blake2b(preimage.encode()).hexdigest()[:64]
+    assert len(task_a.operation_id) <= 64
     # the serialized container payload round-trips to an equal DagResult
     payload = container.context_details.result
     restored = create_dag_result_serdes().deserialize(payload, None)
@@ -88,8 +97,8 @@ def test_interrupt_and_resume():
         make_context(state).dag(register, name="p")
     assert side["a"] == 1  # a completed and checkpointed
     assert side["work"] == 0  # work never scheduled (gate not terminal)
-    # skipped task minted no checkpoint
-    assert "1-DAG_NODE_T_skipme" not in client.operations
+    # skipped task minted no checkpoint (no operation carries its name)
+    assert not any(o.name == "skipme" for o in client.operations.values())
 
     # run 2: gate now succeeds
     control["suspend"] = False
@@ -98,7 +107,7 @@ def test_interrupt_and_resume():
     assert side["work"] == 1  # remaining task ran exactly once
     assert result.get_result("work") == "done"
     assert result.get_status("skipme") is TaskStatus.SKIPPED
-    assert "1-DAG_NODE_T_skipme" not in client.operations
+    assert not any(o.name == "skipme" for o in client.operations.values())
 
 
 def test_large_payload_reexecutes_to_equal_result():

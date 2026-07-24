@@ -17,6 +17,7 @@ per spec §2.8.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -58,29 +59,54 @@ def _fail(_deps: Any, _sc: Any) -> Any:
 def _structural_checks(client: InMemoryServiceClient) -> dict[str, bool]:
     """Compute the four per-language structural entity-ID invariants.
 
-    Task ops are exactly the operations whose id contains the reserved
-    ``DAG_NODE_T_`` delimiter; counter/other ops never do. For the empty DAG
-    there are no task ops, so all four are vacuously ``true``.
+    Per the conformance catalog (Part A, note 2), hashes are NOT expected to
+    match across languages and the invariants MUST be proven on each SDK's own
+    *pre-image*. Python re-hashes per level: a task's backend id is
+    ``blake2b(f"{parent}-DAG_NODE_T_{name}")[:64]``. A task op is therefore any
+    operation whose id equals that recomputation from its ``(parent_id, name)``;
+    counter ops (e.g. the top-level DAG container) never match. For the empty
+    DAG there are no task ops, so all four are vacuously ``true``.
     """
-    task_ids = [oid for oid in client.operations if "DAG_NODE_T_" in oid]
-    counter_ids = [oid for oid in client.operations if "DAG_NODE_T_" not in oid]
-    if not task_ids:
+
+    def task_preimage(op: Any) -> str:
+        return (
+            f"{op.parent_id}-DAG_NODE_T_{op.name}"
+            if op.parent_id
+            else f"DAG_NODE_T_{op.name}"
+        )
+
+    def is_task(op: Any) -> bool:
+        if op.name is None:
+            return False
+        digest = hashlib.blake2b(task_preimage(op).encode()).hexdigest()[:64]
+        return digest == op.operation_id
+
+    ops = list(client.operations.values())
+    task_ops = [op for op in ops if is_task(op)]
+    counter_ids = [op.operation_id for op in ops if not is_task(op)]
+    if not task_ops:
         return {
             "name_based": True,
             "has_delimiter": True,
             "dash_free": True,
             "disjoint_from_counter": True,
         }
-    short_names = [oid.split("DAG_NODE_T_")[-1] for oid in task_ids]
+    # name_based: id is exactly the blake2b bound of the name-based pre-image.
     name_based = all(
-        client.operations[oid].name == oid.split("DAG_NODE_T_")[-1]
-        for oid in task_ids
+        op.operation_id
+        == hashlib.blake2b(task_preimage(op).encode()).hexdigest()[:64]
+        for op in task_ops
     )
-    has_delimiter = all("DAG_NODE_T_" in oid for oid in task_ids)
-    dash_free = all(_NAME_CHARSET.fullmatch(s) is not None for s in short_names)
-    disjoint = set(task_ids).isdisjoint(counter_ids) and all(
-        "DAG_NODE_T_" not in cid for cid in counter_ids
+    # has_delimiter: the pre-image carries the reserved token once per level.
+    has_delimiter = all(task_preimage(op).count("DAG_NODE_T_") >= 1 for op in task_ops)
+    # dash_free: task names contain no dash and not the reserved token.
+    dash_free = all(
+        _NAME_CHARSET.fullmatch(op.name) is not None
+        and "DAG_NODE_T_" not in op.name
+        for op in task_ops
     )
+    # disjoint_from_counter: task ids never collide with counter ids.
+    disjoint = {op.operation_id for op in task_ops}.isdisjoint(counter_ids)
     return {
         "name_based": name_based,
         "has_delimiter": has_delimiter,
