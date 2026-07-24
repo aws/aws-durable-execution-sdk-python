@@ -218,13 +218,23 @@ good reason to break pattern.
    it easier for you to spot mistaken assumptions that the LLMs might make about the code. The other reason is that it makes the
    experience of developers much easier with intelligent and context-aware autocomplete hints in an IDE.
 
-4. Declare a type definition wherever you declare a variable, even within a function scope and even where it's implied. For example,
-   even though the `str` might be _implied_ because of the `call` return type, make it explicit:
+4. Annotate function and method parameters and return types, including `-> None`, so that mypy checks their bodies. For local
+   variables, rely on type inference when it is precise and evident from the initializer:
 
-```
+```python
 def my_function() -> str:
-  my_var: str = arb.call(1, 2, 3)
-  return f"arb result: {my_var}"
+    my_var = arb.call(1, 2, 3)
+    return f"arb result: {my_var}"
+```
+
+   Add an explicit local annotation when inference is unavailable, produces `Any`, is too narrow for the intended use, or when
+   the annotation expresses an intentional contract that is not evident from the initializer. Common examples include empty
+   collections, values initialized with `None`, and values returned by untyped dependencies:
+
+```python
+results: list[str] = []
+response: Response | None = None
+payload: Payload = untyped_dependency.load()
 ```
 
 5. To update a field in a frozen dataclass, prefer to use a `clone` or `with_field` class method constructor or reinitialization,
@@ -572,3 +582,20 @@ If you discover a potential security issue in this project we ask that you notif
 ## Licensing
 
 See the [LICENSE](LICENSE) file for our project's licensing. We will ask you to confirm the licensing of your contribution.
+
+## References
+
+- [Amazon Open Source Code of Conduct](https://aws.github.io/code-of-conduct) and
+  [Code of Conduct FAQ](https://aws.github.io/code-of-conduct-faq)
+- [AWS SAM remote execution command reference](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-cli-command-reference-sam-remote-execution.html)
+- [AWS Security vulnerability reporting](http://aws.amazon.com/security/vulnerability-reporting/)
+- [boto3 documentation](https://boto3.amazonaws.com/)
+- [Conventional Commits](https://www.conventionalcommits.org/)
+- GitHub documentation for [forking a repository](https://help.github.com/articles/fork-a-repo/) and
+  [creating a pull request](https://help.github.com/articles/creating-a-pull-request/)
+- [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html), including its
+  [guidance for internal variables](https://google.github.io/styleguide/pyguide.html#typing-variables)
+- [Hatch installation guide](https://hatch.pypa.io/dev/install/)
+- [Mypy type inference documentation](https://mypy.readthedocs.io/en/stable/type_inference_and_annotations.html#type-inference)
+- [Ruff documentation](https://docs.astral.sh/ruff/) and
+  [Ruff extension for Visual Studio Code](https://github.com/astral-sh/ruff-vscode)
