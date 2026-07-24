@@ -57,7 +57,7 @@ def _to_otel_timestamp(dt: datetime.datetime | None) -> int | None:
     return int(dt.timestamp() * 1_000_000_000)
 
 
-class OtelPlugin(DurableInstrumentationPlugin):
+class InvocationOtelPlugin(DurableInstrumentationPlugin):
     """OpenTelemetry instrumentation plugin for durable executions.
 
     The plugin creates spans for Lambda invocations, durable operations, and
@@ -120,7 +120,7 @@ class OtelPlugin(DurableInstrumentationPlugin):
             self._provider.id_generator = self._id_generator
         else:
             logger.warning(
-                "OtelPlugin expected an SDK TracerProvider "
+                "InvocationOtelPlugin expected an SDK TracerProvider "
                 "(opentelemetry.sdk.trace.TracerProvider) but got %s. Spans will "
                 "not use deterministic IDs. "
                 "Ensure the OpenTelemetry SDK is configured (e.g. via the ADOT "

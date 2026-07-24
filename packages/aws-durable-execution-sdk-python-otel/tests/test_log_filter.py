@@ -22,7 +22,7 @@ from aws_durable_execution_sdk_python_otel.log_filter import (
     OtelContextLogFilter,
     install_log_filter,
 )
-from aws_durable_execution_sdk_python_otel.plugin import OtelPlugin
+from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -31,12 +31,12 @@ EXECUTION_ARN = "arn:aws:lambda:us-west-2:123456789012:function:workflow:$LATEST
 
 def _create_plugin(
     enrich_logger: bool = True,
-) -> tuple[OtelPlugin, InMemorySpanExporter]:
+) -> tuple[InvocationOtelPlugin, InMemorySpanExporter]:
     """Create a plugin wired to an in-memory span exporter."""
     exporter = InMemorySpanExporter()
     trace_provider = TracerProvider()
     trace_provider.add_span_processor(SimpleSpanProcessor(exporter))
-    plugin = OtelPlugin(
+    plugin = InvocationOtelPlugin(
         trace_provider=trace_provider,
         context_extractor=lambda _: Context(),
         enrich_logger=enrich_logger,

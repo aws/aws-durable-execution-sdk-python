@@ -18,13 +18,24 @@ unmodified, so any log formatter or schema must treat the fields as optional.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from opentelemetry.trace import TraceFlags
 
 
 if TYPE_CHECKING:
-    from aws_durable_execution_sdk_python_otel.plugin import OtelPlugin
+    from opentelemetry.trace import SpanContext
+
+
+class _SpanContextProvider(Protocol):
+    """Structural type for any plugin that resolves the active span context.
+
+    The log filter only needs this one capability, so it accepts any object
+    that provides it (e.g. ``InvocationOtelPlugin`` or ``ExecutionOtelPlugin``)
+    rather than a specific plugin class.
+    """
+
+    def get_current_span_context(self) -> SpanContext | None: ...
 
 
 class OtelContextLogFilter(logging.Filter):
@@ -44,7 +55,7 @@ class OtelContextLogFilter(logging.Filter):
         plugin: The OTel plugin instance that resolves the current span context.
     """
 
-    def __init__(self, plugin: OtelPlugin) -> None:
+    def __init__(self, plugin: _SpanContextProvider) -> None:
         super().__init__()
         self._plugin = plugin
 
@@ -61,7 +72,7 @@ class OtelContextLogFilter(logging.Filter):
 
 
 def install_log_filter(
-    plugin: OtelPlugin,
+    plugin: _SpanContextProvider,
     target_logger: logging.Logger | None = None,
 ) -> OtelContextLogFilter | None:
     """Attach an OtelContextLogFilter to a logger's handlers, idempotently.

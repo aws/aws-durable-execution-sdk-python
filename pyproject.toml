@@ -49,6 +49,8 @@ extra-dependencies = [
   "pytest",
   "boto3-stubs[lambda]",
   "opentelemetry-sdk>=1.20.0,<=1.42.1",
+  "opentelemetry-instrumentation-botocore",
+  "opentelemetry-instrumentation-urllib3",
 ]
 
 [tool.hatch.envs.types.scripts]
