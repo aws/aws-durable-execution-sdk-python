@@ -237,9 +237,6 @@ response: Response | None = None
 payload: Payload = untyped_dependency.load()
 ```
 
-   This follows [mypy's documented type inference](https://mypy.readthedocs.io/en/stable/type_inference_and_annotations.html#type-inference)
-   and the [Google Python Style Guide's guidance for internal variables](https://google.github.io/styleguide/pyguide.html#typing-variables).
-
 5. To update a field in a frozen dataclass, prefer to use a `clone` or `with_field` class method constructor or reinitialization,
    rather than dataclass `replace`. There is no big technical reason for this, it's more a soft pattern. The philosophy of an update
    should be more about thoughfully and purposefully creating a _new_ instance than "in-place editing" an existing one.
@@ -585,3 +582,20 @@ If you discover a potential security issue in this project we ask that you notif
 ## Licensing
 
 See the [LICENSE](LICENSE) file for our project's licensing. We will ask you to confirm the licensing of your contribution.
+
+## References
+
+- [Amazon Open Source Code of Conduct](https://aws.github.io/code-of-conduct) and
+  [Code of Conduct FAQ](https://aws.github.io/code-of-conduct-faq)
+- [AWS SAM remote execution command reference](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-cli-command-reference-sam-remote-execution.html)
+- [AWS Security vulnerability reporting](http://aws.amazon.com/security/vulnerability-reporting/)
+- [boto3 documentation](https://boto3.amazonaws.com/)
+- [Conventional Commits](https://www.conventionalcommits.org/)
+- GitHub documentation for [forking a repository](https://help.github.com/articles/fork-a-repo/) and
+  [creating a pull request](https://help.github.com/articles/creating-a-pull-request/)
+- [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html), including its
+  [guidance for internal variables](https://google.github.io/styleguide/pyguide.html#typing-variables)
+- [Hatch installation guide](https://hatch.pypa.io/dev/install/)
+- [Mypy type inference documentation](https://mypy.readthedocs.io/en/stable/type_inference_and_annotations.html#type-inference)
+- [Ruff documentation](https://docs.astral.sh/ruff/) and
+  [Ruff extension for Visual Studio Code](https://github.com/astral-sh/ruff-vscode)
