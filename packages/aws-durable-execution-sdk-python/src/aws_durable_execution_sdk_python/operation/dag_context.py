@@ -29,7 +29,6 @@ from aws_durable_execution_sdk_python.operation.child import child_handler
 from aws_durable_execution_sdk_python.operation.invoke import InvokeOperationExecutor
 from aws_durable_execution_sdk_python.operation.map import map_handler
 from aws_durable_execution_sdk_python.operation.parallel import parallel_handler
-from aws_durable_execution_sdk_python.operation.wait import WaitOperationExecutor
 from aws_durable_execution_sdk_python.operation.wait_for_condition import (
     WaitForConditionOperationExecutor,
 )
@@ -162,8 +161,22 @@ class DagContextImpl(DagContext):
         cfg = config or self._default_step_config()
 
         def executor(ctx: DurableContext, deps_map: DepsMap):
-            return ctx._run_step_with_task_id(
-                task_name, lambda step_ctx: func(deps_map, step_ctx), cfg
+            # Materialize the task as a DagTask CONTEXT op (name-based id,
+            # parented to the Dag container) and run the inner step nested one
+            # level beneath it (child, counter-based id).
+            return self._run_child(
+                ctx,
+                task_name,
+                lambda child: child.step(
+                    lambda step_ctx: func(deps_map, step_ctx),
+                    name=task_name,
+                    config=cfg,
+                ),
+                ChildConfig(
+                    sub_type=OperationSubType.DAG_TASK,
+                    serdes=cfg.serdes if cfg else None,
+                ),
+                OperationSubType.DAG_TASK,
             )
 
         return self._add(task_name, "step", deps, trigger_rule, run_if, cfg, executor)
@@ -236,16 +249,20 @@ class DagContextImpl(DagContext):
         task_name = name
 
         def executor(ctx: DurableContext, deps_map: DepsMap):
-            return WaitOperationExecutor(
-                seconds=seconds,
-                state=ctx.state,
-                operation_identifier=OperationIdentifier(
-                    operation_id=ctx._create_task_id(task_name),
-                    sub_type=OperationSubType.WAIT,
-                    parent_id=ctx._parent_id,
-                    name=task_name,
+            from aws_durable_execution_sdk_python.config import Duration
+
+            # Materialize the task as a DagTask CONTEXT op with the wait nested
+            # one level beneath it. The name-based DagTask id is stable across
+            # the suspend/resume boundary so the nested wait replays deterministically.
+            return self._run_child(
+                ctx,
+                task_name,
+                lambda child: child.wait(
+                    Duration.from_seconds(seconds), name=task_name
                 ),
-            ).process()
+                ChildConfig(sub_type=OperationSubType.DAG_TASK),
+                OperationSubType.DAG_TASK,
+            )
 
         return self._add(task_name, "wait", deps, trigger_rule, run_if, None, executor)
 

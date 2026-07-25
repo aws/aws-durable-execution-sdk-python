@@ -56,26 +56,49 @@ def test_no_collision_with_counter_ids():
     assert task_id == _task_digest("c", "1")
 
 
-def test_seam_checkpoints_under_task_id_and_fast_path_on_replay():
-    """Drive one explicit-id step through the seam; confirm checkpoint id and fast path."""
-    state, client = make_state()
-    ctx = make_context(state, parent_id="dagc")
+def test_step_task_materializes_dagtask_and_fast_path_on_replay():
+    """A DAG step task materializes as a DagTask CONTEXT op (name-based id) with
+    its inner Step nested beneath, and on replay hits the checkpoint fast path.
 
+    Replaces the pre-conformance flat seam assertion (step checkpointed directly
+    under the container with no wrapper) with the canonical
+    Dag -> DagTask -> Step structure that matches the cross-language contract.
+    """
+    from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+
+    state, client = make_state()
     calls = {"n": 0}
 
-    def body(_step_ctx):
-        calls["n"] += 1
-        return "value"
+    def register(d):
+        d.step(
+            lambda deps, sc: calls.__setitem__("n", calls["n"] + 1) or "value",
+            name="mytask",
+        )
 
-    # first call runs and checkpoints under the name-based id
-    result = ctx._run_step_with_task_id("mytask", body)
-    assert result == "value"
+    # first run: task runs once and materializes the DagTask + nested step
+    result = make_context(state).dag(register, name="p")
+    assert result.get_result("mytask") == "value"
     assert calls["n"] == 1
-    assert _task_digest("dagc", "mytask") in client.operations
 
-    # second call (simulated replay) hits the checkpoint fast path, no re-exec
-    result2 = ctx._run_step_with_task_id("mytask", body)
-    assert result2 == "value"
+    dag_task = next(
+        o
+        for o in client.operations.values()
+        if o.name == "mytask" and o.sub_type is OperationSubType.DAG_TASK
+    )
+    # DagTask id is the name-based digest under its parent (the Dag container)
+    assert dag_task.operation_id == _task_digest(dag_task.parent_id, "mytask")
+    inner_step = next(
+        o
+        for o in client.operations.values()
+        if o.name == "mytask" and o.sub_type is OperationSubType.STEP
+    )
+    # the inner step nests one level beneath the DagTask (distinct child id)
+    assert inner_step.parent_id == dag_task.operation_id
+    assert inner_step.operation_id != dag_task.operation_id
+
+    # second run (simulated replay): DagTask fast-path, inner step not re-executed
+    result2 = make_context(state).dag(register, name="p")
+    assert result2.get_result("mytask") == "value"
     assert calls["n"] == 1  # not re-executed
 
 

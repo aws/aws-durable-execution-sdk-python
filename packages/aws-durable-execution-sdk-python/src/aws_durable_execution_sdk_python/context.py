@@ -523,38 +523,6 @@ class DurableContext(DurableContextProtocol):
         )
         return hashlib.blake2b(logical_id.encode()).hexdigest()[:64]
 
-    def _run_step_with_task_id(
-        self,
-        name: str,
-        func: Callable[[StepContext], T],
-        config: StepConfig | None = None,
-    ) -> T:
-        """Run a step under a name-based (DAG) operation id.
-
-        This is the explicit-id seam used by the DAG scheduler: it builds an
-        :class:`OperationIdentifier` from :meth:`_create_task_id` and drives the
-        step executor directly. It relies on the executor's checkpoint fast path
-        (keyed on the explicit operation id) for replay correctness rather than
-        on the per-context counter. Mirrors the order-independent child-id
-        pattern that ``concurrency`` already uses for map/parallel branches.
-
-        .. warning::
-           **Experimental.** Internal implementation detail.
-        """
-        executor: StepOperationExecutor[T] = StepOperationExecutor(
-            func=func,
-            config=config or StepConfig(),
-            state=self.state,
-            operation_identifier=OperationIdentifier(
-                operation_id=self._create_task_id(name),
-                sub_type=OperationSubType.STEP,
-                parent_id=self._parent_id,
-                name=name,
-            ),
-            context_logger=self.logger,
-        )
-        return executor.process()
-
     # endregion DAG (experimental)
 
     # region replay status
