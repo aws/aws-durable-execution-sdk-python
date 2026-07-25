@@ -4,9 +4,12 @@ Reuses the SDK's worker-thread primitives (``ThreadPoolExecutor``, the
 ``SuspendExecution`` protocol) but is a *separate* component from
 ``ConcurrentExecutor`` (which is hard-wired for the flat map/parallel shape).
 It gates task submission on dependency readiness, evaluates trigger rules and
-``run_if`` predicates, drains on failure by default (failure is a terminal
-state, not an abort), and computes DAG-global success/failure/skip counts,
-feeding only success+failure into the reused threshold ``CompletionConfig``.
+``run_if`` predicates, drains on task *failure* by default (a task body that
+raises is a terminal FAILED state, not an abort — spec §5.5), and computes
+DAG-global success/failure/skip counts, feeding only success+failure into the
+reused threshold ``CompletionConfig``. A ``run_if`` predicate that *raises* is
+different: it is a defect in deterministic code, so it aborts the DAG with
+``DagPredicateError`` rather than being recorded as a task failure.
 
 .. warning::
    **Experimental.** Internal implementation of the DAG scheduler.
@@ -30,6 +33,7 @@ from aws_durable_execution_sdk_python.dag import (
     TaskStatus,
 )
 from aws_durable_execution_sdk_python.exceptions import (
+    DagPredicateError,
     SuspendExecution,
     TimedSuspendExecution,
     ValidationError,
@@ -53,7 +57,6 @@ _TERMINAL = (TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.SKIPPED)
 # task scheduling decisions
 _RUN = "RUN"
 _SKIP = "SKIP"
-_FAIL = "FAIL"
 
 
 def _trigger_passes(rule, statuses: list[TaskStatus]) -> bool:
@@ -288,16 +291,11 @@ class DagExecutor:
                     if decision == _RUN:
                         self._in_flight.add(name)
                         to_submit.append((name, task))
-                    elif decision == _SKIP:
+                    else:  # _SKIP: trigger rule or run_if predicate returned False
                         self._results[name] = TaskExecution(
                             name=name, status=TaskStatus.SKIPPED, skip_reason=payload
                         )
                         self._skip += 1
-                    else:  # _FAIL: run_if raised — treat as task failure (drain)
-                        self._results[name] = TaskExecution(
-                            name=name, status=TaskStatus.FAILED, error=payload
-                        )
-                        self._failure += 1
                     progressed = True
             done = self._is_done_locked()
 
@@ -445,14 +443,23 @@ class DagExecutor:
         return True
 
     def _evaluate_locked(self, task: TaskDef) -> tuple[str, Any]:
-        """Decide a ready task's fate: ``(_RUN, None)``, ``(_SKIP, SkipReason)``
-        or ``(_FAIL, ErrorObject)``.
+        """Decide a ready task's fate: ``(_RUN, None)`` or ``(_SKIP, SkipReason)``.
 
         The trigger rule is a pure function of upstream enum statuses. ``run_if``
-        is user code: if it raises, we treat the task as FAILED (spec §5.5's
-        "raise ⇒ FAILED", drain model) rather than letting the exception escape
-        the scheduler. This keeps root and non-root ``run_if`` behaviour
-        identical and never hangs the scheduler.
+        is user-supplied code, but it is specified as a synchronous,
+        deterministic, pure predicate over resolved upstream results, not a
+        checkpointed operation. A ``run_if`` that raises is therefore a defect in
+        deterministic code, not a business outcome: we neither record the task
+        ``FAILED`` (which would silently drive every downstream ``ALL_FAILED`` /
+        ``ANY_FAILED`` / ``ALL_DONE`` compensation path off a scheduler defect)
+        nor ``SKIPPED``. Instead we raise :class:`DagPredicateError`, chaining the
+        original exception, so the whole DAG aborts and ``dag()`` fails loudly.
+        The offending task is left with no terminal state (it is never added to
+        ``self._results``). This is identical for root and non-root tasks. The
+        raise propagates out of ``_pump``: on the caller thread (first pump) it
+        leaves ``run()`` directly; on a worker/timer thread it is captured by
+        ``_safe_pump`` into ``self._scheduler_exception`` and re-raised by
+        ``run()`` after the pool drains.
         """
         statuses = [self._results[dep.name].status for dep in task.all_deps]
         if not _trigger_passes(task.trigger_rule, statuses):
@@ -461,8 +468,12 @@ class DagExecutor:
             deps_map = self._build_deps_map(task)
             try:
                 should_run = task.run_if(deps_map)
-            except Exception as e:  # noqa: BLE001
-                return (_FAIL, ErrorObject.from_exception(e))
+            except Exception as e:
+                msg = (
+                    f"run_if predicate for DAG task {task.name!r} raised "
+                    f"{type(e).__name__}: {e}"
+                )
+                raise DagPredicateError(msg, task_name=task.name) from e
             if not should_run:
                 return (_SKIP, SkipReason.RUN_IF_PREDICATE)
         return (_RUN, None)
@@ -523,6 +534,12 @@ class DagExecutor:
         )
 
     def _stopping_locked(self) -> bool:
+        # A captured scheduler exception (e.g. a run_if predicate raised and the
+        # DAG is aborting with DagPredicateError) stops all further scheduling:
+        # no new tasks start while the pool drains any in-flight work. Checked
+        # first so an abort is never downgraded by a threshold reason.
+        if self._scheduler_exception is not None:
+            return True
         # An indefinite suspend can only be resolved by the platform, so we stop
         # scheduling new work and drain (unchanged pre-timer behaviour). Timed
         # suspends do NOT stop the DAG: they are resumed in-process while other

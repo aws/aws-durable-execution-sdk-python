@@ -18,6 +18,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     DagExecutionError,
     DagInvalidDependencyError,
     DagInvalidTaskNameError,
+    DagPredicateError,
     ValidationError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -37,12 +38,17 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.dag import DagContext, DagResult
     from aws_durable_execution_sdk_python.state import ExecutionState
 
+# Typed Dag* errors that ``unwrap_dag_error`` surfaces cleanly through the child
+# context boundary (on the first run via ``__cause__`` and on replay via
+# ``error_type``). Not all are validation errors: ``DagExecutionError`` and
+# ``DagPredicateError`` are execution-time.
 _DAG_VALIDATION_ERRORS = (
     DagCyclicDependencyError,
     DagInvalidTaskNameError,
     DagDuplicateTaskError,
     DagInvalidDependencyError,
     DagExecutionError,
+    DagPredicateError,
 )
 
 _DAG_ERROR_BY_NAME = {cls.__name__: cls for cls in _DAG_VALIDATION_ERRORS}
@@ -98,7 +104,14 @@ def unwrap_dag_error(exc: ChildContextError) -> None:
     """
     cause = exc.__cause__
     if isinstance(cause, _DAG_VALIDATION_ERRORS):
-        raise cause from None
+        # Re-raise the typed error, preserving ITS OWN original cause so a
+        # DagPredicateError still exposes the raising predicate's exception as
+        # __cause__ (contract: the original error must remain the retrievable
+        # cause). ``from inner`` also suppresses the ChildContextError wrapper
+        # from the traceback; when inner is None (the validation errors) this is
+        # exactly the previous ``raise cause from None`` behaviour.
+        inner = cause.__cause__
+        raise cause from inner
     dag_cls = _DAG_ERROR_BY_NAME.get(exc.error_type or "")
     if dag_cls is not None:
         raise dag_cls(exc.message) from None

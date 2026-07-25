@@ -302,6 +302,39 @@ class DagInvalidDependencyError(ValidationError):
     """
 
 
+class DagPredicateError(DurableExecutionsError):
+    """Raised when a task's ``run_if`` predicate raises, aborting the DAG.
+
+    ``run_if`` is specified as a synchronous, deterministic, pure predicate over
+    resolved upstream results; it is re-evaluated on every replay and is not a
+    checkpointed operation. A predicate that raises is therefore a *defect in
+    deterministic code*, not a business outcome. Rather than record the task as
+    ``FAILED`` (which would silently drive every downstream ``ALL_FAILED`` /
+    ``ANY_FAILED`` / ``ALL_DONE`` compensation path) or ``SKIPPED``, the
+    scheduler aborts: the offending task gets no terminal state, no further
+    tasks start, and the ``dag()`` operation fails with this error.
+
+    The offending task name is available as :attr:`task_name` and is also named
+    in the message. Where it is raised (the scheduler), the original exception
+    is preserved as ``__cause__`` (``raise ... from e``) and ``task_name`` is
+    set. Across the durable ``dag()`` child-context boundary the error is rebuilt
+    from serialized fields (type name + message) so the first run and replay are
+    identical; through that boundary ``__cause__`` and ``task_name`` are not
+    reconstructed, but the offending task name remains in the message. This is
+    the same boundary behaviour as the rest of the ``Dag*`` error family.
+
+    .. warning::
+       **Experimental.** This API is experimental and may be changed or removed
+       in future releases.
+    """
+
+    def __init__(
+        self, message: str | None = None, task_name: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.task_name: str | None = task_name
+
+
 class DurableOperationError(DurableExecutionsError):
     """Base class for typed, per-operation failures.
 

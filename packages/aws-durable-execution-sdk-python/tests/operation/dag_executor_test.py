@@ -299,9 +299,11 @@ def test_explicit_trigger_rule_overrides_config_default():
     assert result.get_status("b") is TaskStatus.SKIPPED
 
 
-# region run_if-raises regression (worker-thread callback swallowed exceptions)
+# region run_if-raises abort (a raising predicate ABORTS the DAG)
 import signal  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
+
+from aws_durable_execution_sdk_python.exceptions import DagPredicateError  # noqa: E402
 
 
 @contextmanager
@@ -310,7 +312,7 @@ def _fail_on_hang(seconds: int = 10):
     whole test session. SIGALRM fires on the main thread (where pytest runs)."""
 
     def _handler(_signum, _frame):
-        raise AssertionError("DagExecutor.run() hung (run_if regression)")
+        raise AssertionError("DagExecutor.run() hung (run_if abort regression)")
 
     old = signal.signal(signal.SIGALRM, _handler)
     signal.alarm(seconds)
@@ -321,56 +323,85 @@ def _fail_on_hang(seconds: int = 10):
         signal.signal(signal.SIGALRM, old)
 
 
-def test_run_if_raises_on_non_root_fails_task_and_drains():
+def _make_executor(register, config=None, parent_id="dag"):
+    """Build a DagExecutor so a test can inspect ``_results`` after ``run()``
+    raises (``run_dag`` can't, because the abort means there is no DagResult)."""
+    config = config or DagConfig()
+    state, _ = make_state()
+    ctx = make_context(state, parent_id=parent_id)
+    d = DagContextImpl(ctx, config)
+    register(d)
+    validate_dag(d)
+    return DagExecutor(ctx, d.get_tasks(), config)
+
+
+def test_run_if_raises_on_non_root_aborts_dag():
     """A run_if that raises on a downstream task (evaluated inside a worker-thread
-    completion callback) must not hang: the task FAILS and the DAG drains."""
+    completion callback) ABORTS the DAG with DagPredicateError: the offending
+    task gets no terminal state and a downstream ALL_FAILED compensation task
+    never runs."""
 
     def register(d):
         a = d.step(lambda deps, sc: "A", name="a")
         # run_if dereferences a missing dep -> KeyError, evaluated after `a` done
-        d.step(
+        b = d.step(
             lambda deps, sc: "ran",
             deps=[a],
             name="b",
             run_if=lambda deps: deps["missing"] > 0,
         )
-        # independent root task must still run (drain, not fail-fast)
-        d.step(lambda deps, sc: "c-ran", name="c")
+        # ALL_FAILED compensation on the offending task: MUST NOT run, because a
+        # predicate defect must never drive a compensation path.
+        d.step(
+            lambda deps, sc: "refunded",
+            deps=[b],
+            name="refund",
+            trigger_rule=TriggerRule.ALL_FAILED,
+        )
 
-    with _fail_on_hang():
-        result, _ = run_dag(register, DagConfig(default_retry_strategy=NO_RETRY))
+    ex = _make_executor(register, DagConfig(default_retry_strategy=NO_RETRY))
+    with _fail_on_hang(), pytest.raises(DagPredicateError) as ei:
+        ex.run()
 
-    assert result.get_status("a") is TaskStatus.SUCCEEDED
-    assert result.get_status("b") is TaskStatus.FAILED
-    assert result.results["b"].error is not None
-    assert result.get_result("c") == "c-ran"
-    assert result.failure_count == 1
-    assert result.completion_reason is DagCompletionReason.COMPLETED_WITH_FAILURES
-    with pytest.raises(DagExecutionError):
-        result.throw_if_error()
+    assert isinstance(ei.value.__cause__, KeyError)
+    assert ei.value.task_name == "b"
+    assert "b" in str(ei.value)
+    # `a` completed normally; `b` (offending) has NO terminal state; `refund`
+    # (downstream ALL_FAILED) never ran.
+    assert ex._results["a"].status is TaskStatus.SUCCEEDED  # noqa: SLF001
+    assert "b" not in ex._results  # noqa: SLF001
+    assert "refund" not in ex._results  # noqa: SLF001
 
 
-def test_run_if_raises_on_root_fails_task():
-    """A raising run_if on a root task fails that task (consistent with the
-    non-root path) rather than aborting the whole DAG."""
+def test_run_if_raises_on_root_aborts_dag():
+    """A raising run_if on a root task ABORTS the DAG (propagates out of the very
+    first pump on the caller thread) rather than failing that task."""
 
     def register(d):
-        d.step(
+        a = d.step(
             lambda deps, sc: "ran",
             name="a",
             run_if=lambda deps: 1 // 0 == 0,
         )
-        d.step(lambda deps, sc: "b-ran", name="b")
+        # ALL_FAILED compensation on the offending root: MUST NOT run.
+        d.step(
+            lambda deps, sc: "refunded",
+            deps=[a],
+            name="refund",
+            trigger_rule=TriggerRule.ALL_FAILED,
+        )
 
-    with _fail_on_hang():
-        result, _ = run_dag(register, DagConfig(default_retry_strategy=NO_RETRY))
+    ex = _make_executor(register, DagConfig(default_retry_strategy=NO_RETRY))
+    with _fail_on_hang(), pytest.raises(DagPredicateError) as ei:
+        ex.run()
 
-    assert result.get_status("a") is TaskStatus.FAILED
-    assert result.get_result("b") == "b-ran"
-    assert result.failure_count == 1
+    assert isinstance(ei.value.__cause__, ZeroDivisionError)
+    assert ei.value.task_name == "a"
+    assert "a" not in ex._results  # noqa: SLF001 - no terminal state
+    assert "refund" not in ex._results  # noqa: SLF001 - compensation did not run
 
 
-# endregion run_if-raises regression
+# endregion run_if-raises abort
 
 
 # region threshold-completion fidelity (mirrors ExecutionCounters.should_complete)
