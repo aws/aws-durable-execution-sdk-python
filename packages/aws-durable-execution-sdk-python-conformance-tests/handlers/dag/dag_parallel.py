@@ -1,10 +1,18 @@
 """DAG conformance 10-7: task that is a parallel of two named branches (flat).
 
-fork(parallel of branches left->"L", right->"R") -> join(step[dep fork] ->
-successful results joined by "-" = "L-R"). The parallel's native Parallel op is
-checkpointed directly under the Dag container (flat, name-based).
-max_concurrency=1 (both DAG and parallel) for a deterministic history. Returns
-the canonical summary defined by test-requirements/dag/10-7.yaml.
+fork(parallel of branches left->"L", right->"R") -> join(step[dep fork]). The
+parallel's native Parallel op is checkpointed directly under the Dag container
+(flat, name-based). max_concurrency=1 (both DAG and parallel) for a
+deterministic history.
+
+Aggregate-only join: ``join`` reads ONLY the aggregate ParallelResult /
+BatchResult handed to it as the dep value and returns ``"<succeeded>/<size>"``
+(``"2/2"``). It does not read individual branch values, keeping the scenario
+expressible in every SDK (Java's ``ParallelResult`` is aggregate-only, and a
+durable-op read from inside a step body is illegal there). Reading child branch
+values is still covered by 10-6 (map).
+
+Returns the canonical summary defined by test-requirements/dag/10-7.yaml.
 """
 
 from __future__ import annotations
@@ -43,11 +51,12 @@ def handler(_event: Any, context: DurableContext) -> dict[str, Any]:
             name="fork",
             config=ParallelConfig(max_concurrency=1),
         )
-        d.step(
-            lambda deps, sc: "-".join(deps[fork].get_results()),
-            deps=[fork],
-            name="join",
-        )
+
+        def join(deps, _sc) -> str:
+            aggregate = deps[fork]
+            return f"{aggregate.success_count}/{aggregate.total_count}"
+
+        d.step(join, deps=[fork], name="join")
 
     result = context.dag(
         register, name="paralleldag", config=DagConfig(max_concurrency=1)
