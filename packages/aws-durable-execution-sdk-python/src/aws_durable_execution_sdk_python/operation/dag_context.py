@@ -202,24 +202,27 @@ class DagContextImpl(DagContext):
         task_name = _resolve_name(name, submitter)
 
         def executor(ctx: DurableContext, deps_map: DepsMap):
-            from aws_durable_execution_sdk_python.operation.callback import (
-                wait_for_callback_handler,
-            )
-
+            # A DAG callback task materializes as a Callback *container* context:
+            # a callback operation cannot take an explicit (name-based) operation
+            # id directly, so the task wraps the SDK's native wait_for_callback in
+            # a container that carries the task's name-based id. The native op
+            # then creates the inner WaitForCallback child context, the callback,
+            # and the submitter step. The resulting on-the-wire shape is
+            #   Callback(container) -> WaitForCallback -> {CallbackStarted, submitter}
+            # matching the frozen DAG contract (and the JS reference).
             def body(child: DurableContext):
-                return wait_for_callback_handler(
-                    child,
+                return child.wait_for_callback(
                     lambda cb_id, cb_ctx: submitter(deps_map, cb_id, cb_ctx),
-                    task_name,
-                    config,
+                    name=task_name,
+                    config=config,
                 )
 
             return self._run_child(
                 ctx,
                 task_name,
                 body,
-                ChildConfig(sub_type=OperationSubType.WAIT_FOR_CALLBACK),
-                OperationSubType.WAIT_FOR_CALLBACK,
+                ChildConfig(sub_type=OperationSubType.CALLBACK),
+                OperationSubType.CALLBACK,
             )
 
         return self._add(
