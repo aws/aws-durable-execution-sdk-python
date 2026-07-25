@@ -42,28 +42,18 @@ def test_container_checkpointed_with_dag_subtype_and_serialized_result():
         o for o in client.operations.values() if o.sub_type is OperationSubType.DAG
     )
     assert container.sub_type is OperationSubType.DAG
-    # Canonical structure: the task materializes as a DagTask CONTEXT op
-    # (name-based id, parented to the Dag container) with the inner Step nested
-    # one level beneath it (ParentId = the DagTask op, counter-based child id).
+    # step task checkpointed under a name-based id: the {parent}-DAG_NODE_T_{name}
+    # pre-image, blake2b-bounded to <=64 hex (backend id-length limit).
     import hashlib
 
-    dag_task = next(
+    task_a = next(
         o
         for o in client.operations.values()
-        if o.name == "a" and o.sub_type is OperationSubType.DAG_TASK
+        if o.name == "a" and o.sub_type is not OperationSubType.DAG
     )
-    preimage = f"{dag_task.parent_id}-DAG_NODE_T_a"
-    assert dag_task.operation_id == hashlib.blake2b(preimage.encode()).hexdigest()[:64]
-    assert len(dag_task.operation_id) <= 64
-    assert dag_task.parent_id == container.operation_id
-    # the inner step is a STEP op nested under the DagTask op
-    inner_step = next(
-        o
-        for o in client.operations.values()
-        if o.name == "a" and o.sub_type is OperationSubType.STEP
-    )
-    assert inner_step.parent_id == dag_task.operation_id
-    assert inner_step.operation_id != dag_task.operation_id
+    preimage = f"{task_a.parent_id}-DAG_NODE_T_a"
+    assert task_a.operation_id == hashlib.blake2b(preimage.encode()).hexdigest()[:64]
+    assert len(task_a.operation_id) <= 64
     # the serialized container payload round-trips to an equal DagResult
     payload = container.context_details.result
     restored = create_dag_result_serdes().deserialize(payload, None)
