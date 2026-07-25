@@ -389,6 +389,20 @@ class DagExecutor:
         scheduler was torn down) are skipped.
         """
         with self._lock:
+            # Abort guard: once the DAG has decided to abort (a run_if predicate
+            # raised, so _scheduler_exception is set), no further checkpoint may
+            # be written and no task may re-run. The scheduler is the OUTER
+            # context manager and the pool the INNER one, so the timer thread is
+            # still alive during the pool-drain window; a resume whose timestamp
+            # elapsed in that window would otherwise fire create_checkpoint()
+            # AFTER the abort decision — a stray flush that contradicts the abort
+            # contract (run() re-raises _scheduler_exception once the pool
+            # drains). Bail before mutating state or checkpointing. This is the
+            # only scheduler entry point that checkpoints; _on_done/_pump are
+            # already gated by _stopping_locked (which checks _scheduler_exception
+            # first), so no other teardown-window checkpoint exists.
+            if self._scheduler_exception is not None:
+                return
             for resume in resumes:
                 name = resume.name
                 if name not in self._pending_timers:

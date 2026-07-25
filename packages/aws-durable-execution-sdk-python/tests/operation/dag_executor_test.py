@@ -641,3 +641,160 @@ def test_mixed_timed_and_indefinite_forces_platform_suspend():
 
 
 # endregion in-process timed resume
+
+
+# region no checkpoint after abort (teardown-window regression)
+from aws_durable_execution_sdk_python.dag import TaskHandle  # noqa: E402
+from aws_durable_execution_sdk_python.operation.dag_executor import (  # noqa: E402
+    _TimedResume,
+)
+
+
+def _bare_executor():
+    """A DagExecutor with no tasks, wired to an in-memory client so a direct
+    ``_resubmit`` call exercises the real ``create_checkpoint`` path (it lands
+    on ``InMemoryServiceClient.checkpoint_count``)."""
+    state, client = make_state()
+    ctx = make_context(state, parent_id="dag")
+    return DagExecutor(ctx, {}, DagConfig()), client
+
+
+def test_resubmit_checkpoints_when_not_aborting_control():
+    """Sensitivity anchor. With the abort flag UNSET, a timed resume writes
+    exactly one checkpoint before re-running (mirrors
+    ``ConcurrentExecutor.resubmitter``) and clears the task's timer bookkeeping.
+
+    This is the checkpoint the abort guard must suppress. Pinning it with the
+    *same* setup as the guard test below — the only difference being
+    ``_scheduler_exception`` — proves the guard test is not vacuous: the count
+    flips from 1 to 0 solely because of the abort flag.
+    """
+    ex, client = _bare_executor()
+    ex._pending_timers.add("t")  # noqa: SLF001
+    assert client.checkpoint_count == 0
+    ex._resubmit([_TimedResume("t")])
+    assert client.checkpoint_count == 1  # resume checkpointed
+    assert "t" not in ex._pending_timers  # noqa: SLF001 - would re-run
+
+
+def test_resubmit_writes_no_checkpoint_after_abort_decision():
+    """Regression (direct): once the DAG has decided to abort
+    (``_scheduler_exception`` set — e.g. a ``run_if`` predicate raised), a timed
+    resume that fires during the teardown/drain window must write NO checkpoint
+    and must not touch task state. Identical setup to the control above; only
+    the abort flag differs, and it takes the checkpoint count from 1 to 0.
+    """
+    ex, client = _bare_executor()
+    ex._pending_timers.add("t")  # noqa: SLF001
+    ex._scheduler_exception = DagPredicateError("aborted", task_name="x")  # noqa: SLF001
+    ex._resubmit([_TimedResume("t")])
+    assert client.checkpoint_count == 0  # zero checkpoints after the abort decision
+    assert "t" in ex._pending_timers  # noqa: SLF001 - guarded path left state intact
+
+
+def test_no_late_checkpoint_in_abort_drain_window():
+    """Regression (end-to-end race). Reproduces the reviewer's observation: the
+    DAG-owned ``TimerScheduler`` is the OUTER context manager and the pool the
+    INNER one, so the timer thread is still alive while the pool drains. A task
+    that timed-suspended has a resume pending; when a *different* task's
+    ``run_if`` aborts the DAG, the pending resume can fire ``_resubmit`` during
+    the drain window and — before the fix — write a checkpoint AFTER the abort
+    decision.
+
+    Topology (raw TaskDefs so the step machinery does not emit its own
+    checkpoints; the ONLY checkpoint source is ``_resubmit``):
+
+      * ``seed``    (root) completes immediately -> makes ``gate`` ready on a
+                    worker thread, so the abort is captured into
+                    ``_scheduler_exception`` (the non-root abort path) rather
+                    than raising out of the first pump.
+      * ``timer``   (root) timed-suspends with a resume due *now* -> a resume is
+                    queued on the scheduler heap and ``timer`` stays in
+                    ``_pending_timers`` across the abort.
+      * ``gate``    (deps=[seed]) ``run_if`` raises -> DAG aborts. It records
+                    ``checkpoint_count`` at that instant.
+      * ``blocker`` (root) stays in-flight ~0.5s to hold the pool-drain window
+                    open, giving the ~0.1s timer loop several chances to fire
+                    the due resume before the scheduler is torn down.
+
+    Sensitivity: with the guard removed I observed exactly one late checkpoint
+    (final == at-abort + 1) and this assertion fails; with the guard, the timer
+    loop fires ``_resubmit`` in the same window but it early-returns, so the
+    count is unchanged.
+    """
+    from aws_durable_execution_sdk_python.dag import TriggerRule  # noqa: PLC0415
+    from aws_durable_execution_sdk_python.operation.dag_context import (  # noqa: PLC0415
+        TaskDef,
+    )
+
+    state, client = make_state()
+    ctx = make_context(state, parent_id="dag")
+    at_abort = {"count": None}
+
+    def seed_exec(_ctx, _deps):
+        return "seed"
+
+    def timer_exec(_ctx, _deps):
+        # Due immediately: the scheduler queues a resume the timer thread will
+        # fire on its next (<=0.1s) loop, i.e. squarely inside the drain window.
+        raise TimedSuspendExecution("timer", time.time())
+
+    def blocker_exec(_ctx, _deps):
+        # Keep the pool draining so the scheduler (outer CM) is not yet torn
+        # down while the due resume fires.
+        time.sleep(0.5)
+        return "blocker"
+
+    def gate_run_if(_deps):
+        # The abort decision. Snapshot the checkpoint count at this instant;
+        # nothing legitimate may checkpoint afterwards.
+        at_abort["count"] = client.checkpoint_count
+        raise KeyError("predicate defect")
+
+    seed_ref = TaskHandle(_name="seed", _dag=None)
+
+    def _root(name, executor):
+        return TaskDef(
+            name=name,
+            kind="step",
+            inline_deps=[],
+            all_deps=[],
+            trigger_rule=TriggerRule.ALL_SUCCESS,
+            run_if=None,
+            config=None,
+            executor=executor,
+        )
+
+    tasks = {
+        "seed": _root("seed", seed_exec),
+        "timer": _root("timer", timer_exec),
+        "blocker": _root("blocker", blocker_exec),
+        "gate": TaskDef(
+            name="gate",
+            kind="step",
+            inline_deps=[],
+            all_deps=[seed_ref],
+            trigger_rule=TriggerRule.ALL_SUCCESS,
+            run_if=gate_run_if,
+            config=None,
+            executor=seed_exec,
+        ),
+    }
+    ex = DagExecutor(ctx, tasks, DagConfig())
+
+    with _fail_on_hang(), pytest.raises(DagPredicateError):
+        ex.run()
+
+    # The abort actually happened via the predicate.
+    assert at_abort["count"] is not None
+    # Nothing checkpointed before the abort in this DAG, and — the regression —
+    # nothing checkpointed after it either, despite the resume firing in-window.
+    assert at_abort["count"] == 0
+    assert client.checkpoint_count == 0, (
+        f"late checkpoint after abort decision: {client.checkpoint_count}"
+    )
+    # And the aborting predicate's task never got a terminal state.
+    assert "gate" not in ex._results  # noqa: SLF001
+
+
+# endregion no checkpoint after abort (teardown-window regression)
