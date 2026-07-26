@@ -54,6 +54,18 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL = (TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.SKIPPED)
 
+# Default cap on how many top-level DAG tasks the scheduler runs concurrently
+# when the config leaves ``max_concurrency`` unset. Previously the DAG was
+# unbounded: ``max_workers`` fell back to the task count, so an N-task DAG
+# spawned N OS threads inside the Lambda sandbox (a 500-task DAG -> 500 threads).
+# 40 is a pragmatic bound -- high enough that realistic graphs are unaffected,
+# low enough to keep thread/socket usage sane in the smallest Lambda configs. It
+# governs the DAG SCHEDULER ONLY (top-level tasks of THIS DAG); it is not
+# inherited by a task's own map/parallel fan-out, and a nested dag task resolves
+# its own independent default of 40. An explicit ``max_concurrency`` always wins,
+# including a value above 40. See dag-review/DEFAULT_CONCURRENCY_CONTRACT.md.
+DEFAULT_DAG_MAX_CONCURRENCY = 40
+
 # task scheduling decisions
 _RUN = "RUN"
 _SKIP = "SKIP"
@@ -252,7 +264,14 @@ class DagExecutor:
         if total == 0:
             return DagResultImpl({}, DagCompletionReason.ALL_COMPLETED)
 
-        max_workers = self._config.max_concurrency or total
+        # Resolve the single effective concurrency bound: an explicit
+        # max_concurrency always wins (including a value above the default);
+        # otherwise cap at DEFAULT_DAG_MAX_CONCURRENCY. This is BOTH the
+        # scheduler's in-flight bound and the pool's max_workers -- the pool is
+        # the resource that made an unbounded DAG spawn one OS thread per task.
+        max_workers = self._config.max_concurrency or min(
+            total, DEFAULT_DAG_MAX_CONCURRENCY
+        )
         # Mirror ConcurrentExecutor.execute: scheduler OUTER, pool INNER, so the
         # pool drains (joins in-flight tasks) before the timer thread is torn
         # down. Any suspend is raised inside the pool ``with`` (as before).

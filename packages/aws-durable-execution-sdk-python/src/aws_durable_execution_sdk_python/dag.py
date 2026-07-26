@@ -150,6 +150,19 @@ class DagConfig:
     """
 
     max_concurrency: int | None = None
+    """Maximum number of top-level tasks this DAG's scheduler runs concurrently.
+
+    When ``None`` (unset), the scheduler applies a default cap of
+    ``DEFAULT_DAG_MAX_CONCURRENCY`` (40) rather than running unbounded. An
+    explicit value always wins, including a value above 40; the only validation
+    is that it must be ``>= 1``.
+
+    Scope: this bounds the DAG SCHEDULER ONLY -- the top-level tasks of *this*
+    DAG. It is deliberately NOT inherited by a task's own internal fan-out: a
+    ``map`` or ``parallel`` task keeps its own default (unlimited) unless
+    configured on that task, and a nested ``dag`` task gets its own independent
+    default of 40.
+    """
     completion_config: CompletionConfig | None = None
     default_retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
     default_trigger_rule: TriggerRule = TriggerRule.ALL_SUCCESS

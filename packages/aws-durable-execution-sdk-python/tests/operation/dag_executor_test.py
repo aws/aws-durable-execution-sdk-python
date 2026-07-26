@@ -798,3 +798,138 @@ def test_no_late_checkpoint_in_abort_drain_window():
 
 
 # endregion no checkpoint after abort (teardown-window regression)
+
+
+# region default max_concurrency cap (contract: unset -> 40, previously unbounded)
+from aws_durable_execution_sdk_python.operation import dag_executor as _dag_executor  # noqa: E402
+from aws_durable_execution_sdk_python.operation.dag_executor import (  # noqa: E402
+    DEFAULT_DAG_MAX_CONCURRENCY,
+)
+
+
+def test_default_dag_max_concurrency_constant_is_40():
+    """Pin the shared cross-language default. The behavioural tests below size
+    themselves off this constant, so this guards against a silent retune."""
+    assert DEFAULT_DAG_MAX_CONCURRENCY == 40
+
+
+def _spy_pool(monkeypatch):
+    """Record the ``max_workers`` every ThreadPoolExecutor is built with.
+
+    Returns the list the executor's real constructor is still invoked, so the
+    DAG runs for real; we only observe the pool size."""
+    captured: list[int] = []
+    real = _dag_executor.ThreadPoolExecutor
+
+    def spy(*args, **kwargs):
+        captured.append(kwargs.get("max_workers", args[0] if args else None))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(_dag_executor, "ThreadPoolExecutor", spy)
+    return captured
+
+
+def test_default_caps_pool_max_workers_when_unset(monkeypatch):
+    """A DAG wider than the default and with NO ``max_concurrency`` must build
+    its pool with exactly 40 workers, not one-per-task (the previously unbounded
+    behaviour that spawned N OS threads). The pool is the actual resource being
+    protected, so assert on the size it was constructed with."""
+    captured = _spy_pool(monkeypatch)
+    width = DEFAULT_DAG_MAX_CONCURRENCY + 20  # 60: comfortably wider than the cap
+
+    def register(d):
+        for i in range(width):
+            d.step(lambda deps, sc: 1, name=f"t{i}")
+
+    result, _ = run_dag(register)
+    assert result.success_count == width
+    assert captured == [DEFAULT_DAG_MAX_CONCURRENCY]
+    assert captured[0] <= DEFAULT_DAG_MAX_CONCURRENCY
+
+
+def test_default_never_exceeds_40_in_flight_when_unset():
+    """The sensitive one. A graph wider than 40 with no ``max_concurrency`` must
+    never run more than 40 task bodies concurrently. This asserts an OBSERVED
+    peak (a lock-guarded counter), not a config value.
+
+    A ``Barrier`` sized to the cap makes the assertion two-sided: every worker
+    increments the live counter, then blocks on the barrier, so a full wave of
+    exactly 40 bodies is simultaneously in flight before any releases — proving
+    the pool genuinely reaches 40 (not merely stays under it). Because only the
+    pool's threads ever run a body and each runs one at a time, the counter can
+    exceed 40 only if the pool was built with >40 workers. Width is a whole
+    multiple of the cap so the barrier drains in exact waves and never deadlocks;
+    the same graph under the old unbounded behaviour would put all `width`
+    bodies in flight at once, pushing the peak to `width`."""
+    width = DEFAULT_DAG_MAX_CONCURRENCY * 2  # 80: two exact waves of 40
+    tracker = {"current": 0, "peak": 0}
+    lock = threading.Lock()
+    barrier = threading.Barrier(DEFAULT_DAG_MAX_CONCURRENCY, timeout=10)
+
+    def body(_deps, _sc):
+        with lock:
+            tracker["current"] += 1
+            tracker["peak"] = max(tracker["peak"], tracker["current"])
+        try:
+            barrier.wait()
+        except threading.BrokenBarrierError:  # pragma: no cover - only on regression
+            pass
+        finally:
+            with lock:
+                tracker["current"] -= 1
+        return 1
+
+    def register(d):
+        for i in range(width):
+            d.step(body, name=f"t{i}")
+
+    result, _ = run_dag(register)
+    assert result.success_count == width
+    # Two-sided: exactly the cap was reached, and it was never exceeded.
+    assert tracker["peak"] == DEFAULT_DAG_MAX_CONCURRENCY
+
+
+def test_explicit_max_concurrency_below_40_wins(monkeypatch):
+    """An explicit value below the default still wins: the pool is built with
+    that value, not the 40 cap."""
+    captured = _spy_pool(monkeypatch)
+
+    def register(d):
+        for i in range(60):
+            d.step(lambda deps, sc: 1, name=f"t{i}")
+
+    result, _ = run_dag(register, DagConfig(max_concurrency=5))
+    assert result.success_count == 60
+    assert captured == [5]
+
+
+def test_explicit_max_concurrency_above_40_wins(monkeypatch):
+    """An explicit value ABOVE the default still wins (the cap is only a default,
+    never a ceiling): the pool is built with 50 workers for a 60-task graph."""
+    captured = _spy_pool(monkeypatch)
+
+    def register(d):
+        for i in range(60):
+            d.step(lambda deps, sc: 1, name=f"t{i}")
+
+    result, _ = run_dag(register, DagConfig(max_concurrency=50))
+    assert result.success_count == 60
+    assert captured == [50]
+
+
+def test_default_cap_does_not_over_allocate_for_small_graphs(monkeypatch):
+    """A DAG narrower than the cap and unset ``max_concurrency`` still builds a
+    pool sized to the task count (min(total, 40)), preserving the pre-change
+    small-graph behaviour rather than always allocating 40."""
+    captured = _spy_pool(monkeypatch)
+
+    def register(d):
+        for i in range(3):
+            d.step(lambda deps, sc: 1, name=f"t{i}")
+
+    result, _ = run_dag(register)
+    assert result.success_count == 3
+    assert captured == [3]
+
+
+# endregion default max_concurrency cap
