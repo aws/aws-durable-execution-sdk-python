@@ -214,3 +214,51 @@ Resources:
       DurableConfig:
         RetentionPeriodInDays: 7
         ExecutionTimeout: 300
+
+  DagRunIfAbort:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-12"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: dag.dag_run_if_abort.handler
+      Description: DAG throwing run_if aborts the DAG with a typed error
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+
+  DagConcurrentOverlap:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-13"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: dag.dag_concurrent_overlap.handler
+      Description: DAG real overlap of two tasks inside one invocation
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+
+  DagConcurrentSuspend:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-14"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: dag.dag_concurrent_suspend.handler
+      Description: DAG inverted readiness across a suspend (two waits in flight)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
