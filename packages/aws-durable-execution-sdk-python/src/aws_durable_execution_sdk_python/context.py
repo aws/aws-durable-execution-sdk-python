@@ -1042,8 +1042,7 @@ class DurableContext(DurableContextProtocol):
         emit_experimental_warning_once()
         resolved_name: str | None = self._resolve_step_name(name, register)
         return dag_handler(
-            run_in_child_context=self.run_in_child_context,
-            state=self.state,
+            ctx=self,
             name=resolved_name,
             register=register,
             config=config,

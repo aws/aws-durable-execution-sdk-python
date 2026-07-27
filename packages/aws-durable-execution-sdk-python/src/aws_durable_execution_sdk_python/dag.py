@@ -44,9 +44,6 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.types import (
         DurableContext,
     )
-    from aws_durable_execution_sdk_python.types import (
-        SummaryGenerator,
-    )
     from aws_durable_execution_sdk_python.waits import WaitForConditionConfig
 
 T = TypeVar("T")
@@ -167,7 +164,6 @@ class DagConfig:
     default_retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
     default_trigger_rule: TriggerRule = TriggerRule.ALL_SUCCESS
     serdes: SerDes | None = None
-    summary_generator: SummaryGenerator[Any] | None = None
 
 
 # region handle & deps-map

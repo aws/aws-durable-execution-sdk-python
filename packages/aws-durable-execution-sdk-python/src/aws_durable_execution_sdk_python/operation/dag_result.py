@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import datetime
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from aws_durable_execution_sdk_python.concurrency.models import (
@@ -31,6 +32,9 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
+# The single converged envelope discriminator (contract: ``type: "DagResult"``).
+_ENVELOPE_TYPE = "DagResult"
+
 # result_kind discriminators
 _KIND_PLAIN = "plain"
 _KIND_BATCH = "batch"
@@ -39,6 +43,44 @@ _KIND_DAG = "dag"
 # TaskDef.kind values whose result is a BatchResult / DagResult
 _BATCH_KINDS = frozenset({"map", "parallel"})
 _DAG_KINDS = frozenset({"dag"})
+
+
+def _iso_millis(dt: datetime.datetime | None) -> str | None:
+    """Format a datetime as the contract timestamp: UTC, millisecond precision,
+    ``Z`` suffix (e.g. ``2026-07-26T03:19:01.884Z``). ``None`` stays ``None``
+    (the value is genuinely unknown)."""
+    if dt is None:
+        return None
+    utc = dt.astimezone(datetime.UTC)
+    return f"{utc.strftime('%Y-%m-%dT%H:%M:%S')}.{utc.microsecond // 1000:03d}Z"
+
+
+def _parse_iso(value: str | None) -> datetime.datetime | None:
+    """Parse a contract timestamp back to an aware UTC datetime. Tolerant of a
+    trailing ``Z`` (which older Pythons' ``fromisoformat`` rejected). ``None``
+    and unparseable values yield ``None`` rather than raising -- a timestamp is
+    informational and must never break deserialization (contract rule 4)."""
+    if not value:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError):  # pragma: no cover - defensive
+        return None
+
+
+def _error_to_dict(err: ErrorObject | None) -> dict[str, Any] | None:
+    """Serialize an error to the canonical PascalCase object with explicit nulls.
+
+    The three canonical keys (``ErrorType``, ``ErrorMessage``, ``StackTrace``)
+    are always present (``null`` when absent) so the payload is diffable across
+    languages; any extra platform field (e.g. ``ErrorData``) is preserved."""
+    if err is None:
+        return None
+    d = dict(err.to_dict())
+    d.setdefault("ErrorType", None)
+    d.setdefault("ErrorMessage", None)
+    d.setdefault("StackTrace", None)
+    return d
 
 
 def dag_reason_from_core(core: CompletionReason) -> DagCompletionReason:
@@ -52,6 +94,7 @@ def _result_kind(task_kind: str | None) -> str:
     if task_kind in _DAG_KINDS:
         return _KIND_DAG
     return _KIND_PLAIN
+
 
 
 def _name_of(task: str | TaskHandle[Any]) -> str:
@@ -153,36 +196,80 @@ class DagResultImpl(DagResult):
 
     # region serialization
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to the converged cross-language DAG envelope.
+
+        Single shape for both the inline and offloaded cases (the offloaded case
+        drops only ``tasks``; see the degradation ladder in ``operation/dag.py``).
+        Every canonical field is always present; absent values are ``null``,
+        never omitted. Aggregate fields are always present even though they are
+        derivable from ``tasks`` -- that redundancy is what lets the offloaded
+        payload keep the same shape after ``tasks`` is dropped. Field order
+        follows the contract listing for console readability (structural
+        comparison ignores order).
+        """
         return {
-            "results": {
-                name: self._task_to_dict(te) for name, te in self._results.items()
-            },
-            "completionReason": self._completion_reason.value,
+            "type": _ENVELOPE_TYPE,
             "totalCount": self._total_count,
+            "successCount": self.success_count,
+            "failureCount": self.failure_count,
+            "skippedCount": self.skipped_count,
+            "completionReason": self._completion_reason.value,
+            "startedTaskNames": [
+                te.name
+                for te in self._results.values()
+                if te.status is TaskStatus.STARTED
+            ],
+            "failedTaskNames": [
+                te.name
+                for te in self._results.values()
+                if te.status is TaskStatus.FAILED
+            ],
+            "tasks": [self._task_to_dict(te) for te in self._results.values()],
         }
 
     def _task_to_dict(self, te: TaskExecution) -> dict[str, Any]:
         kind = _result_kind(self._task_kinds.get(te.name))
         result_value: Any = None
         if te.result is not None:
-            if kind == _KIND_BATCH and isinstance(te.result, BatchResult) or kind == _KIND_DAG and isinstance(te.result, DagResultImpl):
+            if (
+                kind == _KIND_BATCH
+                and isinstance(te.result, BatchResult)
+                or kind == _KIND_DAG
+                and isinstance(te.result, DagResultImpl)
+            ):
                 result_value = te.result.to_dict()
             else:
                 result_value = te.result
+        # resultKind describes how to interpret ``result``, so it is null when there
+        # is no result to interpret: a FAILED or SKIPPED task carries null for both.
+        # All four SDKs agree on this (envelope contract rule 1, explicit nulls).
+        serialized_kind = kind if te.status is TaskStatus.SUCCEEDED else None
         return {
             "name": te.name,
             "status": te.status.value,
-            "resultKind": kind,
             "skipReason": te.skip_reason.value if te.skip_reason else None,
+            "resultKind": serialized_kind,
             "result": result_value,
-            "error": te.error.to_dict() if te.error else None,
+            "error": _error_to_dict(te.error),
+            "startedAt": _iso_millis(te.started_at),
+            "completedAt": _iso_millis(te.completed_at),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DagResultImpl:
+        """Deserialize the converged envelope.
+
+        Reads the ``tasks`` array; unknown fields are ignored and a missing
+        field is treated as absent rather than an error (contract rule 4,
+        additive-only evolution). An envelope with no ``tasks`` (the offloaded
+        case) yields an empty results map -- the offloaded path reconstructs the
+        per-task detail from the child checkpoints instead (see
+        ``operation/dag.py``); it does not call this method to rebuild tasks.
+        """
         results: dict[str, TaskExecution] = {}
         task_kinds: dict[str, str] = {}
-        for name, td in data["results"].items():
+        for td in data.get("tasks") or []:
+            name = td["name"]
             kind = td.get("resultKind", _KIND_PLAIN)
             result_value = td.get("result")
             if result_value is not None:
@@ -192,16 +279,20 @@ class DagResultImpl(DagResult):
                     result_value = cls.from_dict(result_value)
             error_raw = td.get("error")
             results[name] = TaskExecution(
-                name=td["name"],
+                name=name,
                 status=TaskStatus(td["status"]),
                 skip_reason=(
                     SkipReason(td["skipReason"]) if td.get("skipReason") else None
                 ),
                 result=result_value,
                 error=ErrorObject.from_dict(error_raw) if error_raw else None,
+                started_at=_parse_iso(td.get("startedAt")),
+                completed_at=_parse_iso(td.get("completedAt")),
             )
-            task_kinds[name] = "dag" if kind == _KIND_DAG else (
-                "map" if kind == _KIND_BATCH else "step"
+            task_kinds[name] = (
+                "dag"
+                if kind == _KIND_DAG
+                else ("map" if kind == _KIND_BATCH else "step")
             )
         return cls(
             results=results,
@@ -214,7 +305,13 @@ class DagResultImpl(DagResult):
 
 
 class DagResultSerDes(SerDes):
-    """SerDes for the DagResult container payload."""
+    """SerDes for the inline DagResult container payload.
+
+    Serializes/deserializes the full converged envelope (with ``tasks``). The
+    offloaded degradation ladder and the reconstruct path live in
+    ``operation/dag.py`` because they need to manipulate the envelope structure
+    and read the retained child checkpoints, which a plain SerDes cannot do.
+    """
 
     def serialize(self, value: DagResultImpl, serdes_context: SerDesContext) -> str:
         import json

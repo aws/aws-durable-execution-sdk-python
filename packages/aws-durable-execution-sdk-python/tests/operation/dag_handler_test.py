@@ -113,57 +113,68 @@ def test_public_exports():
         assert hasattr(sdk, symbol), symbol
 
 
-def test_summary_generator_wired_into_child_config():
-    """DagConfig.summary_generator is passed through to the container ChildConfig."""
-    from aws_durable_execution_sdk_python.operation.dag import dag_handler
+def test_degradation_ladder_drops_failed_task_names_at_rung_three():
+    """When the no-``tasks`` envelope still exceeds the checkpoint limit (many
+    failed task names), the ladder drops ``failedTaskNames`` too -- but never the
+    counts, ``completionReason`` or ``startedTaskNames``."""
+    import json
 
-    captured = {}
-
-    def fake_run_in_child_context(body, name, child_config):
-        captured["config"] = child_config
-
-    def gen(_result):  # pragma: no cover - not invoked (small payload)
-        return "summary"
-
-    state, _ = make_state()
-    dag_handler(
-        run_in_child_context=fake_run_in_child_context,
-        state=state,
-        name="p",
-        register=lambda d: None,
-        config=DagConfig(summary_generator=gen),
+    from aws_durable_execution_sdk_python.dag import (
+        DagCompletionReason,
+        TaskExecution,
+        TaskStatus,
     )
-    assert captured["config"].summary_generator is gen
+    from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+    from aws_durable_execution_sdk_python.lambda_service import (
+        ErrorObject,
+        OperationSubType,
+    )
+    from aws_durable_execution_sdk_python.operation.dag import DagContainerExecutor
+    from aws_durable_execution_sdk_python.operation.dag_result import DagResultImpl
 
-
-def test_nested_dag_summary_generator_wired():
-    """run_nested_dag builds a container ChildConfig carrying summary_generator."""
-    import aws_durable_execution_sdk_python.operation.dag as dag_mod
-
-    captured = {}
-
-    def fake_child_handler(func, state, operation_identifier, config):
-        captured["config"] = config
-        return func()
-
-    def gen(_result):  # pragma: no cover - not invoked (small payload)
-        return "nested-summary"
-
-    original = dag_mod.child_handler
-    dag_mod.child_handler = fake_child_handler  # type: ignore[assignment]
-    try:
-        state, _ = make_state()
-        ctx = make_context(state)
-        dag_mod.run_nested_dag(
-            ctx,
-            "inner",
-            lambda d: d.step(lambda deps, sc: 1, name="x"),
-            DagConfig(summary_generator=gen),
+    # ~5000 failed tasks with long names: the failedTaskNames list alone exceeds
+    # the 256KB limit, so rung 2 (drop tasks) is not enough and rung 3 fires.
+    results = {}
+    kinds = {}
+    for i in range(5000):
+        name = f"task_{i:06d}_" + "x" * 60
+        results[name] = TaskExecution(
+            name, TaskStatus.FAILED, error=ErrorObject.from_message("e")
         )
-    finally:
-        dag_mod.child_handler = original  # type: ignore[assignment]
-    assert captured["config"].summary_generator is gen
+        kinds[name] = "step"
+    result = DagResultImpl(
+        results, DagCompletionReason.COMPLETED_WITH_FAILURES, kinds, total_count=5000
+    )
 
+    captured: dict = {}
+
+    class _FakeState:
+        def create_checkpoint(self, operation_update, is_sync=True):
+            captured["update"] = operation_update
+
+    executor = DagContainerExecutor(
+        run_body=lambda _r: result,
+        state=_FakeState(),  # type: ignore[arg-type]
+        operation_identifier=OperationIdentifier(
+            operation_id="container",
+            sub_type=OperationSubType.DAG,
+            parent_id=None,
+            name="p",
+        ),
+    )
+    executor._checkpoint_with_ladder(result)
+
+    upd = captured["update"]
+    assert upd.context_options.replay_children is True
+    env = json.loads(upd.payload)
+    assert "tasks" not in env
+    assert "failedTaskNames" not in env  # dropped at rung 3
+    # Never dropped: counts, completionReason, startedTaskNames.
+    assert env["completionReason"] == "COMPLETED_WITH_FAILURES"
+    assert env["startedTaskNames"] == []
+    assert env["successCount"] == 0
+    assert env["failureCount"] == 5000
+    assert env["totalCount"] == 5000
 
 
 def test_unwrap_dag_error_reconstructs_typed_error_on_replay():

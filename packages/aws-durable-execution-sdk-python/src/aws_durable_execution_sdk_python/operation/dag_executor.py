@@ -18,6 +18,7 @@ different: it is a defect in deterministic code, so it aborts the DAG with
 from __future__ import annotations
 
 import heapq
+import datetime
 import itertools
 import logging
 import threading
@@ -236,6 +237,12 @@ class DagExecutor:
         self._results: dict[str, TaskExecution] = {}
         self._scheduled: set[str] = set()
         self._in_flight: set[str] = set()
+        # First-observed wall-clock start per task name, stamped when the body is
+        # about to run. Terminal records copy it into TaskExecution.started_at so
+        # the envelope's startedAt/completedAt are populated (Python omitted them
+        # entirely before). Set once per name so a timed re-run keeps the first
+        # start.
+        self._started_at: dict[str, datetime.datetime] = {}
         self._success = 0
         self._failure = 0
         self._skip = 0
@@ -258,11 +265,47 @@ class DagExecutor:
         self._pool: ThreadPoolExecutor | None = None
 
     # region public
-    def run(self) -> DagResultImpl:
-        """Schedule and run the DAG; return a DagResult (may raise to suspend)."""
+    def run(
+        self,
+        *,
+        reconstruct_started: set[str] | None = None,
+        reconstruct_reason: DagCompletionReason | None = None,
+        reconstruct_total: int | None = None,
+    ) -> DagResultImpl:
+        """Schedule and run the DAG; return a DagResult (may raise to suspend).
+
+        Offloaded-replay reconstruct (contract "replay rule"): when the container
+        payload had ``tasks`` dropped, the caller passes the envelope's
+        ``startedTaskNames`` as ``reconstruct_started`` and its
+        ``completionReason``/``totalCount`` as ``reconstruct_reason``/
+        ``reconstruct_total``. Reconstruct then re-runs this deterministic
+        register graph exactly as a first run would -- each task fast-paths from
+        its own retained child checkpoint, so bodies never re-execute -- except
+        that a task named in ``reconstruct_started`` is seeded STARTED and never
+        scheduled. That is the fix for the documented STARTED-set loss: an
+        in-flight task recorded STARTED in the offloaded envelope is reproduced
+        as STARTED instead of being restarted. The completion reason and total
+        are taken from the envelope rather than re-derived.
+        """
         total = len(self._tasks)
         if total == 0:
-            return DagResultImpl({}, DagCompletionReason.ALL_COMPLETED)
+            reason = reconstruct_reason or DagCompletionReason.ALL_COMPLETED
+            return DagResultImpl(
+                {}, reason, total_count=reconstruct_total
+            )
+
+        if reconstruct_started:
+            # Seed the started set before pumping: mark each as STARTED and
+            # already-scheduled so _pump never submits it (no body run) and
+            # downstream deps see it as non-terminal (stay unscheduled), exactly
+            # reproducing the live in-flight snapshot.
+            with self._lock:
+                for name in reconstruct_started:
+                    if name in self._tasks and name not in self._results:
+                        self._results[name] = TaskExecution(
+                            name=name, status=TaskStatus.STARTED
+                        )
+                        self._scheduled.add(name)
 
         # Resolve the single effective concurrency bound: an explicit
         # max_concurrency always wins (including a value above the default);
@@ -288,7 +331,10 @@ class DagExecutor:
             suspend = self._resolve_suspend()
             if suspend is not None:
                 raise suspend
-        return self._build_result()
+        return self._build_result(
+            reconstruct_reason=reconstruct_reason,
+            reconstruct_total=reconstruct_total,
+        )
 
     # endregion public
 
@@ -335,15 +381,24 @@ class DagExecutor:
         # concurrently (the run_if path already builds deps under the lock).
         with self._lock:
             deps_map = self._build_deps_map(task)
-        logger.debug("▶️ DAG task %s starting", name)
+            # Stamp the first-observed start for this task name (kept across a
+            # timed re-run). Copied into the terminal/STARTED record so the
+            # envelope carries startedAt.
+            self._started_at.setdefault(name, datetime.datetime.now(datetime.UTC))
+        logger.debug("DAG task %s starting", name)
         return task.executor(self._ctx, deps_map)
 
     def _on_done(self, name: str, future: Future) -> None:
+        completed_at = datetime.datetime.now(datetime.UTC)
         try:
             result = future.result()
             with self._lock:
                 self._results[name] = TaskExecution(
-                    name=name, status=TaskStatus.SUCCEEDED, result=result
+                    name=name,
+                    status=TaskStatus.SUCCEEDED,
+                    result=result,
+                    started_at=self._started_at.get(name),
+                    completed_at=completed_at,
                 )
                 self._success += 1
                 self._in_flight.discard(name)
@@ -351,10 +406,14 @@ class DagExecutor:
             schedule_ts: float | None = None
             with self._lock:
                 # Record every suspend (timed + indefinite); precedence is
-                # resolved in _resolve_suspend when the DAG stops.
+                # resolved in _resolve_suspend when the DAG stops. A STARTED task
+                # has begun but not completed, so it carries startedAt but no
+                # completedAt.
                 self._pending_suspends.append(se)
                 self._results[name] = TaskExecution(
-                    name=name, status=TaskStatus.STARTED
+                    name=name,
+                    status=TaskStatus.STARTED,
+                    started_at=self._started_at.get(name),
                 )
                 self._in_flight.discard(name)
                 # Timed suspend: register an in-process resume so the base timer
@@ -373,6 +432,8 @@ class DagExecutor:
                     name=name,
                     status=TaskStatus.FAILED,
                     error=ErrorObject.from_exception(e),
+                    started_at=self._started_at.get(name),
+                    completed_at=completed_at,
                 )
                 self._failure += 1
                 self._in_flight.discard(name)
@@ -600,14 +661,27 @@ class DagExecutor:
 
     # endregion helpers
 
-    def _build_result(self) -> DagResultImpl:
-        if self._early_reason is not None:
+    def _build_result(
+        self,
+        *,
+        reconstruct_reason: DagCompletionReason | None = None,
+        reconstruct_total: int | None = None,
+    ) -> DagResultImpl:
+        if reconstruct_reason is not None:
+            # Offloaded reconstruct: the completion reason is authoritative from
+            # the envelope, not re-derived (a re-derivation over fast-pathed
+            # results could disagree at an early-completion boundary).
+            reason = reconstruct_reason
+        elif self._early_reason is not None:
             reason = self._early_reason
         elif self._failure == 0:
             reason = DagCompletionReason.ALL_COMPLETED
         else:
             reason = DagCompletionReason.COMPLETED_WITH_FAILURES
         task_kinds = {name: task.kind for name, task in self._tasks.items()}
+        total = (
+            reconstruct_total if reconstruct_total is not None else len(self._tasks)
+        )
         return DagResultImpl(
-            dict(self._results), reason, task_kinds, total_count=len(self._tasks)
+            dict(self._results), reason, task_kinds, total_count=total
         )

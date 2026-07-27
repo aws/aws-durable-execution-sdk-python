@@ -7,10 +7,12 @@ The DAG ``bigdag`` has eight root step tasks ``p1``..``p8``; task ``pN`` returns
 its letter repeated 51200 times, so the aggregate is ~410KB (8 * 51200 = 409600
 chars) -- comfortably over the 256KB checkpoint limit -- while every individual
 task result stays far under it. When the container result is checkpointed the
-aggregate is OFFLOADED: Python marks the container ``ReplayChildren=true`` and
-writes no envelope (unlike JS, which writes an SDK-owned ``DagSummary``).
+aggregate is OFFLOADED: Python drops ``tasks`` from the envelope and marks the
+container ``ReplayChildren=true`` while still writing the aggregate summary
+(counts, completionReason, startedTaskNames), then RECONSTRUCTS on replay from
+that envelope plus the retained child checkpoints.
 
-The reconstruct-vs-re-execute divergence only fires when a SUCCEEDED container is
+The reconstruct-vs-inline divergence only fires when a SUCCEEDED container is
 REPLAYED, so the driver mirrors the handler: it runs ``dag()``, a checkpointed
 ``digestBefore`` step, then a ``wait`` that SUSPENDS the invocation; the next
 invocation replays the completed container. Three things are asserted:
@@ -21,13 +23,13 @@ invocation replays the completed container. Three things are asserted:
   after the suspend.
 * **Task bodies are not re-invoked** -- external per-task counters prove each body
   ran exactly once across the offload and the container replay. Under
-  re-execution the DAG child body re-runs, but each task's step operation must
+  reconstruct the DAG register graph re-runs, but each task's step operation must
   fast-path from its own (small, normally-checkpointed) result; a body running
   twice is a duplicated customer side effect, the bug this test exists to catch.
-* **The re-execution path was actually taken** -- Python uses ``ReplayChildren``,
-  not an envelope, so the container operation is asserted to carry
-  ``replay_children is True`` with an empty checkpointed payload (no envelope).
-  This is the observable hook that distinguishes Python's strategy from JS's.
+* **The offload + reconstruct path was actually taken** -- the container
+  operation carries ``replay_children is True`` and an envelope with ``tasks``
+  dropped but the aggregate summary present. This is the observable hook that
+  distinguishes Python's reconstruct strategy.
 """
 
 from __future__ import annotations
@@ -182,19 +184,29 @@ def test_10_15_large_payload_survives_container_replay() -> None:
     for name in _TASK_NAMES:
         assert calls[name] == 1, f"task {name} body ran {calls[name]} times, expected 1"
 
-    # --- The re-execution path was actually taken ----------------------------
-    # Python offloads via ReplayChildren with NO envelope. The container op
-    # carries replay_children=True (proving the aggregate exceeded the 256KB
-    # limit and was offloaded) and an empty checkpointed payload (proving no
-    # DagSummary envelope was written -- the JS-only strategy).
+    # --- The offload + reconstruct path was actually taken -------------------
+    # Python offloads via the degradation ladder: it drops ``tasks`` and sets
+    # ReplayChildren, but -- unlike the pre-convergence behaviour -- it still
+    # writes the aggregate envelope (counts, completionReason, startedTaskNames).
+    # On replay it RECONSTRUCTS from that envelope plus the retained child
+    # checkpoints rather than blindly re-executing.
+    import json
+
     container = _dag_container_op(client)
     assert container.context_details is not None
     assert container.context_details.replay_children is True
-    assert (container.context_details.result or "") == ""
+    envelope = json.loads(container.context_details.result)
+    assert envelope["type"] == "DagResult"
+    assert "tasks" not in envelope  # per-task detail offloaded to the children
+    assert envelope["totalCount"] == _TASK_COUNT
+    assert envelope["successCount"] == _TASK_COUNT
+    assert envelope["completionReason"] == "ALL_COMPLETED"
+    # No task was in-flight at completion, so the started set is empty.
+    assert envelope["startedTaskNames"] == []
 
     # Corroborating evidence that the interesting path was genuinely exercised:
     # the invocation actually suspended and resumed (two invocations), and the
-    # DAG body was re-executed on the replay (register ran twice) rather than
-    # reconstructed from an envelope.
+    # DAG register graph was re-run on the reconstruct (register ran twice) so
+    # each task could fast-path from its own retained child checkpoint.
     assert invocations["n"] == 2, "container was not replayed across a suspend"
-    assert register_calls["n"] == 2, "DAG body was not re-executed on replay"
+    assert register_calls["n"] == 2, "DAG graph was not re-run on reconstruct"

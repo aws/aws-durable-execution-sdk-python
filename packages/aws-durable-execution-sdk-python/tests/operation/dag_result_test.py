@@ -109,3 +109,99 @@ def test_roundtrip_nested_dag_result_kind():
     nested = restored.get_result("nested")
     assert isinstance(nested, DagResultImpl)
     assert nested.get_result("x") == 42
+
+
+def test_envelope_shape_with_tasks():
+    """The converged envelope: type, always-present aggregates + null-explicit
+    per-task fields (contract rules 1 and 3)."""
+    import datetime
+
+    started = datetime.datetime(2026, 7, 26, 3, 19, 1, 884000, tzinfo=datetime.UTC)
+    completed = datetime.datetime(2026, 7, 26, 3, 19, 1, 885000, tzinfo=datetime.UTC)
+    results = {
+        "load": TaskExecution(
+            "load",
+            TaskStatus.SUCCEEDED,
+            result="ok",
+            started_at=started,
+            completed_at=completed,
+        ),
+        "charge": TaskExecution(
+            "charge", TaskStatus.FAILED, error=ErrorObject.from_message("boom")
+        ),
+        "ship": TaskExecution(
+            "ship", TaskStatus.SKIPPED, skip_reason=SkipReason.TRIGGER_RULE
+        ),
+    }
+    env = DagResultImpl(
+        results,
+        DagCompletionReason.COMPLETED_WITH_FAILURES,
+        {"load": "step", "charge": "step", "ship": "step"},
+    ).to_dict()
+
+    assert env["type"] == "DagResult"
+    assert env["totalCount"] == 3
+    assert env["successCount"] == 1
+    assert env["failureCount"] == 1
+    assert env["skippedCount"] == 1
+    assert env["completionReason"] == "COMPLETED_WITH_FAILURES"
+    assert env["startedTaskNames"] == []
+    assert env["failedTaskNames"] == ["charge"]
+
+    by_name = {t["name"]: t for t in env["tasks"]}
+    # Every canonical per-task field is present, null when unset.
+    for t in env["tasks"]:
+        assert set(t) == {
+            "name",
+            "status",
+            "skipReason",
+            "resultKind",
+            "result",
+            "error",
+            "startedAt",
+            "completedAt",
+        }
+    assert by_name["load"]["startedAt"] == "2026-07-26T03:19:01.884Z"
+    assert by_name["load"]["completedAt"] == "2026-07-26T03:19:01.885Z"
+    assert by_name["load"]["skipReason"] is None
+    assert by_name["load"]["resultKind"] == "plain"
+    assert by_name["ship"]["skipReason"] == "TRIGGER_RULE"
+    assert by_name["ship"]["startedAt"] is None
+    # Canonical PascalCase error object with explicit nulls.
+    err = by_name["charge"]["error"]
+    assert err == {"ErrorMessage": "boom", "ErrorType": None, "StackTrace": None}
+
+
+def test_envelope_tasks_dropped_is_valid():
+    """The offloaded case is the same envelope minus ``tasks``; from_dict yields
+    an empty results map and preserves the aggregates."""
+    data = {
+        "type": "DagResult",
+        "totalCount": 8,
+        "successCount": 6,
+        "failureCount": 1,
+        "skippedCount": 1,
+        "completionReason": "COMPLETED_WITH_FAILURES",
+        "startedTaskNames": ["reserve"],
+        "failedTaskNames": ["charge"],
+        # no "tasks"
+    }
+    restored = DagResultImpl.from_dict(data)
+    assert restored.completion_reason is DagCompletionReason.COMPLETED_WITH_FAILURES
+    assert restored.total_count == 8
+    assert dict(restored.results) == {}
+
+
+def test_from_dict_ignores_unknown_fields():
+    """Contract rule 4: readers MUST ignore unknown fields and treat a missing
+    field as absent rather than failing (additive-only evolution)."""
+    env = DagResultImpl(
+        {"a": TaskExecution("a", TaskStatus.SUCCEEDED, result=1)},
+        DagCompletionReason.ALL_COMPLETED,
+        {"a": "step"},
+    ).to_dict()
+    env["schemaVersion"] = "v99"  # unknown top-level field
+    env["tasks"][0]["futureField"] = {"any": "thing"}  # unknown per-task field
+    restored = DagResultImpl.from_dict(env)
+    assert restored.get_result("a") == 1
+    assert restored.completion_reason is DagCompletionReason.ALL_COMPLETED
