@@ -13,8 +13,10 @@ from aws_durable_execution_sdk_python.execution import durable_execution
 @durable_with_child_context
 def print_child(ctx: DurableContext, *, input_1: str) -> str:
     # Log through the child context logger so the record carries the execution
-    # ARN. A second record would mean the child body was wrongly re-executed.
-    ctx.logger.info(input_1)
+    # ARN. Rebinding the replay source enables replay logging, which is what
+    # makes this assertion meaningful: under the default de-duplication an
+    # incorrect second child execution would be suppressed and still count 1.
+    ctx.logger.with_is_replaying(lambda: False).info(input_1)
     return input_1
 
 
