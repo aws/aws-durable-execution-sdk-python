@@ -1,4 +1,4 @@
-"""3-17: Child context with print only (verify no re-execution on replay)."""
+"""3-17: Child context with durable logger only (verify no re-execution on replay)."""
 
 from typing import Any
 
@@ -11,8 +11,10 @@ from aws_durable_execution_sdk_python.execution import durable_execution
 
 
 @durable_with_child_context
-def print_child(_ctx: DurableContext, *, input_1: str) -> str:
-    print(input_1, flush=True)
+def print_child(ctx: DurableContext, *, input_1: str) -> str:
+    # Log through the child context logger so the record carries the execution
+    # ARN. A second record would mean the child body was wrongly re-executed.
+    ctx.logger.info(input_1)
     return input_1
 
 

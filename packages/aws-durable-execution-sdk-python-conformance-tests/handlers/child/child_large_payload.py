@@ -24,7 +24,9 @@ def generate_data(_step_context: StepContext) -> str:
 
 @durable_with_child_context
 def large_data_processor(ctx: DurableContext, *, input_1: str) -> str:
-    print(input_1, flush=True)
+    # Log through the child context logger so the record carries the execution
+    # ARN; the child body re-executes on replay to rebuild the large result.
+    ctx.logger.info(input_1)
     step_result: str = ctx.step(generate_data())
     # Build a large result (>256KB) from the small step result
     large_result = step_result * 6  # ~300KB

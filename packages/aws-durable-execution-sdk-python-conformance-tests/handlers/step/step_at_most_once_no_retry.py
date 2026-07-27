@@ -15,8 +15,10 @@ from aws_durable_execution_sdk_python.retries import RetryPresets
 
 
 @durable_step
-def at_most_once_flaky_step(_step_context: StepContext, *, input_1: str) -> str:
-    print(input_1, flush=True)
+def at_most_once_flaky_step(step_context: StepContext, *, input_1: str) -> str:
+    # Log through the step context logger so the record carries the execution
+    # ARN and can be correlated to this durable execution in CloudWatch.
+    step_context.logger.info(input_1)
     time.sleep(1)  # Allow time for logs to flush to CloudWatch
     os._exit(1)  # Simulate Lambda crash
     return "unreachable"
