@@ -46,6 +46,7 @@ from opentelemetry.trace import (
     Link,
     Span,
     SpanContext,
+    SpanKind,
     StatusCode,
     Tracer,
 )
@@ -141,7 +142,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # Per-invocation state.
         self._execution_arn = ""
         self._extracted_context: Context | None = None
-        self._saved_invocation_context: Context | None = None
         self._workflow_span: Span | None = None
         self._invocation_span: Span | None = None
         self._operation_spans: dict[str, Span] = {}
@@ -188,12 +188,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     # Links
     # ------------------------------------------------------------------
     def _build_invocation_links(self) -> list[Link]:
-        """Link operation/attempt spans to the invocation span."""
-        if self._use_default and self._saved_invocation_context is not None:
-            span = trace.get_current_span(self._saved_invocation_context)
-            ctx = span.get_span_context()
-            if ctx and ctx.is_valid:
-                return [Link(context=ctx)]
+        """Link operation/attempt spans to the durable invocation span."""
         if self._invocation_span is not None:
             ctx = self._invocation_span.get_span_context()
             if ctx and ctx.is_valid:
@@ -216,10 +211,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._execution_arn = info.execution_arn or ""
         self._extracted_context = self._context_extractor(info)
         self._id_generator.set_trace_id(self._execution_arn, info.execution_start_time)
-
-        # Capture the ambient context for link-building in default mode.
-        if self._use_default:
-            self._saved_invocation_context = otel_context.get_current()
 
         self._start_workflow_span(info)
         # Create the Invocation span in both modes. In default-provider mode it
@@ -259,10 +250,11 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         if self._use_default:
             # Default-provider mode: parent the Invocation span to the ambient
             # Lambda invocation span (from the ADOT layer or other
-            # auto-instrumentation) captured at invocation start.
-            # Lambda semantic attributes belong to that ambient span, so carry
-            # only durable correlation attributes here.
-            parent_ctx = self._saved_invocation_context or otel_context.get_current()
+            # auto-instrumentation), which is still the active context here (the
+            # Workflow span is created with an empty context and not yet
+            # attached). Lambda semantic attributes belong to that ambient span,
+            # so carry only durable correlation attributes here.
+            parent_ctx = otel_context.get_current()
             attributes = {
                 "durable.execution.arn": self._execution_arn,
                 "durable.invocation.first": info.is_first_invocation,
@@ -275,6 +267,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             )
             attributes = {
                 "durable.execution.arn": self._execution_arn,
+                "durable.invocation.first": info.is_first_invocation,
                 "faas.coldstart": self._is_cold_start,
                 "cloud.provider": "aws",
                 "cloud.platform": "aws_lambda",
@@ -283,6 +276,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 attributes["faas.invocation_id"] = info.request_id
         self._invocation_span = self._tracer.start_span(
             name="invocation",
+            kind=SpanKind.INTERNAL,
             attributes=attributes,
             context=parent_ctx,
         )
@@ -296,23 +290,38 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # so they are not exported as if completed. _reset_state
         # clears the span map below.
 
-        # End the invocation span regardless of terminal status.
+        # End the invocation span regardless of terminal status. Record the
+        # invocation status and map it to a span status: SUCCEEDED/PENDING are OK
+        # (this invocation did its work, whether it completed or suspended),
+        # RETRY/FAILED are ERROR (this invocation failed).
         if self._invocation_span is not None:
+            self._invocation_span.set_attribute(
+                "durable.invocation.status",
+                info.status.value if info.status else "",
+            )
+            if info.status in (InvocationStatus.SUCCEEDED, InvocationStatus.PENDING):
+                self._invocation_span.set_status(StatusCode.OK)
+            elif info.status in (InvocationStatus.RETRY, InvocationStatus.FAILED):
+                self._invocation_span.set_status(
+                    StatusCode.ERROR, info.error.message if info.error else ""
+                )
             self._invocation_span.end()
 
-        # The Workflow span is exported only on a terminal status; otherwise its
-        # reference is dropped without ending it.
+        # The Workflow span (execution view) is exported only on a terminal
+        # status; otherwise its reference is dropped without ending it. Its span
+        # status reflects the execution outcome: SUCCEEDED -> OK, FAILED -> ERROR
+        # (RETRY/PENDING are non-terminal and never reach here -> UNSET).
         if self._workflow_span is not None:
             if info.status in _TERMINAL_INVOCATION_STATUSES:
                 self._workflow_span.set_attribute(
                     "durable.execution.status",
                     info.status.value if info.status else "",
                 )
-                if info.error:
+                if info.status is InvocationStatus.FAILED:
                     self._workflow_span.set_status(
-                        StatusCode.ERROR, info.error.message or ""
+                        StatusCode.ERROR, info.error.message if info.error else ""
                     )
-                else:
+                elif info.status is InvocationStatus.SUCCEEDED:
                     self._workflow_span.set_status(StatusCode.OK)
                 self._workflow_span.end()
 
@@ -327,7 +336,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     def _reset_state(self) -> None:
         self._execution_arn = ""
         self._extracted_context = None
-        self._saved_invocation_context = None
         self._workflow_span = None
         self._invocation_span = None
         with self._lock:
