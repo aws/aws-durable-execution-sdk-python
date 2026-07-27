@@ -209,7 +209,7 @@ def test_cross_invocation_operation_end_uses_deterministic_span_id():
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
 
-    # Operation end with no matching start (started in a prior invocation).
+    # Backend-updated completion for an operation started in a prior invocation.
     plugin.on_operation_end(
         OperationEndInfo(
             operation_id="step-earlier",
@@ -218,7 +218,7 @@ def test_cross_invocation_operation_end_uses_deterministic_span_id():
             name="earlier-step",
             parent_id=None,
             start_time=START_TIME,
-            is_replayed=True,
+            is_replayed=False,
             status=OperationStatus.SUCCEEDED,
             end_time=END_TIME,
             error=None,
@@ -233,6 +233,53 @@ def test_cross_invocation_operation_end_uses_deterministic_span_id():
     assert matching[0].context.span_id == operation_id_to_span_id(
         EXECUTION_ARN, "step-earlier"
     )
+
+
+@pytest.mark.parametrize(
+    "operation_status",
+    [
+        OperationStatus.SUCCEEDED,
+        OperationStatus.FAILED,
+        OperationStatus.TIMED_OUT,
+        OperationStatus.CANCELLED,
+        OperationStatus.STOPPED,
+    ],
+)
+def test_terminal_replayed_operation_does_not_emit_duplicate_span(
+    operation_status: OperationStatus,
+):
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id="step-earlier",
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="earlier-step",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=True,
+            status=operation_status,
+        )
+    )
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id="step-earlier",
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="earlier-step",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=True,
+            status=operation_status,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
+    assert "earlier-step" not in {span.name for span in exporter.get_finished_spans()}
 
 
 # ---------------------------------------------------------------------------

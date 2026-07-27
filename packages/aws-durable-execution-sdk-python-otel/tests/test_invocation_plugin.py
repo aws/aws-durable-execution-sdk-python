@@ -326,15 +326,23 @@ def test_continuation_span_uses_recorded_start_and_end_times():
     assert span.end_time >= span.start_time
 
 
-def test_replayed_operation_start_emits_continuation_span_with_link():
-    """Replayed operation spans should not reuse the original deterministic span ID."""
+@pytest.mark.parametrize(
+    "operation_status",
+    [
+        OperationStatus.SUCCEEDED,
+        OperationStatus.FAILED,
+        OperationStatus.TIMED_OUT,
+        OperationStatus.CANCELLED,
+        OperationStatus.STOPPED,
+    ],
+)
+def test_terminal_replayed_operation_does_not_emit_duplicate_span(
+    operation_status: OperationStatus,
+):
+    """Terminal operations completed before this invocation are not re-emitted."""
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     operation_id = "wait-replayed"
-    random_span_id = int("abcdef1234567890", 16)
-    plugin._id_generator._fallback_id_generator.generate_span_id = lambda: (
-        random_span_id
-    )
 
     plugin.on_operation_start(
         OperationStartInfo(
@@ -345,7 +353,7 @@ def test_replayed_operation_start_emits_continuation_span_with_link():
             parent_id=None,
             start_time=START_TIME,
             is_replayed=True,
-            status=OperationStatus.SUCCEEDED,
+            status=operation_status,
         )
     )
     plugin.on_operation_end(
@@ -357,18 +365,14 @@ def test_replayed_operation_start_emits_continuation_span_with_link():
             parent_id=None,
             start_time=START_TIME,
             is_replayed=True,
-            status=OperationStatus.SUCCEEDED,
+            status=operation_status,
             end_time=END_TIME,
             error=None,
         )
     )
+    plugin.on_invocation_end(_invocation_end_info())
 
-    span = exporter.get_finished_spans()[0]
-    assert span.name == "replayed-wait"
-    assert span.context.span_id == random_span_id
-    assert span.links[0].context.span_id == operation_id_to_span_id(
-        EXECUTION_ARN, operation_id
-    )
+    assert [span.name for span in exporter.get_finished_spans()] == ["invocation"]
 
 
 def test_retried_operation_start_emits_continuation_span_with_link():

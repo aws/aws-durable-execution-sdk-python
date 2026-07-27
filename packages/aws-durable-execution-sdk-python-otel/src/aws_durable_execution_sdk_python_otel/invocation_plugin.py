@@ -9,6 +9,7 @@ from typing import Any
 
 from aws_durable_execution_sdk_python.lambda_service import (
     InvocationStatus,
+    OperationStatus,
     OperationType,
 )
 from aws_durable_execution_sdk_python.plugin import (
@@ -49,6 +50,16 @@ logger = logging.getLogger(__name__)
 
 _SpanAttributes = dict[str, str | bool | int]
 
+_TERMINAL_OPERATION_STATUSES = frozenset(
+    {
+        OperationStatus.SUCCEEDED,
+        OperationStatus.FAILED,
+        OperationStatus.TIMED_OUT,
+        OperationStatus.CANCELLED,
+        OperationStatus.STOPPED,
+    }
+)
+
 
 def _to_otel_timestamp(dt: datetime.datetime | None) -> int | None:
     """Convert a datetime to OTel timestamp (nanoseconds since epoch), or None."""
@@ -68,8 +79,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     Operation IDs are converted into deterministic span IDs. The first observed
     span for an operation uses that deterministic ID; later continuation spans
     use newly generated span IDs and link back to the deterministic span ID so
-    trace viewers can relate retries and replay-created terminal spans to the
-    original logical operation.
+    trace viewers can relate retries and cross-invocation completions to the
+    original logical operation. Terminal operations encountered only as replay
+    history do not emit another span.
 
     Args:
         trace_provider: OpenTelemetry tracer provider used to create spans.
@@ -373,6 +385,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     def on_operation_start(self, info: OperationStartInfo) -> None:
         """Called when an operation begins. Creates a span for the operation."""
         logger.debug("Durable operation started: %s", info)
+        if info.is_replayed and info.status in _TERMINAL_OPERATION_STATUSES:
+            return
         if info.operation_type is OperationType.CONTEXT:
             # Context operations are tracked using on_user_function_start.
             return
@@ -396,8 +410,14 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         invocation is completing an operation that began earlier, so a short
         continuation span is created and linked to the deterministic logical
         operation span before being ended.
+
+        Terminal replay callbacks describe history that completed before this
+        invocation and do not produce another span. Operations completed by the
+        backend while suspended are delivered with ``is_replayed=False``.
         """
         logger.debug("Durable operation ended: %s", info)
+        if info.is_replayed:
+            return
         if info.operation_type is OperationType.CONTEXT:
             # Context operations are tracked using on_user_function_end.
             return
