@@ -142,7 +142,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # Per-invocation state.
         self._execution_arn = ""
         self._extracted_context: Context | None = None
-        self._saved_invocation_context: Context | None = None
         self._workflow_span: Span | None = None
         self._invocation_span: Span | None = None
         self._operation_spans: dict[str, Span] = {}
@@ -189,12 +188,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     # Links
     # ------------------------------------------------------------------
     def _build_invocation_links(self) -> list[Link]:
-        """Link operation/attempt spans to the invocation span."""
-        if self._use_default and self._saved_invocation_context is not None:
-            span = trace.get_current_span(self._saved_invocation_context)
-            ctx = span.get_span_context()
-            if ctx and ctx.is_valid:
-                return [Link(context=ctx)]
+        """Link operation/attempt spans to the durable invocation span."""
         if self._invocation_span is not None:
             ctx = self._invocation_span.get_span_context()
             if ctx and ctx.is_valid:
@@ -217,10 +211,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._execution_arn = info.execution_arn or ""
         self._extracted_context = self._context_extractor(info)
         self._id_generator.set_trace_id(self._execution_arn, info.execution_start_time)
-
-        # Capture the ambient context for link-building in default mode.
-        if self._use_default:
-            self._saved_invocation_context = otel_context.get_current()
 
         self._start_workflow_span(info)
         # Create the Invocation span in both modes. In default-provider mode it
@@ -260,10 +250,11 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         if self._use_default:
             # Default-provider mode: parent the Invocation span to the ambient
             # Lambda invocation span (from the ADOT layer or other
-            # auto-instrumentation) captured at invocation start.
-            # Lambda semantic attributes belong to that ambient span, so carry
-            # only durable correlation attributes here.
-            parent_ctx = self._saved_invocation_context or otel_context.get_current()
+            # auto-instrumentation), which is still the active context here (the
+            # Workflow span is created with an empty context and not yet
+            # attached). Lambda semantic attributes belong to that ambient span,
+            # so carry only durable correlation attributes here.
+            parent_ctx = otel_context.get_current()
             attributes = {
                 "durable.execution.arn": self._execution_arn,
                 "durable.invocation.first": info.is_first_invocation,
@@ -345,7 +336,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     def _reset_state(self) -> None:
         self._execution_arn = ""
         self._extracted_context = None
-        self._saved_invocation_context = None
         self._workflow_span = None
         self._invocation_span = None
         with self._lock:

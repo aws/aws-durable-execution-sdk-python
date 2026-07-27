@@ -237,9 +237,10 @@ def test_adot_layer_full_lifecycle_parents_to_ambient_span():
     assert invocation.parent.span_id == ambient.get_span_context().span_id
     assert invocation.attributes["durable.invocation.first"] is True
 
-    # Operation span still uses the deterministic id and links to the ambient span.
+    # Operation span still uses the deterministic id and links to the durable
+    # invocation span (which is itself parented to the ambient ADOT span).
     assert operation.context.span_id == operation_id_to_span_id(EXECUTION_ARN, OP_ID)
-    assert ambient.get_span_context().span_id in {
+    assert invocation.context.span_id in {
         link.context.span_id for link in operation.links
     }
 
