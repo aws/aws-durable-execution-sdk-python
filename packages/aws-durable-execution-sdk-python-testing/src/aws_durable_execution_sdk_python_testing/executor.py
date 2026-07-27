@@ -1036,41 +1036,7 @@ class Executor(ExecutionObserver):
         if execution.is_complete:
             return False
 
-        now = self._clock.now()
-        completed_any = False
-        for op in list(execution.operations):
-            if (
-                op.operation_type == OperationType.WAIT
-                and op.status == OperationStatus.STARTED
-                and op.wait_details is not None
-                and op.wait_details.scheduled_end_timestamp is not None
-                and op.wait_details.scheduled_end_timestamp <= now
-            ):
-                try:
-                    execution.complete_wait(op.operation_id, now=now)
-                    completed_any = True
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "[%s] earliest-pending: complete_wait failed for %s",
-                        execution_arn,
-                        op.operation_id,
-                    )
-            elif (
-                op.operation_type == OperationType.STEP
-                and op.status == OperationStatus.PENDING
-                and op.step_details is not None
-                and op.step_details.next_attempt_timestamp is not None
-                and op.step_details.next_attempt_timestamp <= now
-            ):
-                try:
-                    execution.complete_retry(op.operation_id)
-                    completed_any = True
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "[%s] earliest-pending: complete_retry failed for %s",
-                        execution_arn,
-                        op.operation_id,
-                    )
+        completed_any = execution.complete_due_operations(self._clock.now())
         if completed_any:
             self._store.update(execution)
         return completed_any

@@ -25,6 +25,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationUpdate,
     StepDetails,
     WaitDetails,
+    WaitOptions,
 )
 
 from aws_durable_execution_sdk_python_testing.exceptions import (
@@ -172,7 +173,9 @@ def test_async_completion_between_polls_surfaces_on_next_poll():
     executor, store, execution, token_0 = _make_executor_with_started_execution()
     arn = execution.durable_execution_arn
 
-    # First checkpoint: handler declares a 1-second wait.
+    # First checkpoint: handler declares a 60-second wait. The duration
+    # must be far enough out that the checkpoint's own due-operation
+    # pickup does not complete it immediately.
     r1 = executor.checkpoint_execution(
         execution_arn=arn,
         checkpoint_token=token_0,
@@ -182,6 +185,7 @@ def test_async_completion_between_polls_surfaces_on_next_poll():
                 operation_type=OperationType.WAIT,
                 action=OperationAction.START,
                 name="wait-1",
+                wait_options=WaitOptions(wait_seconds=60),
             ),
         ],
     )

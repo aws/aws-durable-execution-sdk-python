@@ -95,6 +95,11 @@ class CheckpointCore:
         ``now`` is the checkpoint's single source of "now", resolved from
         the execution's clock, so all timestamps stamped by this apply
         advance with modeled time under a skip clock.
+
+        Before computing the delta, completes every wait and step retry
+        whose scheduled moment has passed, so those transitions are
+        delivered in this response and a suspended branch resumes within
+        the running invocation instead of waiting for the next one.
         """
         effects: list[CheckpointEffect] = []
         if updates:
@@ -108,6 +113,11 @@ class CheckpointCore:
             )
 
         new_token_sequence: int = execution.advance_token_sequence()
+
+        # Pick up scheduler-due completions before pinning the paginator:
+        # each transition touches its operation, so it lands in this
+        # response's unseen delta and the handler sees it immediately.
+        execution.complete_due_operations(now)
 
         paginator: OperationPaginatorState = OperationPaginatorState.pin(execution)
         # The checkpoint response returns the full unseen delta in a single
