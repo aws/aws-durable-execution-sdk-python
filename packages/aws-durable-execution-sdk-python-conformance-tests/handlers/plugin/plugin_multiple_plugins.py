@@ -5,6 +5,7 @@ the SDK's real ``plugins=[...]`` parameter. Each emits its own prefixed lines
 from the invocation-start / invocation-end hooks.
 """
 
+import json
 from typing import Any
 
 from aws_durable_execution_sdk_python.context import (
@@ -22,20 +23,36 @@ from aws_durable_execution_sdk_python.plugin import (
 
 class PluginA(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
-        print("CONFPLUGIN-A invocation-start", flush=True)
+        print(
+            json.dumps({"plugin": "CONFPLUGIN-A", "hook": "invocation-start"}),
+            flush=True,
+        )
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         status = info.status.name if info.status is not None else "NONE"
-        print(f"CONFPLUGIN-A invocation-end status={status}", flush=True)
+        print(
+            json.dumps(
+                {"plugin": "CONFPLUGIN-A", "hook": "invocation-end", "status": status}
+            ),
+            flush=True,
+        )
 
 
 class PluginB(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
-        print("CONFPLUGIN-B invocation-start", flush=True)
+        print(
+            json.dumps({"plugin": "CONFPLUGIN-B", "hook": "invocation-start"}),
+            flush=True,
+        )
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         status = info.status.name if info.status is not None else "NONE"
-        print(f"CONFPLUGIN-B invocation-end status={status}", flush=True)
+        print(
+            json.dumps(
+                {"plugin": "CONFPLUGIN-B", "hook": "invocation-end", "status": status}
+            ),
+            flush=True,
+        )
 
 
 @durable_step

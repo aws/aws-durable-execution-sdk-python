@@ -6,6 +6,7 @@ so the step fails once then succeeds on the second attempt (mirrors handler
 ``on_user_function_end`` hooks, filtering to STEP-type operations.
 """
 
+import json
 from typing import Any
 
 from aws_durable_execution_sdk_python.config import Duration, StepConfig
@@ -34,13 +35,31 @@ class AttemptPlugin(DurableInstrumentationPlugin):
     def on_user_function_start(self, info: UserFunctionStartInfo) -> None:
         if not _is_step(info):
             return
-        print(f"CONFPLUGIN attempt-start n={info.attempt} op={info.operation_id}", flush=True)
+        print(
+            json.dumps(
+                {
+                    "plugin": "CONFPLUGIN",
+                    "hook": "attempt-start",
+                    "n": info.attempt,
+                    "op": info.operation_id,
+                }
+            ),
+            flush=True,
+        )
 
     def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
         if not _is_step(info):
             return
         print(
-            f"CONFPLUGIN attempt-end n={info.attempt} outcome={info.outcome.name} op={info.operation_id}",
+            json.dumps(
+                {
+                    "plugin": "CONFPLUGIN",
+                    "hook": "attempt-end",
+                    "n": info.attempt,
+                    "outcome": info.outcome.name,
+                    "op": info.operation_id,
+                }
+            ),
             flush=True,
         )
 

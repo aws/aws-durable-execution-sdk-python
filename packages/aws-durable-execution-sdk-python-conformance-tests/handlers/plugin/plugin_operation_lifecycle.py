@@ -5,6 +5,7 @@ The plugin emits its lines from the SDK's real ``on_operation_start`` /
 ``OperationType`` enum reported on the hook info.
 """
 
+import json
 from typing import Any
 
 from aws_durable_execution_sdk_python.context import (
@@ -28,13 +29,32 @@ class OperationLifecyclePlugin(DurableInstrumentationPlugin):
     def on_operation_start(self, info: OperationStartInfo) -> None:
         if not _is_step(info):
             return
-        print(f"CONFPLUGIN operation-start op={info.operation_id}", flush=True)
+        print(
+            json.dumps(
+                {
+                    "plugin": "CONFPLUGIN",
+                    "hook": "operation-start",
+                    "op": info.operation_id,
+                }
+            ),
+            flush=True,
+        )
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
         if not _is_step(info):
             return
         status = info.status.name if info.status is not None else "NONE"
-        print(f"CONFPLUGIN operation-end op={info.operation_id} status={status}", flush=True)
+        print(
+            json.dumps(
+                {
+                    "plugin": "CONFPLUGIN",
+                    "hook": "operation-end",
+                    "op": info.operation_id,
+                    "status": status,
+                }
+            ),
+            flush=True,
+        )
 
 
 @durable_step
