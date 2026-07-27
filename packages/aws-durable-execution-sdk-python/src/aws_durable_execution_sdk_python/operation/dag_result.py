@@ -114,6 +114,9 @@ class DagResultImpl(DagResult):
         completion_reason: DagCompletionReason,
         task_kinds: dict[str, str] | None = None,
         total_count: int | None = None,
+        success_count: int | None = None,
+        failure_count: int | None = None,
+        skipped_count: int | None = None,
     ) -> None:
         self._results = results
         self._completion_reason = completion_reason
@@ -122,6 +125,16 @@ class DagResultImpl(DagResult):
         # a fixed value independent of early completion / never-started tasks.
         # Defaults to len(results) when omitted (fully-recorded DAGs).
         self._total_count = total_count if total_count is not None else len(results)
+        # The three aggregate counts are normally DERIVED from the per-task map.
+        # But an offloaded envelope (no ``tasks``) still carries them, and the
+        # map is legitimately empty when restored from that envelope: honouring
+        # the stored value is contract rule 1 -- a tasks-less restore MUST
+        # preserve the counts rather than fabricate zeros. ``None`` means "derive
+        # from the map" (the normal, fully-recorded path); an explicit value
+        # (from ``from_dict``) always wins, mirroring ``total_count``.
+        self._success_count = success_count
+        self._failure_count = failure_count
+        self._skipped_count = skipped_count
 
     # region accessors
     @overload
@@ -162,14 +175,20 @@ class DagResultImpl(DagResult):
 
     @property
     def success_count(self) -> int:
+        if self._success_count is not None:
+            return self._success_count
         return len(self.succeeded())
 
     @property
     def failure_count(self) -> int:
+        if self._failure_count is not None:
+            return self._failure_count
         return len(self.failed())
 
     @property
     def skipped_count(self) -> int:
+        if self._skipped_count is not None:
+            return self._skipped_count
         return len(self.skipped())
 
     @property
@@ -262,9 +281,13 @@ class DagResultImpl(DagResult):
         Reads the ``tasks`` array; unknown fields are ignored and a missing
         field is treated as absent rather than an error (contract rule 4,
         additive-only evolution). An envelope with no ``tasks`` (the offloaded
-        case) yields an empty results map -- the offloaded path reconstructs the
-        per-task detail from the child checkpoints instead (see
-        ``operation/dag.py``); it does not call this method to rebuild tasks.
+        case) yields an empty results map, but the aggregate summary --
+        ``totalCount``, the three counts, and ``completionReason`` -- is read
+        straight from the envelope and preserved (contract rule 1: a tasks-less
+        restore MUST NOT fabricate zeroed counts or ``ALL_COMPLETED``). The
+        offloaded reconstruct path repopulates the per-task detail from the child
+        checkpoints instead (see ``operation/dag.py``); it does not call this
+        method to rebuild tasks.
         """
         results: dict[str, TaskExecution] = {}
         task_kinds: dict[str, str] = {}
@@ -299,6 +322,9 @@ class DagResultImpl(DagResult):
             completion_reason=DagCompletionReason(data["completionReason"]),
             task_kinds=task_kinds,
             total_count=data.get("totalCount"),
+            success_count=data.get("successCount"),
+            failure_count=data.get("failureCount"),
+            skipped_count=data.get("skippedCount"),
         )
 
     # endregion serialization

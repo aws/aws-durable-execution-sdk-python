@@ -192,6 +192,58 @@ def test_envelope_tasks_dropped_is_valid():
     assert dict(restored.results) == {}
 
 
+def test_tasks_less_envelope_preserves_counts_and_reason():
+    """Contract rule 1: restoring a tasks-less envelope that reports failures
+    MUST preserve ``totalCount``, the three counts and ``completionReason`` from
+    the envelope, and MUST NOT fabricate ``ALL_COMPLETED`` or zeroed counts.
+
+    The per-task map is legitimately empty (the detail was offloaded to the
+    child checkpoints), but the aggregate summary is authoritative and survives.
+    """
+    data = {
+        "type": "DagResult",
+        "totalCount": 8,
+        "successCount": 6,
+        "failureCount": 1,
+        "skippedCount": 1,
+        "completionReason": "COMPLETED_WITH_FAILURES",
+        "startedTaskNames": [],
+        "failedTaskNames": ["charge"],
+        # no "tasks" -- offloaded
+    }
+    restored = DagResultImpl.from_dict(data)
+
+    # completionReason is preserved and is NOT the fabricated ALL_COMPLETED.
+    assert restored.completion_reason is DagCompletionReason.COMPLETED_WITH_FAILURES
+    assert restored.completion_reason is not DagCompletionReason.ALL_COMPLETED
+    # All four counts come straight from the envelope, not the (empty) map.
+    assert restored.total_count == 8
+    assert restored.success_count == 6
+    assert restored.failure_count == 1
+    assert restored.skipped_count == 1
+    # The per-task map is empty, as allowed; the accessor lists reflect that.
+    assert dict(restored.results) == {}
+    assert restored.succeeded() == []
+    assert restored.failed() == []
+    assert restored.skipped() == []
+
+
+def test_tasks_present_counts_still_derive_consistently():
+    """The count override never diverges from the map on a fully-recorded
+    round-trip: to_dict writes the map-derived counts, from_dict reads them back,
+    and they equal the map counts (a present ``tasks`` array stays canonical)."""
+    r = DagResultImpl(
+        _sample_results(),
+        DagCompletionReason.COMPLETED_WITH_FAILURES,
+        {"a": "step", "b": "step", "c": "step"},
+    )
+    restored = DagResultImpl.from_dict(r.to_dict())
+    assert restored.success_count == 1 == len(restored.succeeded())
+    assert restored.failure_count == 1 == len(restored.failed())
+    assert restored.skipped_count == 1 == len(restored.skipped())
+    assert restored.total_count == 3
+
+
 def test_from_dict_ignores_unknown_fields():
     """Contract rule 4: readers MUST ignore unknown fields and treat a missing
     field as absent rather than failing (additive-only evolution)."""

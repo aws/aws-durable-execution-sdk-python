@@ -294,3 +294,19 @@ Resources:
       DurableConfig:
         RetentionPeriodInDays: 7
         ExecutionTimeout: 300
+
+  DagNestedLargePayload:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-17"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: dag.dag_nested_large_payload.handler
+      Description: Nested DAG whose inner aggregate offloads both containers, survives a container replay
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
