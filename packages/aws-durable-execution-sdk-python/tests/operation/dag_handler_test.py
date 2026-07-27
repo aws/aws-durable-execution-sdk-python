@@ -302,3 +302,52 @@ def test_unwrap_dag_error_reconstructs_predicate_error_on_replay():
     assert exc.__cause__ is None
     with pytest.raises(DagPredicateError, match="'b'"):
         unwrap_dag_error(exc)
+
+
+def test_deps_none_for_failed_upstream_end_to_end_through_context_dag():
+    """Integration (public surface): a customer-shaped handler that runs a DAG via
+    ``ctx.dag(...)`` -- the real public entry point -- with a ``charge`` task that
+    raises and a downstream ``audit`` task (``TriggerRule.ALL_DONE``) depending on
+    it. ``audit`` legitimately runs even though ``charge`` FAILED and, reading the
+    failed dependency's value inside its body, observes ``None`` (the runtime
+    behaviour the ``DepsMap[handle] -> T | None`` contract encodes).
+
+    Unlike ``dag_executor_test.test_deps_value_is_none_for_failed_upstream_under_all_done``
+    -- which drives ``DagExecutor`` directly -- this goes end-to-end through
+    ``dag_handler`` (validation, the durable checkpoint boundary and result
+    reconstruction), so the ``None`` observation is exercised on the surface a
+    customer actually calls and survives round-tripping into the returned
+    ``DagResult``.
+    """
+    from aws_durable_execution_sdk_python.config import StepConfig
+    from aws_durable_execution_sdk_python.dag import TriggerRule
+    from aws_durable_execution_sdk_python.retries import RetryPresets
+
+    # Disable retries so the intentionally-failing task fails promptly (attempt 1).
+    no_retry = StepConfig(retry_strategy=RetryPresets.none())
+
+    state, _ = make_state()
+    ctx = make_context(state)
+
+    def register(d):
+        def charge(deps, sc):
+            raise RuntimeError("charge failed")
+
+        charge_task = d.step(charge, name="charge", config=no_retry)
+
+        def audit(deps, sc):
+            # Handle-typed access: ``charge`` FAILED, so its value is None even
+            # though this ALL_DONE task legitimately runs. Return the observation
+            # so it round-trips through the DagResult the caller receives.
+            return deps[charge_task] is None
+
+        d.step(audit, deps=[charge_task], name="audit").trigger_rule(
+            TriggerRule.ALL_DONE
+        )
+
+    result = ctx.dag(register, name="pipeline")
+
+    assert result.get_status("charge") is TaskStatus.FAILED
+    assert result.get_status("audit") is TaskStatus.SUCCEEDED
+    # audit succeeded having observed the failed upstream's value as None.
+    assert result.get_result("audit") is True

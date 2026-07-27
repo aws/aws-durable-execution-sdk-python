@@ -154,6 +154,50 @@ def test_compensation_all_failed_runs_on_failure():
     assert result.get_result("audit") == "audited"
 
 
+def test_deps_value_is_none_for_failed_upstream_under_all_done():
+    """A non-ALL_SUCCESS task (ALL_DONE) may run while an upstream FAILED. Reading
+    that dependency's result inside the body yields ``None`` at runtime — the
+    long-standing behavior that the ``DepsMap[handle] -> T | None`` type reflects.
+
+    Exercises the ``TaskHandle`` (typed) access path specifically, since that is
+    the overload whose return type was corrected from bare ``T`` to ``T | None``.
+    Also asserts ``DagResult.get_result(handle)`` returns ``None`` for the same
+    failed task (its handle overload has the identical fix).
+    """
+    seen = {}
+
+    def boom(_deps, _sc):
+        raise ValueError("boom")
+
+    def register(d):
+        charge = d.step(boom, name="charge", config=NO_RETRY_CFG)
+
+        def audit(deps, _sc):
+            # Handle-typed access: value is None because `charge` FAILED, even
+            # though this ALL_DONE task legitimately runs. Also confirm the
+            # string-keyed access agrees.
+            seen["by_handle"] = deps[charge]
+            seen["by_name"] = deps["charge"]
+            return "audited"
+
+        d.step(audit, deps=[charge], name="audit").trigger_rule(TriggerRule.ALL_DONE)
+        # Expose the handle to the assertions below.
+        seen["charge_handle"] = charge
+
+    result, _ = run_dag(register)
+
+    assert result.get_status("charge") is TaskStatus.FAILED
+    assert result.get_status("audit") is TaskStatus.SUCCEEDED
+    assert result.get_result("audit") == "audited"
+    # The dependency's value inside the body was None (not the bare result type).
+    assert seen["by_handle"] is None
+    assert seen["by_name"] is None
+    # DagResult.get_result for the failed task is likewise None (its handle
+    # overload was corrected to T | None as well).
+    assert result.get_result(seen["charge_handle"]) is None
+    assert result.get_result("charge") is None
+
+
 def test_run_if_skip():
     def register(d):
         a = d.step(lambda deps, sc: 10, name="a")

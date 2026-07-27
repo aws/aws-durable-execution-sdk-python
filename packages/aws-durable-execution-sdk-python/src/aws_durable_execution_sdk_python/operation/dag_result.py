@@ -138,15 +138,18 @@ class DagResultImpl(DagResult):
 
     # region accessors
     @overload
-    def get_result(self, task: TaskHandle[T]) -> T: ...
+    def get_result(self, task: TaskHandle[T]) -> T | None: ...
     @overload
     def get_result(self, task: str) -> Any: ...
     def get_result(self, task: str | TaskHandle[Any]) -> Any:
         """Return a task's result (or ``None`` if absent / not succeeded).
 
         Passing the originating :class:`TaskHandle` preserves the task's result
-        type for static typing (``get_result(handle) -> T``); passing a name
-        string returns ``Any``. Both resolve by task name at runtime.
+        type for static typing (``get_result(handle) -> T | None``); passing a
+        name string returns ``Any``. Both resolve by task name at runtime. The
+        handle overload is ``T | None`` (not bare ``T``) because a missing,
+        FAILED, or SKIPPED task has no result and yields ``None`` -- the type
+        reflects that runtime behavior.
         """
         te = self._results.get(_name_of(task))
         return te.result if te else None

@@ -215,9 +215,17 @@ class DepsMap(Mapping[str, Any]):
     """Resolved upstream results, keyed by dependency task name.
 
     Access by string name (``deps["fetch"] -> Any``) or, for static typing, by
-    the originating :class:`TaskHandle` (``deps[handle] -> T``). The handle path
-    dispatches at runtime on ``isinstance(key, TaskHandle)`` and extracts the
+    the originating :class:`TaskHandle` (``deps[handle] -> T | None``). The handle
+    path dispatches at runtime on ``isinstance(key, TaskHandle)`` and extracts the
     name; it does not rely on hashing.
+
+    The handle overload returns ``T | None`` (not bare ``T``): a dependency's
+    result is only present when that upstream task SUCCEEDED. Under a
+    non-``ALL_SUCCESS`` trigger rule (e.g. ``ALL_DONE``/``ANY_FAILED``) a task
+    body can legitimately run while an upstream dep FAILED or was SKIPPED, in
+    which case its value here is ``None`` -- the type reflects that
+    long-standing runtime behavior rather than pretending the value is always
+    present.
 
     .. warning::
        **Experimental.** This API is experimental and may be changed or removed
@@ -228,7 +236,7 @@ class DepsMap(Mapping[str, Any]):
         self._by_name = by_name
 
     @overload
-    def __getitem__(self, key: TaskHandle[T]) -> T: ...
+    def __getitem__(self, key: TaskHandle[T]) -> T | None: ...
     @overload
     def __getitem__(self, key: str) -> Any: ...
     def __getitem__(self, key: str | TaskHandle[Any]) -> Any:
@@ -445,7 +453,7 @@ class DagResult(ABC):
     """
 
     @overload
-    def get_result(self, task: TaskHandle[T]) -> T: ...  # pragma: no cover
+    def get_result(self, task: TaskHandle[T]) -> T | None: ...  # pragma: no cover
     @overload
     def get_result(self, task: str) -> Any: ...  # pragma: no cover
     @abstractmethod

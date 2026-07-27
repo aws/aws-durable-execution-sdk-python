@@ -310,3 +310,19 @@ Resources:
       DurableConfig:
         RetentionPeriodInDays: 7
         ExecutionTimeout: 300
+
+  DagCompensate:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-18"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: dag.dag_compensate.handler
+      Description: DAG compensation dependency read on a failed upstream is absent, not present (deps-nullability)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
