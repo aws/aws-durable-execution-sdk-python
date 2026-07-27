@@ -19,8 +19,9 @@ from aws_durable_execution_sdk_python.retries import (
 
 @durable_step
 def at_most_once_step(step_context: StepContext, *, input_1: str) -> str:
-    # Print input to stdout each time step executes
-    print(input_1, flush=True)
+    # Log the input through the step context logger each time the step executes
+    # so each record carries the execution ARN for CloudWatch correlation.
+    step_context.logger.info(input_1)
     time.sleep(1)  # Allow time for logs to flush to CloudWatch
 
     # The attempt number is the SDK's built-in durable counter from the step
