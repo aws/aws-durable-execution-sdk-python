@@ -21,37 +21,42 @@ from aws_durable_execution_sdk_python.plugin import (
 )
 
 
+def _emit(record: dict[str, Any], execution_arn: str | None) -> None:
+    # Prefix every plugin record with the execution ARN as a top-level field so
+    # the conformance runner's CloudWatch JSON filter can scope logs to a single
+    # execution. Omit the field when the ARN is unset (never invent a value).
+    if execution_arn:
+        record = {"durableExecutionArn": execution_arn, **record}
+    print(json.dumps(record), flush=True)
+
+
 class PluginA(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
-        print(
-            json.dumps({"plugin": "CONFPLUGIN-A", "hook": "invocation-start"}),
-            flush=True,
+        _emit(
+            {"plugin": "CONFPLUGIN-A", "hook": "invocation-start"},
+            info.execution_arn,
         )
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         status = info.status.name if info.status is not None else "NONE"
-        print(
-            json.dumps(
-                {"plugin": "CONFPLUGIN-A", "hook": "invocation-end", "status": status}
-            ),
-            flush=True,
+        _emit(
+            {"plugin": "CONFPLUGIN-A", "hook": "invocation-end", "status": status},
+            info.execution_arn,
         )
 
 
 class PluginB(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
-        print(
-            json.dumps({"plugin": "CONFPLUGIN-B", "hook": "invocation-start"}),
-            flush=True,
+        _emit(
+            {"plugin": "CONFPLUGIN-B", "hook": "invocation-start"},
+            info.execution_arn,
         )
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         status = info.status.name if info.status is not None else "NONE"
-        print(
-            json.dumps(
-                {"plugin": "CONFPLUGIN-B", "hook": "invocation-end", "status": status}
-            ),
-            flush=True,
+        _emit(
+            {"plugin": "CONFPLUGIN-B", "hook": "invocation-end", "status": status},
+            info.execution_arn,
         )
 
 
