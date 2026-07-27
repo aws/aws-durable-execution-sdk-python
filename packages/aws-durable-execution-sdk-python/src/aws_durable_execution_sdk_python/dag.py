@@ -39,7 +39,6 @@ if TYPE_CHECKING:
         WaitForCallbackConfig,
     )
     from aws_durable_execution_sdk_python.lambda_service import ErrorObject
-    from aws_durable_execution_sdk_python.retries import RetryDecision
     from aws_durable_execution_sdk_python.serdes import SerDes
     from aws_durable_execution_sdk_python.types import (
         DurableContext,
@@ -161,7 +160,6 @@ class DagConfig:
     default of 40.
     """
     completion_config: CompletionConfig | None = None
-    default_retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
     default_trigger_rule: TriggerRule = TriggerRule.ALL_SUCCESS
     serdes: SerDes | None = None
 

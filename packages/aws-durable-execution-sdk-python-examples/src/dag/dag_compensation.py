@@ -17,8 +17,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from aws_durable_execution_sdk_python.config import StepConfig
 from aws_durable_execution_sdk_python.context import DurableContext
-from aws_durable_execution_sdk_python.dag import DagConfig, DagContext, DagResult, TriggerRule
+from aws_durable_execution_sdk_python.dag import DagContext, DagResult, TriggerRule
 from aws_durable_execution_sdk_python.execution import durable_execution
 from aws_durable_execution_sdk_python.retries import RetryPresets
 
@@ -53,10 +54,12 @@ def handler(event: Any, context: DurableContext) -> dict[str, Any]:
     charge_ok = bool(event.get("charge_ok", False)) if isinstance(event, dict) else False
 
     def register(d: DagContext) -> None:
+        # Disable retries on the charge so an intentional failure terminates promptly.
+        no_retry = StepConfig(retry_strategy=RetryPresets.none())
         if charge_ok:
-            charge = d.step(lambda deps, sc: "charged", name="charge")
+            charge = d.step(lambda deps, sc: "charged", name="charge", config=no_retry)
         else:
-            charge = d.step(_charge_declined, name="charge")
+            charge = d.step(_charge_declined, name="charge", config=no_retry)
         d.step(lambda deps, sc: "fulfilled", name="fulfill").after(charge)
         d.step(lambda deps, sc: "refunded", name="refund").after(charge).trigger_rule(
             TriggerRule.ALL_FAILED
@@ -65,10 +68,8 @@ def handler(event: Any, context: DurableContext) -> dict[str, Any]:
             TriggerRule.ALL_DONE
         )
 
-    # Disable retries so an intentionally failing charge terminates promptly.
     result = context.dag(
         register,
         name="compensation",
-        config=DagConfig(default_retry_strategy=RetryPresets.none()),
     )
     return _summarize(result)

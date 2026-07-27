@@ -278,3 +278,19 @@ Resources:
       DurableConfig:
         RetentionPeriodInDays: 7
         ExecutionTimeout: 300
+
+  DagRetry:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-16"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: dag.dag_retry.handler
+      Description: DAG per-task retry inside a DAG succeeds and flows downstream
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300

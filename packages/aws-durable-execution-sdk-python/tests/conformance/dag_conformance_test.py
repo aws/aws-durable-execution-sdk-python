@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 
 from aws_durable_execution_sdk_python import exceptions
-from aws_durable_execution_sdk_python.config import CompletionConfig
+from aws_durable_execution_sdk_python.config import CompletionConfig, StepConfig
 from aws_durable_execution_sdk_python.dag import (
     DagConfig,
     DagResult,
@@ -37,6 +37,9 @@ from aws_durable_execution_sdk_python.retries import RetryPresets
 from tests.dag_support import InMemoryServiceClient, make_context, make_state
 
 NO_RETRY = RetryPresets.none()
+# Per-task step config that disables retries so an intentionally failing step
+# fails promptly instead of falling back to RetryPresets.default().
+NO_RETRY_CFG = StepConfig(retry_strategy=NO_RETRY)
 
 OUT_PATH = Path("/Users/parpooya/workplace/dag-conformance-out/python.json")
 _NAME_CHARSET = re.compile(r"[A-Za-z0-9_]+")
@@ -221,7 +224,7 @@ def _compensation(scenario: str, charge_ok: bool) -> dict[str, Any]:
         if charge_ok:
             c = d.step(lambda deps, sc: "charged", name="charge")
         else:
-            c = d.step(_fail, name="charge")
+            c = d.step(_fail, name="charge", config=NO_RETRY_CFG)
         d.step(lambda deps, sc: "fulfilled", name="fulfill").after(c)
         d.step(lambda deps, sc: "refunded", name="refund").after(c).trigger_rule(
             TriggerRule.ALL_FAILED
@@ -230,7 +233,7 @@ def _compensation(scenario: str, charge_ok: bool) -> dict[str, Any]:
             TriggerRule.ALL_DONE
         )
 
-    result, client = _run(reg, scenario, DagConfig(default_retry_strategy=NO_RETRY))
+    result, client = _run(reg, scenario)
     return _record(scenario, result, client)
 
 
@@ -329,13 +332,13 @@ def test_dag_6_trigger_matrix_mixed() -> None:
 
     def reg(d: Any) -> None:
         up_ok = d.step(lambda deps, sc: "ok", name="up_ok")
-        up_fail = d.step(_fail, name="up_fail")
+        up_fail = d.step(_fail, name="up_fail", config=NO_RETRY_CFG)
         for name, rule, _ in consumers:
             d.step(lambda deps, sc: "c", name=name).after(up_ok, up_fail).trigger_rule(
                 rule
             )
 
-    result, client = _run(reg, "DAG-6", DagConfig(default_retry_strategy=NO_RETRY))
+    result, client = _run(reg, "DAG-6")
     rec = _record("DAG-6", result, client)
     assert rec["tasks"]["up_ok"]["result"] == "ok"
     assert _status(rec, "up_fail") == "FAILED"
@@ -356,12 +359,12 @@ def test_dag_7_trigger_matrix_all_failed() -> None:
     ]
 
     def reg(d: Any) -> None:
-        u1 = d.step(_fail, name="u1")
-        u2 = d.step(_fail, name="u2")
+        u1 = d.step(_fail, name="u1", config=NO_RETRY_CFG)
+        u2 = d.step(_fail, name="u2", config=NO_RETRY_CFG)
         for name, rule, _ in consumers:
             d.step(lambda deps, sc: "k", name=name).after(u1, u2).trigger_rule(rule)
 
-    result, client = _run(reg, "DAG-7", DagConfig(default_retry_strategy=NO_RETRY))
+    result, client = _run(reg, "DAG-7")
     rec = _record("DAG-7", result, client)
     assert _status(rec, "u1") == "FAILED"
     assert _status(rec, "u2") == "FAILED"
@@ -524,7 +527,7 @@ def test_dag_17_tolerated_failures() -> None:
         prev = None
         for i in range(1, 5):
             deps = [prev] if prev is not None else None
-            h = d.step(_fail, deps=deps, name=f"t{i}")
+            h = d.step(_fail, deps=deps, name=f"t{i}", config=NO_RETRY_CFG)
             if i > 1:
                 h.trigger_rule(TriggerRule.ALL_DONE)
             prev = h
@@ -535,7 +538,6 @@ def test_dag_17_tolerated_failures() -> None:
         DagConfig(
             max_concurrency=1,
             completion_config=CompletionConfig(tolerated_failure_count=1),
-            default_retry_strategy=NO_RETRY,
         ),
     )
     rec = _record("DAG-17", result, client)

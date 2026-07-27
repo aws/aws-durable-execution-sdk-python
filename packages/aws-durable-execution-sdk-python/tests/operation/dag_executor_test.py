@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from aws_durable_execution_sdk_python.config import CompletionConfig
+from aws_durable_execution_sdk_python.config import CompletionConfig, StepConfig
 from aws_durable_execution_sdk_python.dag import (
     DagCompletionReason,
     DagConfig,
@@ -26,6 +26,9 @@ from aws_durable_execution_sdk_python.retries import RetryPresets
 from tests.dag_support import make_context, make_state
 
 NO_RETRY = RetryPresets.none()
+# Per-task step config that disables retries, so an intentionally failing step
+# fails promptly (attempt 1) instead of falling back to RetryPresets.default().
+NO_RETRY_CFG = StepConfig(retry_strategy=NO_RETRY)
 
 
 def run_dag(register, config=None, parent_id="dag"):
@@ -116,11 +119,11 @@ def test_trigger_rule_skip_propagation():
         raise ValueError("boom")
 
     def register(d):
-        a = d.step(boom, name="a")
+        a = d.step(boom, name="a", config=NO_RETRY_CFG)
         # default ALL_SUCCESS -> skipped because a FAILED
         d.step(lambda deps, sc: 1, deps=[a], name="b")
 
-    result, _ = run_dag(register, DagConfig(default_retry_strategy=NO_RETRY))
+    result, _ = run_dag(register)
     assert result.get_status("a") is TaskStatus.FAILED
     assert result.get_status("b") is TaskStatus.SKIPPED
     assert result.results["b"].skip_reason is SkipReason.TRIGGER_RULE
@@ -132,7 +135,7 @@ def test_compensation_all_failed_runs_on_failure():
         raise RuntimeError("charge failed")
 
     def register(d):
-        c = d.step(charge, name="charge")
+        c = d.step(charge, name="charge", config=NO_RETRY_CFG)
         # refund runs when charge FAILED
         d.step(lambda deps, sc: "refunded", deps=[c], name="refund").trigger_rule(
             TriggerRule.ALL_FAILED
@@ -144,7 +147,7 @@ def test_compensation_all_failed_runs_on_failure():
             TriggerRule.ALL_DONE
         )
 
-    result, _ = run_dag(register, DagConfig(default_retry_strategy=NO_RETRY))
+    result, _ = run_dag(register)
     assert result.get_status("charge") is TaskStatus.FAILED
     assert result.get_result("refund") == "refunded"
     assert result.get_status("fulfill") is TaskStatus.SKIPPED
@@ -184,12 +187,11 @@ def test_failure_tolerance_exceeded():
 
     def register(d):
         for i in range(3):
-            d.step(boom, name=f"t{i}")
+            d.step(boom, name=f"t{i}", config=NO_RETRY_CFG)
 
     result, _ = run_dag(
         register,
         DagConfig(
-            default_retry_strategy=NO_RETRY,
             completion_config=CompletionConfig(tolerated_failure_count=0),
         ),
     )
@@ -204,10 +206,10 @@ def test_default_drains_on_failure_no_fail_fast():
         raise ValueError("x")
 
     def register(d):
-        d.step(boom, name="a")
+        d.step(boom, name="a", config=NO_RETRY_CFG)
         d.step(lambda deps, sc: ran.__setitem__("b", True), name="b")
 
-    result, _ = run_dag(register, DagConfig(default_retry_strategy=NO_RETRY))
+    result, _ = run_dag(register)
     assert ran["b"] is True
     assert result.failure_count == 1
     assert result.success_count == 1
@@ -218,9 +220,9 @@ def test_throw_if_error():
         raise ValueError("bad")
 
     def register(d):
-        d.step(boom, name="a")
+        d.step(boom, name="a", config=NO_RETRY_CFG)
 
-    result, _ = run_dag(register, DagConfig(default_retry_strategy=NO_RETRY))
+    result, _ = run_dag(register)
     with pytest.raises(DagExecutionError):
         result.throw_if_error()
 
@@ -236,13 +238,12 @@ def test_failure_tolerance_percentage_exceeded():
         raise ValueError("x")
 
     def register(d):
-        d.step(boom, name="a")
+        d.step(boom, name="a", config=NO_RETRY_CFG)
         d.step(lambda deps, sc: 1, name="b")
 
     result, _ = run_dag(
         register,
         DagConfig(
-            default_retry_strategy=NO_RETRY,
             completion_config=CompletionConfig(tolerated_failure_percentage=10),
         ),
     )
@@ -265,7 +266,7 @@ def test_default_trigger_rule_from_config_applies():
         raise ValueError("x")
 
     def register(d):
-        a = d.step(boom, name="a")
+        a = d.step(boom, name="a", config=NO_RETRY_CFG)
         # no explicit trigger_rule -> inherits config default ALL_DONE, so it
         # runs even though its upstream FAILED.
         d.step(lambda deps, sc: "ran", deps=[a], name="b")
@@ -273,7 +274,6 @@ def test_default_trigger_rule_from_config_applies():
     result, _ = run_dag(
         register,
         DagConfig(
-            default_retry_strategy=NO_RETRY,
             default_trigger_rule=TriggerRule.ALL_DONE,
         ),
     )
@@ -359,7 +359,7 @@ def test_run_if_raises_on_non_root_aborts_dag():
             trigger_rule=TriggerRule.ALL_FAILED,
         )
 
-    ex = _make_executor(register, DagConfig(default_retry_strategy=NO_RETRY))
+    ex = _make_executor(register)
     with _fail_on_hang(), pytest.raises(DagPredicateError) as ei:
         ex.run()
 
@@ -391,7 +391,7 @@ def test_run_if_raises_on_root_aborts_dag():
             trigger_rule=TriggerRule.ALL_FAILED,
         )
 
-    ex = _make_executor(register, DagConfig(default_retry_strategy=NO_RETRY))
+    ex = _make_executor(register)
     with _fail_on_hang(), pytest.raises(DagPredicateError) as ei:
         ex.run()
 

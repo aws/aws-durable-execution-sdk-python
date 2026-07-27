@@ -12,10 +12,7 @@ from aws_durable_execution_sdk_python.dag import (
     TaskStatus,
 )
 from aws_durable_execution_sdk_python.exceptions import DagCyclicDependencyError
-from aws_durable_execution_sdk_python.retries import RetryPresets
 from tests.dag_support import make_context, make_state
-
-NO_RETRY = RetryPresets.none()
 
 
 def _diamond(d):
@@ -274,7 +271,7 @@ def test_run_if_raise_aborts_dag_through_context():
         ctx.dag(
             register,
             name="pipeline",
-            config=DagConfig(default_retry_strategy=NO_RETRY),
+            config=DagConfig(),
         )
 
     # Type surfaces cleanly; the offending task is named in the durable message.

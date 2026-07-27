@@ -38,7 +38,6 @@ from aws_durable_execution_sdk_python.serdes import SerDes
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from aws_durable_execution_sdk_python.config import StepConfig
     from aws_durable_execution_sdk_python.context import DurableContext
     from aws_durable_execution_sdk_python.dag import DagConfig
     from aws_durable_execution_sdk_python.serdes import SerDesContext
@@ -159,7 +158,7 @@ class DagContextImpl(DagContext):
         trigger_rule=None, run_if=None,
     ):
         task_name = _resolve_name(name, func)
-        cfg = config or self._default_step_config()
+        cfg = config
 
         def executor(ctx: DurableContext, deps_map: DepsMap):
             return ctx._run_step_with_task_id(
@@ -417,10 +416,3 @@ class DagContextImpl(DagContext):
             ),
             config=config,
         )
-
-    def _default_step_config(self) -> StepConfig | None:
-        from aws_durable_execution_sdk_python.config import StepConfig
-
-        if self._config.default_retry_strategy is not None:
-            return StepConfig(retry_strategy=self._config.default_retry_strategy)
-        return None
