@@ -218,6 +218,9 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
     )
     active_wait_span = plugin._get_span(operation_id)
     assert active_wait_span is not None
+    invocation_span = plugin._get_span(None)
+    assert invocation_span is not None
+    assert invocation_span.start_time <= active_wait_span.start_time
     assert (
         active_wait_span.attributes["durable.operation.status"]
         == OperationStatus.STARTED.value
