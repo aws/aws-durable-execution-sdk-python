@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
@@ -34,6 +35,8 @@ from aws_durable_execution_sdk_python_testing.model import (
 from aws_durable_execution_sdk_python_testing.token import (
     CheckpointToken,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutionStatus(Enum):
@@ -499,6 +502,54 @@ class Execution:
             self.operations[index] = updated_operation
             self._record_updated_operation(operation_id)
             return updated_operation
+
+    def complete_due_operations(self, now: datetime) -> bool:
+        """Complete every operation whose scheduled moment has passed.
+
+        Transitions due WAIT operations (``STARTED`` with a
+        ``scheduled_end_timestamp`` at or before ``now``) via
+        :meth:`complete_wait` and due STEP retries (``PENDING`` with a
+        ``next_attempt_timestamp`` at or before ``now``) via
+        :meth:`complete_retry`. A transition failure is logged and
+        skipped so one bad operation cannot block the rest.
+
+        Returns True when at least one operation completed.
+        """
+        completed_any: bool = False
+        for op in list(self.operations):
+            if (
+                op.operation_type is OperationType.WAIT
+                and op.status is OperationStatus.STARTED
+                and op.wait_details is not None
+                and op.wait_details.scheduled_end_timestamp is not None
+                and op.wait_details.scheduled_end_timestamp <= now
+            ):
+                try:
+                    self.complete_wait(op.operation_id, now=now)
+                    completed_any = True
+                except Exception:  # noqa: BLE001 — skip one bad op, keep the rest
+                    logger.exception(
+                        "[%s] complete_wait failed for due operation %s",
+                        self.durable_execution_arn,
+                        op.operation_id,
+                    )
+            elif (
+                op.operation_type is OperationType.STEP
+                and op.status is OperationStatus.PENDING
+                and op.step_details is not None
+                and op.step_details.next_attempt_timestamp is not None
+                and op.step_details.next_attempt_timestamp <= now
+            ):
+                try:
+                    self.complete_retry(op.operation_id)
+                    completed_any = True
+                except Exception:  # noqa: BLE001 — skip one bad op, keep the rest
+                    logger.exception(
+                        "[%s] complete_retry failed for due operation %s",
+                        self.durable_execution_arn,
+                        op.operation_id,
+                    )
+        return completed_any
 
     def complete_callback_success(
         self,

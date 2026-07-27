@@ -1,15 +1,19 @@
 """Unit tests for CheckpointProcessor."""
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
 
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
+    Operation,
     OperationAction,
+    OperationStatus,
     OperationType,
     OperationUpdate,
     StateOutput,
+    WaitDetails,
 )
 
 from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
@@ -354,3 +358,53 @@ def test_checkpoint_from_superseded_invocation_is_rejected():
     # The current invocation's checkpoint is accepted.
     result = processor.process_checkpoint(current_token, updates, "client-token")
     assert isinstance(result, CheckpointOutput)
+
+
+def test_process_checkpoint_delivers_due_wait_completion() -> None:
+    """A wait whose scheduled end has passed is completed by the
+    checkpoint and returned in the same response delta."""
+    store = InMemoryExecutionStore()
+    scheduler = Mock(spec=Scheduler)
+    processor = CheckpointProcessor(store, scheduler)
+
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="test-inv-id",
+    )
+    execution = Execution.new(start_input)
+    execution.start()
+
+    past: datetime = datetime.now(UTC) - timedelta(seconds=5)
+    execution.operations.append(
+        Operation(
+            operation_id="wait-1",
+            parent_id=None,
+            name="due-wait",
+            start_timestamp=past,
+            operation_type=OperationType.WAIT,
+            status=OperationStatus.STARTED,
+            wait_details=WaitDetails(scheduled_end_timestamp=past),
+        )
+    )
+    store.save(execution)
+
+    token: str = CheckpointToken(
+        execution_arn=execution.durable_execution_arn, token_sequence=0
+    ).to_str()
+
+    result: CheckpointOutput = processor.process_checkpoint(token, [], None)
+
+    returned = {op.operation_id: op for op in result.new_execution_state.operations}
+    assert "wait-1" in returned
+    assert returned["wait-1"].status is OperationStatus.SUCCEEDED
+
+    persisted = store.load(execution.durable_execution_arn)
+    persisted_wait = next(
+        op for op in persisted.operations if op.operation_id == "wait-1"
+    )
+    assert persisted_wait.status is OperationStatus.SUCCEEDED
