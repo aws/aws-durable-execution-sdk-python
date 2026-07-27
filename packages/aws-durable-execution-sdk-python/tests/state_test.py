@@ -15,6 +15,7 @@ import pytest
 
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
+    CheckpointError,
     DurableApiErrorCategory,
     GetExecutionStateError,
     OrphanedChildException,
@@ -1882,6 +1883,337 @@ def test_checkpoint_batches_forever_exception_handling():
         pytest.fail("Should have raised BackgroundThreadError")
     except BackgroundThreadError:
         pass  # Expected
+
+
+def _step_start(operation_id: str) -> OperationUpdate:
+    return OperationUpdate(
+        operation_id=operation_id,
+        operation_type=OperationType.STEP,
+        action=OperationAction.START,
+    )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        pytest.param(
+            [OperationUpdate.create_execution_succeed(payload="{}")],
+            id="execution-succeed",
+        ),
+        pytest.param(
+            [
+                OperationUpdate.create_execution_fail(
+                    error=ErrorObject(
+                        message="boom", type="Error", data=None, stack_trace=None
+                    )
+                )
+            ],
+            id="execution-fail",
+        ),
+        pytest.param(
+            [
+                _step_start("op1"),
+                OperationUpdate.create_execution_succeed(payload="{}"),
+            ],
+            id="mixed-terminal",
+        ),
+        pytest.param([_step_start("op1")], id="non-terminal-only"),
+    ],
+)
+def test_checkpoint_missing_token_with_updates_completes(updates):
+    """A batch that sent any updates and gets no token back completes.
+
+    The service omits the token only at a terminal state - completion, or a
+    failure such as a quota limit - so any non-empty batch with a missing token
+    is treated as completion and its waiters settle cleanly rather than failing.
+    This holds whether or not the batch carried an explicit EXECUTION update.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    mock_lambda_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token=None,
+        new_execution_state=CheckpointUpdatedExecutionState(
+            operations=[], next_marker=None
+        ),
+    )
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+
+    events: list[CompletionEvent] = [CompletionEvent() for _ in updates]
+    for update, event in zip(updates, events, strict=True):
+        state._checkpoint_queue.put(QueuedOperation(update, event))
+
+    thread = threading.Thread(daemon=True, target=state.checkpoint_batches_forever)
+    thread.start()
+    try:
+        for event in events:
+            assert event.wait(timeout=2.0)
+    finally:
+        state.stop_checkpointing()
+        thread.join(timeout=2.0)
+
+    assert state._execution_completed.is_set()
+
+
+def test_settle_after_execution_completed_orphans_pending_operations():
+    """When the execution completes, still-queued operations are settled as orphaned.
+
+    Their waiters must be released with OrphanedChildException rather than left
+    blocking or sent with the consumed token, and checkpointing must stop.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+
+    completion_event = CompletionEvent()
+    state._checkpoint_queue.put(
+        QueuedOperation(
+            OperationUpdate(
+                operation_id="orphan_op",
+                operation_type=OperationType.STEP,
+                action=OperationAction.START,
+            ),
+            completion_event,
+        )
+    )
+
+    state._settle_after_execution_completed()
+
+    assert state._execution_completed.is_set()
+    assert state._checkpointing_stopped.is_set()
+    with pytest.raises(OrphanedChildException):
+        completion_event.wait()
+
+
+def _arm_execution_completed(state: ExecutionState) -> None:
+    state._execution_completed.set()
+
+
+def _arm_checkpointing_failed(state: ExecutionState) -> None:
+    state._checkpointing_failed.set(
+        BackgroundThreadError("Checkpoint creation failed", RuntimeError("boom"))
+    )
+
+
+@pytest.mark.parametrize(
+    ("arm_terminal_state", "expected_error"),
+    [
+        pytest.param(
+            _arm_execution_completed, OrphanedChildException, id="execution-completed"
+        ),
+        pytest.param(
+            _arm_checkpointing_failed, BackgroundThreadError, id="checkpointing-failed"
+        ),
+    ],
+)
+def test_create_checkpoint_rejected_in_terminal_state(
+    arm_terminal_state, expected_error
+):
+    """A checkpoint attempted in a terminal state is rejected, not enqueued.
+
+    Whether the background loop has completed the execution (_execution_completed
+    -> OrphanedChildException) or failed (_checkpointing_failed ->
+    BackgroundThreadError), create_checkpoint surfaces the terminal condition
+    rather than enqueueing an operation whose waiter would block forever.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+    arm_terminal_state(state)
+
+    with pytest.raises(expected_error):
+        state.create_checkpoint(
+            OperationUpdate(
+                operation_id="late_op",
+                operation_type=OperationType.STEP,
+                action=OperationAction.START,
+            ),
+            is_sync=True,
+        )
+
+    assert state._checkpoint_queue.empty()
+
+
+def test_create_checkpoint_after_completion_skips_start_hook():
+    """A checkpoint rejected after completion must not emit a START plugin hook.
+
+    The orphan check runs before the START dispatch, matching the parent-done
+    path, so a rejected operation never fires a START with no completion.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    mock_plugin_executor = Mock()
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=mock_plugin_executor,
+    )
+    state._execution_completed.set()
+
+    with pytest.raises(OrphanedChildException):
+        state.create_checkpoint(
+            OperationUpdate(
+                operation_id="late_op",
+                operation_type=OperationType.STEP,
+                action=OperationAction.START,
+            ),
+            is_sync=True,
+        )
+
+    mock_plugin_executor.on_operation_action.assert_not_called()
+
+
+def test_checkpoint_completion_skips_pagination_with_consumed_token():
+    """On completion the consumed token must not be reused to paginate.
+
+    The terminal response carries its operations inline; if it also reports a
+    next_marker, the loop must not call get_execution_state with the spent
+    token (which would turn a clean completion into a failure).
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    mock_lambda_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token=None,
+        new_execution_state=CheckpointUpdatedExecutionState(
+            operations=[], next_marker="more-pages"
+        ),
+    )
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+
+    completion_event: CompletionEvent = CompletionEvent()
+    state._checkpoint_queue.put(
+        QueuedOperation(
+            OperationUpdate.create_execution_succeed(payload="{}"),
+            completion_event,
+        )
+    )
+
+    thread = threading.Thread(daemon=True, target=state.checkpoint_batches_forever)
+    thread.start()
+    try:
+        assert completion_event.wait(timeout=2.0)
+    finally:
+        state.stop_checkpointing()
+        thread.join(timeout=2.0)
+
+    assert state._execution_completed.is_set()
+    mock_lambda_client.get_execution_state.assert_not_called()
+
+
+def test_completion_lock_rejects_producer_racing_completion():
+    """The in-lock re-check rejects a producer that raced a concurrent completion.
+
+    A producer can pass the pre-lock orphan check and then block acquiring
+    _completion_lock while the execution completes. When it finally takes the
+    lock it must observe _execution_completed and raise, rather than enqueue an
+    operation into an already-drained queue where its waiter would block forever.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+
+    outcome: dict[str, str] = {}
+    started: threading.Event = threading.Event()
+
+    def producer() -> None:
+        started.set()
+        try:
+            state.create_checkpoint(
+                OperationUpdate(
+                    operation_id="racing_op",
+                    operation_type=OperationType.STEP,
+                    action=OperationAction.START,
+                ),
+                is_sync=False,
+            )
+            outcome["result"] = "enqueued"
+        except OrphanedChildException:
+            outcome["result"] = "orphaned"
+
+    thread = threading.Thread(target=producer, daemon=True)
+
+    # Hold the lock to stand in for a settle/drain in progress. The producer
+    # passes the pre-lock check (execution not yet completed) and then blocks
+    # acquiring the lock; completion happens while it waits. The lock is always
+    # released so the producer can never block the test.
+    state._completion_lock.acquire()
+    try:
+        thread.start()
+        assert started.wait(timeout=2.0), "producer thread did not start"
+        # Give the producer time to pass the pre-lock check and block on the lock.
+        time.sleep(0.1)
+        state._execution_completed.set()
+    finally:
+        state._completion_lock.release()
+
+    thread.join(timeout=2.0)
+
+    assert outcome["result"] == "orphaned"
+    assert state._checkpoint_queue.empty()
+
+
+def test_checkpoint_missing_token_on_empty_only_batch_fails():
+    """An empty-only batch (no updates) returning no token is invalid.
+
+    With nothing sent, a missing token cannot mean completion, so it must fail
+    the checkpoint rather than be treated as terminal.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    mock_lambda_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token=None,
+        new_execution_state=CheckpointUpdatedExecutionState(
+            operations=[], next_marker=None
+        ),
+    )
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+
+    empty_event: CompletionEvent = CompletionEvent()
+    state._checkpoint_queue.put(QueuedOperation(None, empty_event))
+
+    thread = threading.Thread(daemon=True, target=state.checkpoint_batches_forever)
+    thread.start()
+    thread.join(timeout=2.0)
+
+    assert empty_event.is_set()
+    try:
+        empty_event.wait()
+        pytest.fail("Should have raised BackgroundThreadError")
+    except BackgroundThreadError as bg_error:
+        assert isinstance(bg_error.source_exception, CheckpointError)
 
 
 def test_collect_checkpoint_batch_shutdown_path():
