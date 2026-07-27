@@ -350,13 +350,12 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             invocation_span.set_attribute(
                 "durable.invocation.status", info.status.value
             )
-            if info.status is InvocationStatus.FAILED:
+            if info.status in (InvocationStatus.SUCCEEDED, InvocationStatus.PENDING):
+                invocation_span.set_status(StatusCode.OK)
+            elif info.status in (InvocationStatus.RETRY, InvocationStatus.FAILED):
                 invocation_span.set_status(
                     StatusCode.ERROR, info.error.message if info.error else ""
                 )
-            elif info.status is InvocationStatus.SUCCEEDED:
-                invocation_span.set_status(StatusCode.OK)
-            # Non-terminal invocations leave the span status UNSET.
 
         # end the invocation span
         self._end_span(None)

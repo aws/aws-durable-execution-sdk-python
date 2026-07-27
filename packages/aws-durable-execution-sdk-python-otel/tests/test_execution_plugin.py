@@ -322,7 +322,7 @@ def test_open_operation_span_not_exported_at_invocation_end():
 @pytest.mark.parametrize(
     ("status", "expected_code"),
     [
-        (InvocationStatus.PENDING, trace.StatusCode.UNSET),
+        (InvocationStatus.PENDING, trace.StatusCode.OK),
         (InvocationStatus.SUCCEEDED, trace.StatusCode.OK),
         (InvocationStatus.FAILED, trace.StatusCode.ERROR),
     ],

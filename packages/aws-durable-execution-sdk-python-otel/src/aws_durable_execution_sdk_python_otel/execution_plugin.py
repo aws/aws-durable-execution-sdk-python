@@ -300,34 +300,37 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # clears the span map below.
 
         # End the invocation span regardless of terminal status. Record the
-        # invocation status; the terminal invocation is marked OK on success and
-        # ERROR on failure, while non-terminal invocations stay UNSET.
+        # invocation status and map it to a span status: SUCCEEDED/PENDING are OK
+        # (this invocation did its work, whether it completed or suspended),
+        # RETRY/FAILED are ERROR (this invocation failed).
         if self._invocation_span is not None:
             self._invocation_span.set_attribute(
                 "durable.invocation.status",
                 info.status.value if info.status else "",
             )
-            if info.status is InvocationStatus.FAILED:
+            if info.status in (InvocationStatus.SUCCEEDED, InvocationStatus.PENDING):
+                self._invocation_span.set_status(StatusCode.OK)
+            elif info.status in (InvocationStatus.RETRY, InvocationStatus.FAILED):
                 self._invocation_span.set_status(
                     StatusCode.ERROR, info.error.message if info.error else ""
                 )
-            elif info.status is InvocationStatus.SUCCEEDED:
-                self._invocation_span.set_status(StatusCode.OK)
             self._invocation_span.end()
 
-        # The Workflow span is exported only on a terminal status; otherwise its
-        # reference is dropped without ending it.
+        # The Workflow span (execution view) is exported only on a terminal
+        # status; otherwise its reference is dropped without ending it. Its span
+        # status reflects the execution outcome: SUCCEEDED -> OK, FAILED -> ERROR
+        # (RETRY/PENDING are non-terminal and never reach here -> UNSET).
         if self._workflow_span is not None:
             if info.status in _TERMINAL_INVOCATION_STATUSES:
                 self._workflow_span.set_attribute(
                     "durable.execution.status",
                     info.status.value if info.status else "",
                 )
-                if info.error:
+                if info.status is InvocationStatus.FAILED:
                     self._workflow_span.set_status(
-                        StatusCode.ERROR, info.error.message or ""
+                        StatusCode.ERROR, info.error.message if info.error else ""
                     )
-                else:
+                elif info.status is InvocationStatus.SUCCEEDED:
                     self._workflow_span.set_status(StatusCode.OK)
                 self._workflow_span.end()
 
