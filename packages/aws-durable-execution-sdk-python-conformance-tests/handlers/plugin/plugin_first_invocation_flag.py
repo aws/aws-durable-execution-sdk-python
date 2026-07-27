@@ -6,6 +6,7 @@ plugin emits its lines from the invocation-start / invocation-end hooks; the
 terminal invocation-end (SUCCEEDED) fires on the replay invocation.
 """
 
+import json
 from typing import Any
 
 from aws_durable_execution_sdk_python.config import Duration
@@ -20,12 +21,25 @@ from aws_durable_execution_sdk_python.plugin import (
 
 class FirstInvocationPlugin(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
-        first = str(info.is_first_invocation).lower()
-        print(f"CONFPLUGIN invocation-start first={first}", flush=True)
+        print(
+            json.dumps(
+                {
+                    "plugin": "CONFPLUGIN",
+                    "hook": "invocation-start",
+                    "first": info.is_first_invocation,
+                }
+            ),
+            flush=True,
+        )
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         status = info.status.name if info.status is not None else "NONE"
-        print(f"CONFPLUGIN invocation-end status={status}", flush=True)
+        print(
+            json.dumps(
+                {"plugin": "CONFPLUGIN", "hook": "invocation-end", "status": status}
+            ),
+            flush=True,
+        )
 
 
 @durable_execution(plugins=[FirstInvocationPlugin()])

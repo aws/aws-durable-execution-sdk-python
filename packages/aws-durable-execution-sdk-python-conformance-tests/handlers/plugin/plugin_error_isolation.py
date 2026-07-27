@@ -7,6 +7,7 @@ STEP-type operations. No mocking: the isolation guarantee under test is the
 SDK's own hook-dispatch try/except, which we exercise by genuinely raising.
 """
 
+import json
 from typing import Any
 
 from aws_durable_execution_sdk_python.context import (
@@ -30,37 +31,41 @@ def _is_step(info: Any) -> bool:
     return info.operation_type.name == "STEP"
 
 
+def _emit(hook: str) -> None:
+    print(json.dumps({"plugin": "CONFPLUGIN-FAULTY", "hook": hook}), flush=True)
+
+
 class FaultyPlugin(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
-        print("CONFPLUGIN faulty invocation-start", flush=True)
+        _emit("invocation-start")
         raise RuntimeError("faulty invocation-start")
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
-        print("CONFPLUGIN faulty invocation-end", flush=True)
+        _emit("invocation-end")
         raise RuntimeError("faulty invocation-end")
 
     def on_operation_start(self, info: OperationStartInfo) -> None:
         if not _is_step(info):
             return
-        print("CONFPLUGIN faulty operation-start", flush=True)
+        _emit("operation-start")
         raise RuntimeError("faulty operation-start")
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
         if not _is_step(info):
             return
-        print("CONFPLUGIN faulty operation-end", flush=True)
+        _emit("operation-end")
         raise RuntimeError("faulty operation-end")
 
     def on_user_function_start(self, info: UserFunctionStartInfo) -> None:
         if not _is_step(info):
             return
-        print("CONFPLUGIN faulty attempt-start", flush=True)
+        _emit("attempt-start")
         raise RuntimeError("faulty attempt-start")
 
     def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
         if not _is_step(info):
             return
-        print("CONFPLUGIN faulty attempt-end", flush=True)
+        _emit("attempt-end")
         raise RuntimeError("faulty attempt-end")
 
 
