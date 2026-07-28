@@ -43,6 +43,7 @@ from typing import Any
 import pytest
 
 from aws_durable_execution_sdk_python.context import DurableContext, ExecutionContext
+from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.dag import (
     DagCompletionReason,
     DagConfig,
@@ -243,8 +244,8 @@ def test_10_14_inverted_readiness_across_suspend() -> None:
 
     def register(d: Any) -> None:
         root = d.step(lambda deps, sc: 1, name="root")
-        slow = d.wait(8, deps=[root], name="slow")  # registered FIRST
-        fast = d.wait(2, deps=[root], name="fast")
+        slow = d.wait(Duration.from_seconds(8), deps=[root], name="slow")  # registered FIRST
+        fast = d.wait(Duration.from_seconds(2), deps=[root], name="fast")
         after_slow = d.step(lambda deps, sc: _record("afterSlow"), name="afterSlow")
         after_slow.after(slow)  # registered FIRST
         after_fast = d.step(lambda deps, sc: _record("afterFast"), name="afterFast")

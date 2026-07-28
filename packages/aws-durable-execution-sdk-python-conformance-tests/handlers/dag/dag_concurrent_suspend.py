@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.dag import DagContext, DagResult
 from aws_durable_execution_sdk_python.execution import durable_execution
 
@@ -43,8 +44,8 @@ def _counts(result: DagResult) -> list[int]:
 def handler(_event: Any, context: DurableContext) -> dict[str, Any]:
     def register(d: DagContext) -> None:
         root = d.step(lambda deps, sc: 1, name="root")
-        slow = d.wait(8, deps=[root], name="slow")  # registered FIRST
-        fast = d.wait(2, deps=[root], name="fast")
+        slow = d.wait(Duration.from_seconds(8), deps=[root], name="slow")  # registered FIRST
+        fast = d.wait(Duration.from_seconds(2), deps=[root], name="fast")
         after_slow = d.step(lambda deps, sc: "S", name="afterSlow").after(
             slow
         )  # registered FIRST

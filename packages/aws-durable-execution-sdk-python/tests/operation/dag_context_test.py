@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import pytest
 
+from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.dag import (
     DagConfig,
     DepsMap,
     TriggerRule,
 )
-from aws_durable_execution_sdk_python.exceptions import DagInvalidTaskNameError
+from aws_durable_execution_sdk_python.exceptions import (
+    DagInvalidTaskNameError,
+    ValidationError,
+)
 from aws_durable_execution_sdk_python.operation.dag_context import DagContextImpl
 from tests.dag_support import make_context, make_state
 
@@ -82,7 +86,15 @@ def test_unresolvable_name_raises():
 def test_wait_requires_name():
     d = _impl()
     with pytest.raises(DagInvalidTaskNameError):
-        d.wait(5)
+        d.wait(Duration.from_seconds(5))
+
+
+def test_wait_requires_duration_of_at_least_one_second():
+    # Matches context.wait(duration: Duration)'s own validation -- a DAG wait
+    # task takes the same Duration type and enforces the same floor.
+    d = _impl()
+    with pytest.raises(ValidationError, match="at least 1 second"):
+        d.wait(Duration.from_seconds(0), name="too-short")
 
 
 def test_duplicate_registration_recorded_in_order():

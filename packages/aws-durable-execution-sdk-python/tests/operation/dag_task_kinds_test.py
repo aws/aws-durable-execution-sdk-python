@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.waits import (
     WaitForConditionConfig,
     WaitForConditionDecision,
@@ -76,7 +77,7 @@ def test_invoke_task_suspends():
 
 def test_wait_task_suspends():
     def register(d):
-        d.wait(30, name="cooldown")
+        d.wait(Duration.from_seconds(30), name="cooldown")
 
     state, _ = make_state()
     with pytest.raises(SuspendExecution):

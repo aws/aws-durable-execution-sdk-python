@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.config import (
         ChildConfig,
         CompletionConfig,
+        Duration,
         InvokeConfig,
         MapConfig,
         ParallelConfig,
@@ -333,7 +334,7 @@ class DagContext(ABC):
     @abstractmethod
     def wait(
         self,
-        seconds: int,
+        duration: Duration,
         deps: Sequence[TaskHandle[Any]] | None = None,
         name: str | None = None,
         *,

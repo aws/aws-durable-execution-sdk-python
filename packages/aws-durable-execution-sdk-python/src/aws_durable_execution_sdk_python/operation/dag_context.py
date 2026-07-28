@@ -19,7 +19,10 @@ from aws_durable_execution_sdk_python.dag import (
     TaskHandle,
     TriggerRule,
 )
-from aws_durable_execution_sdk_python.exceptions import DagInvalidTaskNameError
+from aws_durable_execution_sdk_python.exceptions import (
+    DagInvalidTaskNameError,
+    ValidationError,
+)
 from aws_durable_execution_sdk_python.identifier import (
     OperationIdentifier,
     OperationIdNamespace,
@@ -229,13 +232,18 @@ class DagContextImpl(DagContext):
         )
 
     def wait(
-        self, seconds, deps=None, name=None, *,
+        self, duration, deps=None, name=None, *,
         trigger_rule=None, run_if=None,
     ):
         if not name:
             msg = "wait tasks require an explicit `name=`."
             raise DagInvalidTaskNameError(msg)
         task_name = name
+
+        seconds = duration.to_seconds()
+        if seconds < 1:
+            msg = "duration must be at least 1 second"
+            raise ValidationError(msg)
 
         def executor(ctx: DurableContext, deps_map: DepsMap):
             return WaitOperationExecutor(
