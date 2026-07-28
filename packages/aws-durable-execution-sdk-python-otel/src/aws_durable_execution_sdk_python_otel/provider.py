@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from opentelemetry import propagate, trace
+from opentelemetry.semconv.attributes.service_attributes import SERVICE_NAME
 from opentelemetry.propagators.composite import CompositePropagator
 
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
@@ -93,7 +94,7 @@ def _build_resource():
     if not function_name:
         return None
     attributes: dict[str, str] = {
-        "service.name": function_name,
+        SERVICE_NAME: function_name,
         "faas.name": function_name,
         "cloud.provider": "aws",
         "cloud.platform": "aws_lambda",
