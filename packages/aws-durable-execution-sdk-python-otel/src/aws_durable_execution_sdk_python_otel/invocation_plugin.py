@@ -422,7 +422,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             # Context operations are tracked using on_user_function_end.
             return
         span = self._get_span(info.operation_id)
-        is_continuation = span is None
         if span is None:
             # the span was not started in the current invocation, so we need to
             # create a new one that links to the previous one
@@ -447,10 +446,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         else:
             span.set_status(StatusCode.OK)
 
-        end_timestamp = None if is_continuation else info.end_time
-        if end_timestamp is not None and end_timestamp == info.start_time:
-            end_timestamp += datetime.timedelta(microseconds=1)
-        self._end_span(info.operation_id, end_timestamp)
+        self._end_span(info.operation_id)
 
     def on_user_function_start(self, info: UserFunctionStartInfo) -> None:
         """Called when a context or step operation starts user code.

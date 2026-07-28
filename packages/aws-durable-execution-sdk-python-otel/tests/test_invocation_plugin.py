@@ -254,6 +254,12 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
         EXECUTION_ARN, operation_id
     )
     assert wait_span.parent.span_id == invocation_span.context.span_id
+    assert (
+        invocation_span.start_time
+        <= wait_span.start_time
+        <= wait_span.end_time
+        <= invocation_span.end_time
+    )
     assert wait_span.attributes["durable.operation.id"] == operation_id
     assert wait_span.attributes["durable.operation.type"] == OperationType.WAIT.value
     assert (
