@@ -7,9 +7,13 @@ import warnings
 import pytest
 
 from aws_durable_execution_sdk_python.dag import (
+    DagCompletionOutcome,
     DagCompletionReason,
     DagConfig,
+    DagCustomCompletionConfig,
     TaskStatus,
+    complete_dag,
+    continue_dag,
 )
 from aws_durable_execution_sdk_python.exceptions import DagCyclicDependencyError
 from tests.dag_support import make_context, make_state
@@ -29,6 +33,40 @@ def test_context_dag_end_to_end():
     assert result.get_result("d") == "ABAC"
     assert result.completion_reason is DagCompletionReason.ALL_COMPLETED
     assert result.success_count == 4
+
+
+def test_context_dag_custom_completion_end_to_end():
+    """DAG-18-style rules engine through the real public context.dag() entry
+    point: a linear chain r1 -> r2 -> r3, max_concurrency 1, where the custom
+    predicate stops the moment any task's result is REJECT. r2 rejects, so r3
+    must never run.
+    """
+    ran: list[str] = []
+
+    def should_complete(status):
+        any_rejected = any(
+            item.status is TaskStatus.SUCCEEDED and item.result == "REJECT"
+            for item in status.items
+        )
+        return complete_dag(DagCompletionOutcome.FAILED) if any_rejected else continue_dag()
+
+    def register(d):
+        r1 = d.step(lambda deps, sc: (ran.append("r1"), "ACCEPT")[1], name="r1")
+        r2 = d.step(
+            lambda deps, sc: (ran.append("r2"), "REJECT")[1], deps=[r1], name="r2"
+        )
+        d.step(lambda deps, sc: (ran.append("r3"), "ACCEPT")[1], deps=[r2], name="r3")
+
+    state, _ = make_state()
+    ctx = make_context(state)
+    config = DagConfig(
+        max_concurrency=1,
+        completion_config=DagCustomCompletionConfig(should_complete),
+    )
+    result = ctx.dag(register, name="rules-engine", config=config)
+    assert result.completion_reason is DagCompletionReason.CUSTOM_COMPLETION_FAILED
+    assert result.success_count == 2
+    assert ran == ["r1", "r2"]
 
 
 def test_future_warning_emitted_once():

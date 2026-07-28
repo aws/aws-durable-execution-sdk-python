@@ -27,7 +27,11 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 from aws_durable_execution_sdk_python.dag import (
+    DagCompletionItemStatus,
+    DagCompletionOutcome,
     DagCompletionReason,
+    DagCompletionStatus,
+    DagCustomCompletionConfig,
     DepsMap,
     SkipReason,
     TaskExecution,
@@ -580,17 +584,28 @@ class DagExecutor:
         return DepsMap(by_name)
 
     def _threshold_reason_locked(self) -> DagCompletionReason | None:
-        """Early-completion reason, mirroring ``ExecutionCounters.should_complete``.
+        """Early-completion reason: either a custom ``should_complete``
+        predicate's decision, or the threshold logic mirroring
+        ``ExecutionCounters.should_complete``.
 
-        Order matches the reused batch logic: success threshold first, then the
-        failure-tolerance conditions, then the impossible-to-succeed early stop
-        (which batch reports as ``FAILURE_TOLERANCE_EXCEEDED`` — see
+        Threshold order matches the reused batch logic: success threshold
+        first, then the failure-tolerance conditions, then the
+        impossible-to-succeed early stop (which batch reports as
+        ``FAILURE_TOLERANCE_EXCEEDED`` — see
         ``ConcurrentExecutor._create_result``). The failure-percentage
         denominator excludes SKIPPED tasks (they neither succeed nor fail) so
         skips do not dilute the ratio.
         """
         cc = self._config.completion_config
         if cc is None:
+            return None
+        if isinstance(cc, DagCustomCompletionConfig):
+            status = self._build_completion_status_locked()
+            decision = cc.should_complete(status)
+            if decision.complete:
+                if decision.outcome == DagCompletionOutcome.FAILED:
+                    return DagCompletionReason.CUSTOM_COMPLETION_FAILED
+                return DagCompletionReason.CUSTOM_COMPLETION_SUCCEEDED
             return None
         min_successful = cc.min_successful
         # Success condition (checked before failure, matching batch semantics).
@@ -615,6 +630,40 @@ class DagExecutor:
             if reachable < min_successful:
                 return DagCompletionReason.FAILURE_TOLERANCE_EXCEEDED
         return None
+
+    def _build_completion_status_locked(self) -> DagCompletionStatus:
+        """Builds the live progress snapshot passed to a custom
+        ``should_complete`` predicate: every task in registration order, keyed
+        by name, reflecting exactly what has settled so far (tasks with no
+        entry in ``self._results`` yet are reported with a ``None`` status,
+        i.e. not yet started).
+        """
+        items: list[DagCompletionItemStatus] = []
+        by_name: dict[str, DagCompletionItemStatus] = {}
+        for name in self._tasks:
+            te = self._results.get(name)
+            item = (
+                DagCompletionItemStatus(name=name)
+                if te is None
+                else DagCompletionItemStatus(
+                    name=name,
+                    status=te.status,
+                    result=te.result,
+                    skip_reason=te.skip_reason,
+                )
+            )
+            items.append(item)
+            by_name[name] = item
+        completed = self._success + self._failure + self._skip
+        return DagCompletionStatus(
+            success_count=self._success,
+            failure_count=self._failure,
+            skipped_count=self._skip,
+            completed_count=completed,
+            total_count=len(self._tasks),
+            items=items,
+            results=by_name,
+        )
 
     def _has_indefinite_locked(self) -> bool:
         """True if any *indefinite* (non-timed) suspend is outstanding.

@@ -9,11 +9,15 @@ import pytest
 
 from aws_durable_execution_sdk_python.config import CompletionConfig, StepConfig
 from aws_durable_execution_sdk_python.dag import (
+    DagCompletionOutcome,
     DagCompletionReason,
     DagConfig,
+    DagCustomCompletionConfig,
     SkipReason,
     TaskStatus,
     TriggerRule,
+    complete_dag,
+    continue_dag,
 )
 from aws_durable_execution_sdk_python.exceptions import (
     DagExecutionError,
@@ -223,6 +227,106 @@ def test_min_successful_early_completion():
     )
     assert result.completion_reason is DagCompletionReason.MIN_SUCCESSFUL_REACHED
     assert result.success_count >= 2
+
+
+def test_custom_completion_short_circuits_on_rejected_verdict():
+    """DAG-18-style rules engine: a linear chain r1 -> r2 -> r3, max_concurrency
+    1, where each task returns a verdict. The custom predicate inspects
+    SUCCEEDED items' RESULTS (not just counts) and stops the moment any task's
+    verdict is REJECT -- something no threshold config can express, since
+    thresholds only ever see aggregate counts. r2 rejects, so r3 must never
+    run.
+    """
+    ran: list[str] = []
+
+    def should_complete(status):
+        any_rejected = any(
+            item.status is TaskStatus.SUCCEEDED and item.result == "REJECT"
+            for item in status.items
+        )
+        if any_rejected:
+            return complete_dag(DagCompletionOutcome.FAILED)
+        return continue_dag()
+
+    def register(d):
+        r1 = d.step(lambda deps, sc: (ran.append("r1"), "ACCEPT")[1], name="r1")
+        r2 = d.step(
+            lambda deps, sc: (ran.append("r2"), "REJECT")[1], deps=[r1], name="r2"
+        )
+        d.step(lambda deps, sc: (ran.append("r3"), "ACCEPT")[1], deps=[r2], name="r3")
+
+    result, _ = run_dag(
+        register,
+        DagConfig(
+            max_concurrency=1,
+            completion_config=DagCustomCompletionConfig(should_complete),
+        ),
+    )
+    assert result.completion_reason is DagCompletionReason.CUSTOM_COMPLETION_FAILED
+    assert result.success_count == 2
+    assert "r1" in ran
+    assert "r2" in ran
+    assert "r3" not in ran
+
+
+def test_custom_completion_succeeds_when_predicate_never_rejects():
+    def should_complete(status):
+        if status.completed_count >= status.total_count:
+            return complete_dag()
+        return continue_dag()
+
+    def register(d):
+        d.step(lambda deps, sc: "ACCEPT", name="a")
+        d.step(lambda deps, sc: "ACCEPT", name="b")
+
+    result, _ = run_dag(
+        register,
+        DagConfig(completion_config=DagCustomCompletionConfig(should_complete)),
+    )
+    assert result.completion_reason is DagCompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+    assert result.success_count == 2
+
+
+def test_custom_completion_predicate_sees_accurate_live_snapshot():
+    """The predicate must see exactly what has settled so far: unsettled tasks
+    report a None status, settled tasks report their real result/skip reason,
+    and the aggregate counts always match the per-item list.
+    """
+    snapshots = []
+
+    def should_complete(status):
+        snapshots.append(status)
+        if status.completed_count >= 4:
+            return complete_dag()
+        return continue_dag()
+
+    def register(d):
+        a = d.step(lambda deps, sc: "A", name="a")
+        d.step(lambda deps, sc: "B", name="b")
+        d.step(lambda deps, sc: "C", deps=[a], name="c", trigger_rule=TriggerRule.ALL_FAILED)
+        d.step(lambda deps, sc: "D", name="d")
+
+    result, _ = run_dag(
+        register,
+        DagConfig(completion_config=DagCustomCompletionConfig(should_complete)),
+    )
+    assert result.completion_reason is DagCompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+    assert snapshots, "the predicate must have been invoked at least once"
+    for snap in snapshots:
+        derived_succeeded = sum(
+            1 for item in snap.items if item.status is TaskStatus.SUCCEEDED
+        )
+        derived_skipped = sum(
+            1 for item in snap.items if item.status is TaskStatus.SKIPPED
+        )
+        assert derived_succeeded == snap.success_count
+        assert derived_skipped == snap.skipped_count
+        assert len(snap.items) == len(snap.results)
+        assert snap.total_count == 4
+    last = snapshots[-1]
+    assert last.success_count == 3, "a, b, d succeed"
+    assert last.skipped_count == 1, "c is skipped: ALL_FAILED with no failed upstream"
+    assert last.results["c"].skip_reason is SkipReason.TRIGGER_RULE
 
 
 def test_failure_tolerance_exceeded():

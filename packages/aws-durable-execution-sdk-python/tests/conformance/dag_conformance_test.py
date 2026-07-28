@@ -6,9 +6,11 @@ Implements the applicable scenarios from the canonical catalog
 expected *semantic* outcome, and emits one key-sorted normalized JSON record
 file to ``dag-conformance-out/python.json`` (schema per catalog Part B).
 
-Applicability (catalog Part C): DAG-1..17 and DAG-19 apply to Python (18
-records). DAG-18 (custom result-based completion) is TS+Go only and is OMITTED
-here per the catalog's "emit only applicable scenarios" convention.
+Applicability (catalog Part C): all 19 scenarios (DAG-1..19) apply to Python.
+DAG-18 (custom result-based completion) originally shipped TS+Go only; Python
+added `DagCustomCompletionConfig`/`should_complete` after v1 (the DAG module
+needed no base-SDK predicate hook to build it on, unlike what the catalog
+originally assumed).
 
 All scenarios (including DAG-16/17 early completion) now conform to the
 canonical catalog outcomes; ``total_count`` equals the registered task count
@@ -28,10 +30,14 @@ import pytest
 from aws_durable_execution_sdk_python import exceptions
 from aws_durable_execution_sdk_python.config import CompletionConfig, StepConfig
 from aws_durable_execution_sdk_python.dag import (
+    DagCompletionOutcome,
     DagConfig,
+    DagCustomCompletionConfig,
     DagResult,
     TaskStatus,
     TriggerRule,
+    complete_dag,
+    continue_dag,
 )
 from aws_durable_execution_sdk_python.retries import RetryPresets
 from tests.dag_support import InMemoryServiceClient, make_context, make_state
@@ -553,6 +559,41 @@ def test_dag_17_tolerated_failures() -> None:
     assert rec["counts"]["total"] == 4
 
 
+def test_dag_18_custom_completion() -> None:
+    def should_complete(status: Any) -> Any:
+        rejected = any(
+            item.status is TaskStatus.SUCCEEDED
+            and isinstance(item.result, dict)
+            and item.result.get("verdict") == "REJECT"
+            for item in status.items
+        )
+        return (
+            complete_dag(DagCompletionOutcome.FAILED) if rejected else continue_dag()
+        )
+
+    def reg(d: Any) -> None:
+        r1 = d.step(lambda deps, sc: {"verdict": "ACCEPT"}, name="r1")
+        r2 = d.step(lambda deps, sc: {"verdict": "REJECT"}, deps=[r1], name="r2")
+        d.step(lambda deps, sc: {"verdict": "ACCEPT"}, deps=[r2], name="r3")
+
+    result, client = _run(
+        reg,
+        "DAG-18",
+        DagConfig(
+            max_concurrency=1,
+            completion_config=DagCustomCompletionConfig(should_complete),
+        ),
+    )
+    rec = _record("DAG-18", result, client)
+    assert rec["tasks"]["r1"]["result"] == {"verdict": "ACCEPT"}
+    assert rec["tasks"]["r2"]["result"] == {"verdict": "REJECT"}
+    assert "r3" not in rec["tasks"]  # absent: never started
+    assert rec["completion_reason"] == "CUSTOM_COMPLETION_FAILED"
+    assert rec["counts"] == {"success": 2, "failure": 0, "skipped": 0, "total": 3}
+    with pytest.raises(exceptions.DagExecutionError):
+        result.throw_if_error()
+
+
 def test_dag_19_order_independence() -> None:
     def make_reg(swap: bool) -> Any:
         def reg(d: Any) -> None:
@@ -598,15 +639,14 @@ def test_dag_19_order_independence() -> None:
 def test_zz_emit_python_json() -> None:
     """Runs last (name-sorted): assemble, validate, and write python.json.
 
-    DAG-18 is intentionally OMITTED (TS+Go only, catalog Part C). Emits exactly
-    18 records as key-sorted UTF-8 JSON with 2-space indent + trailing newline.
+    Emits exactly 19 records (DAG-1..19) as key-sorted UTF-8 JSON with 2-space
+    indent + trailing newline.
     """
-    expected_scenarios = {f"DAG-{i}" for i in range(1, 18)} | {"DAG-19"}
+    expected_scenarios = {f"DAG-{i}" for i in range(1, 20)}
     assert set(RECORDS) == expected_scenarios, (
         f"missing/extra: {expected_scenarios ^ set(RECORDS)}"
     )
-    assert "DAG-18" not in RECORDS  # NOT-APPLICABLE for Python (custom completion)
-    assert len(RECORDS) == 18
+    assert len(RECORDS) == 19
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(RECORDS, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
@@ -616,7 +656,6 @@ def test_zz_emit_python_json() -> None:
     reloaded = json.loads(OUT_PATH.read_text(encoding="utf-8"))
     assert reloaded == RECORDS
     assert text.endswith("\n")
-    assert "DAG-18" not in reloaded
 
 
 # endregion scenarios

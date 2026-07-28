@@ -101,6 +101,9 @@ class DagCompletionReason(Enum):
     The first three members are value-compatible with
     ``concurrency.CompletionReason``; ``COMPLETED_WITH_FAILURES`` is DAG-only and
     signals the default drain-on-failure path finished with >=1 failed task.
+    ``CUSTOM_COMPLETION_SUCCEEDED``/``CUSTOM_COMPLETION_FAILED`` are early
+    completion via a custom :attr:`DagCustomCompletionConfig.should_complete`
+    predicate rather than a threshold.
 
     .. warning::
        **Experimental.** This API is experimental and may be changed or removed
@@ -111,6 +114,57 @@ class DagCompletionReason(Enum):
     MIN_SUCCESSFUL_REACHED = "MIN_SUCCESSFUL_REACHED"
     FAILURE_TOLERANCE_EXCEEDED = "FAILURE_TOLERANCE_EXCEEDED"
     COMPLETED_WITH_FAILURES = "COMPLETED_WITH_FAILURES"
+    CUSTOM_COMPLETION_SUCCEEDED = "CUSTOM_COMPLETION_SUCCEEDED"
+    CUSTOM_COMPLETION_FAILED = "CUSTOM_COMPLETION_FAILED"
+
+
+class DagCompletionOutcome(Enum):
+    """The terminal disposition a custom DAG completion predicate assigns to an
+    early completion.
+
+    .. warning::
+       **Experimental.** This API is experimental and may be changed or removed
+       in future releases.
+    """
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True)
+class DagCompletionDecision:
+    """The value a DAG custom completion predicate returns.
+
+    Use :meth:`continue_dag` to keep scheduling, or :meth:`complete_dag` to stop
+    the DAG now with a given outcome (default
+    :attr:`DagCompletionOutcome.SUCCEEDED`).
+
+    .. warning::
+       **Experimental.** This API is experimental and may be changed or removed
+       in future releases.
+    """
+
+    complete: bool
+    outcome: DagCompletionOutcome | None = None
+
+    def __post_init__(self) -> None:
+        if self.complete and self.outcome is None:
+            object.__setattr__(self, "outcome", DagCompletionOutcome.SUCCEEDED)
+        if not self.complete and self.outcome is not None:
+            msg = "outcome must be None when complete is False"
+            raise ValueError(msg)
+
+
+def continue_dag() -> DagCompletionDecision:
+    """Returns a decision meaning "keep scheduling ready tasks"."""
+    return DagCompletionDecision(complete=False)
+
+
+def complete_dag(
+    outcome: DagCompletionOutcome = DagCompletionOutcome.SUCCEEDED,
+) -> DagCompletionDecision:
+    """Returns a decision meaning "complete the DAG now" with the given outcome."""
+    return DagCompletionDecision(complete=True, outcome=outcome)
 
 
 # endregion enums
@@ -135,11 +189,68 @@ class TaskExecution(Generic[T]):
 
 
 @dataclass(frozen=True)
+class DagCompletionItemStatus:
+    """Per-task snapshot passed to a DAG custom completion predicate.
+
+    .. warning::
+       **Experimental.** This API is experimental and may be changed or removed
+       in future releases.
+    """
+
+    name: str
+    status: TaskStatus | None = None
+    """The task's full status, including ``SKIPPED``; ``None`` if not started."""
+    result: Any | None = None
+    """Present only when ``status`` is ``TaskStatus.SUCCEEDED``."""
+    skip_reason: SkipReason | None = None
+    """Present only when ``status`` is ``TaskStatus.SKIPPED``."""
+
+
+@dataclass(frozen=True)
+class DagCompletionStatus:
+    """Progress snapshot passed to a DAG custom completion predicate.
+
+    .. warning::
+       **Experimental.** This API is experimental and may be changed or removed
+       in future releases.
+    """
+
+    success_count: int
+    failure_count: int
+    skipped_count: int
+    completed_count: int
+    """``success_count + failure_count + skipped_count`` (all terminal states)."""
+    total_count: int
+    items: Sequence[DagCompletionItemStatus]
+    """Per-task snapshot, ordered by registration order."""
+    results: Mapping[str, DagCompletionItemStatus]
+    """Live view of terminal task snapshots by name."""
+
+
+@dataclass(frozen=True)
+class DagCustomCompletionConfig:
+    """Custom-predicate DAG completion: a deterministic predicate evaluated over
+    the DAG's live progress and task results after every task settlement.
+
+    Unlike threshold-based :class:`~...config.CompletionConfig`, this predicate
+    can inspect individual tasks' results (via :attr:`DagCompletionStatus.items`
+    / :attr:`DagCompletionStatus.results`), not just aggregate counts.
+
+    .. warning::
+       **Experimental.** This API is experimental and may be changed or removed
+       in future releases.
+    """
+
+    should_complete: Callable[[DagCompletionStatus], DagCompletionDecision]
+
+
+@dataclass(frozen=True)
 class DagConfig:
     """Configuration for a DAG.
 
-    Reuses the existing threshold-only :class:`~...config.CompletionConfig`
-    verbatim; result-based custom completion is v2-deferred.
+    ``completion_config`` accepts either the base SDK's threshold-only
+    :class:`~...config.CompletionConfig`, reused verbatim, or a
+    :class:`DagCustomCompletionConfig` for a results-aware custom predicate.
 
     .. warning::
        **Experimental.** This API is experimental and may be changed or removed
@@ -160,7 +271,7 @@ class DagConfig:
     configured on that task, and a nested ``dag`` task gets its own independent
     default of 40.
     """
-    completion_config: CompletionConfig | None = None
+    completion_config: CompletionConfig | DagCustomCompletionConfig | None = None
     default_trigger_rule: TriggerRule = TriggerRule.ALL_SUCCESS
     serdes: SerDes | None = None
 

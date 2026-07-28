@@ -203,7 +203,11 @@ class DagResultImpl(DagResult):
         return self._completion_reason
 
     def throw_if_error(self) -> None:
-        """Raise :class:`DagExecutionError` if any task FAILED."""
+        """Raise :class:`DagExecutionError` if any task FAILED, or if a custom
+        completion predicate completed the DAG as ``CUSTOM_COMPLETION_FAILED``
+        (which can happen with zero individually-failed tasks -- the predicate's
+        verdict, not a task exception, is what failed the DAG).
+        """
         failures = self.failed()
         if failures:
             first = failures[0]
@@ -211,6 +215,12 @@ class DagResultImpl(DagResult):
             msg = (
                 f"DAG completed with {len(failures)} failed task(s); "
                 f"first failure '{first.name}': {detail}"
+            )
+            raise DagExecutionError(msg)
+        if self.completion_reason is DagCompletionReason.CUSTOM_COMPLETION_FAILED:
+            msg = (
+                "DAG completed with reason CUSTOM_COMPLETION_FAILED (a custom "
+                "completion predicate completed the DAG as a failure)"
             )
             raise DagExecutionError(msg)
 
