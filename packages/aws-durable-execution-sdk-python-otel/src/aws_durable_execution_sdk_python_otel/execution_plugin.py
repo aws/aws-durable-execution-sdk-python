@@ -146,7 +146,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._invocation_span: Span | None = None
         self._operation_spans: dict[str, Span] = {}
         self._lock = threading.RLock()
-        self._is_cold_start = True
 
         if self._config.enrich_logger:
             install_log_filter(self)
@@ -224,8 +223,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 trace.set_span_in_context(self._workflow_span, self._extracted_context)
             )
 
-        self._is_cold_start = False
-
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
         if not self._execution_arn:
             logger.warning("No execution ARN; skipping Workflow span creation")
@@ -269,12 +266,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             attributes = {
                 "durable.execution.arn": self._execution_arn,
                 "durable.invocation.first": info.is_first_invocation,
-                "faas.coldstart": self._is_cold_start,
-                "cloud.provider": "aws",
-                "cloud.platform": "aws_lambda",
             }
-            if info.request_id:
-                attributes["faas.invocation_id"] = info.request_id
         self._invocation_span = self._tracer.start_span(
             name="Invocation",
             kind=SpanKind.INTERNAL,
