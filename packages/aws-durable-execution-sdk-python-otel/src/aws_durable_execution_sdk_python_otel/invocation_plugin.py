@@ -68,7 +68,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     Operation IDs are converted into deterministic span IDs. The first observed
     span for an operation uses that deterministic ID; later continuation spans
     use newly generated span IDs and link back to the deterministic span ID so
-    trace viewers can relate retries and replay-created terminal spans to the
+    trace viewers can relate retries and cross-invocation completions to the
     original logical operation.
 
     Args:
@@ -388,7 +388,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             operation_id=info.operation_id,
             name=info.name or info.operation_id,
             attributes=attributes,
-            start_time=info.start_time,
+            start_time=datetime.datetime.now(datetime.UTC),
             parent_span=parent_span,
             existed=info.is_replayed,
         )
@@ -407,7 +407,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             # Context operations are tracked using on_user_function_end.
             return
         span = self._get_span(info.operation_id)
-        if not span:
+        if span is None:
             # the span was not started in the current invocation, so we need to
             # create a new one that links to the previous one
             parent_span = self._resolve_parent_span(info.parent_id)
@@ -416,7 +416,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 operation_id=info.operation_id,
                 name=info.name or info.operation_id,
                 attributes=attributes,
-                start_time=info.start_time,
+                start_time=datetime.datetime.now(datetime.UTC),
                 parent_span=parent_span,
                 existed=True,
             )
@@ -431,10 +431,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         else:
             span.set_status(StatusCode.OK)
 
-        end_timestamp = info.end_time
-        if end_timestamp is not None and end_timestamp == info.start_time:
-            end_timestamp += datetime.timedelta(microseconds=1)
-        self._end_span(info.operation_id, end_timestamp)
+        self._end_span(info.operation_id)
 
     def on_user_function_start(self, info: UserFunctionStartInfo) -> None:
         """Called when a context or step operation starts user code.

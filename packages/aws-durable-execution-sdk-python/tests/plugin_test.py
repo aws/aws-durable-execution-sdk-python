@@ -642,6 +642,48 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
         self.assertEqual(self.plugin.calls, [])
 
 
+class TestPluginExecutorOnOperationReplay(unittest.TestCase):
+    """Tests for PluginExecutor.on_operation_replay."""
+
+    def test_terminal_operation_does_not_fire_callbacks(self):
+        terminal_statuses = [
+            OperationStatus.SUCCEEDED,
+            OperationStatus.FAILED,
+            OperationStatus.TIMED_OUT,
+            OperationStatus.CANCELLED,
+            OperationStatus.STOPPED,
+        ]
+
+        for status in terminal_statuses:
+            with self.subTest(status=status):
+                plugin = _TrackingPlugin()
+                executor = PluginExecutor(plugins=[plugin])
+                operation = Operation(
+                    operation_id="op-1",
+                    operation_type=OperationType.STEP,
+                    status=status,
+                )
+
+                with executor.run():
+                    executor.on_operation_replay(operation)
+
+                self.assertEqual(plugin.calls, [])
+
+    def test_non_terminal_operation_fires_operation_start(self):
+        plugin = _TrackingPlugin()
+        executor = PluginExecutor(plugins=[plugin])
+        operation = Operation(
+            operation_id="op-1",
+            operation_type=OperationType.WAIT,
+            status=OperationStatus.STARTED,
+        )
+
+        with executor.run():
+            executor.on_operation_replay(operation)
+
+        self.assertEqual(plugin.calls, ["operation_start:op-1"])
+
+
 class TestPluginExecutorOnOperationUpdate(unittest.TestCase):
     """Tests for PluginExecutor.on_operation_update."""
 

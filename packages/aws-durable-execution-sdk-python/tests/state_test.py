@@ -4921,14 +4921,26 @@ def test_plugin_executor_not_called_for_pending_operations():
     assert len(operation_end_calls) == 0
 
 
-def test_emit_operation_replay_hook_fires_start_and_end_for_terminal_operation():
-    """emit_operation_replay_hook emits start+end (is_replayed=True) for terminal ops."""
+@pytest.mark.parametrize(
+    "terminal_status",
+    [
+        OperationStatus.SUCCEEDED,
+        OperationStatus.FAILED,
+        OperationStatus.TIMED_OUT,
+        OperationStatus.CANCELLED,
+        OperationStatus.STOPPED,
+    ],
+)
+def test_emit_operation_replay_hook_skips_terminal_operation(
+    terminal_status: OperationStatus,
+):
+    """Terminal operations do not emit plugin callbacks during replay."""
     start_time = datetime.datetime(2025, 1, 1, tzinfo=datetime.UTC)
     end_time = datetime.datetime(2025, 1, 2, tzinfo=datetime.UTC)
     operation = Operation(
         operation_id="step-1",
         operation_type=OperationType.STEP,
-        status=OperationStatus.SUCCEEDED,
+        status=terminal_status,
         parent_id="parent-1",
         name="my-step",
         start_timestamp=start_time,
@@ -4959,10 +4971,7 @@ def test_emit_operation_replay_hook_fires_start_and_end_for_terminal_operation()
         state.emit_operation_replay_hook(operation)
         state.emit_operation_replay_hook(operation)
 
-    assert captured == [
-        ("start", "step-1", True, OperationStatus.SUCCEEDED),
-        ("end", "step-1", True, OperationStatus.SUCCEEDED),
-    ]
+    assert captured == []
 
 
 def test_emit_operation_replay_hook_fires_only_start_for_non_terminal_operation():

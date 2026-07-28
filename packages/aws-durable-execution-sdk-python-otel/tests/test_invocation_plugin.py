@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
@@ -218,6 +219,9 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
     )
     active_wait_span = plugin._get_span(operation_id)
     assert active_wait_span is not None
+    invocation_span = plugin._get_span(None)
+    assert invocation_span is not None
+    assert invocation_span.start_time <= active_wait_span.start_time
     assert (
         active_wait_span.attributes["durable.operation.status"]
         == OperationStatus.STARTED.value
@@ -250,6 +254,12 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
         EXECUTION_ARN, operation_id
     )
     assert wait_span.parent.span_id == invocation_span.context.span_id
+    assert (
+        invocation_span.start_time
+        <= wait_span.start_time
+        <= wait_span.end_time
+        <= invocation_span.end_time
+    )
     assert wait_span.attributes["durable.operation.id"] == operation_id
     assert wait_span.attributes["durable.operation.type"] == OperationType.WAIT.value
     assert (
@@ -297,10 +307,13 @@ def test_operation_end_without_start_emits_continuation_span_with_link():
     )
 
 
-def test_continuation_span_uses_recorded_start_and_end_times():
-    """Continuation spans use the recorded operation start/end times."""
+def test_continuation_span_uses_current_start_and_end_times():
+    """Continuation spans use current times within the invocation."""
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
+    invocation_span = plugin._get_span(None)
+    assert invocation_span is not None
+    before_callback = time.time_ns()
 
     plugin.on_operation_end(
         OperationEndInfo(
@@ -316,59 +329,11 @@ def test_continuation_span_uses_recorded_start_and_end_times():
             error=None,
         )
     )
+    after_callback = time.time_ns()
 
     span = exporter.get_finished_spans()[0]
-    expected_start = int(START_TIME.timestamp() * 1_000_000_000)
-    expected_end = int(END_TIME.timestamp() * 1_000_000_000)
-    assert span.start_time == expected_start
-    assert span.end_time == expected_end
-    # Duration must be non-negative.
-    assert span.end_time >= span.start_time
-
-
-def test_replayed_operation_start_emits_continuation_span_with_link():
-    """Replayed operation spans should not reuse the original deterministic span ID."""
-    plugin, exporter = _create_plugin()
-    plugin.on_invocation_start(_invocation_start_info())
-    operation_id = "wait-replayed"
-    random_span_id = int("abcdef1234567890", 16)
-    plugin._id_generator._fallback_id_generator.generate_span_id = lambda: (
-        random_span_id
-    )
-
-    plugin.on_operation_start(
-        OperationStartInfo(
-            operation_id=operation_id,
-            operation_type=OperationType.WAIT,
-            sub_type=OperationSubType.WAIT,
-            name="replayed-wait",
-            parent_id=None,
-            start_time=START_TIME,
-            is_replayed=True,
-            status=OperationStatus.SUCCEEDED,
-        )
-    )
-    plugin.on_operation_end(
-        OperationEndInfo(
-            operation_id=operation_id,
-            operation_type=OperationType.WAIT,
-            sub_type=OperationSubType.WAIT,
-            name="replayed-wait",
-            parent_id=None,
-            start_time=START_TIME,
-            is_replayed=True,
-            status=OperationStatus.SUCCEEDED,
-            end_time=END_TIME,
-            error=None,
-        )
-    )
-
-    span = exporter.get_finished_spans()[0]
-    assert span.name == "replayed-wait"
-    assert span.context.span_id == random_span_id
-    assert span.links[0].context.span_id == operation_id_to_span_id(
-        EXECUTION_ARN, operation_id
-    )
+    assert invocation_span.start_time <= span.start_time
+    assert before_callback <= span.start_time <= span.end_time <= after_callback
 
 
 def test_retried_operation_start_emits_continuation_span_with_link():

@@ -209,7 +209,7 @@ def test_cross_invocation_operation_end_uses_deterministic_span_id():
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
 
-    # Operation end with no matching start (started in a prior invocation).
+    # Backend-updated completion for an operation started in a prior invocation.
     plugin.on_operation_end(
         OperationEndInfo(
             operation_id="step-earlier",
@@ -218,7 +218,7 @@ def test_cross_invocation_operation_end_uses_deterministic_span_id():
             name="earlier-step",
             parent_id=None,
             start_time=START_TIME,
-            is_replayed=True,
+            is_replayed=False,
             status=OperationStatus.SUCCEEDED,
             end_time=END_TIME,
             error=None,
