@@ -239,6 +239,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # Empty context => root span with no parent.
         self._workflow_span = self._tracer.start_span(
             name=self._workflow_span_name,
+            kind=SpanKind.INTERNAL,
             attributes={"durable.execution.arn": self._execution_arn},
             start_time=start_time,
             context=Context(),
@@ -291,9 +292,14 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # clears the span map below.
 
         # End the invocation span regardless of terminal status. Record the
-        # invocation status and map it to a span status: SUCCEEDED/PENDING are OK
-        # (this invocation did its work, whether it completed or suspended),
-        # RETRY/FAILED are ERROR (this invocation failed).
+        # invocation status and map it to a span status:
+        #   SUCCEEDED/PENDING -> OK  (this invocation did its work, whether it
+        #                             completed the execution or cleanly suspended)
+        #   FAILED            -> ERROR
+        #   RETRY             -> UNSET
+        # RETRY is left UNSET because the plugin interface cannot tell whether the
+        # execution/workflow was STOPPED or TIMED_OUT: a RETRY invocation is not a
+        # definitive failure of the execution, so we avoid marking the span ERROR.
         if self._invocation_span is not None:
             self._invocation_span.set_attribute(
                 "durable.invocation.status",
@@ -301,7 +307,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             )
             if info.status in (InvocationStatus.SUCCEEDED, InvocationStatus.PENDING):
                 self._invocation_span.set_status(StatusCode.OK)
-            elif info.status in (InvocationStatus.RETRY, InvocationStatus.FAILED):
+            elif info.status is InvocationStatus.FAILED:
                 self._invocation_span.set_status(
                     StatusCode.ERROR, info.error.message if info.error else ""
                 )

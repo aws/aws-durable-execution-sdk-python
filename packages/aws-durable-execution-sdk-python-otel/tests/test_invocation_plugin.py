@@ -176,7 +176,7 @@ def test_invocation_span_records_subsequent_invocation():
     ("invocation_status", "expected_span_status"),
     [
         (InvocationStatus.PENDING, StatusCode.OK),
-        (InvocationStatus.RETRY, StatusCode.ERROR),
+        (InvocationStatus.RETRY, StatusCode.UNSET),
         (InvocationStatus.SUCCEEDED, StatusCode.OK),
         (InvocationStatus.FAILED, StatusCode.ERROR),
     ],
