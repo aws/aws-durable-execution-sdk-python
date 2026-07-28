@@ -350,9 +350,14 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             invocation_span.set_attribute(
                 "durable.invocation.status", info.status.value
             )
+            # Span status mapping: SUCCEEDED/PENDING -> OK, FAILED -> ERROR,
+            # RETRY -> UNSET. RETRY is left UNSET because the plugin interface
+            # cannot tell whether the execution/workflow was STOPPED or
+            # TIMED_OUT, so a RETRY invocation is not treated as a definitive
+            # failure of the execution.
             if info.status in (InvocationStatus.SUCCEEDED, InvocationStatus.PENDING):
                 invocation_span.set_status(StatusCode.OK)
-            elif info.status in (InvocationStatus.RETRY, InvocationStatus.FAILED):
+            elif info.status is InvocationStatus.FAILED:
                 invocation_span.set_status(
                     StatusCode.ERROR, info.error.message if info.error else ""
                 )
