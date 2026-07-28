@@ -27,7 +27,6 @@ from typing import Any
 
 from aws_durable_execution_sdk_python.lambda_service import (
     InvocationStatus,
-    OperationStatus,
     OperationType,
 )
 from aws_durable_execution_sdk_python.plugin import (
@@ -75,16 +74,6 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL_INVOCATION_STATUSES = frozenset(
     {InvocationStatus.SUCCEEDED, InvocationStatus.FAILED}
-)
-
-_TERMINAL_OPERATION_STATUSES = frozenset(
-    {
-        OperationStatus.SUCCEEDED,
-        OperationStatus.FAILED,
-        OperationStatus.TIMED_OUT,
-        OperationStatus.CANCELLED,
-        OperationStatus.STOPPED,
-    }
 )
 
 # Registry key for the invocation span (operations use their operation_id).
@@ -357,8 +346,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     # ------------------------------------------------------------------
     def on_operation_start(self, info: OperationStartInfo) -> None:
         logger.debug("Durable operation started: %s", info)
-        if info.is_replayed and info.status in _TERMINAL_OPERATION_STATUSES:
-            return
         if info.operation_type is OperationType.CONTEXT:
             return  # tracked via on_user_function_start
         parent = self._resolve_parent(info.parent_id)
@@ -372,8 +359,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
         logger.debug("Durable operation ended: %s", info)
-        if info.is_replayed:
-            return
         if info.operation_type is OperationType.CONTEXT:
             return
         span = self._get_span(info.operation_id)

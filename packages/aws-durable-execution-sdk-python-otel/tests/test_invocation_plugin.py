@@ -336,55 +336,6 @@ def test_continuation_span_uses_current_start_and_end_times():
     assert before_callback <= span.start_time <= span.end_time <= after_callback
 
 
-@pytest.mark.parametrize(
-    "operation_status",
-    [
-        OperationStatus.SUCCEEDED,
-        OperationStatus.FAILED,
-        OperationStatus.TIMED_OUT,
-        OperationStatus.CANCELLED,
-        OperationStatus.STOPPED,
-    ],
-)
-def test_terminal_replayed_operation_does_not_emit_duplicate_span(
-    operation_status: OperationStatus,
-):
-    """Terminal operations completed before this invocation are not re-emitted."""
-    plugin, exporter = _create_plugin()
-    plugin.on_invocation_start(_invocation_start_info())
-    operation_id = "wait-replayed"
-
-    plugin.on_operation_start(
-        OperationStartInfo(
-            operation_id=operation_id,
-            operation_type=OperationType.WAIT,
-            sub_type=OperationSubType.WAIT,
-            name="replayed-wait",
-            parent_id=None,
-            start_time=START_TIME,
-            is_replayed=True,
-            status=operation_status,
-        )
-    )
-    plugin.on_operation_end(
-        OperationEndInfo(
-            operation_id=operation_id,
-            operation_type=OperationType.WAIT,
-            sub_type=OperationSubType.WAIT,
-            name="replayed-wait",
-            parent_id=None,
-            start_time=START_TIME,
-            is_replayed=True,
-            status=operation_status,
-            end_time=END_TIME,
-            error=None,
-        )
-    )
-    plugin.on_invocation_end(_invocation_end_info())
-
-    assert [span.name for span in exporter.get_finished_spans()] == ["invocation"]
-
-
 def test_retried_operation_start_emits_continuation_span_with_link():
     """Retried operation spans should not reuse the original deterministic span ID."""
     plugin, exporter = _create_plugin()

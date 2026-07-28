@@ -235,53 +235,6 @@ def test_cross_invocation_operation_end_uses_deterministic_span_id():
     )
 
 
-@pytest.mark.parametrize(
-    "operation_status",
-    [
-        OperationStatus.SUCCEEDED,
-        OperationStatus.FAILED,
-        OperationStatus.TIMED_OUT,
-        OperationStatus.CANCELLED,
-        OperationStatus.STOPPED,
-    ],
-)
-def test_terminal_replayed_operation_does_not_emit_duplicate_span(
-    operation_status: OperationStatus,
-):
-    plugin, exporter = _create_plugin()
-    plugin.on_invocation_start(_invocation_start_info())
-
-    plugin.on_operation_start(
-        OperationStartInfo(
-            operation_id="step-earlier",
-            operation_type=OperationType.STEP,
-            sub_type=OperationSubType.STEP,
-            name="earlier-step",
-            parent_id=None,
-            start_time=START_TIME,
-            is_replayed=True,
-            status=operation_status,
-        )
-    )
-    plugin.on_operation_end(
-        OperationEndInfo(
-            operation_id="step-earlier",
-            operation_type=OperationType.STEP,
-            sub_type=OperationSubType.STEP,
-            name="earlier-step",
-            parent_id=None,
-            start_time=START_TIME,
-            is_replayed=True,
-            status=operation_status,
-            end_time=END_TIME,
-            error=None,
-        )
-    )
-    plugin.on_invocation_end(_invocation_end_info())
-
-    assert "earlier-step" not in {span.name for span in exporter.get_finished_spans()}
-
-
 # ---------------------------------------------------------------------------
 # Default-provider mode: invocation span
 # ---------------------------------------------------------------------------
