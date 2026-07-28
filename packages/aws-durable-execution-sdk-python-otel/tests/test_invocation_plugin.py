@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
@@ -300,10 +301,13 @@ def test_operation_end_without_start_emits_continuation_span_with_link():
     )
 
 
-def test_continuation_span_uses_recorded_start_and_end_times():
-    """Continuation spans use the recorded operation start/end times."""
+def test_continuation_span_uses_current_start_and_end_times():
+    """Continuation spans use current times within the invocation."""
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
+    invocation_span = plugin._get_span(None)
+    assert invocation_span is not None
+    before_callback = time.time_ns()
 
     plugin.on_operation_end(
         OperationEndInfo(
@@ -319,14 +323,11 @@ def test_continuation_span_uses_recorded_start_and_end_times():
             error=None,
         )
     )
+    after_callback = time.time_ns()
 
     span = exporter.get_finished_spans()[0]
-    expected_start = int(START_TIME.timestamp() * 1_000_000_000)
-    expected_end = int(END_TIME.timestamp() * 1_000_000_000)
-    assert span.start_time == expected_start
-    assert span.end_time == expected_end
-    # Duration must be non-negative.
-    assert span.end_time >= span.start_time
+    assert invocation_span.start_time <= span.start_time
+    assert before_callback <= span.start_time <= span.end_time <= after_callback
 
 
 @pytest.mark.parametrize(
