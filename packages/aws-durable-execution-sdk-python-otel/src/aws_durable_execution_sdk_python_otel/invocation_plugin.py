@@ -40,12 +40,20 @@ from aws_durable_execution_sdk_python_otel.context_extractors import (
 )
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     DeterministicIdGenerator,
+    derive_workflow_span_id,
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
+    DEFAULT_WORKFLOW_SPAN_NAME,
+)
 
 
 logger = logging.getLogger(__name__)
+
+_TERMINAL_INVOCATION_STATUSES = frozenset(
+    {InvocationStatus.SUCCEEDED, InvocationStatus.FAILED}
+)
 
 _SpanAttributes = dict[str, str | bool | int]
 
@@ -88,6 +96,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         context_extractor: ContextExtractor | None = None,
         instrument_name: str = DEFAULT_INSTRUMENT_NAME,
         enrich_logger: bool = True,
+        workflow_span_name: str = DEFAULT_WORKFLOW_SPAN_NAME,
     ) -> None:
         """Initialize the plugin with an OpenTelemetry tracer provider.
 
@@ -101,6 +110,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         OTel trace context onto every emitted log record.
         """
         self._enrich_logger = enrich_logger
+        self._workflow_span_name = workflow_span_name
         self._context_extractor: ContextExtractor = (
             context_extractor or xray_context_extractor
         )
@@ -132,6 +142,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         # per invocation status:
         self._execution_arn = ""
         self._extracted_context: Context | None = None
+        self._workflow_span: Span | None = None
         # Maps operation ID (None for root) to the active span.
         self._operation_spans: dict[str | None, Span] = {}
         self._operation_spans_lock = threading.RLock()
@@ -279,6 +290,12 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                     if operation_id
                     else None
                 )
+            # Operation and attempt spans link to the execution-scoped Workflow
+            # span (the invocation span itself, operation_id=None, does not).
+            if self._workflow_span is not None and operation_id is not None:
+                workflow_ctx = self._workflow_span.get_span_context()
+                if workflow_ctx and workflow_ctx.is_valid:
+                    links = [*links, Link(context=workflow_ctx)]
             if parent_span is None:
                 # root span
                 parent_context = self._extracted_context
@@ -329,10 +346,40 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._extracted_context = self._context_extractor(info)
         self._id_generator.set_trace_id(self._execution_arn, info.execution_start_time)
 
+        self._start_workflow_span(info)
+
         self._start_span(
             operation_id=None,
-            name="invocation",
+            name="Invocation",
             attributes=self._extract_attributes(info),
+        )
+
+    def _start_workflow_span(self, info: InvocationStartInfo) -> None:
+        """Create the deterministic, execution-scoped Workflow root span.
+
+        The Workflow span is a parentless root keyed to a deterministic span ID
+        derived from the execution ARN, so every invocation of the same durable
+        execution contributes to one Workflow span. It is exported once, on a
+        terminal invocation. Operation and attempt spans link to it while
+        remaining parented to the invocation span. It is created unconditionally
+        -- InvocationOtelPlugin has no default/owned tracer-provider distinction,
+        so the span is emitted whether the provider is the ambient (ADOT/global)
+        one or an explicitly supplied one.
+        """
+        if not self._execution_arn:
+            logger.warning("No execution ARN; skipping Workflow span creation")
+            return
+        self._id_generator.set_next_span_id(
+            derive_workflow_span_id(self._execution_arn)
+        )
+        # Empty context => root span with no parent. _to_otel_timestamp falls
+        # back to now() when execution_start_time is None.
+        self._workflow_span = self._tracer.start_span(
+            name=self._workflow_span_name,
+            kind=SpanKind.INTERNAL,
+            attributes={"durable.execution.arn": self._execution_arn},
+            start_time=_to_otel_timestamp(info.execution_start_time),
+            context=Context(),
         )
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
@@ -365,9 +412,28 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         # end the invocation span
         self._end_span(None)
 
+        # The Workflow span (execution view) is exported only on a terminal
+        # status; on non-terminal statuses its reference is dropped without
+        # ending it (so it is not exported yet). SUCCEEDED -> OK, FAILED -> ERROR;
+        # RETRY/PENDING are non-terminal and leave it unexported.
+        if self._workflow_span is not None:
+            if info.status in _TERMINAL_INVOCATION_STATUSES:
+                self._workflow_span.set_attribute(
+                    "durable.execution.status",
+                    info.status.value if info.status else "",
+                )
+                if info.status is InvocationStatus.FAILED:
+                    self._workflow_span.set_status(
+                        StatusCode.ERROR, info.error.message if info.error else ""
+                    )
+                elif info.status is InvocationStatus.SUCCEEDED:
+                    self._workflow_span.set_status(StatusCode.OK)
+                self._workflow_span.end()
+
         # Clear all per-invocation state to prevent leaks across warm Lambda reuses
         self._execution_arn = ""
         self._extracted_context = None
+        self._workflow_span = None
         with self._operation_spans_lock:
             self._operation_spans = {}
 
