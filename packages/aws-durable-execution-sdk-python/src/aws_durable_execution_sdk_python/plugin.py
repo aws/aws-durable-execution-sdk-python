@@ -213,9 +213,9 @@ class DurableInstrumentationPlugin:
     def on_operation_start(self, info: OperationStartInfo) -> None:
         """
         Called before an operation's START checkpoint is queued, or when a
-        prior operation is replayed. This guarantees that it strictly precedes
-        ``on_user_function_start``. This is called NOT within the thread that
-        runs operation.
+        prior non-terminal operation is replayed. This guarantees that it
+        strictly precedes ``on_user_function_start``. This is called NOT within
+        the thread that runs operation.
 
         Args:
             info: Information about the operation.
@@ -225,8 +225,9 @@ class DurableInstrumentationPlugin:
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
         """
-        Called when an operation checkpoints a terminal status, or when a prior
-        terminal operation is replayed. This is called NOT within the thread that runs operation.
+        Called when an operation checkpoints a terminal status. Terminal
+        operations are not emitted again during replay. This is called NOT
+        within the thread that runs operation.
 
         Args:
             info: Information about the operation.
@@ -407,7 +408,10 @@ class PluginExecutor:
             )
 
     def on_operation_replay(self, operation: Operation) -> None:
-        """Execute plugins for a checkpointed operation observed during replay."""
+        """Execute plugins for a non-terminal operation observed during replay."""
+        if self._is_terminal_status(operation.status):
+            return
+
         start_info = OperationStartInfo(
             operation_id=operation.operation_id,
             operation_type=operation.operation_type,
@@ -419,29 +423,6 @@ class PluginExecutor:
             status=operation.status,
         )
         self.execute_plugins(start_info, sync=True)
-
-        if self._is_terminal_status(operation.status):
-            self.execute_plugins(
-                OperationEndInfo(
-                    operation_id=operation.operation_id,
-                    operation_type=operation.operation_type,
-                    sub_type=operation.sub_type,
-                    name=operation.name,
-                    parent_id=operation.parent_id,
-                    start_time=operation.start_timestamp,
-                    end_time=operation.end_timestamp,
-                    result=_extract_result(operation),
-                    status=operation.status,
-                    error=self._extract_error(operation),
-                    attempt=(
-                        operation.step_details.attempt
-                        if operation.step_details
-                        else None
-                    ),
-                    is_replayed=True,
-                ),
-                sync=True,
-            )
 
     def on_operation_update(
         self,

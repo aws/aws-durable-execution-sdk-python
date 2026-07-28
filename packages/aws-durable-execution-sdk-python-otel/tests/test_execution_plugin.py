@@ -209,7 +209,7 @@ def test_cross_invocation_operation_end_uses_deterministic_span_id():
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
 
-    # Operation end with no matching start (started in a prior invocation).
+    # Backend-updated completion for an operation started in a prior invocation.
     plugin.on_operation_end(
         OperationEndInfo(
             operation_id="step-earlier",
@@ -218,7 +218,7 @@ def test_cross_invocation_operation_end_uses_deterministic_span_id():
             name="earlier-step",
             parent_id=None,
             start_time=START_TIME,
-            is_replayed=True,
+            is_replayed=False,
             status=OperationStatus.SUCCEEDED,
             end_time=END_TIME,
             error=None,
@@ -324,13 +324,13 @@ def test_open_operation_span_not_exported_at_invocation_end():
     [
         (InvocationStatus.PENDING, trace.StatusCode.OK),
         (InvocationStatus.SUCCEEDED, trace.StatusCode.OK),
-        (InvocationStatus.RETRY, trace.StatusCode.ERROR),
+        (InvocationStatus.RETRY, trace.StatusCode.UNSET),
         (InvocationStatus.FAILED, trace.StatusCode.ERROR),
     ],
 )
 def test_invocation_span_status_kind_and_attributes(status, expected_code):
     """Invocation span is INTERNAL, carries status/first; SUCCEEDED/PENDING are
-    OK and RETRY/FAILED are ERROR."""
+    OK, FAILED is ERROR, and RETRY is UNSET (STOPPED/TIMED_OUT indistinguishable)."""
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_invocation_end(_invocation_end_info(status=status))

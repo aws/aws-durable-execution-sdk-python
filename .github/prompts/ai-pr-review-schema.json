@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000,
+      "description": "Concise Markdown summary of the PR review and any residual test risk"
+    }
+  },
+  "required": [
+    "summary"
+  ],
+  "additionalProperties": false
+}
