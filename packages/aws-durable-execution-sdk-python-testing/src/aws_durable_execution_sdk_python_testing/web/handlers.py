@@ -502,12 +502,18 @@ class GetDurableExecutionHistoryHandler(EndpointHandler):
                 if include_execution_data_str
                 else False
             )
+            reverse_order_str: str | None = self._parse_query_param(
+                request, "ReverseOrder"
+            )
+            reverse_order: bool = (
+                reverse_order_str == "true" if reverse_order_str else False
+            )
 
             history_response: GetDurableExecutionHistoryResponse = (
                 self.executor.get_execution_history(
                     execution_arn,
                     include_execution_data=include_execution_data,
-                    reverse_order=False,
+                    reverse_order=reverse_order,
                     marker=marker,
                     max_items=int(max_items) if max_items else None,
                 )

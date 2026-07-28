@@ -1377,6 +1377,53 @@ def test_get_durable_execution_history_handler_with_include_execution_data_false
     )
 
 
+@pytest.mark.parametrize(
+    ("reverse_order_param", "expected_reverse_order"),
+    [
+        (None, False),
+        ("false", False),
+        ("true", True),
+    ],
+)
+def test_get_durable_execution_history_handler_with_reverse_order(
+    reverse_order_param: str | None, expected_reverse_order: bool
+):
+    """Test GetDurableExecutionHistoryHandler with ReverseOrder."""
+
+    executor = Mock()
+    handler = GetDurableExecutionHistoryHandler(executor)
+    executor.get_execution_history.return_value = GetDurableExecutionHistoryResponse(
+        events=[], next_marker=None
+    )
+
+    router = Router()
+    typed_route = router.find_route(
+        "/2025-12-01/durable-executions/test-arn/history", "GET"
+    )
+    query_params: dict[str, list[str]] = {}
+    if reverse_order_param is not None:
+        query_params["ReverseOrder"] = [reverse_order_param]
+    request = HTTPRequest(
+        method="GET",
+        path=typed_route,
+        headers={},
+        query_params=query_params,
+        body={},
+    )
+
+    response = handler.handle(typed_route, request)
+
+    assert response.status_code == 200
+    assert response.body == {"Events": []}
+    executor.get_execution_history.assert_called_once_with(
+        "test-arn",
+        include_execution_data=False,
+        reverse_order=expected_reverse_order,
+        marker=None,
+        max_items=None,
+    )
+
+
 def test_list_durable_executions_handler_success():
     """Test ListDurableExecutionsHandler with successful execution listing."""
     executor = Mock()
