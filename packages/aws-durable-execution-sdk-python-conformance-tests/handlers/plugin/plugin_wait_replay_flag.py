@@ -1,4 +1,4 @@
-"""10-19: Plugin replay flag for a non-terminal wait.
+"""10-18: Plugin replay flag for a non-terminal wait.
 
 The parallel operation "waits" runs two branches concurrently (max-concurrency
 2): branch 0 runs a wait named "short" of 2 seconds then returns "short-done";
