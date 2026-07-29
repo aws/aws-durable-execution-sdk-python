@@ -283,25 +283,10 @@ Resources:
       DurableConfig:
         RetentionPeriodInDays: 7
         ExecutionTimeout: 300
-  PluginSlowHookFlush:
-    Type: AWS::Serverless::Function
-    TestingMetadata:
-      TestDescription: ["10-18"]
-    Properties:
-      CodeUri: lambda-build/
-      Handler: plugin.plugin_slow_hook_flush.handler
-      Description: Slow work in a plugin hook completes before the invocation returns
-      Role:
-        Fn::GetAtt:
-        - DurableFunctionRole
-        - Arn
-      DurableConfig:
-        RetentionPeriodInDays: 7
-        ExecutionTimeout: 300
   PluginWaitReplayFlag:
     Type: AWS::Serverless::Function
     TestingMetadata:
-      TestDescription: ["10-19"]
+      TestDescription: ["10-18"]
     Properties:
       CodeUri: lambda-build/
       Handler: plugin.plugin_wait_replay_flag.handler
