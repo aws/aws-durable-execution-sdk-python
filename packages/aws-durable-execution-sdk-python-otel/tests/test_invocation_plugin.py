@@ -240,7 +240,7 @@ def test_invocation_end_closes_callback_child_before_parent_context():
     plugin.on_invocation_end(_invocation_end_info(InvocationStatus.PENDING))
 
     spans = {span.name: span for span in exporter.get_finished_spans()}
-    invocation_span = spans["invocation"]
+    invocation_span = spans["Invocation"]
     context_span = spans["wait for callback"]
     callback_span = spans["create callback id"]
     assert callback_span.parent is not None
