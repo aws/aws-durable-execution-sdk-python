@@ -108,7 +108,7 @@ def handler(_event: Any, context: DurableContext) -> dict[str, Any]:
     )
 
     # Forces the invocation to end; the next one replays both completed containers.
-    context.wait(Duration.from_seconds(2), name="pauseForReplay")
+    context.wait(Duration.from_seconds(2), name="settle")
 
     # Recomputed from the REPLAYED (recursively reconstructed) inner result.
     inner = result.get_result("inner")
