@@ -116,10 +116,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
 
         if isinstance(self._provider, SdkTracerProvider):
-            self._id_generator = DeterministicIdGenerator(
-                fallback_id_generator=getattr(self._provider, "id_generator", None)
+            self._id_generator = DeterministicIdGenerator.install_on_provider(
+                self._provider
             )
-            self._provider.id_generator = self._id_generator
         else:
             logger.warning(
                 "ExecutionOtelPlugin expected an SDK TracerProvider but got %s; "

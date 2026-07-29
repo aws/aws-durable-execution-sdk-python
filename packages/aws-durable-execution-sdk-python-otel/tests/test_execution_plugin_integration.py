@@ -50,6 +50,10 @@ END_TIME = datetime(2024, 1, 2, 3, 4, 6, tzinfo=UTC)
 EXECUTION_ARN = "arn:aws:lambda:us-west-2:123456789012:function:workflow:$LATEST"
 OP_ID = "step-1"
 OP_NAME = "fetch-user"
+XRAY_TRACE_HEADER = (
+    "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1"
+)
+XRAY_TRACE_ID = int("5759e988bd862e3fe1be46a994272793", 16)
 
 
 @pytest.fixture(autouse=True)
@@ -246,3 +250,26 @@ def test_adot_layer_full_lifecycle_parents_to_ambient_span():
 
     # The operation span is exported exactly once.
     assert len([s for s in finished if s.name == OP_NAME]) == 1
+
+
+def test_second_plugin_configures_cached_tracer_generator(monkeypatch):
+    """A second handler's Workflow span uses its deterministic trace ID."""
+    provider, exporter = _provider()
+    config = OtelPluginConfig(
+        tracer_provider=provider,
+        use_default_tracer_provider=True,
+        context_extractor=lambda _: Context(),
+        enrich_logger=False,
+    )
+    first_plugin = ExecutionOtelPlugin(config)
+    target_plugin = ExecutionOtelPlugin(config)
+    monkeypatch.setenv("_X_AMZN_TRACE_ID", XRAY_TRACE_HEADER)
+
+    assert target_plugin._tracer is first_plugin._tracer
+    target_plugin.on_invocation_start(_invocation_start())
+    target_plugin.on_invocation_end(_invocation_end())
+
+    workflow = next(
+        span for span in exporter.get_finished_spans() if span.name == "Workflow"
+    )
+    assert workflow.context.trace_id == XRAY_TRACE_ID
