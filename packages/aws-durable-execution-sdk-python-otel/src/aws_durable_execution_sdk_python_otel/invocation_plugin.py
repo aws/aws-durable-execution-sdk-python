@@ -338,9 +338,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         """Called at the end of each invocation. Ends the invocation span and flushes."""
         logger.debug("Durable invocation ended: %s", info)
-        # end all pending spans
+        # Spans are registered parent-first, so close pending spans in reverse
+        # order to keep every child contained within its parent.
         with self._operation_spans_lock:
-            operation_ids = list(self._operation_spans.keys())
+            operation_ids = list(reversed(self._operation_spans))
         for operation_id in operation_ids:
             if operation_id:
                 self._end_span(operation_id)

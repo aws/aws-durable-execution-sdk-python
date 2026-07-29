@@ -199,6 +199,51 @@ def test_invocation_span_status_reflects_execution_status(
     assert spans[0].status.status_code is expected_span_status
 
 
+def test_invocation_end_closes_callback_child_before_parent_context():
+    """Invocation shutdown preserves containment for open callback spans."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    context_start_time = datetime.now(UTC)
+    context_id = "callback-context"
+
+    plugin.on_user_function_start(
+        UserFunctionStartInfo(
+            operation_id=context_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.WAIT_FOR_CALLBACK,
+            name="wait for callback",
+            parent_id=None,
+            start_time=context_start_time,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+            attempt=1,
+        )
+    )
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id="callback",
+            operation_type=OperationType.CALLBACK,
+            sub_type=OperationSubType.CALLBACK,
+            name="create callback id",
+            parent_id=context_id,
+            start_time=context_start_time,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+
+    plugin.on_invocation_end(_invocation_end_info(InvocationStatus.PENDING))
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    invocation_span = spans["invocation"]
+    context_span = spans["wait for callback"]
+    callback_span = spans["create callback id"]
+    assert callback_span.parent is not None
+    assert callback_span.parent.span_id == context_span.context.span_id
+    assert callback_span.end_time <= context_span.end_time <= invocation_span.end_time
+
+
 def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
     """Verify non-user-function operations are traced beneath the invocation."""
     plugin, exporter = _create_plugin()
