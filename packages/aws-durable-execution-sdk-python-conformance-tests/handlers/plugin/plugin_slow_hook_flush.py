@@ -1,13 +1,11 @@
-"""10-18: Plugin hook work is flushed before the invocation returns.
+"""10-18: Slow plugin hook work is reliably delivered.
 
 A single step succeeds. The plugin performs ~1 second of deliberately slow work
-inside its ``on_operation_end`` hook and only then logs its record. Python
-dispatches operation-end synchronously as part of the checkpoint-response merge
-and the plugin executor is drained (ThreadPoolExecutor.shutdown(wait=True)) in
-the ``PluginExecutor.run`` context manager before the durable handler wrapper
-returns the invocation response, so the ~1s hook work MUST complete and its
-record MUST be emitted before the Lambda response is returned. This is the real
-SDK completion contract, not a mock — the sleep genuinely blocks the hook.
+inside its ``on_operation_end`` hook and only then logs its record using the
+SDK's real hook completion mechanism. The conformance assertion checks that the
+record is eventually present in the execution logs; it does not compare the
+record timestamp with the Lambda response boundary. The sleep is genuine hook
+work, not a mock.
 """
 
 import json
@@ -49,9 +47,9 @@ class SlowHookPlugin(DurableInstrumentationPlugin):
     def on_operation_end(self, info: OperationEndInfo) -> None:
         if info.operation_type.name != "STEP":
             return
-        # Deliberately slow hook work; the SDK must not return the invocation
-        # response until this completes (otherwise the environment freeze would
-        # drop the record).
+        # Deliberately slow hook work. The conformance assertion verifies that
+        # the resulting record is eventually present in execution-scoped logs;
+        # it does not assert timing relative to the Lambda response boundary.
         time.sleep(1)
         _emit(
             {
