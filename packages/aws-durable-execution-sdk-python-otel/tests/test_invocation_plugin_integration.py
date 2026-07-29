@@ -155,7 +155,7 @@ def _run_step_lifecycle(plugin: InvocationOtelPlugin) -> None:
 
 def _assert_hierarchy(exporter: InMemorySpanExporter) -> None:
     spans = {s.name: s for s in exporter.get_finished_spans()}
-    invocation = spans["invocation"]
+    invocation = spans["Invocation"]
     operation = spans[OP_NAME]
     attempt = spans[f"{OP_NAME} attempt 1"]
 

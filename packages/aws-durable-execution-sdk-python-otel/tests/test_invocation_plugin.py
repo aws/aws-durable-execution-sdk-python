@@ -31,6 +31,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import SpanKind, StatusCode
 
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
+    derive_workflow_span_id,
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
@@ -149,12 +150,15 @@ def test_invocation_start_and_end_emit_invocation_span():
     plugin.on_invocation_end(_invocation_end_info())
 
     spans = exporter.get_finished_spans()
-    assert [span.name for span in spans] == ["invocation"]
-    assert spans[0].kind is SpanKind.INTERNAL
-    assert spans[0].attributes["durable.execution.arn"] == EXECUTION_ARN
-    assert spans[0].attributes["durable.invocation.first"] is True
+    spans_by_name = {span.name: span for span in spans}
+    # Terminal invocation also exports the Workflow span.
+    assert set(spans_by_name) == {"Invocation", "Workflow"}
+    invocation = spans_by_name["Invocation"]
+    assert invocation.kind is SpanKind.INTERNAL
+    assert invocation.attributes["durable.execution.arn"] == EXECUTION_ARN
+    assert invocation.attributes["durable.invocation.first"] is True
     assert (
-        spans[0].attributes["durable.invocation.status"]
+        invocation.attributes["durable.invocation.status"]
         == InvocationStatus.SUCCEEDED.value
     )
     assert plugin._get_span(None) is None
@@ -168,8 +172,8 @@ def test_invocation_span_records_subsequent_invocation():
     plugin.on_invocation_end(_invocation_end_info())
 
     spans = exporter.get_finished_spans()
-    assert len(spans) == 1
-    assert spans[0].attributes["durable.invocation.first"] is False
+    invocation = next(s for s in spans if s.name == "Invocation")
+    assert invocation.attributes["durable.invocation.first"] is False
 
 
 @pytest.mark.parametrize(
@@ -192,11 +196,56 @@ def test_invocation_span_status_reflects_execution_status(
     plugin.on_invocation_end(_invocation_end_info(invocation_status))
 
     spans = exporter.get_finished_spans()
-    assert len(spans) == 1
-    attributes = spans[0].attributes
+    invocation = next(s for s in spans if s.name == "Invocation")
+    attributes = invocation.attributes
     assert attributes is not None
     assert attributes["durable.invocation.status"] == invocation_status.value
-    assert spans[0].status.status_code is expected_span_status
+    assert invocation.status.status_code is expected_span_status
+
+
+def test_invocation_end_closes_callback_child_before_parent_context():
+    """Invocation shutdown preserves containment for open callback spans."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    context_start_time = datetime.now(UTC)
+    context_id = "callback-context"
+
+    plugin.on_user_function_start(
+        UserFunctionStartInfo(
+            operation_id=context_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.WAIT_FOR_CALLBACK,
+            name="wait for callback",
+            parent_id=None,
+            start_time=context_start_time,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+            attempt=1,
+        )
+    )
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id="callback",
+            operation_type=OperationType.CALLBACK,
+            sub_type=OperationSubType.CALLBACK,
+            name="create callback id",
+            parent_id=context_id,
+            start_time=context_start_time,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+
+    plugin.on_invocation_end(_invocation_end_info(InvocationStatus.PENDING))
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    invocation_span = spans["Invocation"]
+    context_span = spans["wait for callback"]
+    callback_span = spans["create callback id"]
+    assert callback_span.parent is not None
+    assert callback_span.parent.span_id == context_span.context.span_id
+    assert callback_span.end_time <= context_span.end_time <= invocation_span.end_time
 
 
 def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
@@ -249,7 +298,7 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
     spans_by_name = {span.name: span for span in exporter.get_finished_spans()}
     assert all(span.kind is SpanKind.INTERNAL for span in spans_by_name.values())
     wait_span = spans_by_name["wait-for-signal"]
-    invocation_span = spans_by_name["invocation"]
+    invocation_span = spans_by_name["Invocation"]
     assert wait_span.context.span_id == operation_id_to_span_id(
         EXECUTION_ARN, operation_id
     )
@@ -889,3 +938,102 @@ def test_nested_steps_restore_context_span_across_multiple_iterations():
         )
         # Between each inner step, the child-context span is current.
         assert trace.get_current_span().get_span_context().span_id == context_span_id
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [
+        (InvocationStatus.SUCCEEDED, StatusCode.OK),
+        (InvocationStatus.FAILED, StatusCode.ERROR),
+    ],
+)
+def test_workflow_span_exported_on_terminal(status, expected_code):
+    """A terminal invocation exports a deterministic Workflow root span."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_invocation_end(_invocation_end_info(status))
+
+    workflow = next(s for s in exporter.get_finished_spans() if s.name == "Workflow")
+    # Root span: no parent.
+    assert workflow.parent is None
+    assert workflow.kind is SpanKind.INTERNAL
+    # Deterministic span id derived from the execution ARN.
+    assert workflow.context.span_id == derive_workflow_span_id(EXECUTION_ARN)
+    assert workflow.attributes["durable.execution.arn"] == EXECUTION_ARN
+    assert workflow.attributes["durable.execution.status"] == status.value
+    assert workflow.status.status_code is expected_code
+    # Anchored to the execution start time.
+    assert workflow.start_time == int(START_TIME.timestamp() * 1_000_000_000)
+
+
+@pytest.mark.parametrize("status", [InvocationStatus.PENDING, InvocationStatus.RETRY])
+def test_workflow_span_not_exported_on_non_terminal(status):
+    """Non-terminal invocations do not export (end) the Workflow span."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_invocation_end(_invocation_end_info(status))
+
+    names = [s.name for s in exporter.get_finished_spans()]
+    assert "Workflow" not in names
+    assert "Invocation" in names
+
+
+def test_operation_span_links_to_workflow_span():
+    """Operation spans link to the Workflow span while parented to invocation."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    operation_id = "wait-1"
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="wait-for-signal",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="wait-for-signal",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
+    spans_by_name = {s.name: s for s in exporter.get_finished_spans()}
+    op_span = spans_by_name["wait-for-signal"]
+    workflow_span_id = derive_workflow_span_id(EXECUTION_ARN)
+    linked_span_ids = {link.context.span_id for link in op_span.links}
+    assert workflow_span_id in linked_span_ids
+    # Still parented to the invocation span (not the Workflow span).
+    assert op_span.parent is not None
+    assert op_span.parent.span_id == spans_by_name["Invocation"].context.span_id
+
+
+def test_workflow_span_name_is_configurable():
+    """The Workflow span name can be overridden via constructor kwarg."""
+    exporter = InMemorySpanExporter()
+    trace_provider = TracerProvider()
+    trace_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    plugin = InvocationOtelPlugin(
+        trace_provider=trace_provider,
+        context_extractor=lambda _: Context(),
+        workflow_span_name="MyExecution",
+    )
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_invocation_end(_invocation_end_info())
+
+    names = [s.name for s in exporter.get_finished_spans()]
+    assert "MyExecution" in names
+    assert "Workflow" not in names

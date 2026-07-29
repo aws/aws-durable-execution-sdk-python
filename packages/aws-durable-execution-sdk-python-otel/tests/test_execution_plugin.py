@@ -126,10 +126,10 @@ def test_workflow_span_is_root_and_invocation_is_its_child():
 
     spans = {s.name: s for s in exporter.get_finished_spans()}
     assert "Workflow" in spans
-    assert "invocation" in spans
+    assert "Invocation" in spans
 
     workflow = spans["Workflow"]
-    invocation = spans["invocation"]
+    invocation = spans["Invocation"]
 
     # Workflow is a root span (no parent) with the deterministic span ID.
     assert workflow.parent is None
@@ -154,7 +154,7 @@ def test_workflow_span_dropped_on_non_terminal_status():
     names = [s.name for s in exporter.get_finished_spans()]
     # Invocation span is always ended/exported; the Workflow span is dropped
     # (not ended) on a non-terminal status, so it must not be exported.
-    assert "invocation" in names
+    assert "Invocation" in names
     assert "Workflow" not in names
 
 
@@ -193,7 +193,7 @@ def test_operation_parented_under_workflow_and_linked_to_invocation():
 
     spans = {s.name: s for s in exporter.get_finished_spans()}
     workflow = spans["Workflow"]
-    invocation = spans["invocation"]
+    invocation = spans["Invocation"]
     operation = spans["wait-for-signal"]
 
     # Parented under the Workflow span (no parentId => Workflow fallback).
@@ -266,8 +266,8 @@ def test_default_mode_creates_invocation_span():
 
     spans = {s.name: s for s in exporter.get_finished_spans()}
     # The invocation span is now created even in default-provider mode.
-    assert "invocation" in spans
-    invocation = spans["invocation"]
+    assert "Invocation" in spans
+    invocation = spans["Invocation"]
     assert invocation.attributes["durable.execution.arn"] == EXECUTION_ARN
     assert invocation.attributes["durable.invocation.first"] is True
 
@@ -285,7 +285,7 @@ def test_default_mode_invocation_span_parented_to_ambient_span():
         otel_context.detach(token)
         ambient.end()
 
-    invocation = {s.name: s for s in exporter.get_finished_spans()}["invocation"]
+    invocation = {s.name: s for s in exporter.get_finished_spans()}["Invocation"]
     assert invocation.parent is not None
     assert invocation.parent.span_id == ambient.get_span_context().span_id
 
@@ -335,7 +335,7 @@ def test_invocation_span_status_kind_and_attributes(status, expected_code):
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_invocation_end(_invocation_end_info(status=status))
 
-    invocation = {s.name: s for s in exporter.get_finished_spans()}["invocation"]
+    invocation = {s.name: s for s in exporter.get_finished_spans()}["Invocation"]
     assert invocation.kind is trace.SpanKind.INTERNAL
     assert invocation.attributes is not None
     assert invocation.attributes["durable.invocation.status"] == status.value
