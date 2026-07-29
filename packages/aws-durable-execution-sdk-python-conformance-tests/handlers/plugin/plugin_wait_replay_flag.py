@@ -1,18 +1,20 @@
 """10-19: Plugin replay flag for a non-terminal wait.
 
 The parallel operation "waits" runs two branches concurrently (max-concurrency
-2): branch 0 waits 2 seconds then returns "short-done"; branch 1 waits 8 seconds
-then returns "long-done". Both waits checkpoint WaitStarted in the first
-invocation, so the plugin observes ``operation-start`` with ``replay=false``
-twice. When the 2-second wait completes the execution is re-invoked while the
-8-second wait is still NON-terminal, so the plugin observes it via the SDK's real
-``on_operation_start`` hook with ``is_replayed`` (``replay``) true. Each wait
-reaches a terminal SUCCEEDED end exactly once.
+2): branch 0 runs a wait named "short" of 2 seconds then returns "short-done";
+branch 1 runs a wait named "long" of 8 seconds then returns "long-done". Each
+wait is given its stable name via the SDK's real operation naming parameter
+(``context.wait(duration, name=...)``), so records can be correlated to a
+specific wait even though branch event ids are nondeterministic under
+concurrency.
 
-The plugin filters to wait-type operations and emits from the SDK's real
-``on_operation_start`` / ``on_operation_end`` hooks. Operation ids are
-deliberately not logged: branch event ids are nondeterministic under concurrency,
-and the wait type + replay flag alone identify the behavior under test.
+Both waits checkpoint WaitStarted in the first invocation, so the plugin
+observes ``operation-start`` with ``replay=false`` once per wait name. When the
+2-second wait completes the execution is re-invoked while the 8-second wait is
+still NON-terminal, so the plugin observes the named "long" wait via the SDK's
+real ``on_operation_start`` hook with ``is_replayed`` (``replay``) true. The
+terminal "short" wait must not emit a replayed start. Each wait reaches a
+terminal SUCCEEDED end exactly once.
 """
 
 import json
@@ -55,6 +57,7 @@ class WaitReplayFlagPlugin(DurableInstrumentationPlugin):
                 "plugin": "CONFPLUGIN",
                 "hook": "operation-start",
                 "type": info.operation_type.name,
+                "name": info.name,
                 "replay": info.is_replayed,
             },
             self._execution_arn,
@@ -68,6 +71,7 @@ class WaitReplayFlagPlugin(DurableInstrumentationPlugin):
                 "plugin": "CONFPLUGIN",
                 "hook": "operation-end",
                 "type": info.operation_type.name,
+                "name": info.name,
                 "status": info.status.name,
             },
             self._execution_arn,
@@ -75,12 +79,12 @@ class WaitReplayFlagPlugin(DurableInstrumentationPlugin):
 
 
 def wait_short(ctx: DurableContext) -> str:
-    ctx.wait(Duration.from_seconds(2))
+    ctx.wait(Duration.from_seconds(2), name="short")
     return "short-done"
 
 
 def wait_long(ctx: DurableContext) -> str:
-    ctx.wait(Duration.from_seconds(8))
+    ctx.wait(Duration.from_seconds(8), name="long")
     return "long-done"
 
 
