@@ -644,6 +644,79 @@ def test_invoke_handler_default_config_no_tenant_id():
     assert "TenantId" not in chained_invoke_options
 
 
+def test_invoke_handler_with_client_context():
+    """Test invoke_handler passes client_context into the START checkpoint."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+
+    not_found = CheckpointedResult.create_not_found()
+    started_op = Operation(
+        operation_id="invoke1",
+        operation_type=OperationType.CHAINED_INVOKE,
+        status=OperationStatus.STARTED,
+    )
+    started = CheckpointedResult.create_from_operation(started_op)
+    mock_state.get_checkpoint_result.side_effect = [not_found, started]
+
+    config = InvokeConfig(client_context="eyJmb28iOiAiYmFyIn0=")
+
+    with pytest.raises(SuspendExecution):
+        invoke_handler(
+            function_name="test_function",
+            payload="test_input",
+            state=mock_state,
+            operation_identifier=OperationIdentifier(
+                "invoke1", OperationSubType.CHAINED_INVOKE, None, None
+            ),
+            config=config,
+        )
+
+    # Verify checkpoint was called with client_context
+    mock_state.create_checkpoint.assert_called_once()
+    operation_update = mock_state.create_checkpoint.call_args[1]["operation_update"]
+    assert (
+        operation_update.chained_invoke_options.client_context == "eyJmb28iOiAiYmFyIn0="
+    )
+    chained_invoke_options = operation_update.to_dict()["ChainedInvokeOptions"]
+    assert chained_invoke_options["FunctionName"] == "test_function"
+    assert chained_invoke_options["ClientContext"] == "eyJmb28iOiAiYmFyIn0="
+
+
+def test_invoke_handler_without_client_context():
+    """Test invoke_handler omits ClientContext when config does not set it."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+
+    not_found = CheckpointedResult.create_not_found()
+    started_op = Operation(
+        operation_id="invoke1",
+        operation_type=OperationType.CHAINED_INVOKE,
+        status=OperationStatus.STARTED,
+    )
+    started = CheckpointedResult.create_from_operation(started_op)
+    mock_state.get_checkpoint_result.side_effect = [not_found, started]
+
+    config = InvokeConfig(client_context=None)
+
+    with pytest.raises(SuspendExecution):
+        invoke_handler(
+            function_name="test_function",
+            payload="test_input",
+            state=mock_state,
+            operation_identifier=OperationIdentifier(
+                "invoke1", OperationSubType.CHAINED_INVOKE, None, None
+            ),
+            config=config,
+        )
+
+    # Verify checkpoint was called without client_context
+    mock_state.create_checkpoint.assert_called_once()
+    operation_update = mock_state.create_checkpoint.call_args[1]["operation_update"]
+    assert operation_update.chained_invoke_options.client_context is None
+    chained_invoke_options = operation_update.to_dict()["ChainedInvokeOptions"]
+    assert "ClientContext" not in chained_invoke_options
+
+
 def test_invoke_handler_defaults_to_json_serdes():
     """Test invoke_handler uses DEFAULT_JSON_SERDES when config has no serdes."""
     mock_state = Mock(spec=ExecutionState)

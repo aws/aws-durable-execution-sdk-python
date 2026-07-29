@@ -131,6 +131,7 @@ class InvokeOperationExecutor(OperationExecutor[R]):
                 chained_invoke_options=ChainedInvokeOptions(
                     function_name=self.function_name,
                     tenant_id=self.config.tenant_id,
+                    client_context=self.config.client_context,
                 ),
             )
             # Checkpoint invoke START with blocking (is_sync=True).

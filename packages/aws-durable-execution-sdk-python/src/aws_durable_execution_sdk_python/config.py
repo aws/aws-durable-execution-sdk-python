@@ -476,11 +476,16 @@ class InvokeConfig(Generic[P, R]):
 
         tenant_id: Optional tenant identifier for multi-tenant isolation.
             If provided, the invocation will be scoped to this tenant.
+
+        client_context: Optional base64-encoded data (up to 3,583 bytes)
+            about the invoking client, passed to the invoked function in its
+            context object.
     """
 
     serdes_payload: SerDes[P] | None = None
     serdes_result: SerDes[R] | None = None
     tenant_id: str | None = None
+    client_context: str | None = None
 
 
 @dataclass(frozen=True)

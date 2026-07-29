@@ -612,6 +612,52 @@ def test_invoke_options_to_dict_complete():
     assert result["FunctionName"] == "test_func"
 
 
+def test_invoke_options_to_dict_omits_client_context_when_none():
+    """Test ChainedInvokeOptions.to_dict omits ClientContext when unset."""
+    options = ChainedInvokeOptions(function_name="test-function")
+    result = options.to_dict()
+    assert "ClientContext" not in result
+
+
+def test_invoke_options_to_dict_includes_client_context():
+    """Test ChainedInvokeOptions.to_dict includes ClientContext when set."""
+    options = ChainedInvokeOptions(
+        function_name="test-function",
+        client_context="eyJmb28iOiAiYmFyIn0=",
+    )
+    result = options.to_dict()
+    assert result["ClientContext"] == "eyJmb28iOiAiYmFyIn0="
+
+
+def test_invoke_options_from_dict_with_client_context():
+    """Test ChainedInvokeOptions.from_dict reads ClientContext."""
+    data = {
+        "FunctionName": "test-function",
+        "ClientContext": "eyJmb28iOiAiYmFyIn0=",
+    }
+    options = ChainedInvokeOptions.from_dict(data)
+    assert options.function_name == "test-function"
+    assert options.client_context == "eyJmb28iOiAiYmFyIn0="
+
+
+def test_invoke_options_from_dict_without_client_context():
+    """Test ChainedInvokeOptions.from_dict defaults ClientContext to None."""
+    data = {"FunctionName": "test-function"}
+    options = ChainedInvokeOptions.from_dict(data)
+    assert options.client_context is None
+
+
+def test_invoke_options_roundtrip_with_client_context():
+    """Test ChainedInvokeOptions to_dict -> from_dict roundtrip with ClientContext."""
+    original = ChainedInvokeOptions(
+        function_name="test-func",
+        client_context="eyJmb28iOiAiYmFyIn0=",
+    )
+    data = original.to_dict()
+    restored = ChainedInvokeOptions.from_dict(data)
+    assert restored == original
+
+
 # =============================================================================
 # Tests for OperationUpdate Class
 # =============================================================================

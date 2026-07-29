@@ -427,16 +427,21 @@ class ChainedInvokeOptions:
     """
     As of 2025/10/27:
      - Chained invoke options only contains a function name
+    As of 2026/05/13:
+     - Added optional ClientContext (base64-encoded data, up to 3,583 bytes,
+       delivered to the invoked function's context object)
     """
 
     function_name: str
     tenant_id: str | None = None
+    client_context: str | None = None
 
     @classmethod
     def from_dict(cls, data: MutableMapping[str, Any]) -> ChainedInvokeOptions:
         return cls(
             function_name=data["FunctionName"],
             tenant_id=data.get("TenantId"),
+            client_context=data.get("ClientContext"),
         )
 
     def to_dict(self) -> MutableMapping[str, Any]:
@@ -445,6 +450,8 @@ class ChainedInvokeOptions:
         }
         if self.tenant_id is not None:
             result["TenantId"] = self.tenant_id
+        if self.client_context is not None:
+            result["ClientContext"] = self.client_context
 
         return result
 

@@ -198,12 +198,19 @@ def test_invoke_config_defaults():
     """Test InvokeConfig defaults."""
     config = InvokeConfig()
     assert config.tenant_id is None
+    assert config.client_context is None
 
 
 def test_invoke_config_with_tenant_id():
     """Test InvokeConfig with explicit tenant_id."""
     config = InvokeConfig(tenant_id="test-tenant")
     assert config.tenant_id == "test-tenant"
+
+
+def test_invoke_config_with_client_context():
+    """Test InvokeConfig with explicit client_context."""
+    config = InvokeConfig(client_context="eyJmb28iOiAiYmFyIn0=")
+    assert config.client_context == "eyJmb28iOiAiYmFyIn0="
 
 
 # region Config validation
