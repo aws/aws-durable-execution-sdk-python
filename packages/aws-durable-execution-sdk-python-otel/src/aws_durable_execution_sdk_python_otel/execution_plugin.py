@@ -285,19 +285,15 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
 
         # End the invocation span regardless of terminal status. Record the
         # invocation status and map it to a span status:
-        #   SUCCEEDED/PENDING -> OK  (this invocation did its work, whether it
-        #                             completed the execution or cleanly suspended)
-        #   FAILED            -> ERROR
-        #   RETRY             -> UNSET
-        # RETRY is left UNSET because the plugin interface cannot tell whether the
-        # execution/workflow was STOPPED or TIMED_OUT: a RETRY invocation is not a
-        # definitive failure of the execution, so we avoid marking the span ERROR.
+        #   SUCCEEDED     -> OK
+        #   FAILED        -> ERROR
+        #   PENDING/RETRY -> UNSET
         if self._invocation_span is not None:
             self._invocation_span.set_attribute(
                 "durable.invocation.status",
                 info.status.value if info.status else "",
             )
-            if info.status in (InvocationStatus.SUCCEEDED, InvocationStatus.PENDING):
+            if info.status is InvocationStatus.SUCCEEDED:
                 self._invocation_span.set_status(StatusCode.OK)
             elif info.status is InvocationStatus.FAILED:
                 self._invocation_span.set_status(

@@ -322,15 +322,14 @@ def test_open_operation_span_not_exported_at_invocation_end():
 @pytest.mark.parametrize(
     ("status", "expected_code"),
     [
-        (InvocationStatus.PENDING, trace.StatusCode.OK),
+        (InvocationStatus.PENDING, trace.StatusCode.UNSET),
         (InvocationStatus.SUCCEEDED, trace.StatusCode.OK),
         (InvocationStatus.RETRY, trace.StatusCode.UNSET),
         (InvocationStatus.FAILED, trace.StatusCode.ERROR),
     ],
 )
 def test_invocation_span_status_kind_and_attributes(status, expected_code):
-    """Invocation span is INTERNAL, carries status/first; SUCCEEDED/PENDING are
-    OK, FAILED is ERROR, and RETRY is UNSET (STOPPED/TIMED_OUT indistinguishable)."""
+    """Invocation span is INTERNAL and only terminal outcomes set span status."""
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_invocation_end(_invocation_end_info(status=status))
