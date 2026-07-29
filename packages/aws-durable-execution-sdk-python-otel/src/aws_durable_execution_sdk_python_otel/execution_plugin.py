@@ -268,7 +268,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 "durable.invocation.first": info.is_first_invocation,
             }
         self._invocation_span = self._tracer.start_span(
-            name="invocation",
+            name="Invocation",
             kind=SpanKind.INTERNAL,
             attributes=attributes,
             context=parent_ctx,

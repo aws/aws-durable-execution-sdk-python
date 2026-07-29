@@ -172,7 +172,7 @@ def test_community_layer_full_lifecycle_is_workflow_rooted():
     finished = exporter.get_finished_spans()
     spans = {s.name: s for s in finished}
     workflow = spans["Workflow"]
-    invocation = spans["invocation"]
+    invocation = spans["Invocation"]
     operation = spans[OP_NAME]
     attempt = spans[f"{OP_NAME} attempt 1"]
 
@@ -229,7 +229,7 @@ def test_adot_layer_full_lifecycle_parents_to_ambient_span():
 
     finished = exporter.get_finished_spans()
     spans = {s.name: s for s in finished}
-    invocation = spans["invocation"]
+    invocation = spans["Invocation"]
     operation = spans[OP_NAME]
 
     # Invocation span parents to the ambient ADOT span and carries the first flag.
