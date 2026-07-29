@@ -945,6 +945,82 @@ def test_no_late_checkpoint_in_abort_drain_window():
     assert "gate" not in ex._results  # noqa: SLF001
 
 
+def test_resubmit_checkpoint_is_inside_the_abort_check_lock():
+    """Regression (deterministic, no sleep-based timing): closes the narrower
+    race the end-to-end drain-window test above cannot reliably force.
+
+    ``_scheduler_exception`` is set by ``_safe_pump`` on a WORKER thread (a
+    completion callback) UNDER ``self._lock`` (see its handler, guarded the
+    same way). ``_resubmit`` runs on the TIMER thread. The abort guard's first
+    check only proves no abort had been decided at the instant the timer
+    thread entered its critical section; if ``create_checkpoint`` were called
+    AFTER releasing ``self._lock``, a worker thread's ``_safe_pump`` could
+    acquire the lock and set the exception in that gap, and the checkpoint
+    would still fire moments after an abort was decided elsewhere --
+    reachable only via an exact interleaving that 200 iterations of the
+    timing-based test above will not reliably hit.
+
+    Proven directly here with two real threads and a non-blocking lock probe
+    (no sleeps anywhere): ``_resubmit`` itself runs on a background thread
+    (playing the timer thread), with ``create_checkpoint`` monkeypatched to
+    signal it has started and then block on a gate this test controls --
+    holding the checkpoint call "in flight" indefinitely, independent of wall
+    time. Once that signal fires, the main thread (playing the racing worker
+    thread) performs a non-blocking ``self._lock.acquire(blocking=False)``
+    probe -- exactly what ``_safe_pump`` would need to do to set
+    ``_scheduler_exception``. With the fix (checkpoint call genuinely inside
+    the lock), the probe MUST fail: ``_resubmit``'s thread still holds
+    ``self._lock`` for as long as its call to ``create_checkpoint`` is
+    outstanding. If the checkpoint call were outside the lock (the bug),
+    ``_resubmit`` would have already released the lock before ever calling
+    ``create_checkpoint``, and the probe would succeed.
+    """
+    ex, client = _bare_executor()
+    ex._pending_timers.add("t")  # noqa: SLF001
+
+    checkpoint_started = threading.Event()
+    release_checkpoint = threading.Event()
+    real_create_checkpoint = ex._ctx.state.create_checkpoint
+
+    def _held_open_create_checkpoint(*args, **kwargs):
+        checkpoint_started.set()
+        # Held open until THIS test explicitly releases it -- independent of
+        # wall-clock time, so the probe below has an unbounded window to run.
+        release_checkpoint.wait(timeout=5)
+        return real_create_checkpoint(*args, **kwargs)
+
+    ex._ctx.state.create_checkpoint = _held_open_create_checkpoint  # noqa: SLF001
+
+    resubmit_thread = threading.Thread(
+        target=lambda: ex._resubmit([_TimedResume("t")]),  # noqa: SLF001
+        daemon=True,
+    )
+    resubmit_thread.start()
+
+    # Wait for _resubmit (on its own thread) to be blocked inside
+    # create_checkpoint, i.e. genuinely "in flight" with self._lock held if
+    # and only if the fix holds.
+    assert checkpoint_started.wait(timeout=5), "create_checkpoint was never called"
+
+    # Mirrors exactly what _safe_pump needs to do to set the abort flag:
+    # acquire self._lock. Non-blocking, so this cannot itself hang the test
+    # regardless of which way the bug/fix goes.
+    acquired = ex._lock.acquire(blocking=False)  # noqa: SLF001
+    if acquired:
+        ex._lock.release()  # noqa: SLF001
+
+    release_checkpoint.set()
+    resubmit_thread.join(timeout=5)
+
+    assert not resubmit_thread.is_alive()
+    assert not acquired, (
+        "a second thread was able to acquire self._lock while create_checkpoint "
+        "was in flight inside _resubmit -- the checkpoint call is reachable "
+        "outside the lock-protected abort check (race window regression)"
+    )
+    assert client.checkpoint_count == 1  # the (unraced) checkpoint still completed
+
+
 # endregion no checkpoint after abort (teardown-window regression)
 
 

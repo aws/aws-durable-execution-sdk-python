@@ -485,6 +485,18 @@ class DagExecutor:
             # only scheduler entry point that checkpoints; _on_done/_pump are
             # already gated by _stopping_locked (which checks _scheduler_exception
             # first), so no other teardown-window checkpoint exists.
+            #
+            # create_checkpoint() itself is called INSIDE this same lock
+            # acquisition (below), not after releasing it: _scheduler_exception
+            # is set by _safe_pump on a worker-thread completion callback (a
+            # different thread than this timer thread), so if the checkpoint
+            # call were outside the lock, that worker thread could set the
+            # exception in the gap between releasing the lock and reaching
+            # create_checkpoint() -- the exact stray-flush-after-abort this
+            # guard exists to prevent, just via a narrower window than a
+            # lock-scoped check alone would close. create_checkpoint() blocks
+            # on the background checkpoint-batching thread's queue, not on
+            # this lock, so holding self._lock across the call is deadlock-safe.
             if self._scheduler_exception is not None:
                 return
             for resume in resumes:
@@ -502,8 +514,9 @@ class DagExecutor:
                 # and its scheduled mark so _pump re-evaluates and re-runs it.
                 self._scheduled.discard(name)
                 self._results.pop(name, None)
-        # Checkpoint before re-running, matching ConcurrentExecutor.resubmitter.
-        self._ctx.state.create_checkpoint()
+            # Checkpoint before re-running, matching ConcurrentExecutor.resubmitter.
+            # Deliberately still under self._lock -- see the guard comment above.
+            self._ctx.state.create_checkpoint()
         self._safe_pump()
 
     def _resolve_suspend(self) -> SuspendExecution | None:
