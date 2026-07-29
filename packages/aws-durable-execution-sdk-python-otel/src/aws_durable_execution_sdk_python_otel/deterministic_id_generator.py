@@ -7,8 +7,13 @@ import hashlib
 import os
 import re
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from opentelemetry.sdk.trace import IdGenerator, RandomIdGenerator
+
+
+if TYPE_CHECKING:
+    from opentelemetry.sdk.trace import TracerProvider
 
 
 HASHED_ID_PATTERN = re.compile(r"^[0-9a-f]{16}$")
@@ -126,6 +131,23 @@ class DeterministicIdGenerator(RandomIdGenerator):
     def __init__(self, fallback_id_generator: IdGenerator | None = None) -> None:
         self._execution_trace_id: int | None = None
         self._fallback_id_generator = fallback_id_generator or RandomIdGenerator()
+
+    @classmethod
+    def install_on_provider(cls, provider: TracerProvider) -> DeterministicIdGenerator:
+        """Return the provider's deterministic generator, installing one if needed.
+
+        OpenTelemetry tracers capture the provider's ID generator when they are
+        created. Reusing an installed generator ensures multiple plugin instances
+        with the same instrumentation scope configure the generator referenced by
+        the provider's cached tracer.
+        """
+        current_generator = provider.id_generator
+        if isinstance(current_generator, cls):
+            return current_generator
+
+        generator = cls(fallback_id_generator=current_generator)
+        provider.id_generator = generator
+        return generator
 
     def set_next_span_id(self, span_id: int | None) -> None:
         """Set the operation ID to use for the next span's ID.

@@ -116,9 +116,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         )
 
         self._provider = trace_provider or trace.get_tracer_provider()
-        self._id_generator: DeterministicIdGenerator = DeterministicIdGenerator(
-            fallback_id_generator=getattr(self._provider, "id_generator", None)
-        )
         # Deterministic trace stitching requires the SDK TracerProvider, which
         # exposes id_generator/sampler. The API's default ProxyTracerProvider
         # (returned before an SDK provider is configured) does not. Rather than
@@ -127,8 +124,11 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         # provider is configured later). In a Lambda OTel/ADOT deployment the
         # layer configures a real SDK provider before the handler imports.
         if isinstance(self._provider, SdkTracerProvider):
-            self._provider.id_generator = self._id_generator
+            self._id_generator = DeterministicIdGenerator.install_on_provider(
+                self._provider
+            )
         else:
+            self._id_generator = DeterministicIdGenerator()
             logger.warning(
                 "InvocationOtelPlugin expected an SDK TracerProvider "
                 "(opentelemetry.sdk.trace.TracerProvider) but got %s. Spans will "
