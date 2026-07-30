@@ -44,6 +44,8 @@ from aws_durable_execution_sdk_python.context import (
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     ChildContextError,
+    RetryableSerDesError,
+    SerDesError,
     ValidationError,
     InvalidStateError,
     OrphanedChildException,
@@ -1433,15 +1435,141 @@ def test_create_result_no_failed_executables():
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
 
+    # wrap_user_function must return the real function so the branch result is
+    # the (serializable) "result_N" string that the child round-trips.
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *a, **k: func
+
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"
-    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+    # Return the configured child_context so its pass-through wrap_user_function
+    # is used and the branch result is the serializable "result_N" string.
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     result = executor.execute(execution_state, executor_context)
 
     assert len(result.all) == 1
     assert result.all[0].status == BatchItemStatus.SUCCEEDED
     assert result.completion_reason == CompletionReason.ALL_COMPLETED
+
+
+def _serdes_branch_test_context() -> tuple[Mock, Mock]:
+    """Build (execution_state, executor_context) mocks for a single-branch run."""
+    execution_state: Mock = Mock()
+    execution_state.create_checkpoint = Mock()
+    child_context: Mock = Mock()
+    child_context.state.wrap_user_function = lambda func, *a, **k: func
+    executor_context: Mock = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+    return execution_state, executor_context
+
+
+@pytest.mark.parametrize("nesting_type", [NestingType.NESTED, NestingType.FLAT])
+def test_execute_permanent_serdes_error_in_branch_is_failed_item(nesting_type):
+    """A permanent serdes failure in a branch is recorded as a failed item.
+
+    SerDesError is a per-operation failure, so a single bad item is recorded in
+    the BatchResult rather than failing the invocation.
+    """
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            raise SerDesError("permanent serdes")
+
+    executor = TestExecutor(
+        executables=[Executable(0, lambda: "x")],
+        max_concurrency=1,
+        completion_config=CompletionConfig(
+            min_successful=None,
+            tolerated_failure_count=None,
+            tolerated_failure_percentage=None,
+        ),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        nesting_type=nesting_type,
+        operation_id_namespace=_StubNamespace(),
+    )
+    execution_state, executor_context = _serdes_branch_test_context()
+
+    result = executor.execute(execution_state, executor_context)
+
+    assert len(result.all) == 1
+    assert result.all[0].status is BatchItemStatus.FAILED
+    assert result.all[0].error.type == SerDesError.WIRE_ERROR_TYPE
+
+
+@pytest.mark.parametrize("nesting_type", [NestingType.NESTED, NestingType.FLAT])
+def test_execute_retryable_serdes_error_in_branch_escapes_batch(nesting_type):
+    """A retryable serdes failure escapes the batch and fails the invocation.
+
+    execute() re-raises it for a backend retry rather than recording a
+    permanent failed item that no retry could repair.
+    """
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            raise RetryableSerDesError("transient serdes")
+
+    executor = TestExecutor(
+        executables=[Executable(0, lambda: "x")],
+        max_concurrency=1,
+        completion_config=CompletionConfig(
+            min_successful=None,
+            tolerated_failure_count=None,
+            tolerated_failure_percentage=None,
+        ),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        nesting_type=nesting_type,
+        operation_id_namespace=_StubNamespace(),
+    )
+    execution_state, executor_context = _serdes_branch_test_context()
+
+    with pytest.raises(RetryableSerDesError):
+        executor.execute(execution_state, executor_context)
+
+
+def test_replay_flat_branch_retryable_serdes_error_escapes_batch():
+    """During FLAT replay, a retryable serdes failure re-executing a branch
+    escapes the batch (re-raises) instead of becoming a failed item."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            raise RetryableSerDesError("transient serdes")
+
+    executor = TestExecutor(
+        executables=[Executable(0, lambda: "x")],
+        max_concurrency=1,
+        completion_config=CompletionConfig(min_successful=1),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        nesting_type=NestingType.FLAT,
+        operation_id_namespace=_StubNamespace(),
+    )
+    executor._execute_item_in_child_context = Mock(
+        side_effect=RetryableSerDesError("transient serdes")
+    )
+
+    # A non-terminal checkpoint (neither succeeded nor failed) makes the FLAT
+    # replay path re-execute the branch body.
+    checkpoint: Mock = Mock()
+    checkpoint.is_succeeded.return_value = False
+    checkpoint.is_failed.return_value = False
+    execution_state: Mock = Mock()
+    execution_state.get_checkpoint_result = Mock(return_value=checkpoint)
+    executor_context: Mock = Mock()
+
+    with pytest.raises(RetryableSerDesError):
+        executor._replay_terminal_item(
+            execution_state, executor_context, Executable(0, lambda: "x")
+        )
 
 
 def test_create_result_with_suspended_executable():
@@ -1484,6 +1612,46 @@ def test_create_result_with_suspended_executable():
 
     # Should raise SuspendExecution since single task suspends
     with pytest.raises(SuspendExecution):
+        executor.execute(execution_state, executor_context)
+
+
+def test_retryable_error_takes_priority_over_suspension():
+    """A retryable branch error is raised even when other branches are suspended.
+
+    Without priority, the coordinator would raise SuspendExecution (returning
+    PENDING) instead of failing the invocation for a backend retry.
+    """
+    import threading
+
+    barrier: threading.Barrier = threading.Barrier(2)
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            # Both branches synchronize so the coordinator sees both events.
+            barrier.wait(timeout=5)
+            if executable.index == 0:
+                raise RetryableSerDesError("transient serdes")
+            msg = "waiting for callback"
+            raise SuspendExecution(msg)
+
+    executor = TestExecutor(
+        executables=[Executable(0, lambda: "a"), Executable(1, lambda: "b")],
+        max_concurrency=2,
+        completion_config=CompletionConfig(
+            min_successful=None,
+            tolerated_failure_count=None,
+            tolerated_failure_percentage=None,
+        ),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        nesting_type=NestingType.NESTED,
+        operation_id_namespace=_StubNamespace(),
+    )
+    execution_state, executor_context = _serdes_branch_test_context()
+
+    with pytest.raises(RetryableSerDesError):
         executor.execute(execution_state, executor_context)
 
 

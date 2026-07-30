@@ -11,6 +11,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     CheckpointError,
     DurableOperationError,
     GetExecutionStateError,
+    SerDesError,
     StepError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -177,6 +178,28 @@ def test_error_object_from_exception_empty_message():
     assert error.type == "ValueError"
     assert error.data is None
     assert error.stack_trace is None
+
+
+def test_raise_as_operation_error_wraps_in_passed_class():
+    """A non-serdes error surfaces as the operation's own error type."""
+    error_object = ErrorObject.from_exception(ValueError("boom"))
+    with pytest.raises(StepError) as exc_info:
+        error_object.raise_as_operation_error(StepError)
+    assert exc_info.value.error_type == "ValueError"
+
+
+def test_raise_as_operation_error_surfaces_serdes_error_directly():
+    """A serdes failure surfaces as SerDesError regardless of the operation kind.
+
+    Both the first-run FAIL path and replay call this method, so this covers
+    both: a SerDesError is catchable as itself, not wrapped in the operation's
+    own error type.
+    """
+    error_object = ErrorObject.from_exception(SerDesError("serdes boom"))
+    with pytest.raises(SerDesError) as exc_info:
+        error_object.raise_as_operation_error(StepError)
+    assert not isinstance(exc_info.value, StepError)
+    assert exc_info.value.error_type == SerDesError.WIRE_ERROR_TYPE
 
 
 def test_error_object_from_message_regular():

@@ -12,6 +12,8 @@ from aws_durable_execution_sdk_python.config import (
 from aws_durable_execution_sdk_python.exceptions import (
     ExecutionError,
     InvalidStateError,
+    RetryableSerDesError,
+    SerDesError,
     StepError,
     StepInterruptedError,
 )
@@ -229,11 +231,27 @@ class StepOperationExecutor(OperationExecutor[T]):
             )
             raw_result: T = wrapped_user_func(step_context)
 
-            serialized_result: str = serialize(
+            # A custom serdes may serialize to None, which is handled below.
+            serialized_result: str | None = serialize(
                 serdes=self.config.serdes,
                 value=raw_result,
                 operation_id=self.operation_identifier.operation_id,
                 durable_execution_arn=self.state.durable_execution_arn,
+            )
+
+            # Round-trip before the SUCCEED checkpoint so a SUCCEEDED step is
+            # always reconstructable and the first run matches replay. A None
+            # payload is returned as-is, mirroring the replay path. A permanent
+            # serdes failure here fails before any SUCCEED is written.
+            return_value: T = (
+                None  # type: ignore[assignment]
+                if serialized_result is None
+                else deserialize(
+                    serdes=self.config.serdes,
+                    data=serialized_result,
+                    operation_id=self.operation_identifier.operation_id,
+                    durable_execution_arn=self.state.durable_execution_arn,
+                )
             )
 
             success_operation: OperationUpdate = OperationUpdate.create_step_succeed(
@@ -251,17 +269,28 @@ class StepOperationExecutor(OperationExecutor[T]):
                 self.operation_identifier.operation_id,
                 self.operation_identifier.name,
             )
-            # Return the round-tripped value so the first run matches replay,
-            # which reconstructs the result by deserializing the checkpoint.
-            # A None payload is returned as-is, mirroring the replay path.
-            if serialized_result is None:
-                return None  # type: ignore[return-value]
-            return deserialize(  # noqa: TRY300
-                serdes=self.config.serdes,
-                data=serialized_result,
-                operation_id=self.operation_identifier.operation_id,
-                durable_execution_arn=self.state.durable_execution_arn,
+            return return_value
+        except RetryableSerDesError:
+            # Transient serdes failure: fail the invocation for backend retry,
+            # bypassing the step retry strategy. This narrow catch relies on the
+            # serdes wrappers raising only RetryableSerDesError or SerDesError;
+            # any other retryable InvocationError would fall through to the step
+            # retry strategy below.
+            raise
+        except SerDesError as e:
+            # Permanent serdes failure: terminal FAIL surfaced as SerDesError,
+            # without the step retry strategy.
+            logger.exception(
+                "❌ serdes failed for step id: %s, name: %s",
+                self.operation_identifier.operation_id,
+                self.operation_identifier.name,
             )
+            error_object: ErrorObject = ErrorObject.from_exception(e)
+            fail_operation: OperationUpdate = OperationUpdate.create_step_fail(
+                identifier=self.operation_identifier, error=error_object
+            )
+            self.state.create_checkpoint(operation_update=fail_operation)
+            error_object.raise_as_operation_error(StepError)
         except Exception as e:
             if isinstance(e, ExecutionError):
                 # No retry on fatal - e.g checkpoint exception

@@ -25,6 +25,8 @@ from aws_durable_execution_sdk_python.exceptions import (
     InvokeError,
     OrderedLockError,
     OrphanedChildException,
+    RetryableSerDesError,
+    SerDesError,
     StepError,
     StepInterruptedError,
     SuspendExecution,
@@ -288,6 +290,30 @@ def test_operation_error_registry_contains_all_subclasses():
         _DURABLE_OPERATION_ERROR_REGISTRY["CallbackSubmitterError"]
         is CallbackSubmitterError
     )
+
+
+# =============================================================================
+# SerDes error hierarchy
+# =============================================================================
+
+
+def test_serdes_error_hierarchy():
+    """SerDesError is a catchable SDK error, separate from operation failures
+    and from errors that terminate execution."""
+    error = SerDesError("serdes boom")
+    assert isinstance(error, DurableExecutionsError)
+    assert not isinstance(error, DurableOperationError)
+    assert not isinstance(error, UnrecoverableError)
+    assert error.error_type == SerDesError.WIRE_ERROR_TYPE
+
+
+def test_retryable_serdes_error_is_retryable_invocation_error():
+    """RetryableSerDesError fails the invocation for backend retry."""
+    error = RetryableSerDesError("transient boom")
+    assert isinstance(error, InvocationError)
+    assert error.is_retryable() is True
+    # Not an operation error, so it is not caught as a per-operation failure.
+    assert not isinstance(error, DurableOperationError)
 
 
 # =============================================================================

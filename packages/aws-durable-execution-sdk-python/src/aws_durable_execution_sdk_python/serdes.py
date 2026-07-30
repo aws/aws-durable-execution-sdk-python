@@ -35,7 +35,7 @@ from typing import Any, Generic, Protocol, TypeVar
 from aws_durable_execution_sdk_python.concurrency.models import BatchResult
 from aws_durable_execution_sdk_python.exceptions import (
     DurableExecutionsError,
-    ExecutionError,
+    RetryableSerDesError,
     SerDesError,
 )
 
@@ -456,19 +456,23 @@ def serialize(
         Serialized string representation
 
     Raises:
-        FatalError: If serialization fails
+        RetryableSerDesError: If serialization fails transiently (propagated).
+        SerDesError: If serialization fails permanently.
     """
     serdes_context: SerDesContext = SerDesContext(operation_id, durable_execution_arn)
     active_serdes: SerDes[T] = serdes or EXTENDED_TYPES_SERDES
     try:
         return active_serdes.serialize(value, serdes_context)
+    except RetryableSerDesError:
+        # Transient failure: propagate so it retries the invocation.
+        raise
     except Exception as e:
         logger.exception(
             "⚠️ Serialization failed for id: %s",
             operation_id,
         )
         msg = f"Serialization failed for id: {operation_id}, error: {e}."
-        raise ExecutionError(msg) from e
+        raise SerDesError(msg) from e
 
 
 def deserialize(
@@ -486,13 +490,17 @@ def deserialize(
         Deserialized Python object
 
     Raises:
-        FatalError: If deserialization fails
+        RetryableSerDesError: If deserialization fails transiently (propagated).
+        SerDesError: If deserialization fails permanently.
     """
     serdes_context: SerDesContext = SerDesContext(operation_id, durable_execution_arn)
     active_serdes: SerDes[T] = serdes or EXTENDED_TYPES_SERDES
     try:
         return active_serdes.deserialize(data, serdes_context)
+    except RetryableSerDesError:
+        # Transient failure: propagate so it retries the invocation.
+        raise
     except Exception as e:
         logger.exception("⚠️ Deserialization failed for id: %s", operation_id)
-        msg = f"Deserialization failed for id: {operation_id}"
-        raise ExecutionError(msg) from e
+        msg = f"Deserialization failed for id: {operation_id}, error: {e}."
+        raise SerDesError(msg) from e
