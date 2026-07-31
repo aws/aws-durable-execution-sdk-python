@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import opentelemetry.context as otel_context
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
+    ErrorObject,
     InvocationStatus,
     OperationStatus,
     OperationSubType,
@@ -17,6 +18,9 @@ from aws_durable_execution_sdk_python.plugin import (
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
+    UserFunctionEndInfo,
+    UserFunctionOutcome,
+    UserFunctionStartInfo,
 )
 from opentelemetry import trace
 from opentelemetry.context import Context
@@ -233,6 +237,153 @@ def test_cross_invocation_operation_end_uses_deterministic_span_id():
     assert matching[0].context.span_id == operation_id_to_span_id(
         EXECUTION_ARN, "step-earlier"
     )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "terminal_status", "error", "expected_span_status"),
+    [
+        (
+            UserFunctionOutcome.SUCCEEDED,
+            OperationStatus.SUCCEEDED,
+            None,
+            trace.StatusCode.OK,
+        ),
+        (
+            UserFunctionOutcome.SUCCEEDED,
+            OperationStatus.FAILED,
+            ErrorObject(
+                message="serialization failed",
+                type="SerializationError",
+                data=None,
+                stack_trace=None,
+            ),
+            trace.StatusCode.ERROR,
+        ),
+    ],
+)
+def test_context_span_waits_for_terminal_operation_status(
+    outcome,
+    terminal_status,
+    error,
+    expected_span_status,
+):
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    operation_id = "context-1"
+
+    plugin.on_user_function_start(
+        UserFunctionStartInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name="book-trip",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+            attempt=1,
+        )
+    )
+    active_span = plugin._get_span(operation_id)
+    assert active_span is not None
+    assert (
+        active_span.attributes["durable.operation.status"]
+        == OperationStatus.STARTED.value
+    )
+
+    plugin.on_user_function_end(
+        UserFunctionEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name="book-trip",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+            attempt=1,
+            outcome=outcome,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+
+    assert plugin._get_span(operation_id) is active_span
+    assert (
+        active_span.attributes["durable.operation.status"]
+        == OperationStatus.STARTED.value
+    )
+    assert not exporter.get_finished_spans()
+
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name="book-trip",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=terminal_status,
+            end_time=END_TIME,
+            error=error,
+        )
+    )
+
+    span = exporter.get_finished_spans()[0]
+    assert span.attributes["durable.operation.status"] == terminal_status.value
+    assert span.status.status_code is expected_span_status
+
+
+def test_step_attempt_span_omits_operation_status():
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    operation_id = "step-1"
+
+    plugin.on_user_function_start(
+        UserFunctionStartInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="fetch-user",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+            attempt=1,
+        )
+    )
+    active_span = plugin._get_span("step-1:attempt:1")
+    assert active_span is not None
+    assert "durable.operation.status" not in active_span.attributes
+
+    plugin.on_user_function_end(
+        UserFunctionEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="fetch-user",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+            attempt=1,
+            outcome=UserFunctionOutcome.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+
+    span = exporter.get_finished_spans()[0]
+    assert (
+        span.attributes["durable.attempt.outcome"]
+        == UserFunctionOutcome.SUCCEEDED.value
+    )
+    assert "durable.operation.status" not in span.attributes
 
 
 # ---------------------------------------------------------------------------

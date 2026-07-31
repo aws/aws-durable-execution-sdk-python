@@ -3,6 +3,7 @@ import logging
 import unittest
 from unittest.mock import MagicMock
 
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     DurableExecutionInvocationOutput,
     ErrorObject,
@@ -682,6 +683,53 @@ class TestPluginExecutorOnOperationReplay(unittest.TestCase):
             executor.on_operation_replay(operation)
 
         self.assertEqual(plugin.calls, ["operation_start:op-1"])
+
+
+class TestPluginExecutorOnChildContextEnd(unittest.TestCase):
+    """Tests for locally determined child-context completion."""
+
+    def test_builds_terminal_operation_info(self):
+        captured: list[OperationEndInfo] = []
+
+        class _CapturingPlugin(_TrackingPlugin):
+            def on_operation_end(self, info: OperationEndInfo) -> None:
+                super().on_operation_end(info)
+                captured.append(info)
+
+        plugin = _CapturingPlugin()
+        executor = PluginExecutor(plugins=[plugin])
+        identifier = OperationIdentifier(
+            operation_id="context-1",
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            parent_id="parent-1",
+            name="book-trip",
+        )
+        before = datetime.datetime.now(datetime.UTC)
+
+        with executor.run():
+            executor.on_child_context_end(
+                identifier,
+                OperationStatus.FAILED,
+                error=ERROR,
+                is_replayed=True,
+            )
+
+        after = datetime.datetime.now(datetime.UTC)
+        self.assertEqual(plugin.calls, ["operation_end:context-1"])
+        self.assertEqual(len(captured), 1)
+        info = captured[0]
+        self.assertEqual(info.operation_id, "context-1")
+        self.assertEqual(info.operation_type, OperationType.CONTEXT)
+        self.assertEqual(info.sub_type, OperationSubType.RUN_IN_CHILD_CONTEXT)
+        self.assertEqual(info.parent_id, "parent-1")
+        self.assertEqual(info.name, "book-trip")
+        self.assertEqual(info.status, OperationStatus.FAILED)
+        self.assertEqual(info.error, ERROR)
+        self.assertTrue(info.is_replayed)
+        self.assertIsNone(info.start_time)
+        assert info.end_time is not None
+        self.assertLessEqual(before, info.end_time)
+        self.assertLessEqual(info.end_time, after)
 
 
 class TestPluginExecutorOnOperationUpdate(unittest.TestCase):

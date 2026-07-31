@@ -485,6 +485,22 @@ class ExecutionState:
 
         self._plugin_executor.on_operation_replay(operation)
 
+    def emit_child_context_end_hook(
+        self,
+        operation_identifier: OperationIdentifier,
+        status: OperationStatus,
+        *,
+        error: ErrorObject | None = None,
+        is_replayed: bool = False,
+    ) -> None:
+        """Fire a terminal hook for a child context completed without a checkpoint."""
+        self._plugin_executor.on_child_context_end(
+            operation_identifier,
+            status,
+            error=error,
+            is_replayed=is_replayed,
+        )
+
     def is_operation_updated_since_last_invocation(self, operation_id: str) -> bool:
         """Return True if an operation changed while this execution was suspended."""
         return operation_id in self._updated_operation_ids

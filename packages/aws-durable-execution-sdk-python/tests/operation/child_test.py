@@ -21,6 +21,7 @@ from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationAction,
+    OperationStatus,
     OperationSubType,
     OperationType,
 )
@@ -104,6 +105,7 @@ def test_child_handler_not_started(
     assert success_operation.payload == json.dumps("fresh_result")
 
     mock_callable.assert_called_once()
+    mock_state.emit_child_context_end_hook.assert_not_called()
 
 
 def test_child_handler_already_succeeded():
@@ -398,6 +400,7 @@ def test_child_handler_invocation_error_reraised():
         for call in mock_state.create_checkpoint.call_args_list
     ]
     assert OperationAction.FAIL not in actions
+    mock_state.emit_child_context_end_hook.assert_not_called()
 
 
 def test_child_handler_execution_error_wrapped():
@@ -784,12 +787,13 @@ def test_child_handler_replay_children_mode() -> None:
     mock_state.wrap_user_function.return_value = mock_callable
     child_config: ChildConfig = ChildConfig()
 
+    identifier = OperationIdentifier(
+        "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+    )
     actual_result = child_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier(
-            "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
-        ),
+        identifier,
         child_config,
     )
 
@@ -800,6 +804,11 @@ def test_child_handler_replay_children_mode() -> None:
     mock_state.create_checkpoint.assert_not_called()
     # Verify get_checkpoint_result called once
     assert mock_state.get_checkpoint_result.call_count == 1
+    mock_state.emit_child_context_end_hook.assert_called_once_with(
+        identifier,
+        OperationStatus.SUCCEEDED,
+        is_replayed=True,
+    )
 
 
 def test_small_payload_with_summary_generator():
@@ -958,12 +967,13 @@ def test_child_handler_is_virtual_no_succeed():
 
     config = ChildConfig(is_virtual=True)
 
+    identifier = OperationIdentifier(
+        "op2", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+    )
     result = child_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier(
-            "op2", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
-        ),
+        identifier,
         config,
     )
 
@@ -971,6 +981,11 @@ def test_child_handler_is_virtual_no_succeed():
 
     # Verify no checkpoints created
     mock_state.create_checkpoint.assert_not_called()
+    mock_state.emit_child_context_end_hook.assert_called_once_with(
+        identifier,
+        OperationStatus.SUCCEEDED,
+        is_replayed=False,
+    )
 
     mock_callable.assert_called_once()
 
@@ -1017,6 +1032,7 @@ def test_child_handler_not_is_virtual_finish_mode():
     assert success_operation.action.value == "SUCCEED"
 
     mock_callable.assert_called_once()
+    mock_state.emit_child_context_end_hook.assert_not_called()
 
 
 def test_child_handler_is_virtual_with_exception():
@@ -1043,13 +1059,14 @@ def test_child_handler_is_virtual_with_exception():
 
     config = ChildConfig(is_virtual=True)
 
+    identifier = OperationIdentifier(
+        "op4", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+    )
     with pytest.raises(ChildContextError):
         child_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier(
-                "op4", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
-            ),
+            identifier,
             config,
         )
 
@@ -1057,6 +1074,12 @@ def test_child_handler_is_virtual_with_exception():
     assert mock_state.create_checkpoint.call_count == 0
 
     mock_callable.assert_called_once()
+    end_call = mock_state.emit_child_context_end_hook.call_args
+    assert end_call.args[:2] == (identifier, OperationStatus.FAILED)
+    assert end_call.kwargs["is_replayed"] is False
+    error = end_call.kwargs["error"]
+    assert error.type == "ValueError"
+    assert error.message == "Test error"
 
 
 def test_child_handler_not_is_virtual_with_exception():
@@ -1095,6 +1118,7 @@ def test_child_handler_not_is_virtual_with_exception():
     assert fail_operation.action.value == "FAIL"
 
     mock_callable.assert_called_once()
+    mock_state.emit_child_context_end_hook.assert_not_called()
 
 
 def test_child_handler_is_virtual_comparison():
