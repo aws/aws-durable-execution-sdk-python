@@ -47,7 +47,7 @@ jobs:
       actions: write
       contents: read
       id-token: write
-    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/python-opentelemetry.yml@6c43f7573d8734be801341c87a76bc76b351bcb7
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/python-opentelemetry.yml@d155cb3801e85722ba9c7cc468b8ec20c6687576
     with:
       phase: ${{ inputs.phase || 'short' }}
       delay_seconds: ${{ inputs.delay_seconds || '82800' }}
@@ -55,9 +55,9 @@ jobs:
       otlp_endpoint: ${{ inputs.otlp_endpoint || '' }}
       python_sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}
     secrets:
-      PYTHON_TEST_ROLE_ARN: ${{ secrets.TEST_ROLE_ARN }}
-      PYTHON_TEST_ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
-      PYTHON_TEST_LAMBDA_EXECUTION_ROLE_ARN: ${{ secrets.TEST_LAMBDA_EXECUTION_ROLE_ARN }}
+      CONFORMANCE_TEST_ROLE_ARN: ${{ secrets.TEST_ROLE_ARN }}
+      CONFORMANCE_TEST_ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
+      CONFORMANCE_TEST_LAMBDA_EXECUTION_ROLE_ARN: ${{ secrets.TEST_LAMBDA_EXECUTION_ROLE_ARN }}
       DASH0_AUTH_TOKEN: ${{ secrets.DASH0_AUTH_TOKEN }}
       DD_API_KEY: ${{ secrets.DD_API_KEY }}
       DD_APPLICATION_KEY: ${{ secrets.DD_APPLICATION_KEY }}
