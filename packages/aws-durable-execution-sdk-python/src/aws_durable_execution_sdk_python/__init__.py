@@ -7,7 +7,12 @@ from aws_durable_execution_sdk_python.__about__ import __version__
 # Helper decorators - commonly used for step functions
 # Concurrency
 from aws_durable_execution_sdk_python.concurrency.models import BatchResult
-from aws_durable_execution_sdk_python.config import ParallelBranch
+from aws_durable_execution_sdk_python.config import (
+    BatchItemStatus,
+    CompletionItemStatus,
+    CompletionStatus,
+    ParallelBranch,
+)
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
     durable_parallel_branch,
@@ -42,12 +47,15 @@ from aws_durable_execution_sdk_python.types import StepContext
 
 
 __all__ = [
+    "BatchItemStatus",
     "BatchResult",
     "CallbackError",
     "CallbackExternalError",
     "CallbackSubmitterError",
     "CallbackTimeoutError",
     "ChildContextError",
+    "CompletionItemStatus",
+    "CompletionStatus",
     "DurableContext",
     "DurableExecutionsError",
     "DurableOperationError",

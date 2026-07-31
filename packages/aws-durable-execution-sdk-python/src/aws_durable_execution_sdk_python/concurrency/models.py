@@ -13,10 +13,17 @@ from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
     InvalidStateError,
 )
+from aws_durable_execution_sdk_python.config import (
+    BatchItemStatus,
+    CompletionItemStatus,
+    CompletionStatus,
+)
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from aws_durable_execution_sdk_python.types import BatchResult as BatchResultProtocol
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from aws_durable_execution_sdk_python.config import CompletionConfig
     from aws_durable_execution_sdk_python.types import SummaryGenerator
 
@@ -30,16 +37,13 @@ ResultType = TypeVar("ResultType")
 
 
 # region Result models
-class BatchItemStatus(Enum):
-    SUCCEEDED = "SUCCEEDED"
-    FAILED = "FAILED"
-    STARTED = "STARTED"
 
 
 class CompletionReason(Enum):
     ALL_COMPLETED = "ALL_COMPLETED"
     MIN_SUCCESSFUL_REACHED = "MIN_SUCCESSFUL_REACHED"
     FAILURE_TOLERANCE_EXCEEDED = "FAILURE_TOLERANCE_EXCEEDED"
+    CUSTOM_COMPLETION = "CUSTOM_COMPLETION"
 
 
 @dataclass(frozen=True)
@@ -48,8 +52,12 @@ class CompletionPolicy:
 
     Single home for the completion logic shared by the concurrency
     coordinator (scheduling decisions) and :class:`BatchResult`
-    (completion reason inference). A user-supplied completion predicate,
-    if introduced later, slots in here.
+    (completion reason inference).
+
+    When a custom predicate (``should_complete``) is provided it takes full
+    precedence: the threshold fields are ignored and the predicate alone
+    decides early completion. The batch still completes once every item
+    finishes regardless of the predicate's return value.
 
     Fail-fast semantics: when no criteria are configured at all, a single
     failure exceeds tolerance.
@@ -59,6 +67,7 @@ class CompletionPolicy:
     min_successful: int | None = None
     tolerated_failure_count: int | None = None
     tolerated_failure_percentage: int | float | None = None
+    should_complete: Callable[[CompletionStatus], bool] | None = None
 
     @classmethod
     def from_config(
@@ -72,6 +81,7 @@ class CompletionPolicy:
             min_successful=config.min_successful,
             tolerated_failure_count=config.tolerated_failure_count,
             tolerated_failure_percentage=config.tolerated_failure_percentage,
+            should_complete=config.should_complete,
         )
 
     @property
@@ -83,8 +93,29 @@ class CompletionPolicy:
             or self.tolerated_failure_percentage is not None
         )
 
+    def _build_status(
+        self,
+        succeeded: int,
+        failed: int,
+        items: tuple[CompletionItemStatus, ...] = (),
+    ) -> CompletionStatus:
+        """Build a CompletionStatus snapshot from current counts."""
+        return CompletionStatus(
+            success_count=succeeded,
+            failure_count=failed,
+            completed_count=succeeded + failed,
+            total_count=self.total,
+            items=items,
+        )
+
     def is_tolerance_exceeded(self, failed: int) -> bool:
-        """True when failures exceed the configured tolerance."""
+        """True when failures exceed the configured tolerance.
+
+        When a custom predicate is active, tolerance checking is disabled -
+        the predicate owns all early-exit decisions.
+        """
+        if self.should_complete is not None:
+            return False
         if not self.has_criteria:
             return failed > 0
         if (
@@ -98,20 +129,52 @@ class CompletionPolicy:
         return False
 
     def should_continue(self, failed: int) -> bool:
-        """True while more branches may be scheduled."""
+        """True while more branches may be scheduled.
+
+        When a custom predicate is active, scheduling is never stopped by
+        tolerance - the predicate controls completion via is_complete.
+        """
         return not self.is_tolerance_exceeded(failed)
 
-    def is_complete(self, succeeded: int, failed: int) -> bool:
+    def is_complete(
+        self,
+        succeeded: int,
+        failed: int,
+        items: tuple[CompletionItemStatus, ...] = (),
+        has_terminal_event: bool = True,
+    ) -> bool:
         """True when the batch has met a completion criterion."""
         if succeeded + failed >= self.total:
             return True
+        if self.should_complete is not None:
+            # Only evaluate the custom predicate after at least one branch
+            # has reached a terminal state. This prevents predicates like
+            # `failure_count == 0` from firing before any work runs.
+            if not has_terminal_event:
+                return False
+            status: CompletionStatus = self._build_status(succeeded, failed, items)
+            return self.should_complete(status)
         return self.min_successful is not None and succeeded >= self.min_successful
 
-    def reason(self, succeeded: int, failed: int) -> CompletionReason:
+    def reason(
+        self,
+        succeeded: int,
+        failed: int,
+        items: tuple[CompletionItemStatus, ...] = (),
+    ) -> CompletionReason:
         """Infer the completion reason. Tolerance is checked first."""
         if self.is_tolerance_exceeded(failed):
             return CompletionReason.FAILURE_TOLERANCE_EXCEEDED
         if succeeded + failed >= self.total:
+            return CompletionReason.ALL_COMPLETED
+        if self.should_complete is not None:
+            status: CompletionStatus = self._build_status(succeeded, failed, items)
+            if self.should_complete(status):
+                return CompletionReason.CUSTOM_COMPLETION
+            # The predicate did not fire but the loop exited (all items
+            # completed or raced events pushed totals to total after the
+            # is_complete check). Report ALL_COMPLETED since every branch
+            # reached a terminal state.
             return CompletionReason.ALL_COMPLETED
         if self.min_successful is not None and succeeded >= self.min_successful:
             return CompletionReason.MIN_SUCCESSFUL_REACHED
@@ -346,7 +409,28 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
         policy: CompletionPolicy = CompletionPolicy.from_config(
             len(items), completion_config
         )
-        return cls(items, policy.reason(succeeded_count, failed_count))
+
+        # Build items snapshot so quorum predicates receive per-item state
+        # even in the fallback inference path.
+        item_snapshots: tuple[CompletionItemStatus, ...] = tuple(
+            CompletionItemStatus(
+                index=item.index,
+                status=item.status,
+                result=item.result
+                if item.status is BatchItemStatus.SUCCEEDED
+                else None,
+                error_message=(
+                    item.error.message
+                    if item.status is BatchItemStatus.FAILED
+                    and item.error is not None
+                    and hasattr(item.error, "message")
+                    else None
+                ),
+            )
+            for item in items
+        )
+
+        return cls(items, policy.reason(succeeded_count, failed_count, item_snapshots))
 
     def to_dict(self) -> dict:
         return {
