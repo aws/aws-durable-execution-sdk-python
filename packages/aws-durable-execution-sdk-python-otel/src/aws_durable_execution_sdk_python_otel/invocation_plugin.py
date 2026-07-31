@@ -470,9 +470,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         operation span before being ended.
         """
         logger.debug("Durable operation ended: %s", info)
-        if info.operation_type is OperationType.CONTEXT:
-            # Context operations are tracked using on_user_function_end.
-            return
         span = self._get_span(info.operation_id)
         if span is None:
             # the span was not started in the current invocation, so we need to
@@ -548,9 +545,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
         """Called when a context or step operation finishes user code.
 
-        This callback records the final attempt status, captures exceptions for
-        failed attempts, and ends the span that was attached in
-        ``on_user_function_start``.
+        STEP attempt spans are finalized here. CONTEXT spans stay open until
+        ``on_operation_end`` supplies the authoritative durable status.
 
         Args:
             info: Information about the operation attempt.
@@ -572,23 +568,26 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 "on_user_function_end called without matching on_user_function_start"
             )
 
-        span.set_attributes(self._extract_attributes(info))
-        if info.outcome is UserFunctionOutcome.FAILED:
-            span.set_status(StatusCode.ERROR, info.error.message if info.error else "")
-            span.record_exception(
-                Exception(
-                    (info.error.message or info.error.type)
-                    if info.error
-                    else "Unknown error"
+        if info.operation_type is OperationType.STEP:
+            span.set_attributes(self._extract_attributes(info))
+            if info.outcome is UserFunctionOutcome.FAILED:
+                span.set_status(
+                    StatusCode.ERROR, info.error.message if info.error else ""
                 )
-            )
-        else:
-            span.set_status(StatusCode.OK)
+                span.record_exception(
+                    Exception(
+                        (info.error.message or info.error.type)
+                        if info.error
+                        else "Unknown error"
+                    )
+                )
+            else:
+                span.set_status(StatusCode.OK)
 
-        end_timestamp = info.end_time
-        if end_timestamp is not None and end_timestamp == info.start_time:
-            end_timestamp += datetime.timedelta(microseconds=1)
-        self._end_span(span_key, end_timestamp)
+            end_timestamp = info.end_time
+            if end_timestamp is not None and end_timestamp == info.start_time:
+                end_timestamp += datetime.timedelta(microseconds=1)
+            self._end_span(span_key, end_timestamp)
         # Restore the enclosing operation span as current so code that runs
         # after this operation (e.g. between steps in a child context)
         # correlates to its enclosing operation, not the operation that just
@@ -621,7 +620,15 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             attributes["durable.operation.type"] = info.operation_type.value
         if hasattr(info, "sub_type") and info.sub_type is not None:
             attributes["durable.operation.subtype"] = info.sub_type.value
-        if hasattr(info, "status") and info.status is not None:
+        # STEP user-function spans represent attempts, not durable operations.
+        if (
+            not (
+                isinstance(info, (UserFunctionStartInfo, UserFunctionEndInfo))
+                and info.operation_type is OperationType.STEP
+            )
+            and hasattr(info, "status")
+            and info.status is not None
+        ):
             attributes["durable.operation.status"] = info.status.value
         if hasattr(info, "name") and info.name is not None:
             attributes["durable.operation.name"] = info.name

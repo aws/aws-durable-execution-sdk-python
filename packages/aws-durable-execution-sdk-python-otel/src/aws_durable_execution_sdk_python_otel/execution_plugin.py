@@ -356,8 +356,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
         logger.debug("Durable operation ended: %s", info)
-        if info.operation_type is OperationType.CONTEXT:
-            return
         span = self._get_span(info.operation_id)
         if span is None:
             # Cross-invocation stitching: operation started in a prior
@@ -477,25 +475,28 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             raise RuntimeError(
                 "on_user_function_end without matching on_user_function_start"
             )
-        span.set_attributes(self._operation_attributes(info))
-        if info.outcome is UserFunctionOutcome.FAILED:
-            span.set_status(StatusCode.ERROR, info.error.message if info.error else "")
-            span.record_exception(
-                Exception(
-                    (info.error.message or info.error.type)
-                    if info.error
-                    else "Unknown error"
+        if info.operation_type is OperationType.STEP:
+            span.set_attributes(self._operation_attributes(info))
+            if info.outcome is UserFunctionOutcome.FAILED:
+                span.set_status(
+                    StatusCode.ERROR, info.error.message if info.error else ""
                 )
-            )
-        else:
-            span.set_status(StatusCode.OK)
+                span.record_exception(
+                    Exception(
+                        (info.error.message or info.error.type)
+                        if info.error
+                        else "Unknown error"
+                    )
+                )
+            else:
+                span.set_status(StatusCode.OK)
 
-        end_time = info.end_time
-        if end_time is not None and end_time == info.start_time:
-            end_time += datetime.timedelta(microseconds=1)
-        popped = self._pop_span(key)
-        if popped is not None:
-            popped.end(end_time=_to_otel_timestamp(end_time))
+            end_time = info.end_time
+            if end_time is not None and end_time == info.start_time:
+                end_time += datetime.timedelta(microseconds=1)
+            popped = self._pop_span(key)
+            if popped is not None:
+                popped.end(end_time=_to_otel_timestamp(end_time))
 
         # Restore the enclosing span as active (parent op, else invocation/workflow).
         enclosing = (
@@ -519,7 +520,14 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             attributes["durable.operation.type"] = info.operation_type.value
         if getattr(info, "sub_type", None) is not None:
             attributes["durable.operation.subtype"] = info.sub_type.value
-        if getattr(info, "status", None) is not None:
+        # STEP user-function spans represent attempts, not durable operations.
+        if (
+            not (
+                isinstance(info, (UserFunctionStartInfo, UserFunctionEndInfo))
+                and info.operation_type is OperationType.STEP
+            )
+            and getattr(info, "status", None) is not None
+        ):
             attributes["durable.operation.status"] = info.status.value
         if getattr(info, "name", None) is not None:
             attributes["durable.operation.name"] = info.name

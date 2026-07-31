@@ -225,9 +225,9 @@ class DurableInstrumentationPlugin:
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
         """
-        Called when an operation checkpoints a terminal status. Terminal
-        operations are not emitted again during replay. This is called NOT
-        within the thread that runs operation.
+        Called when an operation reaches a terminal status. Terminal operations
+        are not emitted again during replay. Child contexts without a terminal
+        checkpoint may emit this from the thread that runs the operation.
 
         Args:
             info: Information about the operation.
@@ -423,6 +423,32 @@ class PluginExecutor:
             status=operation.status,
         )
         self.execute_plugins(start_info, sync=True)
+
+    def on_child_context_end(
+        self,
+        operation_identifier: OperationIdentifier,
+        status: OperationStatus,
+        *,
+        error: ErrorObject | None = None,
+        is_replayed: bool = False,
+    ) -> None:
+        """Execute plugins for a child context that completed without a checkpoint."""
+        now = datetime.datetime.now(datetime.UTC)
+        self.execute_plugins(
+            OperationEndInfo(
+                operation_id=operation_identifier.operation_id,
+                operation_type=operation_identifier.type,
+                sub_type=operation_identifier.sub_type,
+                name=operation_identifier.name,
+                parent_id=operation_identifier.parent_id,
+                start_time=None,
+                end_time=now,
+                status=status,
+                error=error,
+                is_replayed=is_replayed,
+            ),
+            sync=True,
+        )
 
     def on_operation_update(
         self,

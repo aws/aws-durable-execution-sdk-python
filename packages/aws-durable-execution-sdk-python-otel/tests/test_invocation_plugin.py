@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 import opentelemetry.context as otel_context
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
+    ErrorObject,
     InvocationStatus,
     OperationStatus,
     OperationSubType,
@@ -517,6 +518,7 @@ def test_step_operation_span_parents_attempt_span():
         == OperationStatus.SUCCEEDED.value
     )
     assert attempt_span.attributes["durable.attempt.number"] == 1
+    assert "durable.operation.status" not in attempt_span.attributes
 
 
 def test_user_function_callbacks_emit_attempt_span_attributes():
@@ -540,6 +542,7 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
     plugin.on_user_function_start(start_info)
     active_span = plugin._get_span("step-1:attempt:1")
     assert active_span is not None
+    assert "durable.operation.status" not in active_span.attributes
     active_span.set_attributes(
         {
             "durable.operation.name": "stale-name",
@@ -575,6 +578,7 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
         span.attributes["durable.attempt.outcome"]
         == UserFunctionOutcome.SUCCEEDED.value
     )
+    assert "durable.operation.status" not in span.attributes
 
 
 def test_step_attempt_span_name_includes_attempt_number():
@@ -661,8 +665,35 @@ def test_step_attempt_span_name_defaults_to_first_attempt():
     assert span.name == "fetch-user attempt 1"
 
 
-def test_context_span_omits_attempt_attributes():
-    """CONTEXT operations do not carry per-attempt attributes.
+@pytest.mark.parametrize(
+    ("outcome", "terminal_status", "error", "expected_span_status"),
+    [
+        (
+            UserFunctionOutcome.SUCCEEDED,
+            OperationStatus.SUCCEEDED,
+            None,
+            StatusCode.OK,
+        ),
+        (
+            UserFunctionOutcome.SUCCEEDED,
+            OperationStatus.FAILED,
+            ErrorObject(
+                message="serialization failed",
+                type="SerializationError",
+                data=None,
+                stack_trace=None,
+            ),
+            StatusCode.ERROR,
+        ),
+    ],
+)
+def test_context_span_waits_for_terminal_status_and_omits_attempt_attributes(
+    outcome,
+    terminal_status,
+    error,
+    expected_span_status,
+):
+    """Completed CONTEXT spans carry terminal status and no attempt attributes.
 
     durable.attempt.number and durable.attempt.outcome are meaningful for
     STEP operations (each retry is an attempt) but not for CONTEXT, so the
@@ -698,16 +729,41 @@ def test_context_span_omits_attempt_attributes():
             status=OperationStatus.STARTED,
             is_replay_children=False,
             attempt=1,
-            outcome=UserFunctionOutcome.SUCCEEDED,
+            outcome=outcome,
             end_time=END_TIME,
             error=None,
         )
     )
 
+    active_span = plugin._get_span(operation_id)
+    assert active_span is not None
+    assert (
+        active_span.attributes["durable.operation.status"]
+        == OperationStatus.STARTED.value
+    )
+    assert not exporter.get_finished_spans()
+
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=None,
+            name="book-trip",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=terminal_status,
+            end_time=END_TIME,
+            error=error,
+        )
+    )
+
     span = exporter.get_finished_spans()[0]
     assert span.attributes["durable.operation.type"] == OperationType.CONTEXT.value
+    assert span.attributes["durable.operation.status"] == terminal_status.value
     assert "durable.attempt.number" not in span.attributes
     assert "durable.attempt.outcome" not in span.attributes
+    assert span.status.status_code is expected_span_status
 
 
 def test_span_registry_helpers_can_be_called_from_multiple_threads():
