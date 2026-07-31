@@ -47,7 +47,7 @@ jobs:
       actions: write
       contents: read
       id-token: write
-    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/python-opentelemetry.yml@5a31b277b014d688b4d7002f346cf9c01047e026
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/python-opentelemetry.yml@47ea5921fe6a5542843318a0f8a851b69e93b03d
     with:
       phase: ${{ inputs.phase || 'short' }}
       delay_seconds: ${{ inputs.delay_seconds || '82800' }}
