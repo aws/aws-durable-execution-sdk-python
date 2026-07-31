@@ -38,6 +38,11 @@ on:
         description: OTLP ingest endpoint for community-layer jobs
         required: false
         type: string
+      conformance_test_ref:
+        description: Conformance test commit SHA or branch name
+        required: true
+        default: main
+        type: string
 
 permissions: {}
 
@@ -47,12 +52,13 @@ jobs:
       actions: write
       contents: read
       id-token: write
-    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/python-opentelemetry.yml@47ea5921fe6a5542843318a0f8a851b69e93b03d
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/python-opentelemetry.yml@3071832ab55c1baf96a5c21c6d526bcaad2a0345
     with:
       phase: ${{ inputs.phase || 'short' }}
       delay_seconds: ${{ inputs.delay_seconds || '82800' }}
       aws_region: ${{ inputs.aws_region || 'us-west-2' }}
       otlp_endpoint: ${{ inputs.otlp_endpoint || '' }}
+      conformance_test_ref: ${{ inputs.conformance_test_ref || 'main' }}
       python_sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}
     secrets:
       CONFORMANCE_TEST_ROLE_ARN: ${{ secrets.TEST_ROLE_ARN }}
