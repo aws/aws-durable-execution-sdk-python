@@ -47,6 +47,9 @@ class SuspensionPlugin(DurableInstrumentationPlugin):
             {
                 "plugin": "CONFPLUGIN",
                 "hook": "invocation-end",
+                # Same-invocation flag from the SDK's own end-hook info: ties
+                # this record to the invocation that emitted it.
+                "first": info.is_first_invocation,
                 "terminal": terminal,
                 "status": status,
             },

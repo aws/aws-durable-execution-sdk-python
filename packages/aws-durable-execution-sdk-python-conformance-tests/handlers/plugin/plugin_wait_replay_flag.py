@@ -59,6 +59,9 @@ class WaitReplayFlagPlugin(DurableInstrumentationPlugin):
                 "type": info.operation_type.name,
                 "name": info.name,
                 "replay": info.is_replayed,
+                # Non-terminal at hook time, from the hook info's own operation
+                # state (no end timestamp yet) — no cross-invocation state.
+                "pending": info.end_time is None,
             },
             self._execution_arn,
         )
