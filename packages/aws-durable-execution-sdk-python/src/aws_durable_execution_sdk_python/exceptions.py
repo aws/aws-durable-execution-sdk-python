@@ -411,6 +411,18 @@ _DURABLE_OPERATION_ERROR_REGISTRY: dict[str, type[DurableOperationError]] = {
 }
 
 
+def register_operation_error(error_cls: type[DurableOperationError]) -> None:
+    """Register an SDK-owned operation-error subclass for replay reconstruction.
+
+    For subclasses defined in higher-level modules that this module cannot
+    import without a cycle (e.g. BatchCompletionError). The class must accept
+    the standard error-field constructor keywords (message, error_type, data,
+    stack_trace) so from_error_fields can rebuild it.
+    """
+    key: str = f"{error_cls.__module__}.{error_cls.__qualname__}"
+    _DURABLE_OPERATION_ERROR_REGISTRY[key] = error_cls
+
+
 class StepInterruptedError(InvocationError):
     """Raised when a step is interrupted before it checkpointed at the end."""
 

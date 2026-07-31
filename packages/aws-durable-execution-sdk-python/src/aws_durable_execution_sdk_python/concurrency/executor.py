@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
 from aws_durable_execution_sdk_python.concurrency.models import (
     BatchItem,
-    BatchItemStatus,
     BatchResult,
     Branch,
     BranchEvent,
@@ -24,7 +23,10 @@ from aws_durable_execution_sdk_python.concurrency.models import (
     Executable,
 )
 from aws_durable_execution_sdk_python.config import (
+    BatchItemStatus,
     ChildConfig,
+    CompletionDecision,
+    CompletionItemStatus,
     NestingType,
 )
 from aws_durable_execution_sdk_python.exceptions import (
@@ -152,6 +154,52 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         name: str | None = self.executables[index].name
         return name if name is not None else f"{self.name_prefix}{index}"
 
+    def _build_items_snapshot(self) -> tuple[CompletionItemStatus, ...]:
+        """Build the per-branch status snapshot for the custom predicate.
+
+        Only called when a should_complete predicate is active. Returns a
+        tuple ordered by branch index so items[i] is the branch at position i.
+        Distinguishes None (not yet scheduled) from STARTED (running or
+        suspended) so predicates can reason about scheduling state.
+        """
+        snapshot: list[CompletionItemStatus] = []
+        for branch in self.branches:
+            name: str | None = self.executables[branch.index].name
+            if branch.status is BranchStatus.COMPLETED:
+                snapshot.append(
+                    CompletionItemStatus(
+                        index=branch.index,
+                        status=BatchItemStatus.SUCCEEDED,
+                        name=name,
+                    )
+                )
+            elif branch.status is BranchStatus.FAILED:
+                snapshot.append(
+                    CompletionItemStatus(
+                        index=branch.index,
+                        status=BatchItemStatus.FAILED,
+                        name=name,
+                    )
+                )
+            elif branch.status is BranchStatus.PENDING:
+                snapshot.append(
+                    CompletionItemStatus(
+                        index=branch.index,
+                        status=None,
+                        name=name,
+                    )
+                )
+            else:
+                # RUNNING, SUSPENDED, SUSPENDED_WITH_TIMEOUT
+                snapshot.append(
+                    CompletionItemStatus(
+                        index=branch.index,
+                        status=BatchItemStatus.STARTED,
+                        name=name,
+                    )
+                )
+        return tuple(snapshot)
+
     def execute(
         self, execution_state: ExecutionState, executor_context: DurableContext
     ) -> BatchResult[ResultType]:
@@ -195,10 +243,26 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             )
 
         try:
+            # Only rebuild the items snapshot after a terminal event changes
+            # branch state, not after timeouts/resumes with no status change.
+            needs_snapshot_rebuild: bool = True
+            items_snapshot: tuple[CompletionItemStatus, ...] = ()
+            # The custom predicate result for the current snapshot. Evaluated
+            # once per state change and reused for both the completion check
+            # and the reason, so user code runs at most once per change.
+            decision: CompletionDecision | None = None
             while True:
-                if self.policy.is_complete(
-                    succeeded, failed
-                ) or not self.policy.should_continue(failed):
+                if needs_snapshot_rebuild:
+                    items_snapshot = (
+                        self._build_items_snapshot()
+                        if self.policy.should_complete is not None
+                        else ()
+                    )
+                    decision = self.policy.evaluate(succeeded, failed, items_snapshot)
+                    needs_snapshot_rebuild = False
+                if self.policy.is_complete(succeeded, failed, items_snapshot, decision):
+                    break
+                if not self.policy.should_continue(failed):
                     break
 
                 # Start branches in index order up to the in-flight limit.
@@ -212,6 +276,7 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                     submit(pending.popleft())
                     in_flight += 1
                     running += 1
+                    needs_snapshot_rebuild = True
 
                 # Resume due timed suspends in-process. One checkpoint
                 # refresh serves the whole due wave; a failure is terminal
@@ -261,11 +326,13 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                         succeeded += 1
                         running -= 1
                         in_flight -= 1
+                        needs_snapshot_rebuild = True
                     case BranchEventKind.FAILED if event.error is not None:
                         applied.fail(event.error)
                         failed += 1
                         running -= 1
                         in_flight -= 1
+                        needs_snapshot_rebuild = True
                         if (
                             isinstance(event.error, InvocationError)
                             and event.error.is_retryable()
@@ -274,10 +341,12 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                     case BranchEventKind.SUSPENDED:
                         applied.suspend()
                         running -= 1
+                        needs_snapshot_rebuild = True
                     case BranchEventKind.SUSPENDED_UNTIL if event.resume_at is not None:
                         applied.suspend_until(event.resume_at)
                         heapq.heappush(timed_resumes, (event.resume_at, event.index))
                         running -= 1
+                        needs_snapshot_rebuild = True
                     case BranchEventKind.ORPHANED:
                         # An ancestor context already checkpointed terminal, so
                         # every further checkpoint under it is rejected. Stop
@@ -303,11 +372,14 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             # invocation.
             pool.shutdown(wait=False, cancel_futures=True)
 
-        # The decision that ended the loop determines the reason. Captured
-        # before the drain so raced terminal events update item statuses
-        # without flipping the reason (and the recorded summary) to a
-        # decision that never fired.
-        completion_reason: CompletionReason = self.policy.reason(succeeded, failed)
+        # The state that ended the loop determines the reason. Computed from
+        # the loop-exit counts, snapshot, and predicate decision - all before
+        # the drain, so raced terminal events update item statuses without
+        # flipping the reason (and the recorded summary) to a decision that
+        # never fired. Reusing decision avoids re-evaluating the predicate.
+        completion_reason: CompletionReason = self.policy.reason(
+            succeeded, failed, items_snapshot, decision
+        )
 
         # Apply terminal events that raced the completion decision, so a
         # branch that finished just before the batch completed is reported
@@ -396,7 +468,13 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                     raise InvalidStateError(msg)
 
         if completion_reason is None:
-            completion_reason = self.policy.reason(succeeded, failed)
+            # Fallback: supply items snapshot so quorum predicates work here too.
+            fallback_items: tuple[CompletionItemStatus, ...] = (
+                self._build_items_snapshot()
+                if self.policy.should_complete is not None
+                else ()
+            )
+            completion_reason = self.policy.reason(succeeded, failed, fallback_items)
         return BatchResult(batch_items, completion_reason)
 
     def _branch_worker(

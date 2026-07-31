@@ -399,6 +399,17 @@
       "path": "./src/map/map_with_failure_tolerance.py"
     },
     {
+      "name": "Map with Should Complete",
+      "description": "Map operation with custom should_complete predicate for early completion",
+      "handler": "map_with_should_complete.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/map/map_with_should_complete.py"
+    },
+    {
       "name": "Map Completion Config",
       "description": "Reproduces issue where map with minSuccessful loses failure count",
       "handler": "map_completion.handler",
@@ -441,6 +452,17 @@
         "ExecutionTimeout": 300
       },
       "path": "./src/parallel/parallel_with_failure_tolerance.py"
+    },
+    {
+      "name": "Parallel with Should Complete",
+      "description": "Parallel operation with custom quorum-based should_complete predicate",
+      "handler": "parallel_with_should_complete.handler",
+      "integration": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 300
+      },
+      "path": "./src/parallel/parallel_with_should_complete.py"
     },
     {
       "name": "Map with Custom SerDes",

@@ -17,6 +17,7 @@ from aws_durable_execution_sdk_python.concurrency.executor import (
     ConcurrentExecutor,
 )
 from aws_durable_execution_sdk_python.concurrency.models import (
+    BatchCompletionError,
     BatchItem,
     BatchItemStatus,
     BatchResult,
@@ -32,6 +33,11 @@ from aws_durable_execution_sdk_python.concurrency.models import (
 from aws_durable_execution_sdk_python.config import (
     ChildConfig,
     CompletionConfig,
+    CompletionDecision,
+    CompletionOutcome,
+    CompletionStatus,
+    complete_batch,
+    continue_batch,
     MapConfig,
     ParallelBranch,
     ParallelConfig,
@@ -44,6 +50,7 @@ from aws_durable_execution_sdk_python.context import (
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     ChildContextError,
+    DurableOperationError,
     RetryableSerDesError,
     SerDesError,
     ValidationError,
@@ -2915,6 +2922,128 @@ def test_completion_policy_reason_defaults_to_all_completed():
     assert policy.reason(succeeded=1, failed=0) is CompletionReason.ALL_COMPLETED
 
 
+def test_completion_policy_from_config_copies_should_complete():
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return complete_batch() if s.success_count >= 2 else continue_batch()
+
+    config: CompletionConfig = CompletionConfig(should_complete=predicate)
+    policy: CompletionPolicy = CompletionPolicy.from_config(5, config)
+    assert policy.should_complete is predicate
+    assert policy.min_successful is None
+
+
+def test_completion_policy_should_complete_disables_tolerance():
+    """When a predicate is active, tolerance checking is disabled."""
+
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return complete_batch() if s.success_count >= 3 else continue_batch()
+
+    policy: CompletionPolicy = CompletionPolicy(
+        total=5,
+        should_complete=predicate,
+    )
+    # Tolerance is disabled when predicate is active
+    assert not policy.is_tolerance_exceeded(failed=5)
+    assert policy.should_continue(failed=5)
+
+
+def test_completion_policy_should_complete_is_complete_true():
+    """Predicate returns True when success threshold is met."""
+
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return complete_batch() if s.success_count >= 2 else continue_batch()
+
+    policy: CompletionPolicy = CompletionPolicy.from_config(
+        5, CompletionConfig(should_complete=predicate)
+    )
+    assert not policy.is_complete(succeeded=1, failed=0)
+    assert policy.is_complete(succeeded=2, failed=0)
+    assert policy.is_complete(succeeded=2, failed=1)
+
+
+def test_completion_policy_should_complete_is_complete_all_done():
+    """Batch completes when all items finish regardless of predicate."""
+
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return continue_batch()
+
+    policy: CompletionPolicy = CompletionPolicy.from_config(
+        3, CompletionConfig(should_complete=predicate)
+    )
+    assert not policy.is_complete(succeeded=1, failed=1)
+    assert policy.is_complete(succeeded=2, failed=1)
+
+
+def test_completion_policy_should_complete_reason_custom():
+    """Reason is CUSTOM_COMPLETION when predicate triggers early exit."""
+
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return complete_batch() if s.success_count >= 2 else continue_batch()
+
+    policy: CompletionPolicy = CompletionPolicy.from_config(
+        5, CompletionConfig(should_complete=predicate)
+    )
+    assert (
+        policy.reason(succeeded=2, failed=0)
+        is CompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+    )
+
+
+def test_completion_policy_should_complete_reason_all_completed():
+    """Reason is ALL_COMPLETED when all items finish without predicate firing."""
+
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return complete_batch() if s.success_count >= 10 else continue_batch()
+
+    policy: CompletionPolicy = CompletionPolicy.from_config(
+        3, CompletionConfig(should_complete=predicate)
+    )
+    assert policy.reason(succeeded=2, failed=1) is CompletionReason.ALL_COMPLETED
+
+
+def test_completion_policy_should_complete_receives_correct_status():
+    """Predicate receives a CompletionStatus with correct counts."""
+    received: list[CompletionStatus] = []
+
+    def capture(status: CompletionStatus) -> CompletionDecision:
+        received.append(status)
+        return complete_batch() if status.success_count >= 2 else continue_batch()
+
+    policy: CompletionPolicy = CompletionPolicy.from_config(
+        5, CompletionConfig(should_complete=capture)
+    )
+    result: bool = policy.is_complete(succeeded=1, failed=1)
+    assert not result
+    assert len(received) == 1
+    assert received[0].success_count == 1
+    assert received[0].failure_count == 1
+    assert received[0].completed_count == 2
+    assert received[0].total_count == 5
+
+
+def test_completion_config_should_complete_mutually_exclusive_with_thresholds():
+    """should_complete cannot be combined with threshold fields."""
+
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return complete_batch() if s.success_count >= 3 else continue_batch()
+
+    with pytest.raises(ValidationError):
+        CompletionConfig(
+            min_successful=1,
+            should_complete=predicate,
+        )
+    with pytest.raises(ValidationError):
+        CompletionConfig(
+            tolerated_failure_count=0,
+            should_complete=predicate,
+        )
+    with pytest.raises(ValidationError):
+        CompletionConfig(
+            tolerated_failure_percentage=50,
+            should_complete=predicate,
+        )
+
+
 # endregion CompletionPolicy
 
 
@@ -2926,6 +3055,11 @@ def _make_executor_mocks():
     execution_state = Mock()
     execution_state.create_checkpoint = Mock()
     execution_state.wrap_user_function = lambda func, *args, **kwargs: func
+    # Default: no branch has a prior checkpoint (fresh run).
+    _absent = Mock()
+    _absent.is_succeeded.return_value = False
+    _absent.is_failed.return_value = False
+    execution_state.get_checkpoint_result = Mock(return_value=_absent)
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"
     executor_context._parent_id = "parent"  # noqa: SLF001
@@ -3907,3 +4041,660 @@ def test_operation_id_namespace_derivation_is_stable():
 
     expected_no_prefix: str = hashlib.blake2b(b"7").hexdigest()[:64]
     assert OperationIdNamespace(None).create_id_for_step(7) == expected_no_prefix
+
+
+# region Custom completion predicate (should_complete) integration tests
+
+
+def _fresh_execution_state():
+    """Mock execution_state for fresh runs (no prior checkpoints)."""
+    execution_state = Mock()
+    execution_state.create_checkpoint = Mock()
+    _absent = Mock()
+    _absent.is_succeeded.return_value = False
+    _absent.is_failed.return_value = False
+    execution_state.get_checkpoint_result = Mock(return_value=_absent)
+    return execution_state
+
+
+def test_executor_should_complete_early_exit_on_success_count():
+    """Executor completes early when should_complete predicate returns True."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return complete_batch() if s.success_count >= 2 else continue_batch()
+
+    completion_config: CompletionConfig = CompletionConfig(should_complete=predicate)
+
+    executables: list[Executable] = [
+        Executable(0, lambda: None),
+        Executable(1, lambda: None),
+        Executable(2, lambda: None),
+        Executable(3, lambda: None),
+        Executable(4, lambda: None),
+    ]
+
+    executor: TestExecutor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+    execution_state = _fresh_execution_state()
+
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    result: BatchResult = executor.execute(execution_state, executor_context)
+
+    assert result.completion_reason is CompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+    # With max_concurrency=1 and sequential execution, exactly 2 should succeed
+    assert result.success_count == 2
+    # Remaining items were never started (or still STARTED if raced)
+    assert result.started_count + result.success_count + result.failure_count <= 5
+
+
+def test_executor_should_complete_all_finish_when_predicate_never_fires():
+    """Batch completes normally when predicate never returns True."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    # Predicate requires 100 successes - never reachable with 3 items
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return complete_batch() if s.success_count >= 100 else continue_batch()
+
+    completion_config: CompletionConfig = CompletionConfig(should_complete=predicate)
+
+    executables: list[Executable] = [
+        Executable(0, lambda: None),
+        Executable(1, lambda: None),
+        Executable(2, lambda: None),
+    ]
+
+    executor: TestExecutor = TestExecutor(
+        executables=executables,
+        max_concurrency=3,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+    execution_state = _fresh_execution_state()
+
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    result: BatchResult = executor.execute(execution_state, executor_context)
+
+    assert result.completion_reason is CompletionReason.ALL_COMPLETED
+    assert result.success_count == 3
+    assert result.total_count == 3
+
+
+def test_executor_should_complete_with_mixed_success_and_failure():
+    """Predicate can inspect both success and failure counts."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            if executable.index % 2 == 0:
+                return f"result_{executable.index}"
+            msg: str = f"error_{executable.index}"
+            raise ValueError(msg)
+
+    # Complete when we have at least 1 success AND 1 failure
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return (
+            complete_batch()
+            if s.success_count >= 1 and s.failure_count >= 1
+            else continue_batch()
+        )
+
+    completion_config: CompletionConfig = CompletionConfig(should_complete=predicate)
+
+    executables: list[Executable] = [
+        Executable(0, lambda: None),
+        Executable(1, lambda: None),
+        Executable(2, lambda: None),
+        Executable(3, lambda: None),
+    ]
+
+    executor: TestExecutor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+    execution_state = _fresh_execution_state()
+
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    result: BatchResult = executor.execute(execution_state, executor_context)
+
+    assert result.completion_reason is CompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+    assert result.success_count >= 1
+    assert result.failure_count >= 1
+
+
+def test_batch_result_from_dict_custom_completion_reason():
+    """BatchResult deserializes CUSTOM_COMPLETION reason correctly."""
+    data: dict = {
+        "all": [
+            {"index": 0, "status": "SUCCEEDED", "result": "ok", "error": None},
+            {"index": 1, "status": "SUCCEEDED", "result": "ok", "error": None},
+            {"index": 2, "status": "STARTED", "result": None, "error": None},
+        ],
+        "completionReason": "CUSTOM_COMPLETION_SUCCEEDED",
+    }
+    result: BatchResult = BatchResult.from_dict(data)
+    assert result.completion_reason is CompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+    assert result.success_count == 2
+    assert result.started_count == 1
+
+
+def test_completion_record_custom_completion_round_trip():
+    """CompletionRecord correctly parses CUSTOM_COMPLETION from a summary payload."""
+    payload: str = json.dumps(
+        {
+            "type": "MAP",
+            "totalCount": 5,
+            "completionReason": "CUSTOM_COMPLETION_SUCCEEDED",
+            "startedIndexes": [3, 4],
+            "startedCount": 2,
+            "successCount": 2,
+            "failureCount": 1,
+            "status": "SUCCEEDED",
+        }
+    )
+    record: CompletionRecord | None = CompletionRecord.from_summary_payload(payload)
+    assert record is not None
+    assert record.completion_reason is CompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+    assert record.started_total == 5
+    assert record.started_indexes == frozenset({3, 4})
+
+
+def test_executor_should_complete_no_hang_guard():
+    """Predicate fires before any branch runs on a fresh invocation (no checkpoints).
+
+    An always-true predicate stops the batch immediately with an empty
+    result. On fresh runs restored_terminal_target is 0 so the gate is
+    open from the start.
+    """
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    # Predicate always fires
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return complete_batch()
+
+    completion_config: CompletionConfig = CompletionConfig(should_complete=predicate)
+
+    executables: list[Executable] = [
+        Executable(0, lambda: None),
+        Executable(1, lambda: None),
+        Executable(2, lambda: None),
+    ]
+
+    executor: TestExecutor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+    execution_state = _fresh_execution_state()
+
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
+    executor_context.create_child_context = lambda *args, **kwargs: Mock()
+
+    result: BatchResult = executor.execute(execution_state, executor_context)
+
+    # Predicate fired immediately — no items were started or completed
+    assert result.completion_reason is CompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+    assert result.success_count == 0
+    assert result.failure_count == 0
+
+
+def test_should_complete_allowed_with_flat_nesting():
+    """should_complete may be combined with NestingType.FLAT."""
+
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return complete_batch() if s.success_count >= 2 else continue_batch()
+
+    parallel_config: ParallelConfig = ParallelConfig(
+        completion_config=CompletionConfig(should_complete=predicate),
+        nesting_type=NestingType.FLAT,
+    )
+    assert parallel_config.nesting_type is NestingType.FLAT
+
+    map_config: MapConfig = MapConfig(
+        completion_config=CompletionConfig(should_complete=predicate),
+        nesting_type=NestingType.FLAT,
+    )
+    assert map_config.nesting_type is NestingType.FLAT
+
+
+def test_executor_should_complete_index_based_quorum():
+    """Predicate can inspect per-item status for quorum rules.
+
+    Quorum rule: complete when branch 0 succeeds OR (branches 1 AND 2 both succeed).
+    Branch 0 fails, branches 1 and 2 succeed, triggering the quorum.
+    """
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            if executable.index == 0:
+                msg: str = "branch 0 fails"
+                raise ValueError(msg)
+            return f"result_{executable.index}"
+
+    def quorum_predicate(s: CompletionStatus) -> CompletionDecision:
+        # Branch 0 succeeds OR (branches 1 AND 2 both succeed)
+        if len(s.items) == 0:
+            return continue_batch()
+        branch_0_ok: bool = (
+            len(s.items) > 0 and s.items[0].status is BatchItemStatus.SUCCEEDED
+        )
+        branch_1_ok: bool = (
+            len(s.items) > 1 and s.items[1].status is BatchItemStatus.SUCCEEDED
+        )
+        branch_2_ok: bool = (
+            len(s.items) > 2 and s.items[2].status is BatchItemStatus.SUCCEEDED
+        )
+        return (
+            complete_batch()
+            if branch_0_ok or (branch_1_ok and branch_2_ok)
+            else continue_batch()
+        )
+
+    completion_config: CompletionConfig = CompletionConfig(
+        should_complete=quorum_predicate
+    )
+
+    executables: list[Executable] = [
+        Executable(0, lambda: None),
+        Executable(1, lambda: None),
+        Executable(2, lambda: None),
+        Executable(3, lambda: None),
+    ]
+
+    executor: TestExecutor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+    execution_state = _fresh_execution_state()
+
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    result: BatchResult = executor.execute(execution_state, executor_context)
+
+    # Branch 0 failed, branches 1+2 succeeded -> quorum met
+    assert result.completion_reason is CompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+    assert result.failure_count == 1
+    assert result.success_count == 2
+
+
+def test_executor_should_complete_predicate_raises_propagates():
+    """A predicate that raises propagates the exception to the caller.
+
+    Documents the current behavior: the predicate must not raise. If it
+    does, the exception escapes the coordinator loop unmodified.
+    """
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    def bad_predicate(s: CompletionStatus) -> CompletionDecision:
+        msg: str = "predicate bug"
+        raise RuntimeError(msg)
+
+    completion_config: CompletionConfig = CompletionConfig(
+        should_complete=bad_predicate
+    )
+
+    executables: list[Executable] = [
+        Executable(0, lambda: None),
+        Executable(1, lambda: None),
+    ]
+
+    executor: TestExecutor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=completion_config,
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+    execution_state = _fresh_execution_state()
+
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    with pytest.raises(RuntimeError, match="predicate bug"):
+        executor.execute(execution_state, executor_context)
+
+
+def test_validate_for_total_raises_without_should_complete():
+    """_validate_for_total raises when min_successful > total without predicate."""
+    config: CompletionConfig = CompletionConfig(min_successful=10)
+    with pytest.raises(ValidationError):
+        config._validate_for_total(5)
+
+
+def test_replay_round_trip_custom_completion_without_reinvoking_predicate():
+    """Replay reconstructs a CUSTOM_COMPLETION batch from the checkpointed record.
+
+    The predicate must NOT be re-invoked during replay. This test proves
+    that by using a predicate that would give a different answer if called
+    during replay (it counts invocations), yet the replayed result matches
+    the live result exactly.
+    """
+    call_count: list[int] = [0]
+
+    def counting_predicate(s: CompletionStatus) -> CompletionDecision:
+        call_count[0] += 1
+        return complete_batch() if s.success_count >= 2 else continue_batch()
+
+    executables: list[Executable] = [
+        Executable(0, partial(lambda i: f"live_{i}", 0)),
+        Executable(1, partial(lambda i: f"live_{i}", 1)),
+        Executable(2, partial(lambda i: f"live_{i}", 2)),
+        Executable(3, partial(lambda i: f"live_{i}", 3)),
+    ]
+    executor = _make_executor(
+        executables,
+        max_concurrency=1,
+        completion_config=CompletionConfig(should_complete=counting_predicate),
+    )
+    execution_state, executor_context = _make_executor_mocks()
+    live: BatchResult = executor.execute(execution_state, executor_context)
+
+    # Live run should have completed early at 2 successes
+    assert live.completion_reason is CompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+    assert live.success_count == 2
+    live_calls: int = call_count[0]
+    assert live_calls > 0
+
+    # Build the summary envelope (as would be checkpointed)
+    summary: str = envelope_summary_generator("MapResult", None)(live)
+    top_checkpoint = Mock()
+    top_checkpoint.result = summary
+
+    # Replay: set up branch checkpoints for the terminal items
+    replay_state, replay_context = _make_replay_mocks(
+        {
+            "op_0": _succeeded_checkpoint('"replayed_0"'),
+            "op_1": _succeeded_checkpoint('"replayed_1"'),
+        }
+    )
+    replay_executor = _make_executor(
+        executables,
+        max_concurrency=1,
+        completion_config=CompletionConfig(should_complete=counting_predicate),
+    )
+
+    # Reset call count to detect any predicate calls during replay
+    call_count[0] = 0
+    replayed: BatchResult = replay_executor.replay(
+        replay_state, replay_context, top_checkpoint
+    )
+
+    # Predicate was NOT called during replay
+    assert call_count[0] == 0
+
+    # Replayed result matches live result structure
+    assert replayed.completion_reason is CompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+    assert replayed.success_count == live.success_count
+    assert [(i.index, i.status) for i in replayed.all] == [
+        (i.index, i.status) for i in live.all
+    ]
+
+
+def test_suspend_resume_mid_batch_with_should_complete():
+    """Predicate fires on a later invocation after a branch suspends and resumes.
+
+    Branch 0 suspends (timed), branch 1 succeeds, and after the timed
+    resume branch 0 succeeds - predicate fires at 2 successes.
+    """
+    call_counts: dict[int, int] = {0: 0}
+
+    def timed_then_ok():
+        call_counts[0] += 1
+        if call_counts[0] == 1:
+            msg: str = "retry shortly"
+            raise TimedSuspendExecution(msg, time.time() + 0.1)
+        return "branch_0_done"
+
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return complete_batch() if s.success_count >= 2 else continue_batch()
+
+    executables: list[Executable] = [
+        Executable(0, timed_then_ok),
+        Executable(1, lambda: "branch_1_done"),
+        Executable(2, lambda: "branch_2_done"),
+        Executable(3, lambda: "branch_3_done"),
+    ]
+    executor = _make_executor(
+        executables,
+        max_concurrency=2,
+        completion_config=CompletionConfig(should_complete=predicate),
+    )
+    execution_state, executor_context = _make_executor_mocks()
+
+    result: BatchResult = executor.execute(execution_state, executor_context)
+
+    # Branch 0 suspended then resumed; the predicate fired at 2 successes
+    assert result.completion_reason is CompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+    assert result.success_count >= 2
+
+
+def test_executor_should_complete_items_reflect_started_status():
+    """Predicate sees STARTED (not None) for submitted branches and SUCCEEDED
+    for completed branches after a terminal event triggers a snapshot rebuild.
+    """
+    observed_items: list[tuple] = []
+
+    def inspecting_predicate(s: CompletionStatus) -> CompletionDecision:
+        # Only capture after at least one branch has completed
+        if not observed_items and s.success_count >= 1 and s.items:
+            for item in s.items:
+                observed_items.append((item.index, item.status))
+        return complete_batch() if s.success_count >= 2 else continue_batch()
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    executables: list[Executable] = [
+        Executable(0, lambda: None),
+        Executable(1, lambda: None),
+        Executable(2, lambda: None),
+        Executable(3, lambda: None),
+    ]
+
+    executor: TestExecutor = TestExecutor(
+        executables=executables,
+        max_concurrency=2,
+        completion_config=CompletionConfig(should_complete=inspecting_predicate),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+    execution_state = _fresh_execution_state()
+
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    result: BatchResult = executor.execute(execution_state, executor_context)
+
+    assert result.completion_reason is CompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+
+    # After a terminal event the snapshot was rebuilt from live branch state.
+    # Verify predicate observed correct statuses:
+    assert len(observed_items) == 4
+    statuses: set = {status for _, status in observed_items}
+
+    # At least one SUCCEEDED branch must be visible
+    assert BatchItemStatus.SUCCEEDED in statuses
+    # Branches not yet submitted should be None (PENDING internally)
+    assert None in statuses
+
+
+def test_batch_result_status_honors_custom_completion_failed():
+    """complete_batch(FAILED) marks batch status FAILED even with no item failures."""
+    items: list[BatchItem] = [
+        BatchItem(0, BatchItemStatus.SUCCEEDED, result="ok"),
+        BatchItem(1, BatchItemStatus.SUCCEEDED, result="ok"),
+    ]
+    result: BatchResult = BatchResult(items, CompletionReason.CUSTOM_COMPLETION_FAILED)
+    assert result.status is BatchItemStatus.FAILED
+    # has_failure is item-level: no individual item failed here.
+    assert not result.has_failure
+    assert result.get_errors() == []
+    with pytest.raises(BatchCompletionError) as exc_info:
+        result.throw_if_error()
+    assert exc_info.value.completion_reason is CompletionReason.CUSTOM_COMPLETION_FAILED
+
+
+def test_batch_completion_error_reconstructs_across_boundary():
+    """BatchCompletionError round-trips through error-field reconstruction.
+
+    Serializing then rebuilding (the path used when the error crosses a
+    child/map/parallel boundary) yields a BatchCompletionError again, not the
+    base DurableOperationError, so callers can catch it consistently.
+    """
+    original: BatchCompletionError = BatchCompletionError(
+        CompletionReason.CUSTOM_COMPLETION_FAILED
+    )
+    wire: ErrorObject = ErrorObject.from_exception(original)
+    reconstructed: DurableOperationError = wire.to_durable_operation_error()
+
+    assert isinstance(reconstructed, BatchCompletionError)
+    assert reconstructed.completion_reason is CompletionReason.CUSTOM_COMPLETION_FAILED
+    assert reconstructed.message == original.message
+
+
+def test_batch_result_status_honors_custom_completion_succeeded():
+    """complete_batch(SUCCEEDED) marks batch status SUCCEEDED even with item failures."""
+    items: list[BatchItem] = [
+        BatchItem(
+            0,
+            BatchItemStatus.FAILED,
+            error=ErrorObject("msg", "Error", None, None),
+        ),
+        BatchItem(1, BatchItemStatus.SUCCEEDED, result="ok"),
+    ]
+    result: BatchResult = BatchResult(
+        items, CompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+    )
+    assert result.status is BatchItemStatus.SUCCEEDED
+    assert result.has_failure  # individual item did fail
+
+
+def test_executor_should_complete_with_failed_outcome():
+    """complete_batch(FAILED) produces CUSTOM_COMPLETION_FAILED and fails the batch."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            return f"result_{executable.index}"
+
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        # After 2 successes, declare failure (quorum can't be met)
+        if s.success_count >= 2:
+            return complete_batch(CompletionOutcome.FAILED)
+        return continue_batch()
+
+    executables: list[Executable] = [
+        Executable(0, lambda: None),
+        Executable(1, lambda: None),
+        Executable(2, lambda: None),
+    ]
+
+    executor: TestExecutor = TestExecutor(
+        executables=executables,
+        max_concurrency=1,
+        completion_config=CompletionConfig(should_complete=predicate),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+    execution_state = _fresh_execution_state()
+
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    result: BatchResult = executor.execute(execution_state, executor_context)
+
+    assert result.completion_reason is CompletionReason.CUSTOM_COMPLETION_FAILED
+    assert result.status is BatchItemStatus.FAILED
+    # No item failed; has_failure is item-level, but the batch outcome is FAILED.
+    assert not result.has_failure
+    with pytest.raises(BatchCompletionError):
+        result.throw_if_error()
+
+
+# endregion Custom completion predicate (should_complete) integration tests
