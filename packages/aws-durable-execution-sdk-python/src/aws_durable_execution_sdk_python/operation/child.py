@@ -14,6 +14,7 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.lambda_service import (
     ContextOptions,
     ErrorObject,
+    OperationStatus,
     OperationSubType,
     OperationUpdate,
 )
@@ -169,6 +170,11 @@ class ChildOperationExecutor(OperationExecutor[T]):
                     self.operation_identifier.operation_id,
                     self.operation_identifier.name,
                 )
+                self.state.emit_child_context_end_hook(
+                    self.operation_identifier,
+                    OperationStatus.SUCCEEDED,
+                    is_replayed=checkpointed_result.is_existent(),
+                )
                 return raw_result
 
             # If in replay_children mode, return without checkpointing
@@ -177,6 +183,11 @@ class ChildOperationExecutor(OperationExecutor[T]):
                     "ReplayChildren mode: Executed child context again on replay due to large payload. Exiting child context without creating another checkpoint. id: %s, name: %s",
                     self.operation_identifier.operation_id,
                     self.operation_identifier.name,
+                )
+                self.state.emit_child_context_end_hook(
+                    self.operation_identifier,
+                    OperationStatus.SUCCEEDED,
+                    is_replayed=True,
                 )
                 return raw_result
 
@@ -259,6 +270,13 @@ class ChildOperationExecutor(OperationExecutor[T]):
                 # Must ensure the failure state is persisted before raising the exception.
                 # This guarantees the error is durable and child operations won't be re-executed on replay.
                 self.state.create_checkpoint(operation_update=fail_operation)
+            else:
+                self.state.emit_child_context_end_hook(
+                    self.operation_identifier,
+                    OperationStatus.FAILED,
+                    error=error_object,
+                    is_replayed=checkpointed_result.is_existent(),
+                )
 
             # Reconstruct from the checkpointed error (same path as replay) so
             # first run and replay surface an identical ChildContextError.
