@@ -1,0 +1,70 @@
+name: OpenTelemetry Conformance Tests
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "packages/aws-durable-execution-sdk-python/**"
+      - "packages/aws-durable-execution-sdk-python-otel/**"
+      - ".github/workflows/opentelemetry-conformance-tests.yml"
+  push:
+    branches: ["main"]
+    paths:
+      - "packages/aws-durable-execution-sdk-python/**"
+      - "packages/aws-durable-execution-sdk-python-otel/**"
+      - ".github/workflows/opentelemetry-conformance-tests.yml"
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Run short tests, launch a long run, or check the active long run
+        required: true
+        default: short
+        type: choice
+        options:
+          - short
+          - launch
+          - check
+      delay_seconds:
+        description: Durable delay in seconds (1-86400, launch only)
+        required: true
+        default: "82800"
+        type: string
+      aws_region:
+        description: AWS region
+        required: true
+        default: us-west-2
+        type: string
+      otlp_endpoint:
+        description: OTLP ingest endpoint for community-layer jobs
+        required: false
+        type: string
+      conformance_test_ref:
+        description: Conformance test commit SHA or branch name
+        required: true
+        default: main
+        type: string
+
+permissions: {}
+
+jobs:
+  opentelemetry:
+    permissions:
+      actions: write
+      contents: read
+      id-token: write
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/python-opentelemetry.yml@810cc12607fc28edf2d7864859ca08db42ff069a
+    with:
+      phase: ${{ inputs.phase || 'short' }}
+      delay_seconds: ${{ inputs.delay_seconds || '82800' }}
+      aws_region: ${{ inputs.aws_region || 'us-west-2' }}
+      otlp_endpoint: ${{ inputs.otlp_endpoint || '' }}
+      conformance_test_ref: ${{ inputs.conformance_test_ref || 'main' }}
+      python_sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}
+    secrets:
+      CONFORMANCE_TEST_ROLE_ARN: ${{ secrets.TEST_ROLE_ARN }}
+      CONFORMANCE_TEST_ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
+      CONFORMANCE_TEST_LAMBDA_EXECUTION_ROLE_ARN: ${{ secrets.TEST_LAMBDA_EXECUTION_ROLE_ARN }}
+      DASH0_AUTH_TOKEN: ${{ secrets.DASH0_AUTH_TOKEN }}
+      DD_API_KEY: ${{ secrets.DD_API_KEY }}
+      DD_APPLICATION_KEY: ${{ secrets.DD_APPLICATION_KEY }}
+      DATADOG_OTLP_HEADERS: ${{ secrets.DATADOG_OTLP_HEADERS }}
