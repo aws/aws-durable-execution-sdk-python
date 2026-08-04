@@ -286,6 +286,7 @@ setups.
 - `aws-durable-execution-sdk-python` >= 1.5.0
 - `opentelemetry-api` >= 1.20.0
 - `opentelemetry-sdk` >= 1.20.0
+- `opentelemetry-exporter-otlp`
 
 ## License
 
