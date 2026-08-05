@@ -185,7 +185,9 @@ def create_tracer_provider(
         provider: TracerProvider = config.tracer_provider
     elif source is ProviderSource.GLOBAL:
         provider = trace.get_tracer_provider()
-    else:  # AUTO_OTLP
+    elif source is ProviderSource.AUTO_OTLP:
         provider = _create_auto_provider(config, id_generator)
+    else:  # pragma: no cover - exhaustive over ProviderSource
+        raise ValueError(f"unknown provider_source: {source!r}")
 
     return ProviderResult(provider, source)
