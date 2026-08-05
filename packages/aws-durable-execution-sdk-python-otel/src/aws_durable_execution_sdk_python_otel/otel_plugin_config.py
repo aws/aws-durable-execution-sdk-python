@@ -36,8 +36,8 @@ class ProviderSource(Enum):
     """
 
     EXPLICIT = "explicit"  # use config.tracer_provider as-is
-    GLOBAL = "global"  # use the global provider (trace.get_tracer_provider())
-    AUTO_OTLP = "auto_otlp"  # default: plugin builds and owns an OTLP provider
+    GLOBAL = "global"  # default: use the global provider (trace.get_tracer_provider())
+    AUTO_OTLP = "auto_otlp"  # plugin builds and owns an OTLP provider
 
 
 @dataclass
@@ -57,10 +57,10 @@ class OtelPluginConfig:
 
     Attributes:
         provider_source: Selects how the tracer provider is obtained
-            (:class:`ProviderSource`). Defaults to ``AUTO_OTLP`` (the plugin
-            builds and owns an OTLP provider). ``GLOBAL`` uses the globally
-            configured provider (e.g. the ADOT Lambda layer) via
-            ``trace.get_tracer_provider()``. ``EXPLICIT`` uses ``tracer_provider``
+            (:class:`ProviderSource`). Defaults to ``GLOBAL`` (uses the globally
+            configured provider, e.g. the ADOT Lambda layer, via
+            ``trace.get_tracer_provider()``). ``AUTO_OTLP`` makes the plugin
+            build and own an OTLP provider. ``EXPLICIT`` uses ``tracer_provider``
             as-is and skips instrumentation registration.
         tracer_provider: The provider used when ``provider_source`` is
             ``EXPLICIT``. Required in that case and must be left unset for
@@ -77,7 +77,7 @@ class OtelPluginConfig:
         enrich_logger: Install the root-logger OTel context filter.
     """
 
-    provider_source: ProviderSource = ProviderSource.AUTO_OTLP
+    provider_source: ProviderSource = ProviderSource.GLOBAL
     tracer_provider: SdkTracerProvider | None = None
     context_extractor: ContextExtractor | None = None
     instrument_name: str = DEFAULT_INSTRUMENT_NAME

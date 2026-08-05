@@ -40,15 +40,17 @@ def test_global_source_returns_global_provider():
     assert result.source is ProviderSource.GLOBAL
 
 
-def test_unset_config_defaults_to_auto_otlp_provider():
-    # The shared default: no provider_source given -> plugin builds its own
-    # OTLP provider.
+def test_unset_config_defaults_to_global_provider():
+    # The default: no provider_source given -> use the global provider.
     result = create_tracer_provider(OtelPluginConfig())
-    assert result.source is ProviderSource.AUTO_OTLP
+    assert result.source is ProviderSource.GLOBAL
+    assert result.tracer_provider is trace.get_tracer_provider()
 
 
-def test_auto_configured_provider_is_sdk_provider():
-    result = create_tracer_provider(OtelPluginConfig())
+def test_auto_otlp_source_builds_sdk_provider():
+    result = create_tracer_provider(
+        OtelPluginConfig(provider_source=ProviderSource.AUTO_OTLP)
+    )
     assert result.source is ProviderSource.AUTO_OTLP
     assert isinstance(result.tracer_provider, TracerProvider)
 
@@ -62,7 +64,7 @@ def test_explicit_source_requires_tracer_provider():
 
 
 def test_tracer_provider_without_explicit_source_raises():
-    # Default source is AUTO_OTLP; a stray tracer_provider would be ignored.
+    # Default source is GLOBAL; a stray tracer_provider would be ignored.
     with pytest.raises(ValueError, match="only valid with provider_source=EXPLICIT"):
         OtelPluginConfig(tracer_provider=TracerProvider())
 
