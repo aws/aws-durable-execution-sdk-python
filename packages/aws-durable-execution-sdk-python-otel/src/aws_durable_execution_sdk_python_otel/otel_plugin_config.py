@@ -29,15 +29,14 @@ DEFAULT_OTLP_ENDPOINT = "http://localhost:4318"
 
 
 class ProviderSource(Enum):
-    """Which of the three resolution tiers an :class:`OtelPluginConfig` selects.
+    """Which tracer-provider tier an :class:`OtelPluginConfig` selects.
 
-    Resolved once via :func:`resolve_provider_source` and used by
-    ``create_tracer_provider`` (to build the provider) and by the plugins (to
-    make the instrumentation and flush decisions off a single value).
+    The single value that drives provider construction (``create_tracer_provider``)
+    and the plugins' instrumentation, span-parenting and flush decisions.
     """
 
-    EXPLICIT = "explicit"  # caller supplied config.tracer_provider
-    GLOBAL = "global"  # use_default_tracer_provider -> trace.get_tracer_provider()
+    EXPLICIT = "explicit"  # use config.tracer_provider as-is
+    GLOBAL = "global"  # use the global provider (trace.get_tracer_provider())
     AUTO_OTLP = "auto_otlp"  # default: plugin builds and owns an OTLP provider
 
 
@@ -57,13 +56,15 @@ class OtelPluginConfig:
     are ignored without error by :class:`InvocationOtelPlugin`.
 
     Attributes:
-        tracer_provider: Explicit provider to use as-is. Highest priority; when
-            set, the plugin does not own or modify it and skips instrumentation
-            registration.
-        use_default_tracer_provider: When True (and no explicit provider),
-            resolve the globally configured provider via ``trace.get_tracer_provider()``
-            (e.g. the ADOT Lambda layer). Defaults to False, in which case the
-            plugin auto-configures its own OTLP provider.
+        provider_source: Selects how the tracer provider is obtained
+            (:class:`ProviderSource`). Defaults to ``AUTO_OTLP`` (the plugin
+            builds and owns an OTLP provider). ``GLOBAL`` uses the globally
+            configured provider (e.g. the ADOT Lambda layer) via
+            ``trace.get_tracer_provider()``. ``EXPLICIT`` uses ``tracer_provider``
+            as-is and skips instrumentation registration.
+        tracer_provider: The provider used when ``provider_source`` is
+            ``EXPLICIT``. Required in that case and must be left unset for
+            ``GLOBAL`` / ``AUTO_OTLP``.
         context_extractor: Upstream trace-context extractor. Defaults to the
             X-Ray extractor when omitted.
         instrument_name: Instrumentation scope name.
@@ -76,8 +77,8 @@ class OtelPluginConfig:
         enrich_logger: Install the root-logger OTel context filter.
     """
 
+    provider_source: ProviderSource = ProviderSource.AUTO_OTLP
     tracer_provider: SdkTracerProvider | None = None
-    use_default_tracer_provider: bool = False
     context_extractor: ContextExtractor | None = None
     instrument_name: str = DEFAULT_INSTRUMENT_NAME
     enable_http_instrumentation: bool = True
@@ -86,21 +87,23 @@ class OtelPluginConfig:
     workflow_span_name: str = DEFAULT_WORKFLOW_SPAN_NAME
     enrich_logger: bool = True
 
+    def __post_init__(self) -> None:
+        """Validate that each provider source has the fields it requires.
 
-def resolve_provider_source(config: OtelPluginConfig) -> ProviderSource:
-    """Map a config to its :class:`ProviderSource`, encoding precedence once.
-
-    Precedence (highest first):
-
-    1. An explicit ``tracer_provider`` -> :attr:`ProviderSource.EXPLICIT`.
-    2. ``use_default_tracer_provider`` -> :attr:`ProviderSource.GLOBAL`.
-    3. Otherwise (default) -> :attr:`ProviderSource.AUTO_OTLP`.
-
-    Keeping this in one place means ``create_tracer_provider`` and the plugins
-    all agree on how a config resolves.
-    """
-    if config.tracer_provider is not None:
-        return ProviderSource.EXPLICIT
-    if config.use_default_tracer_provider:
-        return ProviderSource.GLOBAL
-    return ProviderSource.AUTO_OTLP
+        The config is fully driven by :attr:`provider_source`; ``tracer_provider``
+        is the one source-specific field, so it must be present for ``EXPLICIT``
+        and absent for ``GLOBAL`` / ``AUTO_OTLP`` (where it would be silently
+        ignored).
+        """
+        if self.provider_source is ProviderSource.EXPLICIT:
+            if self.tracer_provider is None:
+                raise ValueError(
+                    "provider_source=EXPLICIT requires a tracer_provider."
+                )
+        elif self.tracer_provider is not None:
+            raise ValueError(
+                "tracer_provider is only valid with provider_source=EXPLICIT; "
+                f"got provider_source={self.provider_source.name}. Set "
+                "ProviderSource.EXPLICIT, or drop tracer_provider for "
+                "GLOBAL / AUTO_OTLP."
+            )

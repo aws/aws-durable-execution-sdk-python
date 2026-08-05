@@ -23,7 +23,10 @@ from aws_durable_execution_sdk_python_otel.log_filter import (
     install_log_filter,
 )
 from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
+    OtelPluginConfig,
+    ProviderSource,
+)
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -39,6 +42,7 @@ def _create_plugin(
     trace_provider.add_span_processor(SimpleSpanProcessor(exporter))
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
+            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=trace_provider,
             context_extractor=lambda _: Context(),
             enrich_logger=enrich_logger,

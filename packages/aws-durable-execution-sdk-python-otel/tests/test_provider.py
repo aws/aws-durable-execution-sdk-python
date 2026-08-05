@@ -11,7 +11,6 @@ from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     OtelPluginConfig,
     ExporterConfig,
     ProviderSource,
-    resolve_provider_source,
 )
 from aws_durable_execution_sdk_python_otel.provider import (
     SAMPLING_RATIO_ENV,
@@ -22,71 +21,57 @@ from aws_durable_execution_sdk_python_otel.provider import (
 )
 
 
-def test_explicit_provider_is_used_and_not_owned():
+def test_explicit_provider_is_used():
     provider = TracerProvider()
-    result = create_tracer_provider(OtelPluginConfig(tracer_provider=provider))
+    result = create_tracer_provider(
+        OtelPluginConfig(
+            provider_source=ProviderSource.EXPLICIT, tracer_provider=provider
+        )
+    )
     assert result.tracer_provider is provider
     assert result.source is ProviderSource.EXPLICIT
 
 
-def test_use_default_provider_returns_global_and_not_owned():
-    result = create_tracer_provider(OtelPluginConfig(use_default_tracer_provider=True))
+def test_global_source_returns_global_provider():
+    result = create_tracer_provider(
+        OtelPluginConfig(provider_source=ProviderSource.GLOBAL)
+    )
     assert result.tracer_provider is trace.get_tracer_provider()
     assert result.source is ProviderSource.GLOBAL
 
 
-def test_unset_config_defaults_to_owned_auto_otlp_provider():
-    # Both plugins share this default: no explicit provider and
-    # use_default_tracer_provider left False -> plugin builds/owns an OTLP provider.
+def test_unset_config_defaults_to_auto_otlp_provider():
+    # The shared default: no provider_source given -> plugin builds its own
+    # OTLP provider.
     result = create_tracer_provider(OtelPluginConfig())
     assert result.source is ProviderSource.AUTO_OTLP
 
 
-def test_auto_configured_provider_is_owned_sdk_provider():
+def test_auto_configured_provider_is_sdk_provider():
     result = create_tracer_provider(OtelPluginConfig())
     assert result.source is ProviderSource.AUTO_OTLP
     assert isinstance(result.tracer_provider, TracerProvider)
 
 
-def test_explicit_provider_takes_precedence_over_use_default():
-    provider = TracerProvider()
-    result = create_tracer_provider(
-        OtelPluginConfig(tracer_provider=provider, use_default_tracer_provider=True)
-    )
-    assert result.tracer_provider is provider
-    assert result.source is ProviderSource.EXPLICIT
-
-
 # ---------------------------------------------------------------------------
-# Provider-source resolution (precedence encoded in one place)
+# Config validation (each source has the fields it needs)
 # ---------------------------------------------------------------------------
-def test_resolve_provider_source_explicit():
-    assert (
-        resolve_provider_source(OtelPluginConfig(tracer_provider=TracerProvider()))
-        is ProviderSource.EXPLICIT
-    )
+def test_explicit_source_requires_tracer_provider():
+    with pytest.raises(ValueError, match="requires a tracer_provider"):
+        OtelPluginConfig(provider_source=ProviderSource.EXPLICIT)
 
 
-def test_resolve_provider_source_global():
-    assert (
-        resolve_provider_source(OtelPluginConfig(use_default_tracer_provider=True))
-        is ProviderSource.GLOBAL
-    )
+def test_tracer_provider_without_explicit_source_raises():
+    # Default source is AUTO_OTLP; a stray tracer_provider would be ignored.
+    with pytest.raises(ValueError, match="only valid with provider_source=EXPLICIT"):
+        OtelPluginConfig(tracer_provider=TracerProvider())
 
 
-def test_resolve_provider_source_defaults_to_auto_otlp():
-    assert resolve_provider_source(OtelPluginConfig()) is ProviderSource.AUTO_OTLP
-
-
-def test_resolve_provider_source_explicit_wins_over_default():
-    assert (
-        resolve_provider_source(
-            OtelPluginConfig(
-                tracer_provider=TracerProvider(), use_default_tracer_provider=True
-            )
+def test_global_source_rejects_tracer_provider():
+    with pytest.raises(ValueError, match="only valid with provider_source=EXPLICIT"):
+        OtelPluginConfig(
+            provider_source=ProviderSource.GLOBAL, tracer_provider=TracerProvider()
         )
-        is ProviderSource.EXPLICIT
-    )
 
 
 # ---------------------------------------------------------------------------

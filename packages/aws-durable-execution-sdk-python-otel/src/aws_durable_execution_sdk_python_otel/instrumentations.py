@@ -3,7 +3,7 @@
 Mirrors the JS ``registerStandaloneInstrumentations``:
 
 * A custom (explicit) provider skips ALL instrumentation registration.
-* When the global provider is in use (``use_default_tracer_provider``), only the
+* When the global provider is in use (``ProviderSource.GLOBAL``), only the
   AWS SDK instrumentation is registered (not HTTP).
 * When the plugin owns an auto-configured provider, both AWS SDK and (optionally)
   HTTP instrumentation are registered against that provider.

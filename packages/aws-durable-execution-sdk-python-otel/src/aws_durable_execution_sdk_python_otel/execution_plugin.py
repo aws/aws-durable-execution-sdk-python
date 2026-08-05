@@ -62,6 +62,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
 )
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     OtelPluginConfig,
+    ProviderSource,
 )
 from aws_durable_execution_sdk_python_otel.instrumentations import (
     register_standalone_instrumentations,
@@ -108,11 +109,10 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             id_generator=self._id_generator,
         )
         self._provider = result.tracer_provider
-        # Global (ADOT) mode changes Invocation-span parenting (see
-        # _start_invocation_span). This reflects the user's opt-in flag, not the
-        # resolved source: a test may supply an explicit provider *and* set the
-        # flag to exercise the ambient-parenting path.
-        self._use_default = self._config.use_default_tracer_provider
+        # GLOBAL (ADOT) mode parents the Invocation span to the ambient Lambda
+        # invocation span instead of the Workflow span (see
+        # _start_invocation_span).
+        self._provider_source = result.source
 
         # Deterministic stitching requires an SDK provider exposing id_generator.
         from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
@@ -241,7 +241,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     def _start_invocation_span(self, info: InvocationStartInfo) -> None:
         self._id_generator.set_next_span_id(None)
         attributes: dict[str, Any]
-        if self._use_default:
+        if self._provider_source is ProviderSource.GLOBAL:
             # Default-provider mode: parent the Invocation span to the ambient
             # Lambda invocation span (from the ADOT layer or other
             # auto-instrumentation), which is still the active context here (the

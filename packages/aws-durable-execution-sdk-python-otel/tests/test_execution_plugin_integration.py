@@ -4,9 +4,9 @@ Drives the full plugin lifecycle against a real TracerProvider +
 InMemorySpanExporter for the two deployment shapes:
 
 * Community collector layer: the plugin owns its provider
-  (``use_default_tracer_provider=False``); the Workflow span is the trace root.
+  (``provider_source=AUTO_OTLP`` / ``EXPLICIT``); the Workflow span is the trace root.
 * ADOT layer: the ADOT Lambda layer supplies the global provider and the ambient
-  Lambda invocation span (``use_default_tracer_provider=True``); the plugin's
+  Lambda invocation span (``provider_source=GLOBAL``); the plugin's
   Invocation span parents to that ambient span.
 """
 
@@ -42,7 +42,10 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
+    OtelPluginConfig,
+    ProviderSource,
+)
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -162,8 +165,8 @@ def test_community_layer_full_lifecycle_is_workflow_rooted():
     provider, exporter = _provider()
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
+            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=provider,
-            use_default_tracer_provider=False,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
         )
@@ -209,12 +212,13 @@ def test_community_layer_full_lifecycle_is_workflow_rooted():
 # ---------------------------------------------------------------------------
 # ADOT layer (default provider; ambient invocation span)
 # ---------------------------------------------------------------------------
-def test_adot_layer_full_lifecycle_parents_to_ambient_span():
+def test_adot_layer_full_lifecycle_parents_to_ambient_span(monkeypatch):
     provider, exporter = _provider()
+    # Simulate the ADOT layer having configured the global TracerProvider.
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            tracer_provider=provider,
-            use_default_tracer_provider=True,
+            provider_source=ProviderSource.GLOBAL,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
         )
@@ -255,9 +259,9 @@ def test_adot_layer_full_lifecycle_parents_to_ambient_span():
 def test_second_plugin_configures_cached_tracer_generator(monkeypatch):
     """A second handler's Workflow span uses its deterministic trace ID."""
     provider, exporter = _provider()
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     config = OtelPluginConfig(
-        tracer_provider=provider,
-        use_default_tracer_provider=True,
+        provider_source=ProviderSource.GLOBAL,
         context_extractor=lambda _: Context(),
         enrich_logger=False,
     )

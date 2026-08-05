@@ -1,14 +1,13 @@
 """Shared TracerProvider factory for the durable-execution OTel plugins.
 
-Implements the 3-tier provider resolution used by both plugins, reported as a
-:class:`ProviderSource`:
+Builds the tracer provider selected by the config's
+:class:`~aws_durable_execution_sdk_python_otel.otel_plugin_config.ProviderSource`:
 
-1. An explicit ``tracer_provider`` in config is used as-is (``EXPLICIT``).
-2. Otherwise, when ``use_default_tracer_provider`` is True, the globally
-   configured provider is used (``GLOBAL``).
-3. Otherwise a fully auto-configured SDK provider is created with an OTLP
-   exporter, batch processor, sampler and Lambda resource attributes
-   (``AUTO_OTLP``); this is the only tier the plugin owns/flushes.
+1. ``EXPLICIT``  - the config's ``tracer_provider`` is used as-is.
+2. ``GLOBAL``    - the globally configured provider is used (e.g. ADOT layer).
+3. ``AUTO_OTLP`` - a fully auto-configured SDK provider is created with an OTLP
+   exporter, batch processor, sampler and Lambda resource attributes; this is
+   the only tier the plugin owns/flushes.
 """
 
 from __future__ import annotations
@@ -25,7 +24,6 @@ from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     DEFAULT_OTLP_ENDPOINT,
     OtelPluginConfig,
     ProviderSource,
-    resolve_provider_source,
 )
 
 
@@ -160,16 +158,15 @@ def create_tracer_provider(
     *,
     id_generator: IdGenerator | None = None,
 ) -> ProviderResult:
-    """Resolve a TracerProvider using the shared 3-tier priority.
+    """Resolve a TracerProvider from the config's :attr:`provider_source`.
 
-    The tier is resolved once (:func:`resolve_provider_source`) and this function
-    is a straight switch on it. The chosen tier is reported back as
-    :class:`ProviderSource` so callers make the instrumentation/flush decision
-    off a single value:
+    A straight switch on ``config.provider_source``; the chosen tier is reported
+    back as :class:`ProviderSource` so callers make the instrumentation/flush
+    decision off a single value:
 
-    1. ``config.tracer_provider`` set        -> ``EXPLICIT``   (used as-is)
-    2. ``config.use_default_tracer_provider`` -> ``GLOBAL``     (global provider)
-    3. otherwise (default)                    -> ``AUTO_OTLP``  (plugin-owned OTLP)
+    1. ``EXPLICIT``  -> ``config.tracer_provider`` used as-is
+    2. ``GLOBAL``    -> the globally configured provider
+    3. ``AUTO_OTLP`` -> a plugin-owned, auto-configured OTLP provider
 
     Args:
         config: Shared plugin configuration.
@@ -179,11 +176,11 @@ def create_tracer_provider(
     Returns:
         A :class:`ProviderResult`.
     """
-    source = resolve_provider_source(config)
+    source = config.provider_source
 
     if source is ProviderSource.EXPLICIT:
-        # Explicit provider: use as-is, never wrap/modify. resolve_provider_source
-        # only returns EXPLICIT when tracer_provider is set.
+        # Explicit provider: use as-is, never wrap/modify. OtelPluginConfig
+        # validation guarantees tracer_provider is set for EXPLICIT.
         assert config.tracer_provider is not None
         provider: TracerProvider = config.tracer_provider
     elif source is ProviderSource.GLOBAL:

@@ -5,6 +5,7 @@ from typing import Any
 from aws_durable_execution_sdk_python_otel import (
     InvocationOtelPlugin,
     OtelPluginConfig,
+    ProviderSource,
 )
 
 from aws_durable_execution_sdk_python import StepContext
@@ -36,7 +37,7 @@ def add_numbers_in_child(child_context: DurableContext, a: int, b: int):
 
 
 @durable_execution(
-    plugins=[InvocationOtelPlugin(OtelPluginConfig(use_default_tracer_provider=True))]
+    plugins=[InvocationOtelPlugin(OtelPluginConfig(provider_source=ProviderSource.GLOBAL))]
 )
 def handler(_event: Any, context: DurableContext) -> int:
     result = 0

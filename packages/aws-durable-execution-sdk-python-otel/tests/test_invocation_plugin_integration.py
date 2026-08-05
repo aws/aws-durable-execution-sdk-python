@@ -45,7 +45,10 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
+    OtelPluginConfig,
+    ProviderSource,
+)
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -190,6 +193,7 @@ def test_community_layer_full_lifecycle_uses_supplied_provider():
     provider, exporter = _provider()
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
+            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=provider,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
@@ -213,7 +217,7 @@ def test_adot_layer_full_lifecycle_uses_global_provider(monkeypatch):
 
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            use_default_tracer_provider=True,
+            provider_source=ProviderSource.GLOBAL,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
         )
@@ -232,6 +236,7 @@ def test_second_plugin_configures_cached_tracer_generator(monkeypatch):
     provider, exporter = _provider()
     first_plugin = InvocationOtelPlugin(
         OtelPluginConfig(
+            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=provider,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
@@ -239,6 +244,7 @@ def test_second_plugin_configures_cached_tracer_generator(monkeypatch):
     )
     target_plugin = InvocationOtelPlugin(
         OtelPluginConfig(
+            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=provider,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
