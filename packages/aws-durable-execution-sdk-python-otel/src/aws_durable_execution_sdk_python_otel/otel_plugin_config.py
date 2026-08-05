@@ -97,9 +97,7 @@ class OtelPluginConfig:
         """
         if self.provider_source is ProviderSource.EXPLICIT:
             if self.tracer_provider is None:
-                raise ValueError(
-                    "provider_source=EXPLICIT requires a tracer_provider."
-                )
+                raise ValueError("provider_source=EXPLICIT requires a tracer_provider.")
         elif self.tracer_provider is not None:
             raise ValueError(
                 "tracer_provider is only valid with provider_source=EXPLICIT; "

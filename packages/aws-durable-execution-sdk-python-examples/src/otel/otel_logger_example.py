@@ -49,7 +49,9 @@ def greet_in_child(child_context: DurableContext, name: str) -> str:
 
 
 @durable_execution(
-    plugins=[InvocationOtelPlugin(OtelPluginConfig(provider_source=ProviderSource.GLOBAL))]
+    plugins=[
+        InvocationOtelPlugin(OtelPluginConfig(provider_source=ProviderSource.GLOBAL))
+    ]
 )
 def handler(_event: Any, context: DurableContext) -> str:
     # Logged at the top level: enriched with the invocation span_id.

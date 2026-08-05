@@ -37,7 +37,9 @@ def add_numbers_in_child(child_context: DurableContext, a: int, b: int):
 
 
 @durable_execution(
-    plugins=[InvocationOtelPlugin(OtelPluginConfig(provider_source=ProviderSource.GLOBAL))]
+    plugins=[
+        InvocationOtelPlugin(OtelPluginConfig(provider_source=ProviderSource.GLOBAL))
+    ]
 )
 def handler(_event: Any, context: DurableContext) -> int:
     result = 0
