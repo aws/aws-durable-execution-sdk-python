@@ -8,6 +8,7 @@ consistent and not duplicated across plugins.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, Sequence
 
 
@@ -25,6 +26,19 @@ DEFAULT_WORKFLOW_SPAN_NAME = "Workflow"
 # OTLPSpanExporter appends /v1/traces itself, so the base endpoint must NOT
 # include it (mirrors the JS fix in PR #729 that removed the duplicate path).
 DEFAULT_OTLP_ENDPOINT = "http://localhost:4318"
+
+
+class ProviderSource(Enum):
+    """Which of the three resolution tiers an :class:`OtelPluginConfig` selects.
+
+    Resolved once via :func:`resolve_provider_source` and used by
+    ``create_tracer_provider`` (to build the provider) and by the plugins (to
+    make the instrumentation and flush decisions off a single value).
+    """
+
+    EXPLICIT = "explicit"  # caller supplied config.tracer_provider
+    GLOBAL = "global"  # use_default_tracer_provider -> trace.get_tracer_provider()
+    AUTO_OTLP = "auto_otlp"  # default: plugin builds and owns an OTLP provider
 
 
 @dataclass
@@ -71,3 +85,22 @@ class OtelPluginConfig:
     propagators: Sequence[TextMapPropagator] | None = None
     workflow_span_name: str = DEFAULT_WORKFLOW_SPAN_NAME
     enrich_logger: bool = True
+
+
+def resolve_provider_source(config: OtelPluginConfig) -> ProviderSource:
+    """Map a config to its :class:`ProviderSource`, encoding precedence once.
+
+    Precedence (highest first):
+
+    1. An explicit ``tracer_provider`` -> :attr:`ProviderSource.EXPLICIT`.
+    2. ``use_default_tracer_provider`` -> :attr:`ProviderSource.GLOBAL`.
+    3. Otherwise (default) -> :attr:`ProviderSource.AUTO_OTLP`.
+
+    Keeping this in one place means ``create_tracer_provider`` and the plugins
+    all agree on how a config resolves.
+    """
+    if config.tracer_provider is not None:
+        return ProviderSource.EXPLICIT
+    if config.use_default_tracer_provider:
+        return ProviderSource.GLOBAL
+    return ProviderSource.AUTO_OTLP

@@ -10,10 +10,11 @@ from opentelemetry.sdk.trace.sampling import ALWAYS_ON, TraceIdRatioBased
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     OtelPluginConfig,
     ExporterConfig,
+    ProviderSource,
+    resolve_provider_source,
 )
 from aws_durable_execution_sdk_python_otel.provider import (
     SAMPLING_RATIO_ENV,
-    ProviderSource,
     _build_resource,
     _build_sampler,
     _resolve_endpoint,
@@ -26,14 +27,12 @@ def test_explicit_provider_is_used_and_not_owned():
     result = create_tracer_provider(OtelPluginConfig(tracer_provider=provider))
     assert result.tracer_provider is provider
     assert result.source is ProviderSource.EXPLICIT
-    assert result.owns_provider is False
 
 
 def test_use_default_provider_returns_global_and_not_owned():
     result = create_tracer_provider(OtelPluginConfig(use_default_tracer_provider=True))
     assert result.tracer_provider is trace.get_tracer_provider()
     assert result.source is ProviderSource.GLOBAL
-    assert result.owns_provider is False
 
 
 def test_unset_config_defaults_to_owned_auto_otlp_provider():
@@ -41,12 +40,11 @@ def test_unset_config_defaults_to_owned_auto_otlp_provider():
     # use_default_tracer_provider left False -> plugin builds/owns an OTLP provider.
     result = create_tracer_provider(OtelPluginConfig())
     assert result.source is ProviderSource.AUTO_OTLP
-    assert result.owns_provider is True
 
 
 def test_auto_configured_provider_is_owned_sdk_provider():
     result = create_tracer_provider(OtelPluginConfig())
-    assert result.owns_provider is True
+    assert result.source is ProviderSource.AUTO_OTLP
     assert isinstance(result.tracer_provider, TracerProvider)
 
 
@@ -57,7 +55,38 @@ def test_explicit_provider_takes_precedence_over_use_default():
     )
     assert result.tracer_provider is provider
     assert result.source is ProviderSource.EXPLICIT
-    assert result.owns_provider is False
+
+
+# ---------------------------------------------------------------------------
+# Provider-source resolution (precedence encoded in one place)
+# ---------------------------------------------------------------------------
+def test_resolve_provider_source_explicit():
+    assert (
+        resolve_provider_source(OtelPluginConfig(tracer_provider=TracerProvider()))
+        is ProviderSource.EXPLICIT
+    )
+
+
+def test_resolve_provider_source_global():
+    assert (
+        resolve_provider_source(OtelPluginConfig(use_default_tracer_provider=True))
+        is ProviderSource.GLOBAL
+    )
+
+
+def test_resolve_provider_source_defaults_to_auto_otlp():
+    assert resolve_provider_source(OtelPluginConfig()) is ProviderSource.AUTO_OTLP
+
+
+def test_resolve_provider_source_explicit_wins_over_default():
+    assert (
+        resolve_provider_source(
+            OtelPluginConfig(
+                tracer_provider=TracerProvider(), use_default_tracer_provider=True
+            )
+        )
+        is ProviderSource.EXPLICIT
+    )
 
 
 # ---------------------------------------------------------------------------

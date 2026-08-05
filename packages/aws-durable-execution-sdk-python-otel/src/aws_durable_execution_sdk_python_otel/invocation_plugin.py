@@ -131,7 +131,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             id_generator=self._id_generator,
         )
         self._provider = result.tracer_provider
-        self._owns_provider = result.owns_provider
 
         # Deterministic trace stitching requires the SDK TracerProvider, which
         # exposes id_generator/sampler. The API's default ProxyTracerProvider

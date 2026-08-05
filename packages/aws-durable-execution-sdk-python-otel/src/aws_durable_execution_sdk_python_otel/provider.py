@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from enum import Enum
 from typing import TYPE_CHECKING
 
 from opentelemetry import propagate, trace
@@ -25,6 +24,8 @@ from opentelemetry.propagators.composite import CompositePropagator
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     DEFAULT_OTLP_ENDPOINT,
     OtelPluginConfig,
+    ProviderSource,
+    resolve_provider_source,
 )
 
 
@@ -40,25 +41,17 @@ SAMPLING_RATIO_ENV = "OTEL_DURABLE_SAMPLING_RATIO"
 OTLP_ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"
 
 
-class ProviderSource(Enum):
-    """Which of the three resolution tiers produced the tracer provider."""
-
-    EXPLICIT = "explicit"  # caller supplied config.tracer_provider
-    GLOBAL = "global"  # use_default_tracer_provider -> trace.get_tracer_provider()
-    AUTO_OTLP = "auto_otlp"  # default: plugin builds and owns an OTLP provider
-
-
 @dataclass
 class ProviderResult:
-    """Result of provider resolution: the provider and how it was chosen."""
+    """Result of provider resolution: the provider and how it was chosen.
+
+    ``source`` is the single value callers key their instrumentation/flush
+    decisions off; the plugin owns (and flushes) the provider only when it is
+    :attr:`ProviderSource.AUTO_OTLP`.
+    """
 
     tracer_provider: TracerProvider
     source: ProviderSource
-
-    @property
-    def owns_provider(self) -> bool:
-        """True only when the plugin created (and therefore manages) the provider."""
-        return self.source is ProviderSource.AUTO_OTLP
 
 
 def _resolve_endpoint(config: OtelPluginConfig) -> str:
@@ -169,8 +162,10 @@ def create_tracer_provider(
 ) -> ProviderResult:
     """Resolve a TracerProvider using the shared 3-tier priority.
 
-    The chosen tier is reported as :class:`ProviderSource` so callers make the
-    instrumentation/flush decision once, off a single value:
+    The tier is resolved once (:func:`resolve_provider_source`) and this function
+    is a straight switch on it. The chosen tier is reported back as
+    :class:`ProviderSource` so callers make the instrumentation/flush decision
+    off a single value:
 
     1. ``config.tracer_provider`` set        -> ``EXPLICIT``   (used as-is)
     2. ``config.use_default_tracer_provider`` -> ``GLOBAL``     (global provider)
@@ -184,13 +179,16 @@ def create_tracer_provider(
     Returns:
         A :class:`ProviderResult`.
     """
-    if config.tracer_provider is not None:
-        # Explicit provider: use as-is, never wrap/modify.
-        return ProviderResult(config.tracer_provider, ProviderSource.EXPLICIT)
+    source = resolve_provider_source(config)
 
-    if config.use_default_tracer_provider:
-        return ProviderResult(trace.get_tracer_provider(), ProviderSource.GLOBAL)
+    if source is ProviderSource.EXPLICIT:
+        # Explicit provider: use as-is, never wrap/modify. resolve_provider_source
+        # only returns EXPLICIT when tracer_provider is set.
+        assert config.tracer_provider is not None
+        provider: TracerProvider = config.tracer_provider
+    elif source is ProviderSource.GLOBAL:
+        provider = trace.get_tracer_provider()
+    else:  # AUTO_OTLP
+        provider = _create_auto_provider(config, id_generator)
 
-    return ProviderResult(
-        _create_auto_provider(config, id_generator), ProviderSource.AUTO_OTLP
-    )
+    return ProviderResult(provider, source)

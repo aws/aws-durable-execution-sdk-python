@@ -17,6 +17,8 @@ from aws_durable_execution_sdk_python_otel.execution_plugin import (
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     OtelPluginConfig,
     ExporterConfig,
+    ProviderSource,
+    resolve_provider_source,
 )
 from aws_durable_execution_sdk_python_otel.instrumentations import (
     register_standalone_instrumentations,
@@ -30,7 +32,6 @@ from aws_durable_execution_sdk_python_otel.invocation_plugin import (
 )
 from aws_durable_execution_sdk_python_otel.provider import (
     ProviderResult,
-    ProviderSource,
     create_tracer_provider,
 )
 
@@ -47,6 +48,7 @@ __all__ = [
     "ProviderResult",
     "ProviderSource",
     "create_tracer_provider",
+    "resolve_provider_source",
     "derive_workflow_span_id",
     "install_log_filter",
     "operation_id_to_span_id",

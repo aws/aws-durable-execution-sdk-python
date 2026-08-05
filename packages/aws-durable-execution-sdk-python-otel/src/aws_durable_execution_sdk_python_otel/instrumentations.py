@@ -22,7 +22,7 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any
 
-from aws_durable_execution_sdk_python_otel.provider import ProviderSource
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import ProviderSource
 
 
 if TYPE_CHECKING:

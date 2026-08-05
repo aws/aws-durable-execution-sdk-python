@@ -108,7 +108,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             id_generator=self._id_generator,
         )
         self._provider = result.tracer_provider
-        self._owns_provider = result.owns_provider
         # Global (ADOT) mode changes Invocation-span parenting (see
         # _start_invocation_span). This reflects the user's opt-in flag, not the
         # resolved source: a test may supply an explicit provider *and* set the
