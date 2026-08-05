@@ -45,7 +45,11 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
 )
 from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
-    DEFAULT_WORKFLOW_SPAN_NAME,
+    OtelPluginConfig,
+)
+from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
+from aws_durable_execution_sdk_python_otel.instrumentations import (
+    register_standalone_instrumentations,
 )
 
 
@@ -80,42 +84,60 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     original logical operation.
 
     Args:
-        trace_provider: OpenTelemetry tracer provider used to create spans.
-            Optional; when omitted, the globally configured tracer provider
-            (``opentelemetry.trace.get_tracer_provider()``) is used.
-        context_extractor: Optional extractor for upstream context. Defaults to
-            AWS X-Ray header extraction.
-        instrument_name: Instrumentation scope name registered with the tracer.
+        config: Shared plugin configuration (the same OtelPluginConfig accepted
+            by ExecutionOtelPlugin). When omitted, defaults are used (X-Ray
+            extractor, "Workflow" span name, log enrichment on). When no provider
+            is configured, an OTLP provider is auto-configured (matching
+            ExecutionOtelPlugin and the JS SDK plugins); set
+            ``use_default_tracer_provider=True`` on the config to use the globally
+            configured tracer provider instead (e.g. the ADOT Lambda layer).
     """
 
     DEFAULT_INSTRUMENT_NAME = "aws-durable-execution-sdk-python"
 
-    def __init__(
-        self,
-        trace_provider: SdkTracerProvider | None = None,
-        context_extractor: ContextExtractor | None = None,
-        instrument_name: str = DEFAULT_INSTRUMENT_NAME,
-        enrich_logger: bool = True,
-        workflow_span_name: str = DEFAULT_WORKFLOW_SPAN_NAME,
-    ) -> None:
-        """Initialize the plugin with an OpenTelemetry tracer provider.
+    def __init__(self, config: OtelPluginConfig | None = None) -> None:
+        """Initialize the plugin from a shared OtelPluginConfig.
+
+        Accepts the same OtelPluginConfig as ExecutionOtelPlugin so both plugins
+        share one configuration surface (context extractor, instrumentation
+        name, provider selection, exporter/propagator settings, log
+        enrichment). Like ExecutionOtelPlugin and the JS SDK plugins, it
+        auto-configures an OTLP provider when nothing is supplied; pass
+        ``use_default_tracer_provider=True`` to use the globally configured
+        (e.g. ADOT) provider instead.
 
         The tracer provider is configured with this plugin's deterministic ID
         generator so spans for a durable execution share stable trace and
-        logical operation identifiers. When no provider is supplied, the
-        globally configured tracer provider is used.
+        logical operation identifiers.
 
-        When enrich_logger is enabled (default), the plugin installs a logging
-        filter on the root logger at invocation start that stamps the active
-        OTel trace context onto every emitted log record.
+        When ``enrich_logger`` is enabled (default), the plugin installs a
+        logging filter that stamps the active OTel trace context onto every
+        emitted log record.
         """
-        self._enrich_logger = enrich_logger
-        self._workflow_span_name = workflow_span_name
+        self._config = config or OtelPluginConfig()
         self._context_extractor: ContextExtractor = (
-            context_extractor or xray_context_extractor
+            self._config.context_extractor or xray_context_extractor
         )
+        self._workflow_span_name = self._config.workflow_span_name
+        self._enrich_logger = self._config.enrich_logger
 
-        self._provider = trace_provider or trace.get_tracer_provider()
+        # Like ExecutionOtelPlugin (and the JS SDK plugins), InvocationOtelPlugin
+        # auto-configures an OTLP provider when nothing is supplied. Resolve the
+        # effective "use the global provider" decision up front so that
+        # instrumentation registration matches what create_tracer_provider does.
+        self._use_default = self._config.use_default_tracer_provider
+        if self._use_default is None:
+            self._use_default = False
+
+        self._id_generator = DeterministicIdGenerator()
+        result = create_tracer_provider(
+            self._config,
+            id_generator=self._id_generator,
+            default_use_global=False,
+        )
+        self._provider = result.tracer_provider
+        self._owns_provider = result.owns_provider
+
         # Deterministic trace stitching requires the SDK TracerProvider, which
         # exposes id_generator/sampler. The API's default ProxyTracerProvider
         # (returned before an SDK provider is configured) does not. Rather than
@@ -128,16 +150,25 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 self._provider
             )
         else:
-            self._id_generator = DeterministicIdGenerator()
             logger.warning(
                 "InvocationOtelPlugin expected an SDK TracerProvider "
                 "(opentelemetry.sdk.trace.TracerProvider) but got %s. Spans will "
                 "not use deterministic IDs. "
                 "Ensure the OpenTelemetry SDK is configured (e.g. via the ADOT "
-                "Lambda layer) or pass an explicit trace_provider.",
+                "Lambda layer) or pass an explicit tracer_provider.",
                 type(self._provider).__name__,
             )
-        self._tracer: Tracer = self._provider.get_tracer(instrument_name)
+        self._tracer: Tracer = self._provider.get_tracer(self._config.instrument_name)
+
+        try:
+            register_standalone_instrumentations(
+                self._config,
+                self._provider if self._owns_provider else None,
+                owns_provider=self._owns_provider,
+                use_default_tracer_provider=self._use_default,
+            )
+        except Exception:
+            logger.exception("Failed to register standalone instrumentations")
 
         # per invocation status:
         self._execution_arn = ""

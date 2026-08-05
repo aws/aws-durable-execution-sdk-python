@@ -168,21 +168,25 @@ See the [ADOT sampling configuration](https://aws-otel.github.io/docs/getting-st
 ```python
 from aws_durable_execution_sdk_python_otel import (
     InvocationOtelPlugin,
+    OtelPluginConfig,
     xray_context_extractor,
 )
 
 plugin = InvocationOtelPlugin(
-    # Provide your own TracerProvider if you already have one configured.
-    # Defaults to the globally configured tracer provider.
-    trace_provider=None,
-    # Use a custom context extractor (default: xray_context_extractor).
-    context_extractor=xray_context_extractor,
-    # Custom instrumentation scope name
-    # (default: "aws-durable-execution-sdk-python").
-    instrument_name="my-service",
-    # Install a root-logger filter that stamps trace context onto every
-    # log record (default: True).
-    enrich_logger=True,
+    OtelPluginConfig(
+        # Provide your own TracerProvider if you already have one configured.
+        # When omitted, an OTLP provider is auto-configured (like ExecutionOtelPlugin);
+        # set use_default_tracer_provider=True to use the global (e.g. ADOT) provider.
+        tracer_provider=None,
+        # Use a custom context extractor (default: xray_context_extractor).
+        context_extractor=xray_context_extractor,
+        # Custom instrumentation scope name
+        # (default: "aws-durable-execution-sdk-python").
+        instrument_name="my-service",
+        # Install a root-logger filter that stamps trace context onto every
+        # log record (default: True).
+        enrich_logger=True,
+    )
 )
 ```
 
@@ -193,15 +197,16 @@ The plugin supports multiple strategies for extracting upstream trace context:
 ```python
 from aws_durable_execution_sdk_python_otel import (
     InvocationOtelPlugin,
+    OtelPluginConfig,
     w3c_client_context_extractor,
     xray_context_extractor,
 )
 
 # Default: X-Ray trace header (recommended for most Lambda deployments)
-InvocationOtelPlugin(context_extractor=xray_context_extractor)
+InvocationOtelPlugin(OtelPluginConfig(context_extractor=xray_context_extractor))
 
 # W3C Trace Context via clientContext (requires backend propagation support)
-InvocationOtelPlugin(context_extractor=w3c_client_context_extractor)
+InvocationOtelPlugin(OtelPluginConfig(context_extractor=w3c_client_context_extractor))
 ```
 
 ### Log Correlation
@@ -251,10 +256,15 @@ The main plugin class. Implements `DurableInstrumentationPlugin` from `aws_durab
 
 ```python
 InvocationOtelPlugin(
-    trace_provider=None,
-    context_extractor=None,
-    instrument_name="aws-durable-execution-sdk-python",
-    enrich_logger=True,
+    OtelPluginConfig(
+        tracer_provider=None,
+        context_extractor=None,
+        instrument_name="aws-durable-execution-sdk-python",
+        enrich_logger=True,
+        workflow_span_name="Workflow",
+        # ...and the rest of OtelPluginConfig (use_default_tracer_provider,
+        # enable_http_instrumentation, exporter_config, propagators).
+    )
 )
 ```
 

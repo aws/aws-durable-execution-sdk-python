@@ -45,6 +45,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -188,9 +189,11 @@ def _assert_hierarchy(exporter: InMemorySpanExporter) -> None:
 def test_community_layer_full_lifecycle_uses_supplied_provider():
     provider, exporter = _provider()
     plugin = InvocationOtelPlugin(
-        trace_provider=provider,
-        context_extractor=lambda _: Context(),
-        enrich_logger=False,
+        OtelPluginConfig(
+            tracer_provider=provider,
+            context_extractor=lambda _: Context(),
+            enrich_logger=False,
+        )
     )
 
     plugin.on_invocation_start(_invocation_start())
@@ -209,8 +212,11 @@ def test_adot_layer_full_lifecycle_uses_global_provider(monkeypatch):
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
 
     plugin = InvocationOtelPlugin(
-        context_extractor=lambda _: Context(),
-        enrich_logger=False,
+        OtelPluginConfig(
+            use_default_tracer_provider=True,
+            context_extractor=lambda _: Context(),
+            enrich_logger=False,
+        )
     )
 
     plugin.on_invocation_start(_invocation_start())
@@ -225,14 +231,18 @@ def test_second_plugin_configures_cached_tracer_generator(monkeypatch):
     """A second handler's Workflow span uses its deterministic trace ID."""
     provider, exporter = _provider()
     first_plugin = InvocationOtelPlugin(
-        trace_provider=provider,
-        context_extractor=lambda _: Context(),
-        enrich_logger=False,
+        OtelPluginConfig(
+            tracer_provider=provider,
+            context_extractor=lambda _: Context(),
+            enrich_logger=False,
+        )
     )
     target_plugin = InvocationOtelPlugin(
-        trace_provider=provider,
-        context_extractor=lambda _: Context(),
-        enrich_logger=False,
+        OtelPluginConfig(
+            tracer_provider=provider,
+            context_extractor=lambda _: Context(),
+            enrich_logger=False,
+        )
     )
     monkeypatch.setenv("_X_AMZN_TRACE_ID", XRAY_TRACE_HEADER)
 
