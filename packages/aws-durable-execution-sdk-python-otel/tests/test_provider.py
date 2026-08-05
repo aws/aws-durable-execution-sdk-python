@@ -13,6 +13,7 @@ from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
 )
 from aws_durable_execution_sdk_python_otel.provider import (
     SAMPLING_RATIO_ENV,
+    ProviderSource,
     _build_resource,
     _build_sampler,
     _resolve_endpoint,
@@ -24,21 +25,23 @@ def test_explicit_provider_is_used_and_not_owned():
     provider = TracerProvider()
     result = create_tracer_provider(OtelPluginConfig(tracer_provider=provider))
     assert result.tracer_provider is provider
+    assert result.source is ProviderSource.EXPLICIT
     assert result.owns_provider is False
 
 
 def test_use_default_provider_returns_global_and_not_owned():
     result = create_tracer_provider(OtelPluginConfig(use_default_tracer_provider=True))
     assert result.tracer_provider is trace.get_tracer_provider()
+    assert result.source is ProviderSource.GLOBAL
     assert result.owns_provider is False
 
 
-def test_default_use_global_flag_applies_when_unset():
-    # InvocationOtelPlugin passes default_use_global=True so an unset config
-    # resolves to the global provider.
-    result = create_tracer_provider(OtelPluginConfig(), default_use_global=True)
-    assert result.tracer_provider is trace.get_tracer_provider()
-    assert result.owns_provider is False
+def test_unset_config_defaults_to_owned_auto_otlp_provider():
+    # Both plugins share this default: no explicit provider and
+    # use_default_tracer_provider left False -> plugin builds/owns an OTLP provider.
+    result = create_tracer_provider(OtelPluginConfig())
+    assert result.source is ProviderSource.AUTO_OTLP
+    assert result.owns_provider is True
 
 
 def test_auto_configured_provider_is_owned_sdk_provider():
@@ -53,6 +56,7 @@ def test_explicit_provider_takes_precedence_over_use_default():
         OtelPluginConfig(tracer_provider=provider, use_default_tracer_provider=True)
     )
     assert result.tracer_provider is provider
+    assert result.source is ProviderSource.EXPLICIT
     assert result.owns_provider is False
 
 

@@ -1,13 +1,14 @@
 """Shared TracerProvider factory for the durable-execution OTel plugins.
 
-Implements the 3-level provider resolution used by both plugins:
+Implements the 3-tier provider resolution used by both plugins, reported as a
+:class:`ProviderSource`:
 
-1. An explicit ``tracer_provider`` in config is used as-is (``owns_provider=False``).
-2. Otherwise, when ``use_default_tracer_provider`` resolves to True, the globally
-   configured provider is used (``owns_provider=False``).
+1. An explicit ``tracer_provider`` in config is used as-is (``EXPLICIT``).
+2. Otherwise, when ``use_default_tracer_provider`` is True, the globally
+   configured provider is used (``GLOBAL``).
 3. Otherwise a fully auto-configured SDK provider is created with an OTLP
    exporter, batch processor, sampler and Lambda resource attributes
-   (``owns_provider=True``).
+   (``AUTO_OTLP``); this is the only tier the plugin owns/flushes.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from opentelemetry import propagate, trace
@@ -38,12 +40,25 @@ SAMPLING_RATIO_ENV = "OTEL_DURABLE_SAMPLING_RATIO"
 OTLP_ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"
 
 
+class ProviderSource(Enum):
+    """Which of the three resolution tiers produced the tracer provider."""
+
+    EXPLICIT = "explicit"  # caller supplied config.tracer_provider
+    GLOBAL = "global"  # use_default_tracer_provider -> trace.get_tracer_provider()
+    AUTO_OTLP = "auto_otlp"  # default: plugin builds and owns an OTLP provider
+
+
 @dataclass
 class ProviderResult:
-    """Result of provider resolution: the provider and whether we own it."""
+    """Result of provider resolution: the provider and how it was chosen."""
 
     tracer_provider: TracerProvider
-    owns_provider: bool
+    source: ProviderSource
+
+    @property
+    def owns_provider(self) -> bool:
+        """True only when the plugin created (and therefore manages) the provider."""
+        return self.source is ProviderSource.AUTO_OTLP
 
 
 def _resolve_endpoint(config: OtelPluginConfig) -> str:
@@ -151,31 +166,31 @@ def create_tracer_provider(
     config: OtelPluginConfig,
     *,
     id_generator: IdGenerator | None = None,
-    default_use_global: bool = False,
 ) -> ProviderResult:
-    """Resolve a TracerProvider using the shared 3-level priority.
+    """Resolve a TracerProvider using the shared 3-tier priority.
+
+    The chosen tier is reported as :class:`ProviderSource` so callers make the
+    instrumentation/flush decision once, off a single value:
+
+    1. ``config.tracer_provider`` set        -> ``EXPLICIT``   (used as-is)
+    2. ``config.use_default_tracer_provider`` -> ``GLOBAL``     (global provider)
+    3. otherwise (default)                    -> ``AUTO_OTLP``  (plugin-owned OTLP)
 
     Args:
         config: Shared plugin configuration.
         id_generator: Deterministic ID generator injected into an
             auto-configured provider so cross-invocation trace stitching works.
-        default_use_global: The value ``use_default_tracer_provider`` defaults to
-            when it is unset in config. ``ExecutionOtelPlugin`` passes ``False``;
-            ``InvocationOtelPlugin`` passes ``True`` to preserve its historical
-            behaviour of using the global provider.
 
     Returns:
         A :class:`ProviderResult`.
     """
     if config.tracer_provider is not None:
         # Explicit provider: use as-is, never wrap/modify.
-        return ProviderResult(config.tracer_provider, False)
+        return ProviderResult(config.tracer_provider, ProviderSource.EXPLICIT)
 
-    use_default = config.use_default_tracer_provider
-    if use_default is None:
-        use_default = default_use_global
+    if config.use_default_tracer_provider:
+        return ProviderResult(trace.get_tracer_provider(), ProviderSource.GLOBAL)
 
-    if use_default:
-        return ProviderResult(trace.get_tracer_provider(), False)
-
-    return ProviderResult(_create_auto_provider(config, id_generator), True)
+    return ProviderResult(
+        _create_auto_provider(config, id_generator), ProviderSource.AUTO_OTLP
+    )

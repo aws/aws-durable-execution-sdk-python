@@ -101,16 +101,19 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             self._config.context_extractor or xray_context_extractor
         )
         self._workflow_span_name = self._config.workflow_span_name
-        self._use_default = bool(self._config.use_default_tracer_provider)
 
         self._id_generator = DeterministicIdGenerator()
         result = create_tracer_provider(
             self._config,
             id_generator=self._id_generator,
-            default_use_global=False,
         )
         self._provider = result.tracer_provider
         self._owns_provider = result.owns_provider
+        # Global (ADOT) mode changes Invocation-span parenting (see
+        # _start_invocation_span). This reflects the user's opt-in flag, not the
+        # resolved source: a test may supply an explicit provider *and* set the
+        # flag to exercise the ambient-parenting path.
+        self._use_default = self._config.use_default_tracer_provider
 
         # Deterministic stitching requires an SDK provider exposing id_generator.
         from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
@@ -129,12 +132,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._tracer: Tracer = self._provider.get_tracer(self._config.instrument_name)
 
         try:
-            register_standalone_instrumentations(
-                self._config,
-                self._provider if self._owns_provider else None,
-                owns_provider=self._owns_provider,
-                use_default_tracer_provider=self._use_default,
-            )
+            register_standalone_instrumentations(self._config, result)
         except Exception:
             logger.exception("Failed to register standalone instrumentations")
 

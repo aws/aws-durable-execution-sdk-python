@@ -122,18 +122,13 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._enrich_logger = self._config.enrich_logger
 
         # Like ExecutionOtelPlugin (and the JS SDK plugins), InvocationOtelPlugin
-        # auto-configures an OTLP provider when nothing is supplied. Resolve the
-        # effective "use the global provider" decision up front so that
-        # instrumentation registration matches what create_tracer_provider does.
-        self._use_default = self._config.use_default_tracer_provider
-        if self._use_default is None:
-            self._use_default = False
-
+        # auto-configures an OTLP provider when nothing is supplied; pass
+        # use_default_tracer_provider=True on the config for the global (ADOT)
+        # provider.
         self._id_generator = DeterministicIdGenerator()
         result = create_tracer_provider(
             self._config,
             id_generator=self._id_generator,
-            default_use_global=False,
         )
         self._provider = result.tracer_provider
         self._owns_provider = result.owns_provider
@@ -161,12 +156,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._tracer: Tracer = self._provider.get_tracer(self._config.instrument_name)
 
         try:
-            register_standalone_instrumentations(
-                self._config,
-                self._provider if self._owns_provider else None,
-                owns_provider=self._owns_provider,
-                use_default_tracer_provider=self._use_default,
-            )
+            register_standalone_instrumentations(self._config, result)
         except Exception:
             logger.exception("Failed to register standalone instrumentations")
 

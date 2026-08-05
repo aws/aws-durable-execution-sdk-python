@@ -30,6 +30,7 @@ from aws_durable_execution_sdk_python_otel.invocation_plugin import (
 )
 from aws_durable_execution_sdk_python_otel.provider import (
     ProviderResult,
+    ProviderSource,
     create_tracer_provider,
 )
 
@@ -44,6 +45,7 @@ __all__ = [
     "InvocationOtelPlugin",
     "OtelContextLogFilter",
     "ProviderResult",
+    "ProviderSource",
     "create_tracer_provider",
     "derive_workflow_span_id",
     "install_log_filter",

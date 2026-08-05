@@ -47,7 +47,9 @@ class OtelPluginConfig:
             set, the plugin does not own or modify it and skips instrumentation
             registration.
         use_default_tracer_provider: When True (and no explicit provider),
-            resolve the globally configured provider via ``trace.get_tracer_provider()``.
+            resolve the globally configured provider via ``trace.get_tracer_provider()``
+            (e.g. the ADOT Lambda layer). Defaults to False, in which case the
+            plugin auto-configures its own OTLP provider.
         context_extractor: Upstream trace-context extractor. Defaults to the
             X-Ray extractor when omitted.
         instrument_name: Instrumentation scope name.
@@ -61,7 +63,7 @@ class OtelPluginConfig:
     """
 
     tracer_provider: SdkTracerProvider | None = None
-    use_default_tracer_provider: bool | None = None
+    use_default_tracer_provider: bool = False
     context_extractor: ContextExtractor | None = None
     instrument_name: str = DEFAULT_INSTRUMENT_NAME
     enable_http_instrumentation: bool = True

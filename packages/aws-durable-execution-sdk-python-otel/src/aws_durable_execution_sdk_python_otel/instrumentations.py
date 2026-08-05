@@ -22,13 +22,14 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any
 
+from aws_durable_execution_sdk_python_otel.provider import ProviderSource
+
 
 if TYPE_CHECKING:
-    from opentelemetry.trace import TracerProvider
-
     from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
         OtelPluginConfig,
     )
+    from aws_durable_execution_sdk_python_otel.provider import ProviderResult
 
 
 logger = logging.getLogger(__name__)
@@ -98,31 +99,25 @@ def _register_http_instrumentation(tracer_provider: object | None) -> None:
 
 def register_standalone_instrumentations(
     config: OtelPluginConfig,
-    tracer_provider: TracerProvider | None,
-    *,
-    owns_provider: bool,
-    use_default_tracer_provider: bool,
+    result: ProviderResult,
 ) -> None:
-    """Register AWS SDK and HTTP instrumentations per the shared policy.
+    """Register AWS SDK and HTTP instrumentations per the resolved source.
 
     Args:
         config: Shared plugin configuration.
-        tracer_provider: The resolved provider (may be the global provider).
-        owns_provider: True when the plugin created/owns the provider.
-        use_default_tracer_provider: True when the global provider is in use.
+        result: The resolved provider and its :class:`ProviderSource`.
     """
-    # A custom, explicitly-supplied provider means the caller manages their own
-    # instrumentation: skip everything.
-    if config.tracer_provider is not None:
+    if result.source is ProviderSource.EXPLICIT:
+        # Caller manages their own instrumentation: skip everything.
         return
 
-    if use_default_tracer_provider:
+    if result.source is ProviderSource.GLOBAL:
         # Global provider: register AWS instrumentation only.
         _register_aws_instrumentation(None)
         return
 
-    # Auto-configured, plugin-owned provider: AWS SDK always; HTTP unless
-    # explicitly disabled.
-    _register_aws_instrumentation(tracer_provider)
+    # AUTO_OTLP: auto-configured, plugin-owned provider -> AWS SDK always; HTTP
+    # unless explicitly disabled.
+    _register_aws_instrumentation(result.tracer_provider)
     if config.enable_http_instrumentation:
-        _register_http_instrumentation(tracer_provider)
+        _register_http_instrumentation(result.tracer_provider)
