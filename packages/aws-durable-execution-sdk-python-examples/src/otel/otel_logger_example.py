@@ -16,7 +16,10 @@ Logs emitted:
 
 from typing import Any
 
-from aws_durable_execution_sdk_python_otel import InvocationOtelPlugin
+from aws_durable_execution_sdk_python_otel import (
+    InvocationOtelPlugin,
+    OtelPluginConfig,
+)
 
 from aws_durable_execution_sdk_python import StepContext
 from aws_durable_execution_sdk_python.context import (
@@ -44,7 +47,9 @@ def greet_in_child(child_context: DurableContext, name: str) -> str:
     return result
 
 
-@durable_execution(plugins=[InvocationOtelPlugin()])
+@durable_execution(
+    plugins=[InvocationOtelPlugin(OtelPluginConfig(use_default_tracer_provider=True))]
+)
 def handler(_event: Any, context: DurableContext) -> str:
     # Logged at the top level: enriched with the invocation span_id.
     context.logger.info("Workflow started")

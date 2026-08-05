@@ -2,7 +2,10 @@
 
 from typing import Any
 
-from aws_durable_execution_sdk_python_otel import InvocationOtelPlugin
+from aws_durable_execution_sdk_python_otel import (
+    InvocationOtelPlugin,
+    OtelPluginConfig,
+)
 
 from aws_durable_execution_sdk_python import StepContext
 from aws_durable_execution_sdk_python.config import Duration
@@ -32,7 +35,9 @@ def add_numbers_in_child(child_context: DurableContext, a: int, b: int):
     return result
 
 
-@durable_execution(plugins=[InvocationOtelPlugin()])
+@durable_execution(
+    plugins=[InvocationOtelPlugin(OtelPluginConfig(use_default_tracer_provider=True))]
+)
 def handler(_event: Any, context: DurableContext) -> int:
     result = 0
     for i in range(3):
