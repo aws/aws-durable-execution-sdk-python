@@ -163,6 +163,11 @@ class InvocationInfo:
     execution_arn: str | None
     is_first_invocation: bool
     execution_start_time: datetime.datetime | None = None
+    # The deserialized execution input, surfaced to instrumentation plugins that
+    # need to record it (e.g. Workflow Insight). Mirrors the JS SDK's
+    # InvocationInfo.executionInput. kw_only so it never reorders the positional
+    # fields above. None when the input is empty or unavailable.
+    execution_input: Any = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -174,6 +179,11 @@ class InvocationStartInfo(InvocationInfo):
 class InvocationEndInfo(InvocationInfo):
     status: InvocationStatus = field(kw_only=True)
     error: ErrorObject | None = None
+    # The serialized execution result (a JSON string, or "" when the result was
+    # checkpointed out-of-band for a large payload). Surfaced to instrumentation
+    # plugins that record execution output (e.g. Workflow Insight); mirrors the
+    # JS SDK's InvocationEndInfo.executionResult. None on failure/suspend.
+    execution_result: str | None = field(default=None, kw_only=True)
 
     @classmethod
     def from_durable_execution_invocation_output(
@@ -186,8 +196,10 @@ class InvocationEndInfo(InvocationInfo):
             execution_arn=invocation_start_info.execution_arn,
             is_first_invocation=invocation_start_info.is_first_invocation,
             execution_start_time=invocation_start_info.execution_start_time,
+            execution_input=invocation_start_info.execution_input,
             status=output.status,
             error=output.error,
+            execution_result=output.result,
         )
 
 
@@ -324,6 +336,7 @@ class PluginExecutor:
         is_first_invocation: bool,
         execution_start_time: datetime.datetime | None,
         lambda_context: LambdaContext | None,
+        execution_input: Any = None,
     ) -> None:
         aws_request_id = lambda_context.aws_request_id if lambda_context else None
         self._invocation_status = InvocationStartInfo(
@@ -331,6 +344,7 @@ class PluginExecutor:
             request_id=aws_request_id,
             is_first_invocation=is_first_invocation,
             execution_start_time=execution_start_time,
+            execution_input=execution_input,
         )
         self.execute_plugins(self._invocation_status, sync=True)
 
