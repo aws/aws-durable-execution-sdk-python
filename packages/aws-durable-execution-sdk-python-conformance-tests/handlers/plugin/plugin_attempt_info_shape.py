@@ -4,17 +4,19 @@ A single step named "flaky" throws on its first attempt and succeeds on the
 second, using the SDK's real retry strategy (``RetryStrategyConfig`` +
 ``create_retry_strategy``, max_attempts >= 2, ~1s delay); it returns "ok". The
 plugin emits from the SDK's real per-attempt hooks (``on_user_function_start`` /
-``on_user_function_end``), filtering to step-type operations. Every logged field
-is read from the CURRENT hook's own info parameter — never reconstructed from
-another hook or from plugin state. When the Python info type does not expose a
-field, the plugin logs the corresponding ``has_*`` flag as false; that omission
-is the honest signal of a missing API surface.
+``on_user_function_end``, filtering to step-type operations) a CANONICAL DUMP of
+the CURRENT hook's own info parameter: every field the Python attempt-info type
+exposes is mapped one-to-one to its canonical camelCase name; unset fields
+(value None) are OMITTED (a missing key fails its assertion — the honest parity
+signal); timestamps ISO-8601, errors their message string, ``outcome`` the
+info's own ``UserFunctionOutcome`` token.
 
 Python surface note: ``UserFunctionStartInfo`` / ``UserFunctionEndInfo`` expose
-operation_id, name, operation_type, attempt and start_time; the end info adds
-``outcome`` (a ``UserFunctionOutcome`` enum) and ``error``. The failure is a
-genuine thrown exception surfaced through the SDK's retry path — never a
-hand-rolled outcome.
+operation_id, operation_type, sub_type, name, parent_id, start_time, attempt,
+is_replayed and is_replay_children; the end info adds ``end_time``, ``outcome``
+and ``error``. The failure is a genuine thrown exception surfaced through the
+SDK's retry path — never a hand-rolled outcome. (``status`` is an inherited
+constant STARTED on attempt infos and is not part of the attempt schema.)
 """
 
 import json
@@ -48,6 +50,33 @@ def _emit(record: dict[str, Any], execution_arn: str | None) -> None:
     print(json.dumps(record), flush=True)
 
 
+def _dump_attempt(
+    hook: str, info: UserFunctionStartInfo | UserFunctionEndInfo
+) -> dict[str, Any]:
+    # Canonical dump of an attempt info's own field surface. Identity + attempt
+    # number + replay indicators are always present; optional fields are emitted
+    # only when the info populates them (None -> omitted key = honest red).
+    record: dict[str, Any] = {
+        "plugin": "CONFPLUGIN",
+        "hook": hook,
+        "id": info.operation_id,
+        "type": info.operation_type.name.upper(),
+        "isReplay": info.is_replayed,
+        "isReplayingChildren": info.is_replay_children,
+    }
+    if info.name is not None:
+        record["name"] = info.name
+    if info.sub_type is not None:
+        record["subType"] = info.sub_type.name
+    if info.parent_id is not None:
+        record["parentId"] = info.parent_id
+    if info.attempt is not None:
+        record["attempt"] = info.attempt
+    if info.start_time is not None:
+        record["startTimestamp"] = info.start_time.isoformat()
+    return record
+
+
 class AttemptInfoShapePlugin(DurableInstrumentationPlugin):
     def __init__(self) -> None:
         # User-function hooks do not carry the execution ARN, so capture it from
@@ -60,37 +89,19 @@ class AttemptInfoShapePlugin(DurableInstrumentationPlugin):
     def on_user_function_start(self, info: UserFunctionStartInfo) -> None:
         if info.operation_type.name != "STEP":
             return
-        _emit(
-            {
-                "plugin": "CONFPLUGIN",
-                "hook": "attempt-start",
-                "op": info.operation_id,
-                "name": info.name,
-                "type": info.operation_type.name.upper(),
-                "attempt": info.attempt,
-                "has_start_time": info.start_time is not None,
-            },
-            self._execution_arn,
-        )
+        _emit(_dump_attempt("attempt-start", info), self._execution_arn)
 
     def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
         if info.operation_type.name != "STEP":
             return
-        _emit(
-            {
-                "plugin": "CONFPLUGIN",
-                "hook": "attempt-end",
-                "op": info.operation_id,
-                "name": info.name,
-                "type": info.operation_type.name.upper(),
-                "attempt": info.attempt,
-                # outcome as reported by the info's own outcome enum — a
-                # presentation of the API's data, not a reconstruction.
-                "outcome": info.outcome.name,
-                "has_error": info.error is not None,
-            },
-            self._execution_arn,
-        )
+        record = _dump_attempt("attempt-end", info)
+        # The end info adds its own outcome enum and (on failure) an error.
+        record["outcome"] = info.outcome.name
+        if info.end_time is not None:
+            record["endTimestamp"] = info.end_time.isoformat()
+        if info.error is not None and info.error.message is not None:
+            record["error"] = info.error.message
+        _emit(record, self._execution_arn)
 
 
 @durable_step
