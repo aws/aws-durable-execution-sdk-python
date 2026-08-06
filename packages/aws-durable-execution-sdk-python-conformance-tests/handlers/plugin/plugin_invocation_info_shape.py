@@ -2,18 +2,20 @@
 
 A single 2-second wait suspends on the first invocation and completes on
 replay; the handler returns "done-<input>". The plugin emits from the SDK's
-real ``on_invocation_start`` / ``on_invocation_end`` hooks. Every logged field
-is read from the CURRENT hook's own info parameter — never reconstructed from
-another hook or from plugin state. When the Python ``InvocationInfo`` type does
-not expose a field, the plugin logs the corresponding ``has_*`` flag as false
-and omits the value key; that omission is the honest signal of a missing API
-surface (the reference field set is the union across SDKs).
+real ``on_invocation_start`` / ``on_invocation_end`` hooks a CANONICAL DUMP of
+the CURRENT hook's own info parameter: every field the Python ``InvocationInfo``
+type exposes is mapped one-to-one to its canonical camelCase name; a field the
+type does not expose is simply OMITTED (a missing key fails its assertion — the
+honest parity signal). One derived scalar is added on the end record:
+``terminal`` := status in (SUCCEEDED, FAILED). No cross-hook reconstruction —
+``isFirstInvocation`` on the end record comes from the invocation-end info.
 
 Python surface note: ``InvocationInfo`` carries only ``request_id``,
-``execution_arn``, ``is_first_invocation`` and ``execution_start_time``. It has
-NO execution-input, operations-map, or externally-updated-operations field, and
-``InvocationEndInfo`` adds only ``status`` + ``error`` (no execution-result
-field). Those absences are surfaced faithfully as has_*: false.
+``execution_arn``, ``is_first_invocation`` and ``execution_start_time``; the end
+info adds ``status`` + ``error``. It has NO execution-input, operations-map,
+externally-updated-operations, or execution-result field, so the canonical
+``executionInput`` / ``operationsCount`` / ``updatedOperationsCount`` /
+``executionResult`` keys are omitted — the honest red for those probes.
 """
 
 import json
@@ -40,41 +42,39 @@ def _emit(record: dict[str, Any], execution_arn: str | None) -> None:
 
 class InvocationInfoShapePlugin(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
-        # Probe the invocation-start info surface. Python's InvocationInfo has
-        # no execution-input, operations-map, or updated-operations field, so
-        # those has_* flags are honestly false and the "input" key is omitted.
-        _emit(
-            {
-                "plugin": "CONFPLUGIN",
-                "hook": "invocation-start",
-                "first": info.is_first_invocation,
-                "has_request_id": info.request_id is not None,
-                "has_input": False,
-                "has_operations": False,
-                "updated_nonempty": False,
-                "has_start_time": info.execution_start_time is not None,
-            },
-            info.execution_arn,
-        )
+        # Canonical dump of InvocationStartInfo. executionInput / operationsCount
+        # / updatedOperationsCount are absent from the Python type and therefore
+        # omitted — that omission is the parity signal under test.
+        record: dict[str, Any] = {
+            "plugin": "CONFPLUGIN",
+            "hook": "invocation-start",
+            "isFirstInvocation": info.is_first_invocation,
+        }
+        if info.request_id is not None:
+            record["requestId"] = info.request_id
+        if info.execution_start_time is not None:
+            record["executionStartTimestamp"] = info.execution_start_time.isoformat()
+        _emit(record, info.execution_arn)
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
-        # "first" MUST come from the END info itself (its presence there is what
-        # is under test) — never captured at invocation-start.
-        status = info.status.name if info.status is not None else "NONE"
-        terminal = status in ("SUCCEEDED", "FAILED")
-        _emit(
-            {
-                "plugin": "CONFPLUGIN",
-                "hook": "invocation-end",
-                "first": info.is_first_invocation,
-                "terminal": terminal,
-                "status": status,
-                # InvocationEndInfo exposes no execution-result field.
-                "has_result": False,
-                "has_error": info.error is not None,
-            },
-            info.execution_arn,
-        )
+        # isFirstInvocation MUST come from the END info itself. executionInput /
+        # operationsCount / executionResult are absent from the Python type and
+        # therefore omitted.
+        status = info.status.name
+        record: dict[str, Any] = {
+            "plugin": "CONFPLUGIN",
+            "hook": "invocation-end",
+            "isFirstInvocation": info.is_first_invocation,
+            "status": status,
+            "terminal": status in ("SUCCEEDED", "FAILED"),
+        }
+        if info.request_id is not None:
+            record["requestId"] = info.request_id
+        if info.execution_start_time is not None:
+            record["executionStartTimestamp"] = info.execution_start_time.isoformat()
+        if info.error is not None and info.error.message is not None:
+            record["executionError"] = info.error.message
+        _emit(record, info.execution_arn)
 
 
 @durable_execution(plugins=[InvocationInfoShapePlugin()])

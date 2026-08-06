@@ -3,17 +3,19 @@
 A single step named "greet" returns the constant "task-a" and succeeds on the
 first attempt. The plugin implements the SDK's real ``on_operation_change``
 hook and, for each step-type operation in the change info's updated-operations
-delta, probes the DELTA ITEM's own field surface. Every logged field is read
-from the CURRENT hook's own info parameter (the change info and its delta
-items) — never reconstructed from another hook or from plugin state. When the
-Python type does not expose a field, the plugin logs the corresponding
-``has_*`` flag as false; that omission is the honest signal of a missing API
-surface.
+delta, logs ONE single-line JSON record: a CANONICAL DUMP of that DELTA ITEM's
+own field surface (a full ``OperationInfo``) plus the hook-level fields. Every
+field the item type exposes is mapped one-to-one to its canonical camelCase
+name; unset fields (value None) are OMITTED (a missing key fails its assertion —
+the honest parity signal). Hook-level fields: ``executionArn`` (the change
+info's own ARN), ``updatedOperationsCount`` / ``operationsCount`` (the two map
+sizes), and the derived scalar ``inFullMap`` := the item id also appears in the
+info's full operations map.
 
 Python surface note: change-delta items are full ``OperationInfo`` objects
 (identity + status + payloads), so the item exposes result, end_time, attempt
 and an ``is_replayed`` replay indicator; ``OperationChangeInfo`` itself carries
-the execution ARN.
+the execution ARN and both operation maps.
 """
 
 import json
@@ -43,8 +45,8 @@ def _emit(record: dict[str, Any], execution_arn: str | None) -> None:
 
 class OperationChangeShapePlugin(DurableInstrumentationPlugin):
     def __init__(self) -> None:
-        # durableExecutionArn stamping is captured at invocation-start; has_arn
-        # below is probed from the change info's OWN execution_arn field.
+        # Operation-change hooks carry their own execution ARN, but the
+        # top-level durableExecutionArn stamp is captured at invocation-start.
         self._execution_arn: str | None = None
 
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
@@ -54,26 +56,38 @@ class OperationChangeShapePlugin(DurableInstrumentationPlugin):
         for op_id, op in info.updated_operations.items():
             if op.operation_type.name != "STEP":
                 continue
-            _emit(
-                {
-                    "plugin": "CONFPLUGIN",
-                    "hook": "operation-change",
-                    "op": op_id,
-                    "status": op.status.name,
-                    "in_full_map": op_id in info.operations,
-                    # has_arn probes whether the change info itself carries the
-                    # execution ARN (its own field, read directly here).
-                    "has_arn": info.execution_arn is not None,
-                    "item_name": op.name,
-                    "item_type": op.operation_type.name.upper(),
-                    "item_has_result": op.result is not None,
-                    "item_has_end_time": op.end_time is not None,
-                    "item_has_attempt": op.attempt is not None,
-                    # A replay indicator field exists on the item type itself.
-                    "item_has_replay": hasattr(op, "is_replayed"),
-                },
-                self._execution_arn,
-            )
+            # Hook-level fields dumped from the change info's own surface.
+            record: dict[str, Any] = {
+                "plugin": "CONFPLUGIN",
+                "hook": "operation-change",
+                "updatedOperationsCount": len(info.updated_operations),
+                "operationsCount": len(info.operations),
+                "inFullMap": op_id in info.operations,
+            }
+            if info.execution_arn is not None:
+                record["executionArn"] = info.execution_arn
+            # Canonical dump of the delta ITEM's own OperationInfo surface.
+            record["id"] = op.operation_id
+            record["type"] = op.operation_type.name.upper()
+            record["status"] = op.status.name
+            record["isReplay"] = op.is_replayed
+            if op.name is not None:
+                record["name"] = op.name
+            if op.sub_type is not None:
+                record["subType"] = op.sub_type.name
+            if op.parent_id is not None:
+                record["parentId"] = op.parent_id
+            if op.start_time is not None:
+                record["startTimestamp"] = op.start_time.isoformat()
+            if op.end_time is not None:
+                record["endTimestamp"] = op.end_time.isoformat()
+            if op.result is not None:
+                record["result"] = op.result
+            if op.error is not None and op.error.message is not None:
+                record["error"] = op.error.message
+            if op.attempt is not None:
+                record["attempt"] = op.attempt
+            _emit(record, self._execution_arn)
 
 
 @durable_step

@@ -2,17 +2,19 @@
 
 A single step named "greet" returns the constant "task-a" and succeeds on the
 first attempt. The plugin emits from the SDK's real ``on_operation_start`` /
-``on_operation_end`` hooks, filtering to step-type operations. Every logged
-field is read from the CURRENT hook's own info parameter — never reconstructed
-from another hook or from plugin state. When the Python ``OperationInfo`` type
-does not expose a field, the plugin logs the corresponding ``has_*`` flag as
-false; that omission is the honest signal of a missing API surface.
+``on_operation_end`` hooks (filtering to step-type operations) a CANONICAL DUMP
+of the CURRENT hook's own info parameter: every field the Python
+``OperationInfo`` type exposes is mapped one-to-one to its canonical camelCase
+name; unset fields (value None) are OMITTED (a missing key fails its assertion —
+the honest parity signal); type tokens are upper-cased, timestamps ISO-8601,
+the serialized result the raw serialized string, errors their message string.
 
 Python surface note: ``OperationInfo`` exposes operation_id, operation_type,
-name, start_time, is_replayed, status, end_time, result, error and attempt, so
-the full operation-end field set is available. ``has_status`` is emitted at
-operation-start for observability but not asserted (status population on a live
-first start varies by SDK).
+sub_type, name, parent_id, start_time, is_replayed, status, end_time, result,
+error and attempt, so the full operation-end field set is available.
+``status`` / ``startTimestamp`` / ``attempt`` are dumped at operation-start when
+populated (STARTED) but NOT asserted — live-first-start population is
+legitimately SDK-divergent.
 """
 
 import json
@@ -28,6 +30,7 @@ from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationStartInfo,
     OperationEndInfo,
+    OperationInfo,
     OperationStartInfo,
 )
 
@@ -39,6 +42,37 @@ def _emit(record: dict[str, Any], execution_arn: str | None) -> None:
     if execution_arn:
         record = {"durableExecutionArn": execution_arn, **record}
     print(json.dumps(record), flush=True)
+
+
+def _dump_operation(hook: str, info: OperationInfo) -> dict[str, Any]:
+    # Canonical dump of an OperationInfo's own field surface. Identity + replay
+    # flag + status are always present; optional fields are emitted only when
+    # the info populates them (None -> omitted key = honest missing-field red).
+    record: dict[str, Any] = {
+        "plugin": "CONFPLUGIN",
+        "hook": hook,
+        "id": info.operation_id,
+        "type": info.operation_type.name.upper(),
+        "status": info.status.name,
+        "isReplay": info.is_replayed,
+    }
+    if info.name is not None:
+        record["name"] = info.name
+    if info.sub_type is not None:
+        record["subType"] = info.sub_type.name
+    if info.parent_id is not None:
+        record["parentId"] = info.parent_id
+    if info.start_time is not None:
+        record["startTimestamp"] = info.start_time.isoformat()
+    if info.end_time is not None:
+        record["endTimestamp"] = info.end_time.isoformat()
+    if info.result is not None:
+        record["result"] = info.result
+    if info.error is not None and info.error.message is not None:
+        record["error"] = info.error.message
+    if info.attempt is not None:
+        record["attempt"] = info.attempt
+    return record
 
 
 class OperationInfoShapePlugin(DurableInstrumentationPlugin):
@@ -53,42 +87,12 @@ class OperationInfoShapePlugin(DurableInstrumentationPlugin):
     def on_operation_start(self, info: OperationStartInfo) -> None:
         if info.operation_type.name != "STEP":
             return
-        _emit(
-            {
-                "plugin": "CONFPLUGIN",
-                "hook": "operation-start",
-                "op": info.operation_id,
-                "name": info.name,
-                "type": info.operation_type.name.upper(),
-                "replay": info.is_replayed,
-                "has_start_time": info.start_time is not None,
-                "has_status": info.status is not None,
-            },
-            self._execution_arn,
-        )
+        _emit(_dump_operation("operation-start", info), self._execution_arn)
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
         if info.operation_type.name != "STEP":
             return
-        status = info.status.name if info.status is not None else "NONE"
-        record: dict[str, Any] = {
-            "plugin": "CONFPLUGIN",
-            "hook": "operation-end",
-            "op": info.operation_id,
-            "name": info.name,
-            "type": info.operation_type.name.upper(),
-            "replay": info.is_replayed,
-            "status": status,
-            "has_result": info.result is not None,
-            "has_error": info.error is not None,
-            "attempt": info.attempt,
-            "has_end_time": info.end_time is not None,
-        }
-        # Include the checkpointed serialized result exactly as exposed on the
-        # info; omit the key entirely when the info carries no result value.
-        if info.result is not None:
-            record["result"] = info.result
-        _emit(record, self._execution_arn)
+        _emit(_dump_operation("operation-end", info), self._execution_arn)
 
 
 @durable_step
