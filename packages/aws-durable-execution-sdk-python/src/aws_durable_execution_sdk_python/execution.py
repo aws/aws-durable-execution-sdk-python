@@ -304,6 +304,7 @@ def durable_execution(
                     else None
                 ),
                 is_first_invocation=not has_prior_operations,
+                execution_input=input_event,
             )
             # Thread 1: Run background checkpoint processing
             executor.submit(execution_state.checkpoint_batches_forever)
