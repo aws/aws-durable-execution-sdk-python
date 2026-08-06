@@ -73,6 +73,7 @@ INVOCATION_START_INFO = InvocationStartInfo(
     execution_arn="arn:aws:lambda:us-east-1:123:durable:abc",
     execution_start_time=START_TS,
     is_first_invocation=True,
+    execution_input={"name": "World"},
 )
 INVOCATION_END_INFO = InvocationEndInfo(
     request_id="req-1",
@@ -81,6 +82,8 @@ INVOCATION_END_INFO = InvocationEndInfo(
     status=InvocationStatus.FAILED,
     error=ERROR,
     is_first_invocation=False,
+    execution_input={"name": "World"},
+    execution_result='"Hello, World!"',
 )
 
 USER_FUNCTION_START_INFO = UserFunctionStartInfo(
@@ -164,6 +167,16 @@ class TestDataClasses(unittest.TestCase):
         )
         self.assertEqual(INVOCATION_START_INFO.execution_start_time, START_TS)
         self.assertTrue(INVOCATION_START_INFO.is_first_invocation)
+        self.assertEqual(INVOCATION_START_INFO.execution_input, {"name": "World"})
+
+    def test_invocation_info_execution_input_defaults_to_none(self):
+        info = InvocationStartInfo(
+            request_id="req-1",
+            execution_arn="arn:test",
+            execution_start_time=START_TS,
+            is_first_invocation=True,
+        )
+        self.assertIsNone(info.execution_input)
 
     def test_invocation_end_info(self):
         self.assertEqual(INVOCATION_END_INFO.request_id, "req-1")
@@ -172,6 +185,23 @@ class TestDataClasses(unittest.TestCase):
         self.assertFalse(INVOCATION_END_INFO.is_first_invocation)
         self.assertEqual(INVOCATION_END_INFO.status, InvocationStatus.FAILED)
         self.assertEqual(INVOCATION_END_INFO.error.message, "boom")
+        self.assertEqual(INVOCATION_END_INFO.execution_input, {"name": "World"})
+        self.assertEqual(INVOCATION_END_INFO.execution_result, '"Hello, World!"')
+
+    def test_invocation_end_info_from_invocation_output_carries_input_and_result(self):
+        output = DurableExecutionInvocationOutput(
+            status=InvocationStatus.SUCCEEDED,
+            result='"Hello, World!"',
+        )
+        end_info = InvocationEndInfo.from_durable_execution_invocation_output(
+            INVOCATION_START_INFO, output
+        )
+        self.assertEqual(end_info.request_id, INVOCATION_START_INFO.request_id)
+        self.assertEqual(end_info.execution_arn, INVOCATION_START_INFO.execution_arn)
+        self.assertEqual(end_info.execution_input, {"name": "World"})
+        self.assertEqual(end_info.execution_result, '"Hello, World!"')
+        self.assertEqual(end_info.status, InvocationStatus.SUCCEEDED)
+        self.assertIsNone(end_info.error)
 
     def test_user_function_start_info(self):
         self.assertEqual(USER_FUNCTION_START_INFO.operation_id, "op-1")
