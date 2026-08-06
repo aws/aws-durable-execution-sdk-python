@@ -383,6 +383,10 @@ Mimic the package structure in the src/aws_durable_execution_sdk_python director
 Name your module so that src/mypackage/mymodule.py has a dedicated unit test file
 tests/mypackage/mymodule_test.py
 
+### Conformance tests
+
+Conformance tests verify cross-SDK behavioral parity. The runner and requirement specifications are maintained in a separate repository: [aws-durable-execution-conformance-tests](https://github.com/aws/aws-durable-execution-conformance-tests). The Python handlers live in-repo under `packages/aws-durable-execution-sdk-python-conformance-tests/`, but new requirement IDs must first be registered upstream. Contributors do not need to add conformance tests. If you believe a change warrants one, mention it in your PR description or [open an issue](https://github.com/aws/aws-durable-execution-conformance-tests/issues/new?template=new_requirement.yml) in that repository.
+
 ## Examples and Deployment
 
 Run these commands from the **repository root**.
@@ -500,10 +504,11 @@ To send us a pull request, please:
 
 1. Fork the repository.
 2. Modify the source; please focus on the specific change you are contributing. If you also reformat all the code, it will be hard for us to focus on your change.
-3. Ensure local tests pass.
-4. Commit to your fork using clear commit messages.
-5. Send us a pull request, answering any default questions in the pull request interface.
-6. Pay attention to any automated CI failures reported in the pull request, and stay involved in the conversation.
+3. Write tests for your changes and ensure all tests pass. At minimum, include related **unit tests**. Include **e2e integration tests** (in the `tests/e2e/` directory) when the change affects cross-component behavior, public API surfaces, or end-to-end workflows. For isolated bug fixes where a unit test alone sufficiently covers the fix, integration tests are not required. See the [Testing](#testing) section for details on running tests.
+4. Do **not** add or modify conformance tests without coordinating with the team. Conformance test requirements and the runner live in a separate repository; the Python handlers live in-repo but new requirement IDs must first be registered upstream. If you believe your change warrants a conformance test, please mention it in your PR description or open an issue in the [Conformance Tests repository](https://github.com/aws/aws-durable-execution-conformance-tests/issues/new?template=new_requirement.yml).
+5. Commit to your fork using clear commit messages.
+6. Send us a pull request, answering any default questions in the pull request interface.
+7. Pay attention to any automated CI failures reported in the pull request, and stay involved in the conversation.
 
 ### Pull Request Title and Commit Message Format
 
