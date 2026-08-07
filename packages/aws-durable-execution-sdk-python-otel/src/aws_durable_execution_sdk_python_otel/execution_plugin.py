@@ -93,7 +93,8 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
 
     Args:
         config: Shared plugin configuration. When omitted, defaults are used
-            (auto-configured provider, X-Ray extractor, "Workflow" root span).
+            (globally configured provider, X-Ray extractor, "Workflow" root
+            span).
     """
 
     def __init__(self, config: OtelPluginConfig | None = None) -> None:

@@ -86,12 +86,12 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     Args:
         config: Shared plugin configuration (the same OtelPluginConfig accepted
             by ExecutionOtelPlugin). When omitted, defaults are used (X-Ray
-            extractor, "Workflow" span name, log enrichment on). When no provider
-            is configured, an OTLP provider is auto-configured (matching
-            ExecutionOtelPlugin and the JS SDK plugins); set
-            ``provider_source=ProviderSource.GLOBAL`` on the config to use the
-            globally configured tracer provider instead (e.g. the ADOT Lambda
-            layer).
+            extractor, "Workflow" span name, log enrichment on). Like
+            ExecutionOtelPlugin and the JS SDK plugins, the default
+            ``provider_source`` is ``GLOBAL``: the plugin uses the globally
+            configured tracer provider (e.g. the ADOT Lambda layer). Set
+            ``provider_source=ProviderSource.AUTO_OTLP`` on the config to have
+            the plugin build and own an auto-configured OTLP provider instead.
     """
 
     DEFAULT_INSTRUMENT_NAME = "aws-durable-execution-sdk-python"
@@ -102,10 +102,11 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         Accepts the same OtelPluginConfig as ExecutionOtelPlugin so both plugins
         share one configuration surface (context extractor, instrumentation
         name, provider selection, exporter/propagator settings, log
-        enrichment). Like ExecutionOtelPlugin and the JS SDK plugins, it
-        auto-configures an OTLP provider when nothing is supplied; pass
-        ``provider_source=ProviderSource.GLOBAL`` to use the globally configured
-        (e.g. ADOT) provider instead.
+        enrichment). Like ExecutionOtelPlugin and the JS SDK plugins, the
+        default ``provider_source`` is ``GLOBAL``: it uses the globally
+        configured (e.g. ADOT) provider. Pass
+        ``provider_source=ProviderSource.AUTO_OTLP`` to have the plugin build
+        and own an auto-configured OTLP provider instead.
 
         The tracer provider is configured with this plugin's deterministic ID
         generator so spans for a durable execution share stable trace and
@@ -123,9 +124,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._enrich_logger = self._config.enrich_logger
 
         # Like ExecutionOtelPlugin (and the JS SDK plugins), InvocationOtelPlugin
-        # auto-configures an OTLP provider when nothing is supplied; set
-        # provider_source=ProviderSource.GLOBAL on the config for the global
-        # (ADOT) provider.
+        # defaults to provider_source=GLOBAL (the globally configured, e.g. ADOT,
+        # provider); set provider_source=ProviderSource.AUTO_OTLP on the config
+        # to build and own an auto-configured OTLP provider instead.
         self._id_generator = DeterministicIdGenerator()
         result = create_tracer_provider(
             self._config,
