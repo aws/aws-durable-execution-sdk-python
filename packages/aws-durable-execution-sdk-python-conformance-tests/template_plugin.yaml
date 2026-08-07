@@ -358,3 +358,18 @@ Resources:
       DurableConfig:
         RetentionPeriodInDays: 7
         ExecutionTimeout: 300
+  PluginContextInfoShape:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-23"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: plugin.plugin_context_info_shape.handler
+      Description: Context-typed hook info field shape (subType tokens and children-replay indicator)
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
