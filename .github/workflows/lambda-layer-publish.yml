@@ -1,0 +1,237 @@
+name: Publish OTel Plugin Lambda Layer
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lambda-layer-publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+env:
+  LAYER_NAME: aws-durable-execution-sdk-python-otel-plugin
+  DEFAULT_LAYER_REGIONS: >-
+    af-south-1,
+    ap-east-1,
+    ap-east-2,
+    ap-northeast-1,
+    ap-northeast-2,
+    ap-northeast-3,
+    ap-south-1,
+    ap-south-2,
+    ap-southeast-1,
+    ap-southeast-2,
+    ap-southeast-3,
+    ap-southeast-4,
+    ap-southeast-5,
+    ap-southeast-6,
+    ap-southeast-7,
+    ca-central-1,
+    ca-west-1,
+    eu-central-1,
+    eu-central-2,
+    eu-north-1,
+    eu-south-1,
+    eu-south-2,
+    eu-west-1,
+    eu-west-2,
+    eu-west-3,
+    il-central-1,
+    me-central-1,
+    me-south-1,
+    mx-central-1,
+    sa-east-1,
+    us-east-1,
+    us-east-2,
+    us-west-1,
+    us-west-2
+
+jobs:
+  build-distributions:
+    if: contains(github.event.release.tag_name, 'otel-v')
+    runs-on: ubuntu-latest
+    outputs:
+      sdk_version: ${{ steps.versions.outputs.sdk_version }}
+      otel_version: ${{ steps.versions.outputs.otel_version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install Hatch
+        run: python -m pip install --upgrade hatch==1.16.5
+
+      - name: Build SDK distribution
+        working-directory: packages/aws-durable-execution-sdk-python
+        run: hatch build
+
+      - name: Build OTel plugin distribution
+        working-directory: packages/aws-durable-execution-sdk-python-otel
+        run: hatch build
+
+      - name: Verify legal files
+        run: |
+          python .github/scripts/check_dist_legal_files.py \
+            packages/aws-durable-execution-sdk-python \
+            packages/aws-durable-execution-sdk-python-otel
+
+      - name: Read package versions
+        id: versions
+        run: |
+          SDK_VERSION=$(grep "^__version__" packages/aws-durable-execution-sdk-python/src/aws_durable_execution_sdk_python/__about__.py | cut -d'"' -f2)
+          OTEL_VERSION=$(grep "^__version__" packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel/__about__.py | cut -d'"' -f2)
+          echo "sdk_version=${SDK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "otel_version=${OTEL_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Stage wheels
+        run: |
+          mkdir release-dists
+          cp packages/aws-durable-execution-sdk-python/dist/*.whl release-dists/
+          cp packages/aws-durable-execution-sdk-python-otel/dist/*.whl release-dists/
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lambda-layer-distributions
+          path: release-dists/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-layer:
+    needs: build-distributions
+    runs-on: ubuntu-latest
+    environment:
+      name: lambda-layer-publish
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      LAYER_REGIONS: ${{ vars.LAYER_PUBLISH_REGIONS }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_python: "3.11"
+            runtime: python3.11
+            runtime_slug: python311
+            architecture: x86_64
+          - target_python: "3.11"
+            runtime: python3.11
+            runtime_slug: python311
+            architecture: arm64
+          - target_python: "3.12"
+            runtime: python3.12
+            runtime_slug: python312
+            architecture: x86_64
+          - target_python: "3.12"
+            runtime: python3.12
+            runtime_slug: python312
+            architecture: arm64
+          - target_python: "3.13"
+            runtime: python3.13
+            runtime_slug: python313
+            architecture: x86_64
+          - target_python: "3.13"
+            runtime: python3.13
+            runtime_slug: python313
+            architecture: arm64
+          - target_python: "3.14"
+            runtime: python3.14
+            runtime_slug: python314
+            architecture: x86_64
+          - target_python: "3.14"
+            runtime: python3.14
+            runtime_slug: python314
+            architecture: arm64
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: lambda-layer-distributions
+          path: release-dists/
+
+      - name: Build layer zip
+        id: build-layer
+        env:
+          LAYER_ZIP: dist/${{ env.LAYER_NAME }}-${{ matrix.runtime_slug }}-${{ matrix.architecture }}.zip
+        run: |
+          SDK_WHEEL=$(find release-dists -name 'aws_durable_execution_sdk_python-*.whl' -print -quit)
+          OTEL_WHEEL=$(find release-dists -name 'aws_durable_execution_sdk_python_otel-*.whl' -print -quit)
+          python .github/scripts/build_lambda_layer.py \
+            --sdk-distribution "$SDK_WHEEL" \
+            --otel-distribution "$OTEL_WHEEL" \
+            --target-python "${{ matrix.target_python }}" \
+            --architecture "${{ matrix.architecture }}" \
+            --output "$LAYER_ZIP"
+          echo "layer_zip=${LAYER_ZIP}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
+        with:
+          role-to-assume: ${{ secrets.LAYER_PUBLISH_ROLE_ARN }}
+          role-session-name: otelLayerPublish-${{ matrix.runtime_slug }}-${{ matrix.architecture }}
+          aws-region: us-east-1
+
+      - name: Publish layer versions
+        env:
+          LAYER_ZIP: ${{ steps.build-layer.outputs.layer_zip }}
+          SDK_VERSION: ${{ needs.build-distributions.outputs.sdk_version }}
+          OTEL_VERSION: ${{ needs.build-distributions.outputs.otel_version }}
+        run: |
+          PUBLISHED=false
+          REGION_LIST=${LAYER_REGIONS:-$DEFAULT_LAYER_REGIONS}
+          IFS=',' read -ra REGIONS <<< "$REGION_LIST"
+          for REGION in "${REGIONS[@]}"; do
+            REGION=$(echo "$REGION" | xargs)
+            if [ -z "$REGION" ]; then
+              continue
+            fi
+
+            LAYER_VERSION_ARN=$(aws lambda publish-layer-version \
+              --layer-name "$LAYER_NAME" \
+              --description "AWS Durable Execution SDK ${SDK_VERSION} OTel plugin ${OTEL_VERSION} (${{ matrix.runtime }}/${{ matrix.architecture }})" \
+              --zip-file "fileb://${LAYER_ZIP}" \
+              --compatible-runtimes "${{ matrix.runtime }}" \
+              --compatible-architectures "${{ matrix.architecture }}" \
+              --license-info Apache-2.0 \
+              --region "$REGION" \
+              --query LayerVersionArn \
+              --output text)
+
+            echo "Published ${LAYER_VERSION_ARN}"
+            echo "- \`${LAYER_VERSION_ARN}\`" >> "$GITHUB_STEP_SUMMARY"
+            PUBLISHED=true
+          done
+
+          if [ "$PUBLISHED" != true ]; then
+            echo "No AWS regions were configured for layer publishing."
+            exit 1
+          fi
+
+      - name: Upload layer artifact
+        if: always() && steps.build-layer.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: otel-plugin-layer-${{ matrix.runtime_slug }}-${{ matrix.architecture }}
+          path: ${{ steps.build-layer.outputs.layer_zip }}
+          if-no-files-found: error
+          retention-days: 30
