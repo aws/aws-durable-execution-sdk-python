@@ -35,6 +35,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
 from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     OtelPluginConfig,
+    ProviderSource,
 )
 
 
@@ -64,6 +65,7 @@ def _create_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
+            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=provider,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
@@ -389,19 +391,22 @@ def test_step_attempt_span_omits_operation_status():
 # ---------------------------------------------------------------------------
 # Default-provider mode: invocation span
 # ---------------------------------------------------------------------------
-def _create_default_mode_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
-    """ExecutionOtelPlugin in default-provider mode wired to an in-memory exporter.
+def _create_default_mode_plugin(
+    monkeypatch,
+) -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
+    """ExecutionOtelPlugin in GLOBAL (ADOT) mode wired to an in-memory exporter.
 
-    Passing an explicit ``tracer_provider`` lets the test capture spans while
-    ``use_default_tracer_provider=True`` still selects the default-mode code path.
+    The capture provider is installed as the global provider so
+    ``provider_source=GLOBAL`` resolves to it, letting the test assert spans
+    while exercising the ambient-parenting path.
     """
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            tracer_provider=provider,
-            use_default_tracer_provider=True,
+            provider_source=ProviderSource.GLOBAL,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
         )
@@ -409,8 +414,8 @@ def _create_default_mode_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExpo
     return plugin, exporter
 
 
-def test_default_mode_creates_invocation_span():
-    plugin, exporter = _create_default_mode_plugin()
+def test_default_mode_creates_invocation_span(monkeypatch):
+    plugin, exporter = _create_default_mode_plugin(monkeypatch)
 
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_invocation_end(_invocation_end_info())
@@ -423,8 +428,8 @@ def test_default_mode_creates_invocation_span():
     assert invocation.attributes["durable.invocation.first"] is True
 
 
-def test_default_mode_invocation_span_parented_to_ambient_span():
-    plugin, exporter = _create_default_mode_plugin()
+def test_default_mode_invocation_span_parented_to_ambient_span(monkeypatch):
+    plugin, exporter = _create_default_mode_plugin(monkeypatch)
 
     # Simulate the ambient Lambda invocation span from the ADOT layer.
     ambient = plugin._provider.get_tracer("ambient").start_span("lambda-invocation")

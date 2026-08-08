@@ -10,6 +10,7 @@ from opentelemetry.sdk.trace.sampling import ALWAYS_ON, TraceIdRatioBased
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     OtelPluginConfig,
     ExporterConfig,
+    ProviderSource,
 )
 from aws_durable_execution_sdk_python_otel.provider import (
     SAMPLING_RATIO_ENV,
@@ -20,40 +21,59 @@ from aws_durable_execution_sdk_python_otel.provider import (
 )
 
 
-def test_explicit_provider_is_used_and_not_owned():
+def test_explicit_provider_is_used():
     provider = TracerProvider()
-    result = create_tracer_provider(OtelPluginConfig(tracer_provider=provider))
+    result = create_tracer_provider(
+        OtelPluginConfig(
+            provider_source=ProviderSource.EXPLICIT, tracer_provider=provider
+        )
+    )
     assert result.tracer_provider is provider
-    assert result.owns_provider is False
+    assert result.source is ProviderSource.EXPLICIT
 
 
-def test_use_default_provider_returns_global_and_not_owned():
-    result = create_tracer_provider(OtelPluginConfig(use_default_tracer_provider=True))
+def test_global_source_returns_global_provider():
+    result = create_tracer_provider(
+        OtelPluginConfig(provider_source=ProviderSource.GLOBAL)
+    )
     assert result.tracer_provider is trace.get_tracer_provider()
-    assert result.owns_provider is False
+    assert result.source is ProviderSource.GLOBAL
 
 
-def test_default_use_global_flag_applies_when_unset():
-    # InvocationOtelPlugin passes default_use_global=True so an unset config
-    # resolves to the global provider.
-    result = create_tracer_provider(OtelPluginConfig(), default_use_global=True)
-    assert result.tracer_provider is trace.get_tracer_provider()
-    assert result.owns_provider is False
-
-
-def test_auto_configured_provider_is_owned_sdk_provider():
+def test_unset_config_defaults_to_global_provider():
+    # The default: no provider_source given -> use the global provider.
     result = create_tracer_provider(OtelPluginConfig())
-    assert result.owns_provider is True
+    assert result.source is ProviderSource.GLOBAL
+    assert result.tracer_provider is trace.get_tracer_provider()
+
+
+def test_auto_otlp_source_builds_sdk_provider():
+    result = create_tracer_provider(
+        OtelPluginConfig(provider_source=ProviderSource.AUTO_OTLP)
+    )
+    assert result.source is ProviderSource.AUTO_OTLP
     assert isinstance(result.tracer_provider, TracerProvider)
 
 
-def test_explicit_provider_takes_precedence_over_use_default():
-    provider = TracerProvider()
-    result = create_tracer_provider(
-        OtelPluginConfig(tracer_provider=provider, use_default_tracer_provider=True)
-    )
-    assert result.tracer_provider is provider
-    assert result.owns_provider is False
+# ---------------------------------------------------------------------------
+# Config validation (each source has the fields it needs)
+# ---------------------------------------------------------------------------
+def test_explicit_source_requires_tracer_provider():
+    with pytest.raises(ValueError, match="requires a tracer_provider"):
+        OtelPluginConfig(provider_source=ProviderSource.EXPLICIT)
+
+
+def test_tracer_provider_without_explicit_source_raises():
+    # Default source is GLOBAL; a stray tracer_provider would be ignored.
+    with pytest.raises(ValueError, match="only valid with provider_source=EXPLICIT"):
+        OtelPluginConfig(tracer_provider=TracerProvider())
+
+
+def test_global_source_rejects_tracer_provider():
+    with pytest.raises(ValueError, match="only valid with provider_source=EXPLICIT"):
+        OtelPluginConfig(
+            provider_source=ProviderSource.GLOBAL, tracer_provider=TracerProvider()
+        )
 
 
 # ---------------------------------------------------------------------------
