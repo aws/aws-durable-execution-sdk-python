@@ -69,6 +69,17 @@ The workflow runs on the `release: [published]` event, so it fires whenever a re
 
 > **Note:** The workflow builds and publishes all packages in the matrix. Ensure the version in each package's `__about__.py` is correct before publishing. If only one package has a version bump, PyPI will reject the re-upload of the unchanged package (which is expected and harmless since `fail-fast: false` is set).
 
+Releases containing an `otel-v` tag also trigger the
+[`lambda-layer-publish.yml`](.github/workflows/lambda-layer-publish.yml)
+workflow. It builds the SDK and OTel plugin into Lambda layers for each
+supported Python runtime and architecture, then publishes versions of the
+`aws-durable-execution-sdk-python-otel-plugin` layer.
+
+The publishing job uses the `lambda-layer-publish` GitHub environment and its
+`LAYER_PUBLISH_ROLE_ARN` secret. Set the optional `LAYER_PUBLISH_REGIONS`
+environment variable to a comma-separated list of AWS Regions. When unset, the
+workflow publishes to every commercial AWS Region supported by Lambda.
+
 ## Release Notes Format
 
 Release notes should maintain separate timelines for each package. Use the following structure:

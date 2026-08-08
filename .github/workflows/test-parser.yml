@@ -1,13 +1,15 @@
-name: Test Parser
+name: Test GitHub Scripts
 
 on:
   pull_request:
     paths:
+      - '.github/scripts/build_lambda_layer.py'
       - '.github/scripts/parse_sdk_branch.py'
       - '.github/scripts/tests/**'
   push:
     branches: [ main ]
     paths:
+      - '.github/scripts/build_lambda_layer.py'
       - '.github/scripts/parse_sdk_branch.py'
       - '.github/scripts/tests/**'
 
@@ -15,10 +17,16 @@ permissions:
   contents: read
 
 jobs:
-  test-parser:
+  test-scripts:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-    
-    - name: Run parser tests
-      run: python .github/scripts/tests/test_parse_sdk_branch.py
+
+    - name: Install test dependencies
+      run: python -m pip install pytest
+
+    - name: Run script tests
+      run: |
+        python -m pytest \
+          .github/scripts/tests/test_build_lambda_layer.py \
+          .github/scripts/tests/test_parse_sdk_branch.py
