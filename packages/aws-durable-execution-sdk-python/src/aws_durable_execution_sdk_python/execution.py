@@ -31,6 +31,9 @@ from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     PluginExecutor,
 )
+from aws_durable_execution_sdk_python.plugin_discovery import (
+    load_configured_plugins,
+)
 from aws_durable_execution_sdk_python.state import ExecutionState, ReplayStatus
 
 
@@ -194,7 +197,7 @@ def durable_execution(
             stacklevel=2,  # point the warning to the caller of durable_execution
         )
 
-    plugin_executor = PluginExecutor(plugins)
+    plugin_executor = PluginExecutor(load_configured_plugins(plugins))
 
     @plugin_executor.handle_durable_output
     def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:

@@ -2908,6 +2908,27 @@ class _FailingPlugin(DurableInstrumentationPlugin):
         raise RuntimeError("plugin boom")
 
 
+def test_durable_execution_loads_plugins_when_handler_is_initialized():
+    """Configured plugins are resolved once while the decorator initializes."""
+    explicit_plugin = _RecordingPlugin()
+    resolved_plugin = _RecordingPlugin()
+
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.execution.load_configured_plugins",
+            return_value=[explicit_plugin, resolved_plugin],
+        ) as load_plugins,
+        pytest.warns(FutureWarning),
+    ):
+
+        @durable_execution(plugins=[explicit_plugin])
+        def test_handler(event: Any, context: DurableContext) -> dict:
+            return {"result": "success"}
+
+    load_plugins.assert_called_once_with([explicit_plugin])
+    assert callable(test_handler)
+
+
 def test_durable_execution_with_plugins_success():
     """Test that plugins receive invocation start/end and execution end on success."""
     mock_client = Mock(spec=DurableServiceClient)

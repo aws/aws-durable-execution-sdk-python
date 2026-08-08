@@ -29,6 +29,10 @@ dependencies = [
   "opentelemetry-propagator-aws-xray",
 ]
 
+[project.entry-points."aws_durable_execution.plugins"]
+otel-invocation = "aws_durable_execution_sdk_python_otel.plugin_provider:INVOCATION_OTEL_PLUGIN_PROVIDER"
+otel-execution = "aws_durable_execution_sdk_python_otel.plugin_provider:EXECUTION_OTEL_PLUGIN_PROVIDER"
+
 [project.optional-dependencies]
 # Instrumentation used by ExecutionOtelPlugin's auto-configured provider path.
 # Kept optional so the InvocationOtelPlugin (ADOT / global provider) install

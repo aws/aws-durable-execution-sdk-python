@@ -24,6 +24,19 @@ pip install aws-durable-execution-sdk-python-otel
 3. Pass `InvocationOtelPlugin` to your handler's `plugins` list
 4. Add X-Ray write permissions
 
+Alternatively, install this package in the function artifact or a Lambda layer
+and select either OTel plugin by entry-point name:
+
+```text
+DURABLE_EXECUTION_PLUGINS=otel-invocation
+DURABLE_EXECUTION_PLUGINS=otel-execution
+```
+
+`otel-invocation` creates `InvocationOtelPlugin`; `otel-execution` creates
+`ExecutionOtelPlugin`. The SDK discovers the selected package entry point at
+cold start, so the handler does not need to import or explicitly register the
+plugin.
+
 ### 1. ADOT Lambda Layer
 
 This plugin requires the [AWS Distro for OpenTelemetry (ADOT) Lambda layer](https://aws-otel.github.io/docs/getting-started/lambda) to export traces from your Lambda function.
