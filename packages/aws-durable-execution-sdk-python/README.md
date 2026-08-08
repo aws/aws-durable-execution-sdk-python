@@ -27,6 +27,52 @@ Build reliable, long-running AWS Lambda workflows with checkpointed steps, waits
 | `aws-durable-execution-sdk-python` | Execution SDK for Lambda durable functions | [![PyPI - Version](https://img.shields.io/pypi/v/aws-durable-execution-sdk-python.svg)](https://pypi.org/project/aws-durable-execution-sdk-python) |
 | `aws-durable-execution-sdk-python-testing` | Local/cloud test runner and pytest helpers | [![PyPI - Version](https://img.shields.io/pypi/v/aws-durable-execution-sdk-python-testing.svg)](https://pypi.org/project/aws-durable-execution-sdk-python-testing) |
 
+## Dynamic instrumentation plugins
+
+Instrumentation plugins can be selected at Lambda cold start without importing
+them in the function artifact. Install a provider package in the function or a
+Lambda layer, then set an ordered allow-list:
+
+```text
+DURABLE_EXECUTION_PLUGINS=otel-invocation,example_audit
+```
+
+The SDK resolves those names from the `aws_durable_execution.plugins` Python
+entry-point group when the decorated handler is initialized. An unset or blank
+variable preserves the existing behavior. The decorator's `plugins` argument
+remains supported; explicit plugins run first and take precedence when a
+dynamic provider creates the same concrete plugin type.
+
+Provider packages expose a versioned factory:
+
+```python
+from aws_durable_execution_sdk_python.plugin import (
+    DurableInstrumentationPlugin,
+    DurableInstrumentationPluginProvider,
+)
+
+
+class AuditPlugin(DurableInstrumentationPlugin):
+    pass
+
+
+AUDIT_PLUGIN_PROVIDER = DurableInstrumentationPluginProvider(
+    plugin_type=AuditPlugin,
+    factory=AuditPlugin,
+)
+```
+
+Register the provider in the package's `pyproject.toml`:
+
+```toml
+[project.entry-points."aws_durable_execution.plugins"]
+example_audit = "example_audit:AUDIT_PLUGIN_PROVIDER"
+```
+
+Provider names must be unique across installed distributions. Missing,
+ambiguous, incompatible, or invalid providers raise `PluginLoadError` during
+handler initialization with the provider and distribution details.
+
 ## 🚀 Quick Start
 
 Install the execution SDK:
