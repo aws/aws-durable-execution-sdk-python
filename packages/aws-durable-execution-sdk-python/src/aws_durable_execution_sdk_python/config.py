@@ -99,6 +99,77 @@ class NestingType(Enum):
     """
 
 
+class BatchItemStatus(Enum):
+    """The status of a batch item in map/parallel operations."""
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    STARTED = "STARTED"
+
+
+@dataclass(frozen=True)
+class CompletionItemStatus:
+    """Status snapshot of a single branch/item in a batch operation.
+
+    Provided within :class:`CompletionStatus` so custom predicates can
+    inspect individual branch outcomes for quorum-style decisions.
+
+    Attributes:
+        index: The branch/item index (stable across replay).
+        status: Current status as a BatchItemStatus enum value, or None if
+            the branch has not been scheduled yet (common when max_concurrency
+            limits in-flight branches).
+        result: The branch result when succeeded, None otherwise.
+        error_message: The error message when failed, None otherwise.
+    """
+
+    index: int
+    status: BatchItemStatus | None = None
+    result: object | None = None
+    error_message: str | None = None
+
+    @property
+    def is_succeeded(self) -> bool:
+        """True when this branch completed successfully."""
+        return self.status is BatchItemStatus.SUCCEEDED
+
+    @property
+    def is_failed(self) -> bool:
+        """True when this branch failed."""
+        return self.status is BatchItemStatus.FAILED
+
+    @property
+    def is_started(self) -> bool:
+        """True when this branch is actively running or suspended."""
+        return self.status is BatchItemStatus.STARTED
+
+
+@dataclass(frozen=True)
+class CompletionStatus:
+    """Progress snapshot passed to a custom completion predicate.
+
+    Provided to the ``should_complete`` callable on each branch terminal
+    event so the predicate can decide whether the batch should finish early.
+
+    Attributes:
+        success_count: Number of branches that have completed successfully.
+        failure_count: Number of branches that have failed.
+        completed_count: Total terminal branches (success_count + failure_count).
+        total_count: Total number of branches in the batch.
+        items: Per-branch status snapshot ordered by original index. items[i]
+            is always the branch defined at position i, regardless of
+            completion order. Enables index-based quorum rules such as
+            "complete when branch 0 succeeds OR branches 1 and 2 both
+            succeed".
+    """
+
+    success_count: int
+    failure_count: int
+    completed_count: int
+    total_count: int
+    items: tuple[CompletionItemStatus, ...] = ()
+
+
 @dataclass(frozen=True)
 class CompletionConfig:
     """Configuration for determining when parallel/map operations complete.
@@ -119,8 +190,22 @@ class CompletionConfig:
             (0.0 to 100.0). If None, no percentage limit is enforced.
             Use this to implement "fail if more than X% fail" semantics.
 
+        should_complete: Optional predicate for custom completion logic. When
+            provided, the predicate takes full precedence over the threshold
+            fields (min_successful, tolerated_failure_count,
+            tolerated_failure_percentage are ignored). The predicate receives a
+            CompletionStatus snapshot and returns True to complete the batch
+            early, or False to continue. The batch still completes once every
+            item finishes regardless of the predicate's return value.
+
+            The predicate must be deterministic and side-effect-free. It
+            may be called multiple times per invocation and across
+            re-invocations (suspend/resume). It must depend only on the
+            CompletionStatus provided, never on external state.
+
     Note:
         The operation completes when any of the completion criteria are met:
+        - Custom predicate returns True (when should_complete is provided)
         - Enough successes (min_successful reached)
         - Too many failures (tolerated limits exceeded)
         - All items/branches completed
@@ -131,11 +216,17 @@ class CompletionConfig:
             min_successful=3,
             tolerated_failure_count=2
         )
+
+        # Custom predicate: stop once 2 successes are observed
+        config = CompletionConfig(
+            should_complete=lambda status: status.success_count >= 2
+        )
     """
 
     min_successful: int | None = None
     tolerated_failure_count: int | None = None
     tolerated_failure_percentage: int | float | None = None
+    should_complete: Callable[[CompletionStatus], bool] | None = None
 
     def __post_init__(self) -> None:
         if self.min_successful is not None and self.min_successful < 1:
@@ -158,6 +249,9 @@ class CompletionConfig:
                 f"{self.tolerated_failure_percentage}"
             )
             raise ValidationError(msg)
+        if self.should_complete is not None and not callable(self.should_complete):
+            msg = "should_complete must be callable"
+            raise ValidationError(msg)
 
     def _validate_for_total(self, total: int) -> None:
         """Validate this config against the number of items it will govern.
@@ -166,7 +260,12 @@ class CompletionConfig:
         before the operation's child context starts, so the error surfaces as
         a bare ValidationError (matching wait and wait_for_condition
         validation) instead of a checkpointed operation failure.
+
+        When should_complete is set the predicate takes full precedence and
+        threshold fields are ignored, so threshold validation is skipped.
         """
+        if self.should_complete is not None:
+            return
         if self.min_successful is not None and self.min_successful > total:
             msg = (
                 f"min_successful cannot be greater than total items: "

@@ -22,6 +22,7 @@ from aws_durable_execution_sdk_python.concurrency.models import (
 )
 from aws_durable_execution_sdk_python.config import (
     CompletionConfig,
+    CompletionStatus,
     NestingType,
     ParallelConfig,
 )
@@ -1475,3 +1476,91 @@ def test_parallel_handler_defaults_summary_generator_for_user_config():
     assert captured_configs[0].summary_generator is None
     assert captured_configs[0].max_concurrency == 3
     assert result.total_count == 0
+
+
+# region Custom completion predicate (should_complete) tests
+
+
+def test_parallel_handler_with_should_complete_predicate():
+    """Test parallel_handler passes should_complete through to executor."""
+    callables = [
+        lambda ctx: "result_a",
+        lambda ctx: "result_b",
+        lambda ctx: "result_c",
+        lambda ctx: "result_d",
+    ]
+
+    def predicate(s: CompletionStatus) -> bool:
+        return s.success_count >= 2
+
+    config: ParallelConfig = ParallelConfig(
+        max_concurrency=1,
+        completion_config=CompletionConfig(should_complete=predicate),
+    )
+
+    mock_batch_result: BatchResult = BatchResult(
+        all=[
+            BatchItem(index=0, status=BatchItemStatus.SUCCEEDED, result="result_a"),
+            BatchItem(index=1, status=BatchItemStatus.SUCCEEDED, result="result_b"),
+            BatchItem(index=2, status=BatchItemStatus.STARTED),
+            BatchItem(index=3, status=BatchItemStatus.STARTED),
+        ],
+        completion_reason=CompletionReason.CUSTOM_COMPLETION,
+    )
+
+    executor_context = Mock()
+
+    with patch.object(
+        ParallelExecutor, "execute", return_value=mock_batch_result
+    ) as mock_execute:
+
+        class MockExecutionState:
+            def register_branch_pool(self, pool):
+                pass
+
+            def get_checkpoint_result(self, operation_id):
+                mock_result = Mock()
+                mock_result.is_succeeded.return_value = False
+                return mock_result
+
+        execution_state = MockExecutionState()
+        operation_identifier: OperationIdentifier = OperationIdentifier(
+            "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        )
+
+        result: BatchResult = parallel_handler(
+            callables,
+            config,
+            execution_state,
+            executor_context,
+            operation_identifier,
+            operation_id_namespace=_StubNamespace(),
+        )
+
+        mock_execute.assert_called_once()
+        assert result.completion_reason is CompletionReason.CUSTOM_COMPLETION
+        assert result.success_count == 2
+
+
+def test_parallel_executor_from_callables_preserves_should_complete():
+    """Test ParallelExecutor.from_callables passes should_complete to the policy."""
+
+    def predicate(s: CompletionStatus) -> bool:
+        return s.success_count >= 1
+
+    config: ParallelConfig = ParallelConfig(
+        completion_config=CompletionConfig(should_complete=predicate),
+    )
+
+    callables = [lambda ctx: "a", lambda ctx: "b"]
+
+    executor: ParallelExecutor = ParallelExecutor.from_callables(
+        callables,
+        config,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+    assert executor.policy.should_complete is predicate
+
+
+# endregion Custom completion predicate (should_complete) tests
