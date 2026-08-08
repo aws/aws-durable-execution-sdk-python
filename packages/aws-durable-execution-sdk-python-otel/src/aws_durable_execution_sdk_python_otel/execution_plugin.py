@@ -62,6 +62,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
 )
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     OtelPluginConfig,
+    ProviderSource,
 )
 from aws_durable_execution_sdk_python_otel.instrumentations import (
     register_standalone_instrumentations,
@@ -92,7 +93,8 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
 
     Args:
         config: Shared plugin configuration. When omitted, defaults are used
-            (auto-configured provider, X-Ray extractor, "Workflow" root span).
+            (globally configured provider, X-Ray extractor, "Workflow" root
+            span).
     """
 
     def __init__(self, config: OtelPluginConfig | None = None) -> None:
@@ -101,16 +103,17 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             self._config.context_extractor or xray_context_extractor
         )
         self._workflow_span_name = self._config.workflow_span_name
-        self._use_default = bool(self._config.use_default_tracer_provider)
 
         self._id_generator = DeterministicIdGenerator()
         result = create_tracer_provider(
             self._config,
             id_generator=self._id_generator,
-            default_use_global=False,
         )
         self._provider = result.tracer_provider
-        self._owns_provider = result.owns_provider
+        # GLOBAL (ADOT) mode parents the Invocation span to the ambient Lambda
+        # invocation span instead of the Workflow span (see
+        # _start_invocation_span).
+        self._provider_source = result.source
 
         # Deterministic stitching requires an SDK provider exposing id_generator.
         from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
@@ -129,12 +132,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._tracer: Tracer = self._provider.get_tracer(self._config.instrument_name)
 
         try:
-            register_standalone_instrumentations(
-                self._config,
-                self._provider if self._owns_provider else None,
-                owns_provider=self._owns_provider,
-                use_default_tracer_provider=self._use_default,
-            )
+            register_standalone_instrumentations(self._config, result)
         except Exception:
             logger.exception("Failed to register standalone instrumentations")
 
@@ -244,7 +242,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     def _start_invocation_span(self, info: InvocationStartInfo) -> None:
         self._id_generator.set_next_span_id(None)
         attributes: dict[str, Any]
-        if self._use_default:
+        if self._provider_source is ProviderSource.GLOBAL:
             # Default-provider mode: parent the Invocation span to the ambient
             # Lambda invocation span (from the ADOT layer or other
             # auto-instrumentation), which is still the active context here (the

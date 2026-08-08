@@ -54,6 +54,12 @@ again on every replay. This implies four rules:
 See [Determinism and Replay](https://docs.aws.amazon.com/durable-execution/patterns/best-practices/determinism/)
 for worked examples.
 
+## Testing Requirements
+
+All changes MUST include related tests. At minimum, include **unit tests**. Include **e2e integration tests** (in the `tests/e2e/` directory) when the change affects cross-component behavior, public API surfaces, or end-to-end workflows. For isolated bug fixes where a unit test alone sufficiently covers the fix, integration tests are not required.
+
+Do NOT add or modify **conformance tests** without coordinating with the team. Conformance test requirements and the runner live in a separate repository ([aws-durable-execution-conformance-tests](https://github.com/aws/aws-durable-execution-conformance-tests)). The Python handlers live in-repo under `packages/aws-durable-execution-sdk-python-conformance-tests/`, but new requirement IDs must first be registered upstream. If a change warrants a new conformance test, note it in the PR description or [open an issue](https://github.com/aws/aws-durable-execution-conformance-tests/issues/new?template=new_requirement.yml) in that repository.
+
 ## Working in this repository
 
 - Packages live under `packages/`: the core SDK

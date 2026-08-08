@@ -1,13 +1,13 @@
 """Shared TracerProvider factory for the durable-execution OTel plugins.
 
-Implements the 3-level provider resolution used by both plugins:
+Builds the tracer provider selected by the config's
+:class:`~aws_durable_execution_sdk_python_otel.otel_plugin_config.ProviderSource`:
 
-1. An explicit ``tracer_provider`` in config is used as-is (``owns_provider=False``).
-2. Otherwise, when ``use_default_tracer_provider`` resolves to True, the globally
-   configured provider is used (``owns_provider=False``).
-3. Otherwise a fully auto-configured SDK provider is created with an OTLP
-   exporter, batch processor, sampler and Lambda resource attributes
-   (``owns_provider=True``).
+1. ``EXPLICIT``  - the config's ``tracer_provider`` is used as-is.
+2. ``GLOBAL``    - the globally configured provider is used (e.g. ADOT layer).
+3. ``AUTO_OTLP`` - a fully auto-configured SDK provider is created with an OTLP
+   exporter, batch processor, sampler and Lambda resource attributes; this is
+   the only tier the plugin owns/flushes.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from opentelemetry.propagators.composite import CompositePropagator
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     DEFAULT_OTLP_ENDPOINT,
     OtelPluginConfig,
+    ProviderSource,
 )
 
 
@@ -40,10 +41,15 @@ OTLP_ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"
 
 @dataclass
 class ProviderResult:
-    """Result of provider resolution: the provider and whether we own it."""
+    """Result of provider resolution: the provider and how it was chosen.
+
+    ``source`` is the single value callers key their instrumentation/flush
+    decisions off; the plugin owns (and flushes) the provider only when it is
+    :attr:`ProviderSource.AUTO_OTLP`.
+    """
 
     tracer_provider: TracerProvider
-    owns_provider: bool
+    source: ProviderSource
 
 
 def _resolve_endpoint(config: OtelPluginConfig) -> str:
@@ -151,31 +157,37 @@ def create_tracer_provider(
     config: OtelPluginConfig,
     *,
     id_generator: IdGenerator | None = None,
-    default_use_global: bool = False,
 ) -> ProviderResult:
-    """Resolve a TracerProvider using the shared 3-level priority.
+    """Resolve a TracerProvider from the config's :attr:`provider_source`.
+
+    A straight switch on ``config.provider_source``; the chosen tier is reported
+    back as :class:`ProviderSource` so callers make the instrumentation/flush
+    decision off a single value:
+
+    1. ``EXPLICIT``  -> ``config.tracer_provider`` used as-is
+    2. ``GLOBAL``    -> the globally configured provider
+    3. ``AUTO_OTLP`` -> a plugin-owned, auto-configured OTLP provider
 
     Args:
         config: Shared plugin configuration.
         id_generator: Deterministic ID generator injected into an
             auto-configured provider so cross-invocation trace stitching works.
-        default_use_global: The value ``use_default_tracer_provider`` defaults to
-            when it is unset in config. ``ExecutionOtelPlugin`` passes ``False``;
-            ``InvocationOtelPlugin`` passes ``True`` to preserve its historical
-            behaviour of using the global provider.
 
     Returns:
         A :class:`ProviderResult`.
     """
-    if config.tracer_provider is not None:
-        # Explicit provider: use as-is, never wrap/modify.
-        return ProviderResult(config.tracer_provider, False)
+    source = config.provider_source
 
-    use_default = config.use_default_tracer_provider
-    if use_default is None:
-        use_default = default_use_global
+    if source is ProviderSource.EXPLICIT:
+        # Explicit provider: use as-is, never wrap/modify. OtelPluginConfig
+        # validation guarantees tracer_provider is set for EXPLICIT.
+        assert config.tracer_provider is not None
+        provider: TracerProvider = config.tracer_provider
+    elif source is ProviderSource.GLOBAL:
+        provider = trace.get_tracer_provider()
+    elif source is ProviderSource.AUTO_OTLP:
+        provider = _create_auto_provider(config, id_generator)
+    else:  # pragma: no cover - exhaustive over ProviderSource
+        raise ValueError(f"unknown provider_source: {source!r}")
 
-    if use_default:
-        return ProviderResult(trace.get_tracer_provider(), False)
-
-    return ProviderResult(_create_auto_provider(config, id_generator), True)
+    return ProviderResult(provider, source)

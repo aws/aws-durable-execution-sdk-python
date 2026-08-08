@@ -82,12 +82,3 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist/
-
-  notify-release:
-    if: always() && contains(needs.pypi-publish.result, 'success')
-    needs: [pypi-publish]
-    uses: ./.github/workflows/notify-release.yml
-    with:
-      tag_name: ${{ github.event.release.tag_name }}
-      release_url: ${{ github.event.release.html_url }}
-    secrets: inherit
