@@ -72,13 +72,15 @@ The workflow runs on the `release: [published]` event, so it fires whenever a re
 Releases containing an `otel-v` tag also trigger the
 [`lambda-layer-publish.yml`](.github/workflows/lambda-layer-publish.yml)
 workflow. It builds the SDK and OTel plugin into Lambda layers for each
-supported Python runtime and architecture, then publishes versions of the
+supported Python runtime and architecture, then publishes public versions of the
 `aws-durable-execution-sdk-python-otel-plugin` layer.
 
 The publishing job uses the `lambda-layer-publish` GitHub environment and its
 `LAYER_PUBLISH_ROLE_ARN` secret. Set the optional `LAYER_PUBLISH_REGIONS`
 environment variable to a comma-separated list of AWS Regions. When unset, the
 workflow publishes to every commercial AWS Region supported by Lambda.
+The publishing role must allow `lambda:PublishLayerVersion` and
+`lambda:AddLayerVersionPermission`.
 
 ## Release Notes Format
 

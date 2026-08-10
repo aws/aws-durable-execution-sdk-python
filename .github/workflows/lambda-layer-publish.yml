@@ -206,7 +206,7 @@ jobs:
               continue
             fi
 
-            LAYER_VERSION_ARN=$(aws lambda publish-layer-version \
+            PUBLISH_RESULT=$(aws lambda publish-layer-version \
               --layer-name "$LAYER_NAME" \
               --description "AWS Durable Execution SDK ${SDK_VERSION} OTel plugin ${OTEL_VERSION} (${{ matrix.runtime }}/${{ matrix.architecture }})" \
               --zip-file "fileb://${LAYER_ZIP}" \
@@ -214,8 +214,18 @@ jobs:
               --compatible-architectures "${{ matrix.architecture }}" \
               --license-info Apache-2.0 \
               --region "$REGION" \
-              --query LayerVersionArn \
+              --query '[LayerVersionArn,Version]' \
               --output text)
+            read -r LAYER_VERSION_ARN VERSION_NUMBER <<< "$PUBLISH_RESULT"
+
+            aws lambda add-layer-version-permission \
+              --layer-name "$LAYER_NAME" \
+              --version-number "$VERSION_NUMBER" \
+              --statement-id public-layer-access \
+              --action lambda:GetLayerVersion \
+              --principal "*" \
+              --region "$REGION" \
+              > /dev/null
 
             echo "Published ${LAYER_VERSION_ARN}"
             echo "- \`${LAYER_VERSION_ARN}\`" >> "$GITHUB_STEP_SUMMARY"
