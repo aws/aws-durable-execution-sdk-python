@@ -310,6 +310,7 @@ def durable_execution(
                 # a plugin actually reads it.
                 operations_provider=lambda: execution_state.operations,
                 updated_operation_ids=invocation_input.updated_operation_ids,
+                execution_input=input_event,
             )
             # Thread 1: Run background checkpoint processing
             executor.submit(execution_state.checkpoint_batches_forever)

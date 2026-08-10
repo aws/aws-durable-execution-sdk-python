@@ -148,6 +148,53 @@ class TestDataClasses(unittest.TestCase):
         self.assertEqual(INVOCATION_END_INFO.status, InvocationStatus.FAILED)
         self.assertEqual(INVOCATION_END_INFO.error.message, "boom")
 
+    def test_invocation_info_payload_fields_default_to_none(self):
+        """Both payload surfaces default to None for backward compatibility."""
+        self.assertIsNone(INVOCATION_START_INFO.execution_input)
+        self.assertIsNone(INVOCATION_END_INFO.execution_input)
+        self.assertIsNone(INVOCATION_END_INFO.execution_result)
+
+    def test_invocation_start_info_carries_execution_input(self):
+        info = InvocationStartInfo(
+            request_id="req-1",
+            execution_arn="arn:test",
+            is_first_invocation=True,
+            execution_input={"order": 7},
+        )
+
+        self.assertEqual({"order": 7}, info.execution_input)
+
+    def test_invocation_end_info_carries_input_and_result(self):
+        """The end factory forwards the input and picks up the output result."""
+        start = InvocationStartInfo(
+            request_id="req-1",
+            execution_arn="arn:test",
+            is_first_invocation=False,
+            execution_input={"order": 7},
+        )
+        output = DurableExecutionInvocationOutput(
+            status=InvocationStatus.SUCCEEDED, result='"done"', error=None
+        )
+
+        end = InvocationEndInfo.from_durable_execution_invocation_output(start, output)
+
+        self.assertEqual({"order": 7}, end.execution_input)
+        self.assertEqual('"done"', end.execution_result)
+
+    def test_invocation_end_info_has_no_result_when_suspended(self):
+        start = InvocationStartInfo(
+            request_id="req-1",
+            execution_arn="arn:test",
+            is_first_invocation=True,
+        )
+        output = DurableExecutionInvocationOutput(
+            status=InvocationStatus.PENDING, result=None, error=None
+        )
+
+        end = InvocationEndInfo.from_durable_execution_invocation_output(start, output)
+
+        self.assertIsNone(end.execution_result)
+
     def test_invocation_info_operation_maps_default_to_empty(self):
         """Both maps default to empty so existing constructor calls keep working."""
         self.assertEqual({}, INVOCATION_START_INFO.operations)
@@ -587,8 +634,8 @@ class TestPluginExecutorOnInvocationEnd(unittest.TestCase):
         self.assertIn("invocation_end:req-1", self.plugin.calls)
 
 
-class TestInvocationHookOperationMaps(unittest.TestCase):
-    """Tests for the operations / updated_operations maps on invocation hooks."""
+class TestInvocationHookInfoFields(unittest.TestCase):
+    """Tests for the operation maps and payload fields on invocation hooks."""
 
     def setUp(self):
         self.captured: list[object] = []
@@ -775,6 +822,46 @@ class TestInvocationHookOperationMaps(unittest.TestCase):
             self.assertIsNotNone(self.executor._operations_provider)  # noqa: SLF001
 
         self.assertIsNone(self.executor._operations_provider)  # noqa: SLF001
+
+    def test_execution_input_reaches_both_hooks(self):
+        with self.executor.run():
+            self.executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+                execution_input={"order": 7},
+            )
+            self.executor.on_invocation_end(
+                output=DurableExecutionInvocationOutput(
+                    status=InvocationStatus.SUCCEEDED, result='"done"', error=None
+                )
+            )
+
+        start_info, end_info = self.captured
+        self.assertEqual({"order": 7}, start_info.execution_input)
+        # The end info inherits the input and adds the result.
+        self.assertEqual({"order": 7}, end_info.execution_input)
+        self.assertEqual('"done"', end_info.execution_result)
+
+    def test_suspending_invocation_end_has_no_result(self):
+        with self.executor.run():
+            self.executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+                execution_input="abc",
+            )
+            self.executor.on_invocation_end(
+                output=DurableExecutionInvocationOutput(
+                    status=InvocationStatus.PENDING, result=None, error=None
+                )
+            )
+
+        _, end_info = self.captured
+        self.assertEqual("abc", end_info.execution_input)
+        self.assertIsNone(end_info.execution_result)
 
 
 class TestPluginExecutorOnOperationAction(unittest.TestCase):

@@ -248,6 +248,13 @@ class InvocationInfo:
     end of the invocation on ``on_invocation_end``. Empty on the very first
     invocation-start, before any operation has been checkpointed.
     """
+    execution_input: Any = field(default=None, kw_only=True)
+    """EXPERIMENTAL: the deserialized input the execution was started with.
+
+    The same value the durable handler receives as its ``event`` argument,
+    parsed from the execution's stored input payload. ``None`` when the
+    execution has no input payload, or when the info was built without one.
+    """
 
 
 @dataclass(frozen=True)
@@ -269,6 +276,13 @@ class InvocationStartInfo(InvocationInfo):
 class InvocationEndInfo(InvocationInfo):
     status: InvocationStatus = field(kw_only=True)
     error: ErrorObject | None = None
+    execution_result: str | None = field(default=None, kw_only=True)
+    """EXPERIMENTAL: the serialized result of the execution, when it produced one.
+
+    Taken from the invocation output's ``Result``. ``None`` when the invocation
+    suspended or failed instead of completing, and an empty string when the
+    result was too large to inline and was checkpointed separately.
+    """
 
     @classmethod
     def from_durable_execution_invocation_output(
@@ -289,6 +303,8 @@ class InvocationEndInfo(InvocationInfo):
                 if operations is not None
                 else invocation_start_info.operations
             ),
+            execution_input=invocation_start_info.execution_input,
+            execution_result=output.result,
             status=output.status,
             error=output.error,
         )
@@ -453,6 +469,7 @@ class PluginExecutor:
         lambda_context: LambdaContext | None,
         operations_provider: Callable[[], Mapping[str, Operation]] | None = None,
         updated_operation_ids: Sequence[str] | None = None,
+        execution_input: Any = None,
     ) -> None:
         """Fire the invocation-start hook.
 
@@ -466,6 +483,7 @@ class PluginExecutor:
                 ``OperationInfo`` view is deferred to first access.
             updated_operation_ids: Operation ids from the invocation input's
                 ``UpdatedOperationIds`` -- those updated while suspended.
+            execution_input: The deserialized execution input event.
         """
         aws_request_id = lambda_context.aws_request_id if lambda_context else None
         self._operations_provider = operations_provider
@@ -476,6 +494,7 @@ class PluginExecutor:
             is_first_invocation=is_first_invocation,
             execution_start_time=execution_start_time,
             operations=operations,
+            execution_input=execution_input,
             updated_operations=_LazyOperationInfoMap(
                 lambda: {
                     operation_id: operations[operation_id]
