@@ -1,7 +1,7 @@
 import datetime
 import logging
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -147,6 +147,69 @@ class TestDataClasses(unittest.TestCase):
         self.assertFalse(INVOCATION_END_INFO.is_first_invocation)
         self.assertEqual(INVOCATION_END_INFO.status, InvocationStatus.FAILED)
         self.assertEqual(INVOCATION_END_INFO.error.message, "boom")
+
+    def test_invocation_info_operation_maps_default_to_empty(self):
+        """Both maps default to empty so existing constructor calls keep working."""
+        self.assertEqual({}, INVOCATION_START_INFO.operations)
+        self.assertEqual({}, INVOCATION_START_INFO.updated_operations)
+        self.assertEqual({}, INVOCATION_END_INFO.operations)
+
+    def test_invocation_start_info_carries_operation_maps(self):
+        info = InvocationStartInfo(
+            request_id="req-1",
+            execution_arn="arn:test",
+            is_first_invocation=False,
+            operations={"op-1": OPERATION_END_INFO, "op-2": OPERATION_START_INFO},
+            updated_operations={"op-1": OPERATION_END_INFO},
+        )
+
+        self.assertEqual(
+            {"op-1": OPERATION_END_INFO, "op-2": OPERATION_START_INFO},
+            info.operations,
+        )
+        self.assertEqual({"op-1": OPERATION_END_INFO}, info.updated_operations)
+
+    def test_invocation_end_info_inherits_start_operations(self):
+        """The end factory reuses the start snapshot when given no override."""
+        start = InvocationStartInfo(
+            request_id="req-1",
+            execution_arn="arn:test",
+            is_first_invocation=True,
+            operations={"op-1": OPERATION_END_INFO},
+            updated_operations={"op-1": OPERATION_END_INFO},
+        )
+        output = DurableExecutionInvocationOutput(
+            status=InvocationStatus.SUCCEEDED, result=None, error=None
+        )
+
+        end = InvocationEndInfo.from_durable_execution_invocation_output(start, output)
+
+        self.assertEqual({"op-1": OPERATION_END_INFO}, end.operations)
+        # updated_operations is a start-hook-only surface.
+        self.assertFalse(hasattr(end, "updated_operations"))
+
+    def test_invocation_end_info_accepts_fresher_operations(self):
+        """An explicit map wins, letting the end hook see end-of-invocation state."""
+        start = InvocationStartInfo(
+            request_id="req-1",
+            execution_arn="arn:test",
+            is_first_invocation=True,
+            operations={"op-1": OPERATION_START_INFO},
+        )
+        output = DurableExecutionInvocationOutput(
+            status=InvocationStatus.SUCCEEDED, result=None, error=None
+        )
+
+        end = InvocationEndInfo.from_durable_execution_invocation_output(
+            start,
+            output,
+            operations={"op-1": OPERATION_END_INFO, "op-2": OPERATION_START_INFO},
+        )
+
+        self.assertEqual(
+            {"op-1": OPERATION_END_INFO, "op-2": OPERATION_START_INFO},
+            end.operations,
+        )
 
     def test_user_function_start_info(self):
         self.assertEqual(USER_FUNCTION_START_INFO.operation_id, "op-1")
@@ -522,6 +585,196 @@ class TestPluginExecutorOnInvocationEnd(unittest.TestCase):
             )
 
         self.assertIn("invocation_end:req-1", self.plugin.calls)
+
+
+class TestInvocationHookOperationMaps(unittest.TestCase):
+    """Tests for the operations / updated_operations maps on invocation hooks."""
+
+    def setUp(self):
+        self.captured: list[object] = []
+
+        class _CapturingPlugin(DurableInstrumentationPlugin):
+            def on_invocation_start(_self, info):  # noqa: N805
+                self.captured.append(info)
+
+            def on_invocation_end(_self, info):  # noqa: N805
+                self.captured.append(info)
+
+        self.executor = PluginExecutor(plugins=[_CapturingPlugin()])
+
+    @staticmethod
+    def _operation(operation_id, status=OperationStatus.SUCCEEDED):
+        return Operation(
+            operation_id=operation_id,
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name=f"name-{operation_id}",
+            parent_id="root",
+            status=status,
+            start_timestamp=START_TS,
+            end_timestamp=END_TS,
+            step_details=StepDetails(attempt=1),
+        )
+
+    def _start(self, *, operations=None, updated_operation_ids=None):
+        self.executor.on_invocation_start(
+            execution_arn="arn:exec",
+            lambda_context=LAMBDA_CTX,
+            execution_start_time=START_TS,
+            is_first_invocation=False,
+            operations_provider=(lambda: operations)
+            if operations is not None
+            else None,
+            updated_operation_ids=updated_operation_ids,
+        )
+
+    def test_start_info_converts_operations_to_operation_info(self):
+        operations = {"op-1": self._operation("op-1")}
+
+        with self.executor.run():
+            self._start(operations=operations)
+
+        (start_info,) = self.captured
+        self.assertEqual(["op-1"], list(start_info.operations))
+        converted = start_info.operations["op-1"]
+        self.assertIsInstance(converted, OperationInfo)
+        self.assertEqual("op-1", converted.operation_id)
+        self.assertEqual(OperationStatus.SUCCEEDED, converted.status)
+        self.assertEqual(START_TS, converted.start_time)
+        self.assertEqual(END_TS, converted.end_time)
+        self.assertEqual(1, converted.attempt)
+        # Stored state, not a replay event for the operation.
+        self.assertFalse(converted.is_replayed)
+
+    def test_updated_operations_is_the_subset_named_by_updated_ids(self):
+        operations = {
+            "op-1": self._operation("op-1"),
+            "op-2": self._operation("op-2"),
+        }
+
+        with self.executor.run():
+            self._start(operations=operations, updated_operation_ids=["op-2"])
+
+        (start_info,) = self.captured
+        self.assertEqual(2, len(start_info.operations))
+        self.assertEqual(["op-2"], list(start_info.updated_operations))
+        # Same converted instance as in the full map, not a second conversion.
+        self.assertIs(
+            start_info.operations["op-2"], start_info.updated_operations["op-2"]
+        )
+
+    def test_updated_ids_absent_from_the_map_are_skipped(self):
+        operations = {"op-1": self._operation("op-1")}
+
+        with self.executor.run():
+            self._start(
+                operations=operations, updated_operation_ids=["op-1", "op-missing"]
+            )
+
+        (start_info,) = self.captured
+        self.assertEqual(["op-1"], list(start_info.updated_operations))
+
+    def test_first_invocation_has_empty_maps(self):
+        with self.executor.run():
+            self._start(operations={}, updated_operation_ids=[])
+
+        (start_info,) = self.captured
+        self.assertEqual({}, start_info.operations)
+        self.assertEqual({}, start_info.updated_operations)
+
+    def test_missing_provider_yields_empty_maps(self):
+        """Callers that supply no provider still get a usable, empty map."""
+        with self.executor.run():
+            self._start()
+            self.executor.on_invocation_end(
+                output=DurableExecutionInvocationOutput(
+                    status=InvocationStatus.SUCCEEDED, result=None, error=None
+                )
+            )
+
+        start_info, end_info = self.captured
+        self.assertEqual({}, start_info.operations)
+        self.assertEqual({}, start_info.updated_operations)
+        self.assertEqual({}, end_info.operations)
+
+    def test_operation_info_conversion_is_deferred_and_cached(self):
+        conversions: list[str] = []
+        real_from_operation = OperationInfo.from_operation
+
+        def counting(operation, **kwargs):
+            conversions.append(operation.operation_id)
+            return real_from_operation(operation, **kwargs)
+
+        with (
+            patch.object(OperationInfo, "from_operation", staticmethod(counting)),
+            self.executor.run(),
+        ):
+            self._start(operations={"op-1": self._operation("op-1")})
+            # Nothing read the map inside the hook, so nothing was converted.
+            self.assertEqual([], conversions)
+
+            (start_info,) = self.captured
+            self.assertEqual(1, len(start_info.operations))
+            self.assertEqual(["op-1"], conversions)
+            # Repeated reads reuse the cached conversion.
+            self.assertEqual(["op-1"], list(start_info.operations))
+            self.assertIn("op-1", start_info.operations)
+            self.assertEqual(["op-1"], conversions)
+
+    def test_end_info_reflects_operations_added_during_the_invocation(self):
+        operations = {"op-1": self._operation("op-1")}
+
+        with self.executor.run():
+            self.executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+                operations_provider=lambda: operations,
+            )
+            operations["op-2"] = self._operation("op-2")
+            self.executor.on_invocation_end(
+                output=DurableExecutionInvocationOutput(
+                    status=InvocationStatus.SUCCEEDED, result=None, error=None
+                )
+            )
+
+        start_info, end_info = self.captured
+        self.assertEqual(["op-1", "op-2"], sorted(end_info.operations))
+        # The start map is snapshotted at its hook, so a later checkpoint does
+        # not retroactively change what the start hook reported.
+        self.assertEqual(["op-1"], sorted(start_info.operations))
+
+    def test_failing_provider_degrades_to_an_empty_map(self):
+        def provider():
+            raise RuntimeError("boom")
+
+        with (
+            self.executor.run(),
+            self.assertLogs(
+                "aws_durable_execution_sdk_python.plugin", level="ERROR"
+            ) as logs,
+        ):
+            self.executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+                operations_provider=provider,
+                updated_operation_ids=["op-1"],
+            )
+
+        self.assertTrue(any("Failed to snapshot operations" in m for m in logs.output))
+        (start_info,) = self.captured
+        self.assertEqual(0, len(start_info.operations))
+        self.assertEqual(0, len(start_info.updated_operations))
+
+    def test_provider_is_released_when_the_run_scope_exits(self):
+        with self.executor.run():
+            self._start(operations={"op-1": self._operation("op-1")})
+            self.assertIsNotNone(self.executor._operations_provider)  # noqa: SLF001
+
+        self.assertIsNone(self.executor._operations_provider)  # noqa: SLF001
 
 
 class TestPluginExecutorOnOperationAction(unittest.TestCase):

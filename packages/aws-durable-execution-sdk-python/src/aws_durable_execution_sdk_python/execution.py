@@ -304,6 +304,12 @@ def durable_execution(
                     else None
                 ),
                 is_first_invocation=not has_prior_operations,
+                # Read the map through a callable rather than snapshotting it
+                # here: the invocation-end hook needs the state as of the end of
+                # the invocation, and neither hook pays for the conversion until
+                # a plugin actually reads it.
+                operations_provider=lambda: execution_state.operations,
+                updated_operation_ids=invocation_input.updated_operation_ids,
             )
             # Thread 1: Run background checkpoint processing
             executor.submit(execution_state.checkpoint_batches_forever)
