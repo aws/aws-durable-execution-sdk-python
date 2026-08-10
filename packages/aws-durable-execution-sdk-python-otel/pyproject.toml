@@ -22,12 +22,16 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
-  "aws-durable-execution-sdk-python>=1.5.0",
+  "aws-durable-execution-sdk-python>=1.8.0",
   "opentelemetry-api>=1.20.0",
   "opentelemetry-sdk>=1.20.0",
   "opentelemetry-exporter-otlp",
   "opentelemetry-propagator-aws-xray",
 ]
+
+[project.entry-points."aws_durable_execution.plugins"]
+otel-invocation = "aws_durable_execution_sdk_python_otel.plugin_provider:INVOCATION_OTEL_PLUGIN_PROVIDER"
+otel-execution = "aws_durable_execution_sdk_python_otel.plugin_provider:EXECUTION_OTEL_PLUGIN_PROVIDER"
 
 [project.optional-dependencies]
 # Instrumentation used by ExecutionOtelPlugin's auto-configured provider path.
