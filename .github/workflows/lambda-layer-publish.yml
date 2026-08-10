@@ -1,0 +1,389 @@
+name: Publish OTel Plugin Lambda Layer
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      regions:
+        description: "Comma-separated AWS Regions; defaults to all commercial Regions"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lambda-layer-publish-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  LAYER_NAME: aws-durable-execution-sdk-python-otel-plugin
+  SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.event.release.tag_name }}
+  DEFAULT_LAYER_REGIONS: >-
+    af-south-1,
+    ap-east-1,
+    ap-east-2,
+    ap-northeast-1,
+    ap-northeast-2,
+    ap-northeast-3,
+    ap-south-1,
+    ap-south-2,
+    ap-southeast-1,
+    ap-southeast-2,
+    ap-southeast-3,
+    ap-southeast-4,
+    ap-southeast-5,
+    ap-southeast-6,
+    ap-southeast-7,
+    ca-central-1,
+    ca-west-1,
+    eu-central-1,
+    eu-central-2,
+    eu-north-1,
+    eu-south-1,
+    eu-south-2,
+    eu-west-1,
+    eu-west-2,
+    eu-west-3,
+    il-central-1,
+    me-central-1,
+    me-south-1,
+    mx-central-1,
+    sa-east-1,
+    us-east-1,
+    us-east-2,
+    us-west-1,
+    us-west-2
+
+jobs:
+  build-distributions:
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main') ||
+      contains(github.event.release.tag_name, 'otel-v')
+    runs-on: ubuntu-latest
+    outputs:
+      sdk_version: ${{ steps.versions.outputs.sdk_version }}
+      otel_version: ${{ steps.versions.outputs.otel_version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install Hatch
+        run: python -m pip install --upgrade hatch==1.16.5
+
+      - name: Read package versions
+        id: versions
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          SOURCE_SDK_VERSION=$(grep "^__version__" packages/aws-durable-execution-sdk-python/src/aws_durable_execution_sdk_python/__about__.py | cut -d'"' -f2)
+          OTEL_VERSION=$(grep "^__version__" packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel/__about__.py | cut -d'"' -f2)
+          SDK_VERSION=$(python .github/scripts/resolve_layer_sdk_version.py \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --release-tag "$RELEASE_TAG" \
+            --source-sdk-version "$SOURCE_SDK_VERSION" \
+            --metadata .github/lambda-layer-publish.toml)
+          echo "sdk_version=${SDK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "otel_version=${OTEL_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build SDK distribution
+        if: >-
+          github.event_name == 'workflow_dispatch' ||
+          contains(github.event.release.tag_name, 'sdk-v')
+        working-directory: packages/aws-durable-execution-sdk-python
+        run: hatch build
+
+      - name: Download published SDK distribution
+        if: >-
+          github.event_name == 'release' &&
+          !contains(github.event.release.tag_name, 'sdk-v')
+        env:
+          SDK_VERSION: ${{ steps.versions.outputs.sdk_version }}
+        working-directory: packages/aws-durable-execution-sdk-python
+        run: |
+          python -m pip download \
+            --dest dist \
+            --no-deps \
+            --only-binary=:all: \
+            "aws-durable-execution-sdk-python==${SDK_VERSION}"
+
+      - name: Build OTel plugin distribution
+        working-directory: packages/aws-durable-execution-sdk-python-otel
+        run: hatch build
+
+      - name: Verify legal files
+        run: |
+          python .github/scripts/check_dist_legal_files.py \
+            packages/aws-durable-execution-sdk-python \
+            packages/aws-durable-execution-sdk-python-otel
+
+      - name: Stage wheels
+        run: |
+          mkdir release-dists
+          cp packages/aws-durable-execution-sdk-python/dist/*.whl release-dists/
+          cp packages/aws-durable-execution-sdk-python-otel/dist/*.whl release-dists/
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lambda-layer-distributions
+          path: release-dists/
+          if-no-files-found: error
+          retention-days: 7
+
+  build-layers:
+    needs: build-distributions
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_python: "3.11"
+            runtime: python3.11
+            runtime_slug: python311
+            architecture: x86_64
+          - target_python: "3.11"
+            runtime: python3.11
+            runtime_slug: python311
+            architecture: arm64
+          - target_python: "3.12"
+            runtime: python3.12
+            runtime_slug: python312
+            architecture: x86_64
+          - target_python: "3.12"
+            runtime: python3.12
+            runtime_slug: python312
+            architecture: arm64
+          - target_python: "3.13"
+            runtime: python3.13
+            runtime_slug: python313
+            architecture: x86_64
+          - target_python: "3.13"
+            runtime: python3.13
+            runtime_slug: python313
+            architecture: arm64
+          - target_python: "3.14"
+            runtime: python3.14
+            runtime_slug: python314
+            architecture: x86_64
+          - target_python: "3.14"
+            runtime: python3.14
+            runtime_slug: python314
+            architecture: arm64
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.target_python }}
+
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: lambda-layer-distributions
+          path: release-dists/
+
+      - name: Build layer zip
+        id: build-layer
+        env:
+          LAYER_ZIP: dist/${{ env.LAYER_NAME }}-${{ matrix.runtime_slug }}-${{ matrix.architecture }}.zip
+        run: |
+          SDK_WHEEL=$(find release-dists -name 'aws_durable_execution_sdk_python-*.whl' -print -quit)
+          OTEL_WHEEL=$(find release-dists -name 'aws_durable_execution_sdk_python_otel-*.whl' -print -quit)
+          python .github/scripts/build_lambda_layer.py \
+            --sdk-distribution "$SDK_WHEEL" \
+            --otel-distribution "$OTEL_WHEEL" \
+            --target-python "${{ matrix.target_python }}" \
+            --architecture "${{ matrix.architecture }}" \
+            --output "$LAYER_ZIP"
+          echo "layer_zip=${LAYER_ZIP}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload layer artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: otel-plugin-layer-${{ matrix.runtime_slug }}-${{ matrix.architecture }}
+          path: ${{ steps.build-layer.outputs.layer_zip }}
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-layer:
+    needs: [build-distributions, build-layers]
+    runs-on: ubuntu-latest
+    environment:
+      name: lambda-layer-publish
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      LAYER_REGIONS: ${{ inputs.regions || vars.LAYER_PUBLISH_REGIONS }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_python: "3.11"
+            runtime: python3.11
+            runtime_slug: python311
+            architecture: x86_64
+          - target_python: "3.11"
+            runtime: python3.11
+            runtime_slug: python311
+            architecture: arm64
+          - target_python: "3.12"
+            runtime: python3.12
+            runtime_slug: python312
+            architecture: x86_64
+          - target_python: "3.12"
+            runtime: python3.12
+            runtime_slug: python312
+            architecture: arm64
+          - target_python: "3.13"
+            runtime: python3.13
+            runtime_slug: python313
+            architecture: x86_64
+          - target_python: "3.13"
+            runtime: python3.13
+            runtime_slug: python313
+            architecture: arm64
+          - target_python: "3.14"
+            runtime: python3.14
+            runtime_slug: python314
+            architecture: x86_64
+          - target_python: "3.14"
+            runtime: python3.14
+            runtime_slug: python314
+            architecture: arm64
+
+    steps:
+      - name: Download layer artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: otel-plugin-layer-${{ matrix.runtime_slug }}-${{ matrix.architecture }}
+          path: dist/
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
+        with:
+          role-to-assume: ${{ secrets.LAYER_PUBLISH_ROLE_ARN }}
+          role-session-name: otelLayerPublish-${{ matrix.runtime_slug }}-${{ matrix.architecture }}
+          aws-region: us-east-1
+
+      - name: Publish layer versions
+        env:
+          LAYER_ZIP: dist/${{ env.LAYER_NAME }}-${{ matrix.runtime_slug }}-${{ matrix.architecture }}.zip
+          SDK_VERSION: ${{ needs.build-distributions.outputs.sdk_version }}
+          OTEL_VERSION: ${{ needs.build-distributions.outputs.otel_version }}
+        run: |
+          PUBLISHED=false
+          FAILED_REGIONS=()
+          LOCAL_CODE_SHA256=$(openssl dgst -sha256 -binary "$LAYER_ZIP" | openssl base64 -A)
+          REGION_LIST=${LAYER_REGIONS:-$DEFAULT_LAYER_REGIONS}
+          IFS=',' read -ra REGIONS <<< "$REGION_LIST"
+          for REGION in "${REGIONS[@]}"; do
+            REGION=$(echo "$REGION" | xargs)
+            if [ -z "$REGION" ]; then
+              continue
+            fi
+
+            LAYER_DESCRIPTION="AWS Durable Execution SDK ${SDK_VERSION} OTel plugin ${OTEL_VERSION} (${{ matrix.runtime }}/${{ matrix.architecture }}) sha256:${LOCAL_CODE_SHA256}"
+            if ! EXISTING_RESULT=$(aws lambda list-layer-versions \
+                --layer-name "$LAYER_NAME" \
+                --compatible-runtime "${{ matrix.runtime }}" \
+                --compatible-architecture "${{ matrix.architecture }}" \
+                --region "$REGION" \
+                --query "LayerVersions[?Description=='${LAYER_DESCRIPTION}'] | [0].[LayerVersionArn,Version]" \
+                --output text 2>&1); then
+              if [[ "$EXISTING_RESULT" == *"ResourceNotFoundException"* ]]; then
+                EXISTING_RESULT=""
+              else
+                echo "$EXISTING_RESULT" >&2
+                echo "::warning::Failed to list existing layer versions in ${REGION}"
+                FAILED_REGIONS+=("$REGION")
+                continue
+              fi
+            fi
+
+            if [ -n "$EXISTING_RESULT" ] && [ "$EXISTING_RESULT" != "None" ]; then
+              read -r LAYER_VERSION_ARN VERSION_NUMBER <<< "$EXISTING_RESULT"
+              if ! EXISTING_CODE_SHA256=$(aws lambda get-layer-version \
+                  --layer-name "$LAYER_NAME" \
+                  --version-number "$VERSION_NUMBER" \
+                  --region "$REGION" \
+                  --query 'Content.CodeSha256' \
+                  --output text 2>&1); then
+                echo "$EXISTING_CODE_SHA256" >&2
+                echo "::warning::Failed to read ${LAYER_VERSION_ARN}"
+                FAILED_REGIONS+=("$REGION")
+                continue
+              fi
+              if [ "$EXISTING_CODE_SHA256" != "$LOCAL_CODE_SHA256" ]; then
+                echo "::error::Artifact hash mismatch for ${LAYER_VERSION_ARN}"
+                FAILED_REGIONS+=("$REGION")
+                continue
+              fi
+              echo "Reusing ${LAYER_VERSION_ARN}"
+            else
+              if ! PUBLISH_RESULT=$(aws lambda publish-layer-version \
+                  --layer-name "$LAYER_NAME" \
+                  --description "$LAYER_DESCRIPTION" \
+                  --zip-file "fileb://${LAYER_ZIP}" \
+                  --compatible-runtimes "${{ matrix.runtime }}" \
+                  --compatible-architectures "${{ matrix.architecture }}" \
+                  --license-info Apache-2.0 \
+                  --region "$REGION" \
+                  --query '[LayerVersionArn,Version,Content.CodeSha256]' \
+                  --output text); then
+                echo "::warning::Failed to publish the layer in ${REGION}"
+                FAILED_REGIONS+=("$REGION")
+                continue
+              fi
+              read -r LAYER_VERSION_ARN VERSION_NUMBER PUBLISHED_CODE_SHA256 <<< "$PUBLISH_RESULT"
+              if [ "$PUBLISHED_CODE_SHA256" != "$LOCAL_CODE_SHA256" ]; then
+                echo "::error::Published artifact hash mismatch for ${LAYER_VERSION_ARN}"
+                FAILED_REGIONS+=("$REGION")
+                continue
+              fi
+            fi
+
+            if ! PERMISSION_RESULT=$(aws lambda add-layer-version-permission \
+                --layer-name "$LAYER_NAME" \
+                --version-number "$VERSION_NUMBER" \
+                --statement-id public-layer-access \
+                --action lambda:GetLayerVersion \
+                --principal "*" \
+                --region "$REGION" \
+                2>&1); then
+              if [[ "$PERMISSION_RESULT" != *"ResourceConflictException"* ]]; then
+                echo "$PERMISSION_RESULT" >&2
+                echo "::warning::Failed to grant public access to ${LAYER_VERSION_ARN}"
+                FAILED_REGIONS+=("$REGION")
+                continue
+              fi
+            fi
+
+            echo "Available ${LAYER_VERSION_ARN}"
+            echo "- \`${LAYER_VERSION_ARN}\`" >> "$GITHUB_STEP_SUMMARY"
+            PUBLISHED=true
+          done
+
+          if [ "${#FAILED_REGIONS[@]}" -gt 0 ]; then
+            echo "::error::Layer publishing failed in: ${FAILED_REGIONS[*]}"
+            exit 1
+          fi
+
+          if [ "$PUBLISHED" != true ]; then
+            echo "No AWS regions were configured for layer publishing."
+            exit 1
+          fi

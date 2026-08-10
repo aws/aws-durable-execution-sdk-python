@@ -69,6 +69,29 @@ The workflow runs on the `release: [published]` event, so it fires whenever a re
 
 > **Note:** The workflow builds and publishes all packages in the matrix. Ensure the version in each package's `__about__.py` is correct before publishing. If only one package has a version bump, PyPI will reject the re-upload of the unchanged package (which is expected and harmless since `fail-fast: false` is set).
 
+Releases containing an `otel-v` tag also trigger the
+[`lambda-layer-publish.yml`](.github/workflows/lambda-layer-publish.yml)
+workflow. It builds the SDK and OTel plugin into Lambda layers for each
+supported Python runtime and architecture, then publishes public versions of the
+`aws-durable-execution-sdk-python-otel-plugin` layer.
+For OTel-only releases, the workflow downloads the exact SDK version pinned by
+`layer.sdk-version` in `.github/lambda-layer-publish.toml`; that version must
+already be published to PyPI. Combined SDK and OTel releases require the pin to
+match the new SDK version and build both distributions from the tagged source.
+
+The publishing job uses the `lambda-layer-publish` GitHub environment and its
+`LAYER_PUBLISH_ROLE_ARN` secret. Set the optional `LAYER_PUBLISH_REGIONS`
+environment variable to a comma-separated list of AWS Regions. When unset, the
+workflow publishes to every commercial AWS Region supported by Lambda.
+The workflow can also be run manually from the Actions tab on `main`; its
+optional `regions` input overrides `LAYER_PUBLISH_REGIONS` for that run.
+Each runtime and architecture layer archive is built once and retained as a
+workflow artifact so retries publish the exact same resolved dependencies. Its
+SHA-256 is included in the layer description and verified before reuse.
+The publishing role must allow `lambda:PublishLayerVersion` and
+`lambda:AddLayerVersionPermission`, as well as `lambda:ListLayerVersions` and
+`lambda:GetLayerVersion` for identity-checked, idempotent release retries.
+
 ## Release Notes Format
 
 Release notes should maintain separate timelines for each package. Use the following structure:
@@ -111,6 +134,8 @@ If only one package is being released, include only that package's section. Each
 Before publishing a release:
 
 - [ ] Version bumped in the relevant `__about__.py` file(s)
+- [ ] OTel layer SDK pin identifies a compatible published SDK, or matches the
+      SDK version included in a combined release
 - [ ] Changes merged to `main`
 - [ ] CI checks pass on `main`
 - [ ] Release notes written with separate sections per package
