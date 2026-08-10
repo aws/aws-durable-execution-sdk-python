@@ -114,16 +114,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish-layer:
+  build-layers:
     needs: build-distributions
     runs-on: ubuntu-latest
-    environment:
-      name: lambda-layer-publish
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      LAYER_REGIONS: ${{ inputs.regions || vars.LAYER_PUBLISH_REGIONS }}
     strategy:
       fail-fast: false
       matrix:
@@ -192,6 +185,68 @@ jobs:
             --output "$LAYER_ZIP"
           echo "layer_zip=${LAYER_ZIP}" >> "$GITHUB_OUTPUT"
 
+      - name: Upload layer artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: otel-plugin-layer-${{ matrix.runtime_slug }}-${{ matrix.architecture }}
+          path: ${{ steps.build-layer.outputs.layer_zip }}
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-layer:
+    needs: [build-distributions, build-layers]
+    runs-on: ubuntu-latest
+    environment:
+      name: lambda-layer-publish
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      LAYER_REGIONS: ${{ inputs.regions || vars.LAYER_PUBLISH_REGIONS }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_python: "3.11"
+            runtime: python3.11
+            runtime_slug: python311
+            architecture: x86_64
+          - target_python: "3.11"
+            runtime: python3.11
+            runtime_slug: python311
+            architecture: arm64
+          - target_python: "3.12"
+            runtime: python3.12
+            runtime_slug: python312
+            architecture: x86_64
+          - target_python: "3.12"
+            runtime: python3.12
+            runtime_slug: python312
+            architecture: arm64
+          - target_python: "3.13"
+            runtime: python3.13
+            runtime_slug: python313
+            architecture: x86_64
+          - target_python: "3.13"
+            runtime: python3.13
+            runtime_slug: python313
+            architecture: arm64
+          - target_python: "3.14"
+            runtime: python3.14
+            runtime_slug: python314
+            architecture: x86_64
+          - target_python: "3.14"
+            runtime: python3.14
+            runtime_slug: python314
+            architecture: arm64
+
+    steps:
+      - name: Download layer artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: otel-plugin-layer-${{ matrix.runtime_slug }}-${{ matrix.architecture }}
+          path: dist/
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
         with:
@@ -201,7 +256,7 @@ jobs:
 
       - name: Publish layer versions
         env:
-          LAYER_ZIP: ${{ steps.build-layer.outputs.layer_zip }}
+          LAYER_ZIP: dist/${{ env.LAYER_NAME }}-${{ matrix.runtime_slug }}-${{ matrix.architecture }}.zip
           SDK_VERSION: ${{ needs.build-distributions.outputs.sdk_version }}
           OTEL_VERSION: ${{ needs.build-distributions.outputs.otel_version }}
         run: |
@@ -279,12 +334,3 @@ jobs:
             echo "No AWS regions were configured for layer publishing."
             exit 1
           fi
-
-      - name: Upload layer artifact
-        if: always() && steps.build-layer.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: otel-plugin-layer-${{ matrix.runtime_slug }}-${{ matrix.architecture }}
-          path: ${{ steps.build-layer.outputs.layer_zip }}
-          if-no-files-found: error
-          retention-days: 30

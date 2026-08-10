@@ -81,6 +81,8 @@ environment variable to a comma-separated list of AWS Regions. When unset, the
 workflow publishes to every commercial AWS Region supported by Lambda.
 The workflow can also be run manually from the Actions tab on `main`; its
 optional `regions` input overrides `LAYER_PUBLISH_REGIONS` for that run.
+Each runtime and architecture layer archive is built once and retained as a
+workflow artifact so retries publish the exact same resolved dependencies.
 The publishing role must allow `lambda:PublishLayerVersion` and
 `lambda:AddLayerVersionPermission`, as well as `lambda:ListLayerVersions` for
 idempotent release retries.
