@@ -161,7 +161,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.target_python }}
 
       - name: Download wheels
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -207,36 +207,57 @@ jobs:
               continue
             fi
 
-            if ! PUBLISH_RESULT=$(aws lambda publish-layer-version \
+            LAYER_DESCRIPTION="AWS Durable Execution SDK ${SDK_VERSION} OTel plugin ${OTEL_VERSION} (${{ matrix.runtime }}/${{ matrix.architecture }})"
+            if ! EXISTING_RESULT=$(aws lambda list-layer-versions \
                 --layer-name "$LAYER_NAME" \
-                --description "AWS Durable Execution SDK ${SDK_VERSION} OTel plugin ${OTEL_VERSION} (${{ matrix.runtime }}/${{ matrix.architecture }})" \
-                --zip-file "fileb://${LAYER_ZIP}" \
-                --compatible-runtimes "${{ matrix.runtime }}" \
-                --compatible-architectures "${{ matrix.architecture }}" \
-                --license-info Apache-2.0 \
+                --compatible-runtime "${{ matrix.runtime }}" \
+                --compatible-architecture "${{ matrix.architecture }}" \
                 --region "$REGION" \
-                --query '[LayerVersionArn,Version]' \
+                --query "LayerVersions[?Description=='${LAYER_DESCRIPTION}'] | [0].[LayerVersionArn,Version]" \
                 --output text); then
-              echo "::warning::Failed to publish the layer in ${REGION}"
+              echo "::warning::Failed to list existing layer versions in ${REGION}"
               FAILED_REGIONS+=("$REGION")
               continue
             fi
-            read -r LAYER_VERSION_ARN VERSION_NUMBER <<< "$PUBLISH_RESULT"
 
-            if ! aws lambda add-layer-version-permission \
+            if [ -n "$EXISTING_RESULT" ] && [ "$EXISTING_RESULT" != "None" ]; then
+              read -r LAYER_VERSION_ARN VERSION_NUMBER <<< "$EXISTING_RESULT"
+              echo "Reusing ${LAYER_VERSION_ARN}"
+            else
+              if ! PUBLISH_RESULT=$(aws lambda publish-layer-version \
+                  --layer-name "$LAYER_NAME" \
+                  --description "$LAYER_DESCRIPTION" \
+                  --zip-file "fileb://${LAYER_ZIP}" \
+                  --compatible-runtimes "${{ matrix.runtime }}" \
+                  --compatible-architectures "${{ matrix.architecture }}" \
+                  --license-info Apache-2.0 \
+                  --region "$REGION" \
+                  --query '[LayerVersionArn,Version]' \
+                  --output text); then
+                echo "::warning::Failed to publish the layer in ${REGION}"
+                FAILED_REGIONS+=("$REGION")
+                continue
+              fi
+              read -r LAYER_VERSION_ARN VERSION_NUMBER <<< "$PUBLISH_RESULT"
+            fi
+
+            if ! PERMISSION_RESULT=$(aws lambda add-layer-version-permission \
                 --layer-name "$LAYER_NAME" \
                 --version-number "$VERSION_NUMBER" \
                 --statement-id public-layer-access \
                 --action lambda:GetLayerVersion \
                 --principal "*" \
                 --region "$REGION" \
-                > /dev/null; then
-              echo "::warning::Published ${LAYER_VERSION_ARN}, but failed to grant public access in ${REGION}"
-              FAILED_REGIONS+=("$REGION")
-              continue
+                2>&1); then
+              if [[ "$PERMISSION_RESULT" != *"ResourceConflictException"* ]]; then
+                echo "$PERMISSION_RESULT" >&2
+                echo "::warning::Failed to grant public access to ${LAYER_VERSION_ARN}"
+                FAILED_REGIONS+=("$REGION")
+                continue
+              fi
             fi
 
-            echo "Published ${LAYER_VERSION_ARN}"
+            echo "Available ${LAYER_VERSION_ARN}"
             echo "- \`${LAYER_VERSION_ARN}\`" >> "$GITHUB_STEP_SUMMARY"
             PUBLISHED=true
           done
