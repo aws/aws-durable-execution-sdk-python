@@ -11,11 +11,13 @@ honest parity signal). One derived scalar is added on the end record:
 ``isFirstInvocation`` on the end record comes from the invocation-end info.
 
 Python surface note: ``InvocationInfo`` carries ``request_id``,
-``execution_arn``, ``is_first_invocation``, ``execution_start_time`` and the
-``operations`` map; ``InvocationStartInfo`` adds ``updated_operations`` and the
-end info adds ``status`` + ``error``. It has NO execution-input or
-execution-result field, so the canonical ``executionInput`` /
-``executionResult`` keys are omitted — the honest red for those probes.
+``execution_arn``, ``is_first_invocation``, ``execution_start_time``, the
+``operations`` map and ``execution_input``; ``InvocationStartInfo`` adds
+``updated_operations`` and the end info adds ``status``, ``error`` and
+``execution_result``. The payload surfaces (``execution_input`` /
+``execution_result``) are deliberately NOT dumped here: they are out of GA
+conformance scope, so this requirement's canonical schema omits
+``executionInput`` / ``executionResult`` and asserts nothing about them.
 """
 
 import json
@@ -42,9 +44,9 @@ def _emit(record: dict[str, Any], execution_arn: str | None) -> None:
 
 class InvocationInfoShapePlugin(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
-        # Canonical dump of InvocationStartInfo. executionInput is absent from
-        # the Python type and therefore omitted — that omission is the parity
-        # signal under test.
+        # Canonical dump of InvocationStartInfo, minus execution_input: the
+        # payload surfaces are out of GA scope and this requirement asserts
+        # nothing about them.
         record: dict[str, Any] = {
             "plugin": "CONFPLUGIN",
             "hook": "invocation-start",
@@ -59,8 +61,8 @@ class InvocationInfoShapePlugin(DurableInstrumentationPlugin):
         _emit(record, info.execution_arn)
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
-        # isFirstInvocation MUST come from the END info itself. executionInput /
-        # executionResult are absent from the Python type and therefore omitted.
+        # isFirstInvocation MUST come from the END info itself. execution_input
+        # and execution_result are omitted for the same out-of-scope reason.
         status = info.status.name
         record: dict[str, Any] = {
             "plugin": "CONFPLUGIN",
