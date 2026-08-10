@@ -24,7 +24,11 @@ to the execution.
 import json
 from typing import Any
 
-from aws_durable_execution_sdk_python.config import Duration, ParallelConfig
+from aws_durable_execution_sdk_python.config import (
+    Duration,
+    ParallelBranch,
+    ParallelConfig,
+)
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
     StepContext,
@@ -131,8 +135,13 @@ def branch_b(_ctx: DurableContext) -> str:
 
 @durable_execution(plugins=[ContextInfoShapePlugin()])
 def handler(_event: Any, context: DurableContext) -> list:
+    # Two NAMED branches (branch-a / branch-b) so the requirement can
+    # correlate fn-start records per branch by name.
     result = context.parallel(
-        [branch_a, branch_b],
+        [
+            ParallelBranch(func=branch_a, name="branch-a"),
+            ParallelBranch(func=branch_b, name="branch-b"),
+        ],
         name="ctx",
         config=ParallelConfig(max_concurrency=1),
     )
