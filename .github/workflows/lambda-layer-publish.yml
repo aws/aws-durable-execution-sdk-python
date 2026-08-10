@@ -3,12 +3,18 @@ name: Publish OTel Plugin Lambda Layer
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      regions:
+        description: "Comma-separated AWS Regions; defaults to all commercial Regions"
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: lambda-layer-publish-${{ github.event.release.tag_name }}
+  group: lambda-layer-publish-${{ github.event.release.tag_name || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -51,7 +57,9 @@ env:
 
 jobs:
   build-distributions:
-    if: contains(github.event.release.tag_name, 'otel-v')
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.release.tag_name, 'otel-v')
     runs-on: ubuntu-latest
     outputs:
       sdk_version: ${{ steps.versions.outputs.sdk_version }}
@@ -60,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.event.release.tag_name || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -115,7 +123,7 @@ jobs:
       contents: read
       id-token: write
     env:
-      LAYER_REGIONS: ${{ vars.LAYER_PUBLISH_REGIONS }}
+      LAYER_REGIONS: ${{ inputs.regions || vars.LAYER_PUBLISH_REGIONS }}
     strategy:
       fail-fast: false
       matrix:
@@ -156,7 +164,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.event.release.tag_name || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0

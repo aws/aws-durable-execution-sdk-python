@@ -79,6 +79,8 @@ The publishing job uses the `lambda-layer-publish` GitHub environment and its
 `LAYER_PUBLISH_ROLE_ARN` secret. Set the optional `LAYER_PUBLISH_REGIONS`
 environment variable to a comma-separated list of AWS Regions. When unset, the
 workflow publishes to every commercial AWS Region supported by Lambda.
+The workflow can also be run manually from the Actions tab on `main`; its
+optional `regions` input overrides `LAYER_PUBLISH_REGIONS` for that run.
 The publishing role must allow `lambda:PublishLayerVersion` and
 `lambda:AddLayerVersionPermission`, as well as `lambda:ListLayerVersions` for
 idempotent release retries.
