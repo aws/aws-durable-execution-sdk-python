@@ -8,7 +8,7 @@ version = "0.0.0"
 description = "Cross-SDK conformance test handlers for the AWS Durable Execution SDK for Python, exercised by the aws-durable-execution-conformance-tests runner."
 requires-python = ">=3.11"
 dependencies = [
-  "aws-durable-execution-sdk-python==1.7.0",
+  "aws-durable-execution-sdk-python==1.8.0",
 ]
 
 [tool.hatch.build.targets.wheel]
