@@ -10,11 +10,11 @@ honest parity signal). One derived scalar is added on the end record:
 ``terminal`` := status in (SUCCEEDED, FAILED). No cross-hook reconstruction —
 ``isFirstInvocation`` on the end record comes from the invocation-end info.
 
-Python surface note: ``InvocationInfo`` carries only ``request_id``,
-``execution_arn``, ``is_first_invocation`` and ``execution_start_time``; the end
-info adds ``status`` + ``error``. It has NO execution-input, operations-map,
-externally-updated-operations, or execution-result field, so the canonical
-``executionInput`` / ``operationsCount`` / ``updatedOperationsCount`` /
+Python surface note: ``InvocationInfo`` carries ``request_id``,
+``execution_arn``, ``is_first_invocation``, ``execution_start_time`` and the
+``operations`` map; ``InvocationStartInfo`` adds ``updated_operations`` and the
+end info adds ``status`` + ``error``. It has NO execution-input or
+execution-result field, so the canonical ``executionInput`` /
 ``executionResult`` keys are omitted — the honest red for those probes.
 """
 
@@ -42,13 +42,15 @@ def _emit(record: dict[str, Any], execution_arn: str | None) -> None:
 
 class InvocationInfoShapePlugin(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
-        # Canonical dump of InvocationStartInfo. executionInput / operationsCount
-        # / updatedOperationsCount are absent from the Python type and therefore
-        # omitted — that omission is the parity signal under test.
+        # Canonical dump of InvocationStartInfo. executionInput is absent from
+        # the Python type and therefore omitted — that omission is the parity
+        # signal under test.
         record: dict[str, Any] = {
             "plugin": "CONFPLUGIN",
             "hook": "invocation-start",
             "isFirstInvocation": info.is_first_invocation,
+            "operationsCount": len(info.operations),
+            "updatedOperationsCount": len(info.updated_operations),
         }
         if info.request_id is not None:
             record["requestId"] = info.request_id
@@ -58,13 +60,13 @@ class InvocationInfoShapePlugin(DurableInstrumentationPlugin):
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         # isFirstInvocation MUST come from the END info itself. executionInput /
-        # operationsCount / executionResult are absent from the Python type and
-        # therefore omitted.
+        # executionResult are absent from the Python type and therefore omitted.
         status = info.status.name
         record: dict[str, Any] = {
             "plugin": "CONFPLUGIN",
             "hook": "invocation-end",
             "isFirstInvocation": info.is_first_invocation,
+            "operationsCount": len(info.operations),
             "status": status,
             "terminal": status in ("SUCCEEDED", "FAILED"),
         }
