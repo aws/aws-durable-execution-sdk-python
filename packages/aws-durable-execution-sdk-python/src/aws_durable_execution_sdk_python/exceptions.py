@@ -62,6 +62,10 @@ class DurableExecutionsError(Exception):
     """Base class for Durable Executions exceptions"""
 
 
+class PluginLoadError(DurableExecutionsError):
+    """A dynamically configured instrumentation plugin could not be loaded."""
+
+
 class UnrecoverableError(DurableExecutionsError):
     """Base class for errors that terminate execution."""
 

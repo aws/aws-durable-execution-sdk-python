@@ -27,6 +27,8 @@ from aws_durable_execution_sdk_python.types import LambdaContext
 
 logger = logging.getLogger(__name__)
 
+DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION = 1
+
 
 def _extract_result(operation: Operation) -> str | None:
     if operation.step_details and operation.step_details.result is not None:
@@ -259,6 +261,15 @@ class DurableInstrumentationPlugin:
             info: Information about the operation attempt.
         """
         pass
+
+
+@dataclass(frozen=True)
+class DurableInstrumentationPluginProvider:
+    """Versioned factory exposed through the plugin entry-point group."""
+
+    plugin_type: type[DurableInstrumentationPlugin]
+    factory: Callable[[], DurableInstrumentationPlugin]
+    plugin_api_version: int
 
 
 class PluginExecutor:
