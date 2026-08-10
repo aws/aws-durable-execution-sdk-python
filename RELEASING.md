@@ -85,10 +85,11 @@ workflow publishes to every commercial AWS Region supported by Lambda.
 The workflow can also be run manually from the Actions tab on `main`; its
 optional `regions` input overrides `LAYER_PUBLISH_REGIONS` for that run.
 Each runtime and architecture layer archive is built once and retained as a
-workflow artifact so retries publish the exact same resolved dependencies.
+workflow artifact so retries publish the exact same resolved dependencies. Its
+SHA-256 is included in the layer description and verified before reuse.
 The publishing role must allow `lambda:PublishLayerVersion` and
-`lambda:AddLayerVersionPermission`, as well as `lambda:ListLayerVersions` for
-idempotent release retries.
+`lambda:AddLayerVersionPermission`, as well as `lambda:ListLayerVersions` and
+`lambda:GetLayerVersion` for identity-checked, idempotent release retries.
 
 ## Release Notes Format
 

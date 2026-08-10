@@ -281,6 +281,7 @@ jobs:
         run: |
           PUBLISHED=false
           FAILED_REGIONS=()
+          LOCAL_CODE_SHA256=$(openssl dgst -sha256 -binary "$LAYER_ZIP" | openssl base64 -A)
           REGION_LIST=${LAYER_REGIONS:-$DEFAULT_LAYER_REGIONS}
           IFS=',' read -ra REGIONS <<< "$REGION_LIST"
           for REGION in "${REGIONS[@]}"; do
@@ -289,7 +290,7 @@ jobs:
               continue
             fi
 
-            LAYER_DESCRIPTION="AWS Durable Execution SDK ${SDK_VERSION} OTel plugin ${OTEL_VERSION} (${{ matrix.runtime }}/${{ matrix.architecture }})"
+            LAYER_DESCRIPTION="AWS Durable Execution SDK ${SDK_VERSION} OTel plugin ${OTEL_VERSION} (${{ matrix.runtime }}/${{ matrix.architecture }}) sha256:${LOCAL_CODE_SHA256}"
             if ! EXISTING_RESULT=$(aws lambda list-layer-versions \
                 --layer-name "$LAYER_NAME" \
                 --compatible-runtime "${{ matrix.runtime }}" \
@@ -309,6 +310,22 @@ jobs:
 
             if [ -n "$EXISTING_RESULT" ] && [ "$EXISTING_RESULT" != "None" ]; then
               read -r LAYER_VERSION_ARN VERSION_NUMBER <<< "$EXISTING_RESULT"
+              if ! EXISTING_CODE_SHA256=$(aws lambda get-layer-version \
+                  --layer-name "$LAYER_NAME" \
+                  --version-number "$VERSION_NUMBER" \
+                  --region "$REGION" \
+                  --query 'Content.CodeSha256' \
+                  --output text 2>&1); then
+                echo "$EXISTING_CODE_SHA256" >&2
+                echo "::warning::Failed to read ${LAYER_VERSION_ARN}"
+                FAILED_REGIONS+=("$REGION")
+                continue
+              fi
+              if [ "$EXISTING_CODE_SHA256" != "$LOCAL_CODE_SHA256" ]; then
+                echo "::error::Artifact hash mismatch for ${LAYER_VERSION_ARN}"
+                FAILED_REGIONS+=("$REGION")
+                continue
+              fi
               echo "Reusing ${LAYER_VERSION_ARN}"
             else
               if ! PUBLISH_RESULT=$(aws lambda publish-layer-version \
@@ -319,13 +336,18 @@ jobs:
                   --compatible-architectures "${{ matrix.architecture }}" \
                   --license-info Apache-2.0 \
                   --region "$REGION" \
-                  --query '[LayerVersionArn,Version]' \
+                  --query '[LayerVersionArn,Version,Content.CodeSha256]' \
                   --output text); then
                 echo "::warning::Failed to publish the layer in ${REGION}"
                 FAILED_REGIONS+=("$REGION")
                 continue
               fi
-              read -r LAYER_VERSION_ARN VERSION_NUMBER <<< "$PUBLISH_RESULT"
+              read -r LAYER_VERSION_ARN VERSION_NUMBER PUBLISHED_CODE_SHA256 <<< "$PUBLISH_RESULT"
+              if [ "$PUBLISHED_CODE_SHA256" != "$LOCAL_CODE_SHA256" ]; then
+                echo "::error::Published artifact hash mismatch for ${LAYER_VERSION_ARN}"
+                FAILED_REGIONS+=("$REGION")
+                continue
+              fi
             fi
 
             if ! PERMISSION_RESULT=$(aws lambda add-layer-version-permission \
