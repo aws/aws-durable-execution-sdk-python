@@ -198,6 +198,7 @@ jobs:
           OTEL_VERSION: ${{ needs.build-distributions.outputs.otel_version }}
         run: |
           PUBLISHED=false
+          FAILED_REGIONS=()
           REGION_LIST=${LAYER_REGIONS:-$DEFAULT_LAYER_REGIONS}
           IFS=',' read -ra REGIONS <<< "$REGION_LIST"
           for REGION in "${REGIONS[@]}"; do
@@ -206,31 +207,44 @@ jobs:
               continue
             fi
 
-            PUBLISH_RESULT=$(aws lambda publish-layer-version \
-              --layer-name "$LAYER_NAME" \
-              --description "AWS Durable Execution SDK ${SDK_VERSION} OTel plugin ${OTEL_VERSION} (${{ matrix.runtime }}/${{ matrix.architecture }})" \
-              --zip-file "fileb://${LAYER_ZIP}" \
-              --compatible-runtimes "${{ matrix.runtime }}" \
-              --compatible-architectures "${{ matrix.architecture }}" \
-              --license-info Apache-2.0 \
-              --region "$REGION" \
-              --query '[LayerVersionArn,Version]' \
-              --output text)
+            if ! PUBLISH_RESULT=$(aws lambda publish-layer-version \
+                --layer-name "$LAYER_NAME" \
+                --description "AWS Durable Execution SDK ${SDK_VERSION} OTel plugin ${OTEL_VERSION} (${{ matrix.runtime }}/${{ matrix.architecture }})" \
+                --zip-file "fileb://${LAYER_ZIP}" \
+                --compatible-runtimes "${{ matrix.runtime }}" \
+                --compatible-architectures "${{ matrix.architecture }}" \
+                --license-info Apache-2.0 \
+                --region "$REGION" \
+                --query '[LayerVersionArn,Version]' \
+                --output text); then
+              echo "::warning::Failed to publish the layer in ${REGION}"
+              FAILED_REGIONS+=("$REGION")
+              continue
+            fi
             read -r LAYER_VERSION_ARN VERSION_NUMBER <<< "$PUBLISH_RESULT"
 
-            aws lambda add-layer-version-permission \
-              --layer-name "$LAYER_NAME" \
-              --version-number "$VERSION_NUMBER" \
-              --statement-id public-layer-access \
-              --action lambda:GetLayerVersion \
-              --principal "*" \
-              --region "$REGION" \
-              > /dev/null
+            if ! aws lambda add-layer-version-permission \
+                --layer-name "$LAYER_NAME" \
+                --version-number "$VERSION_NUMBER" \
+                --statement-id public-layer-access \
+                --action lambda:GetLayerVersion \
+                --principal "*" \
+                --region "$REGION" \
+                > /dev/null; then
+              echo "::warning::Published ${LAYER_VERSION_ARN}, but failed to grant public access in ${REGION}"
+              FAILED_REGIONS+=("$REGION")
+              continue
+            fi
 
             echo "Published ${LAYER_VERSION_ARN}"
             echo "- \`${LAYER_VERSION_ARN}\`" >> "$GITHUB_STEP_SUMMARY"
             PUBLISHED=true
           done
+
+          if [ "${#FAILED_REGIONS[@]}" -gt 0 ]; then
+            echo "::error::Layer publishing failed in: ${FAILED_REGIONS[*]}"
+            exit 1
+          fi
 
           if [ "$PUBLISHED" != true ]; then
             echo "No AWS regions were configured for layer publishing."
