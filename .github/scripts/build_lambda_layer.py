@@ -38,6 +38,7 @@ def build_layer(config: BuildConfig) -> Path:
 
     with tempfile.TemporaryDirectory() as temp_dir:
         work_dir = config.build_dir or Path(temp_dir) / "layer"
+        _validate_output_location(config.output, work_dir)
         if work_dir.exists():
             shutil.rmtree(work_dir)
         layer_python_dir = work_dir / "python"
@@ -67,6 +68,11 @@ def _validate_config(config: BuildConfig) -> None:
     for distribution in (config.sdk_distribution, config.otel_distribution):
         if not distribution.is_file():
             raise FileNotFoundError(distribution)
+
+
+def _validate_output_location(output: Path, build_dir: Path) -> None:
+    if output.resolve().is_relative_to(build_dir.resolve()):
+        raise ValueError("Layer output must be outside the build directory")
 
 
 def _install_layer_dependencies(config: BuildConfig, target_dir: Path) -> None:

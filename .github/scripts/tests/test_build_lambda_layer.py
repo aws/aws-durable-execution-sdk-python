@@ -107,3 +107,23 @@ def test_build_layer_requires_built_distributions(tmp_path: Path) -> None:
                 otel_distribution=tmp_path / "missing-otel.whl",
             )
         )
+
+
+def test_build_layer_rejects_output_inside_build_directory(tmp_path: Path) -> None:
+    sdk_wheel = tmp_path / "sdk.whl"
+    otel_wheel = tmp_path / "otel.whl"
+    sdk_wheel.write_text("sdk")
+    otel_wheel.write_text("otel")
+    build_dir = tmp_path / "layer"
+
+    with pytest.raises(ValueError, match="outside the build directory"):
+        build_layer(
+            BuildConfig(
+                output=build_dir / "layer.zip",
+                target_python="3.13",
+                architecture="x86_64",
+                sdk_distribution=sdk_wheel,
+                otel_distribution=otel_wheel,
+                build_dir=build_dir,
+            )
+        )
