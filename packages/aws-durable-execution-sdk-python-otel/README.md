@@ -306,7 +306,7 @@ setups.
 ## Requirements
 
 - Python >= 3.11
-- `aws-durable-execution-sdk-python` >= 1.5.0
+- `aws-durable-execution-sdk-python` >= 1.8.0
 - `opentelemetry-api` >= 1.20.0
 - `opentelemetry-sdk` >= 1.20.0
 - `opentelemetry-exporter-otlp`
