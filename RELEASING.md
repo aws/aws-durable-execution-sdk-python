@@ -75,10 +75,9 @@ workflow. It builds the SDK and OTel plugin into Lambda layers for each
 supported Python runtime and architecture, then publishes public versions of the
 `aws-durable-execution-sdk-python-otel-plugin` layer.
 For OTel-only releases, the workflow downloads the exact SDK version pinned by
-`tool.lambda-layer.sdk-version` in the OTel package's `pyproject.toml`; that
-version must already be published to PyPI. Combined SDK and OTel releases
-require the pin to match the new SDK version and build both distributions from
-the tagged source.
+`layer.sdk-version` in `.github/lambda-layer-publish.toml`; that version must
+already be published to PyPI. Combined SDK and OTel releases require the pin to
+match the new SDK version and build both distributions from the tagged source.
 
 The publishing job uses the `lambda-layer-publish` GitHub environment and its
 `LAYER_PUBLISH_ROLE_ARN` secret. Set the optional `LAYER_PUBLISH_REGIONS`

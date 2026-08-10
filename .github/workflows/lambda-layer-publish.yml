@@ -91,7 +91,7 @@ jobs:
             --event-name "$GITHUB_EVENT_NAME" \
             --release-tag "$RELEASE_TAG" \
             --source-sdk-version "$SOURCE_SDK_VERSION" \
-            --otel-pyproject packages/aws-durable-execution-sdk-python-otel/pyproject.toml)
+            --metadata .github/lambda-layer-publish.toml)
           echo "sdk_version=${SDK_VERSION}" >> "$GITHUB_OUTPUT"
           echo "otel_version=${OTEL_VERSION}" >> "$GITHUB_OUTPUT"
 
