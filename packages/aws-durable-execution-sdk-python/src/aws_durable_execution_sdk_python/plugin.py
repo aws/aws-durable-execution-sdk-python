@@ -269,7 +269,7 @@ class DurableInstrumentationPluginProvider:
 
     plugin_type: type[DurableInstrumentationPlugin]
     factory: Callable[[], DurableInstrumentationPlugin]
-    plugin_api_version: int = DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION
+    plugin_api_version: int
 
 
 class PluginExecutor:

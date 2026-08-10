@@ -72,6 +72,14 @@ def _provider(
     )
 
 
+def test_plugin_provider_requires_authored_api_version() -> None:
+    with pytest.raises(TypeError, match="plugin_api_version"):
+        DurableInstrumentationPluginProvider(
+            plugin_type=_PluginA,
+            factory=_PluginA,
+        )  # type: ignore[call-arg]
+
+
 @pytest.mark.parametrize("configured_value", [None, "", "   "])
 def test_unconfigured_discovery_preserves_explicit_plugins(
     configured_value: str | None,
@@ -322,6 +330,7 @@ def test_discovery_rejects_invalid_declared_plugin_type() -> None:
     provider = DurableInstrumentationPluginProvider(
         plugin_type=cast(type[DurableInstrumentationPlugin], object),
         factory=_PluginA,
+        plugin_api_version=DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION,
     )
     entry_point = _FakeEntryPoint("a", provider)
 
@@ -345,6 +354,7 @@ def test_discovery_rejects_non_class_declared_plugin_type() -> None:
     provider = DurableInstrumentationPluginProvider(
         plugin_type=cast(type[DurableInstrumentationPlugin], _PluginA()),
         factory=_PluginA,
+        plugin_api_version=DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION,
     )
     entry_point = _FakeEntryPoint("a", provider)
 

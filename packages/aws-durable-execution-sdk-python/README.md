@@ -59,6 +59,7 @@ class AuditPlugin(DurableInstrumentationPlugin):
 AUDIT_PLUGIN_PROVIDER = DurableInstrumentationPluginProvider(
     plugin_type=AuditPlugin,
     factory=AuditPlugin,
+    plugin_api_version=1,
 )
 ```
 
@@ -68,6 +69,9 @@ Register the provider in the package's `pyproject.toml`:
 [project.entry-points."aws_durable_execution.plugins"]
 example_audit = "example_audit:AUDIT_PLUGIN_PROVIDER"
 ```
+
+Set `plugin_api_version` to the literal API version the provider implements.
+Update it only after verifying the provider against that API version.
 
 Provider names must be unique across installed distributions. Missing,
 ambiguous, incompatible, or invalid providers raise `PluginLoadError` during
