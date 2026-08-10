@@ -9,7 +9,8 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, MutableMapping, cast
+from threading import Lock
+from typing import Any, Callable, Iterator, MutableMapping, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -105,6 +106,82 @@ class OperationInfo:
             is_replayed=is_replayed,
             status=operation.status,
         )
+
+
+def _to_operation_info_map(
+    operations: Mapping[str, Operation],
+) -> dict[str, OperationInfo]:
+    """Convert a map of checkpointed operations to the plugin ``OperationInfo`` view.
+
+    ``is_replayed`` is left at its default ``False``: these entries describe the
+    stored state of an operation, not a replay event for it. Replay is signalled
+    through the dedicated operation hooks.
+    """
+    return {
+        operation_id: OperationInfo.from_operation(operation)
+        for operation_id, operation in operations.items()
+    }
+
+
+class _LazyOperationInfoMap(Mapping[str, OperationInfo]):
+    """Read-only ``operation id -> OperationInfo`` map built on first access.
+
+    Invocation hook infos carry the execution's whole operation map. Converting
+    it eagerly would charge every invocation of an operation-heavy execution for
+    a view most plugins never read, so the conversion is deferred to the first
+    mapping operation and then cached. The underlying operations are snapshotted
+    before this map is handed out, so deferring the conversion does not move the
+    point in time the map describes. Behaves like a plain read-only ``dict``
+    (iteration, ``len``, ``in``, ``get``, ``==`` against any mapping).
+    """
+
+    __slots__ = ("_provider", "_lock", "_resolved")
+
+    def __init__(self, provider: Callable[[], dict[str, OperationInfo]] | None) -> None:
+        self._provider = provider
+        self._lock = Lock()
+        self._resolved: dict[str, OperationInfo] | None = None
+
+    def _resolve(self) -> dict[str, OperationInfo]:
+        with self._lock:
+            if self._resolved is None:
+                if self._provider is None:
+                    self._resolved = {}
+                else:
+                    try:
+                        self._resolved = self._provider()
+                    except Exception:
+                        # A plugin-facing view must never break the execution.
+                        logger.exception(
+                            "Failed to build plugin operations map; using empty map"
+                        )
+                        self._resolved = {}
+            return self._resolved
+
+    def __getitem__(self, key: str) -> OperationInfo:
+        return self._resolve()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._resolve())
+
+    def __len__(self) -> int:
+        return len(self._resolve())
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Mapping):
+            return self._resolve() == dict(other)
+        return NotImplemented
+
+    def __ne__(self, other: object) -> bool:
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    __hash__ = None  # type: ignore[assignment]  # mutable-by-materialization view
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self._resolve()!r})"
 
 
 @dataclass(frozen=True)
@@ -204,11 +281,29 @@ class InvocationInfo:
     without it); ``durable_execution()`` always populates it with the
     deserialized input payload, which is ``{}`` when the payload is empty.
     """
+    operations: Mapping[str, OperationInfo] = field(default_factory=dict, kw_only=True)
+    """Checkpointed operations for this execution, keyed by operation id.
+
+    A point-in-time view of the execution's operation map: as observed at the
+    start of the invocation on ``on_invocation_start``, and as observed at the
+    end of the invocation on ``on_invocation_end``. Empty on the very first
+    invocation-start, before any operation has been checkpointed.
+    """
 
 
 @dataclass(frozen=True)
 class InvocationStartInfo(InvocationInfo):
-    pass
+    updated_operations: Mapping[str, OperationInfo] = field(
+        default_factory=dict, kw_only=True
+    )
+    """Operations updated externally while this execution was suspended.
+
+    A wait timer that expired, a callback that was delivered, or a chained
+    invoke that completed between the previous invocation and this one. This is
+    the subset of :attr:`InvocationInfo.operations` named by the durable
+    invocation input's ``UpdatedOperationIds``, so it is empty on the first
+    invocation.
+    """
 
 
 @dataclass(frozen=True)
@@ -244,6 +339,7 @@ class InvocationEndInfo(InvocationInfo):
         cls,
         invocation_start_info: InvocationStartInfo,
         output: "DurableExecutionInvocationOutput",
+        operations: Mapping[str, OperationInfo] | None = None,
     ):
         return InvocationEndInfo(
             request_id=invocation_start_info.request_id,
@@ -251,6 +347,13 @@ class InvocationEndInfo(InvocationInfo):
             is_first_invocation=invocation_start_info.is_first_invocation,
             execution_start_time=invocation_start_info.execution_start_time,
             execution_input=invocation_start_info.execution_input,
+            # Default to the start-of-invocation view when the caller has no
+            # fresher snapshot to offer.
+            operations=(
+                operations
+                if operations is not None
+                else invocation_start_info.operations
+            ),
             status=output.status,
             error=output.error,
             execution_result=output.result,
@@ -341,6 +444,7 @@ class PluginExecutor:
         self._plugins = plugins or []
         self._executor: ThreadPoolExecutor | None = None
         self._invocation_status: InvocationStartInfo | None = None
+        self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
 
     @contextlib.contextmanager
     def run(self):
@@ -353,6 +457,7 @@ class PluginExecutor:
             yield
         finally:
             self._invocation_status = None
+            self._operations_provider = None
             # Shut down the thread pool, waiting for pending tasks to complete.
             if self._executor:
                 self._executor.shutdown(wait=True)
@@ -393,6 +498,28 @@ class PluginExecutor:
                 # this is called asynchronously, so plugins cannot manipulate thread local objects
                 self._executor.submit(self._dispatch_plugin, plugin, info)
 
+    @staticmethod
+    def _snapshot_operation_infos(
+        operations_provider: Callable[[], Mapping[str, Operation]] | None,
+    ) -> Mapping[str, OperationInfo]:
+        """Capture the operation map now; defer the ``OperationInfo`` conversion.
+
+        Copying the map is cheap, building an ``OperationInfo`` per operation is
+        not. Snapshotting eagerly pins the point in time the hook reports, so a
+        plugin that stashes the info and reads it later still sees the state as
+        of its hook; deferring the conversion keeps operation-heavy executions
+        from paying for a view no plugin reads.
+        """
+        if operations_provider is None:
+            return _LazyOperationInfoMap(None)
+        try:
+            snapshot = dict(operations_provider())
+        except Exception:
+            # A plugin-facing view must never break the execution.
+            logger.exception("Failed to snapshot operations for plugin hook")
+            return _LazyOperationInfoMap(None)
+        return _LazyOperationInfoMap(lambda: _to_operation_info_map(snapshot))
+
     def on_invocation_start(
         self,
         execution_arn: str,
@@ -400,14 +527,40 @@ class PluginExecutor:
         execution_start_time: datetime.datetime | None,
         lambda_context: LambdaContext | None,
         execution_input: Any = None,
+        operations_provider: Callable[[], Mapping[str, Operation]] | None = None,
+        updated_operation_ids: Sequence[str] | None = None,
     ) -> None:
+        """Fire the invocation-start hook.
+
+        Args:
+            execution_arn: ARN of the durable execution.
+            is_first_invocation: False when prior operations exist (a replay).
+            execution_start_time: Start timestamp of the execution operation.
+            lambda_context: Lambda context, for the request id.
+            execution_input: The deserialized execution input event.
+            operations_provider: Returns the current checkpointed operation map.
+                Called once here to snapshot it; the conversion to the plugin's
+                ``OperationInfo`` view is deferred to first access.
+            updated_operation_ids: Operation ids from the invocation input's
+                ``UpdatedOperationIds`` -- those updated while suspended.
+        """
         aws_request_id = lambda_context.aws_request_id if lambda_context else None
+        self._operations_provider = operations_provider
+        operations = self._snapshot_operation_infos(operations_provider)
         self._invocation_status = InvocationStartInfo(
             execution_arn=execution_arn,
             request_id=aws_request_id,
             is_first_invocation=is_first_invocation,
             execution_start_time=execution_start_time,
             execution_input=self._snapshot_execution_input(execution_input),
+            operations=operations,
+            updated_operations=_LazyOperationInfoMap(
+                lambda: {
+                    operation_id: operations[operation_id]
+                    for operation_id in (updated_operation_ids or [])
+                    if operation_id in operations
+                }
+            ),
         )
         self.execute_plugins(self._invocation_status, sync=True)
 
@@ -448,9 +601,13 @@ class PluginExecutor:
             # on_invocation_start not called, skip
             return
 
+        # Re-read the operation map so the end hook sees the state as of the end
+        # of this invocation, not the snapshot taken at its start.
         invocation_end_info = (
             InvocationEndInfo.from_durable_execution_invocation_output(
-                self._invocation_status, output
+                self._invocation_status,
+                output,
+                operations=self._snapshot_operation_infos(self._operations_provider),
             )
         )
         self.execute_plugins(invocation_end_info, sync=True)
@@ -629,10 +786,7 @@ class PluginExecutor:
                     operation.operation_id: OperationInfo.from_operation(operation)
                     for operation in changed_operations
                 },
-                operations={
-                    operation_id: OperationInfo.from_operation(operation)
-                    for operation_id, operation in operations.items()
-                },
+                operations=_to_operation_info_map(operations),
             ),
             sync=True,
         )
