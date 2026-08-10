@@ -82,9 +82,16 @@ jobs:
 
       - name: Read package versions
         id: versions
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          SDK_VERSION=$(grep "^__version__" packages/aws-durable-execution-sdk-python/src/aws_durable_execution_sdk_python/__about__.py | cut -d'"' -f2)
+          SOURCE_SDK_VERSION=$(grep "^__version__" packages/aws-durable-execution-sdk-python/src/aws_durable_execution_sdk_python/__about__.py | cut -d'"' -f2)
           OTEL_VERSION=$(grep "^__version__" packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel/__about__.py | cut -d'"' -f2)
+          SDK_VERSION=$(python .github/scripts/resolve_layer_sdk_version.py \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --release-tag "$RELEASE_TAG" \
+            --source-sdk-version "$SOURCE_SDK_VERSION" \
+            --otel-pyproject packages/aws-durable-execution-sdk-python-otel/pyproject.toml)
           echo "sdk_version=${SDK_VERSION}" >> "$GITHUB_OUTPUT"
           echo "otel_version=${OTEL_VERSION}" >> "$GITHUB_OUTPUT"
 
