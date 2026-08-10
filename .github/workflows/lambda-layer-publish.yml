@@ -19,6 +19,7 @@ concurrency:
 
 env:
   LAYER_NAME: aws-durable-execution-sdk-python-otel-plugin
+  SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.event.release.tag_name }}
   DEFAULT_LAYER_REGIONS: >-
     af-south-1,
     ap-east-1,
@@ -58,7 +59,8 @@ env:
 jobs:
   build-distributions:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main') ||
       contains(github.event.release.tag_name, 'otel-v')
     runs-on: ubuntu-latest
     outputs:
@@ -68,7 +70,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name || github.ref }}
+          ref: ${{ env.SOURCE_REF }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -78,9 +80,34 @@ jobs:
       - name: Install Hatch
         run: python -m pip install --upgrade hatch==1.16.5
 
+      - name: Read package versions
+        id: versions
+        run: |
+          SDK_VERSION=$(grep "^__version__" packages/aws-durable-execution-sdk-python/src/aws_durable_execution_sdk_python/__about__.py | cut -d'"' -f2)
+          OTEL_VERSION=$(grep "^__version__" packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel/__about__.py | cut -d'"' -f2)
+          echo "sdk_version=${SDK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "otel_version=${OTEL_VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Build SDK distribution
+        if: >-
+          github.event_name == 'workflow_dispatch' ||
+          contains(github.event.release.tag_name, 'sdk-v')
         working-directory: packages/aws-durable-execution-sdk-python
         run: hatch build
+
+      - name: Download published SDK distribution
+        if: >-
+          github.event_name == 'release' &&
+          !contains(github.event.release.tag_name, 'sdk-v')
+        env:
+          SDK_VERSION: ${{ steps.versions.outputs.sdk_version }}
+        working-directory: packages/aws-durable-execution-sdk-python
+        run: |
+          python -m pip download \
+            --dest dist \
+            --no-deps \
+            --only-binary=:all: \
+            "aws-durable-execution-sdk-python==${SDK_VERSION}"
 
       - name: Build OTel plugin distribution
         working-directory: packages/aws-durable-execution-sdk-python-otel
@@ -91,14 +118,6 @@ jobs:
           python .github/scripts/check_dist_legal_files.py \
             packages/aws-durable-execution-sdk-python \
             packages/aws-durable-execution-sdk-python-otel
-
-      - name: Read package versions
-        id: versions
-        run: |
-          SDK_VERSION=$(grep "^__version__" packages/aws-durable-execution-sdk-python/src/aws_durable_execution_sdk_python/__about__.py | cut -d'"' -f2)
-          OTEL_VERSION=$(grep "^__version__" packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel/__about__.py | cut -d'"' -f2)
-          echo "sdk_version=${SDK_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "otel_version=${OTEL_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Stage wheels
         run: |
@@ -157,7 +176,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name || github.ref }}
+          ref: ${{ env.SOURCE_REF }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -277,10 +296,15 @@ jobs:
                 --compatible-architecture "${{ matrix.architecture }}" \
                 --region "$REGION" \
                 --query "LayerVersions[?Description=='${LAYER_DESCRIPTION}'] | [0].[LayerVersionArn,Version]" \
-                --output text); then
-              echo "::warning::Failed to list existing layer versions in ${REGION}"
-              FAILED_REGIONS+=("$REGION")
-              continue
+                --output text 2>&1); then
+              if [[ "$EXISTING_RESULT" == *"ResourceNotFoundException"* ]]; then
+                EXISTING_RESULT=""
+              else
+                echo "$EXISTING_RESULT" >&2
+                echo "::warning::Failed to list existing layer versions in ${REGION}"
+                FAILED_REGIONS+=("$REGION")
+                continue
+              fi
             fi
 
             if [ -n "$EXISTING_RESULT" ] && [ "$EXISTING_RESULT" != "None" ]; then

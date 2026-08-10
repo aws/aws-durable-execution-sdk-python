@@ -74,6 +74,9 @@ Releases containing an `otel-v` tag also trigger the
 workflow. It builds the SDK and OTel plugin into Lambda layers for each
 supported Python runtime and architecture, then publishes public versions of the
 `aws-durable-execution-sdk-python-otel-plugin` layer.
+For OTel-only releases, the workflow downloads the exact SDK version already
+published to PyPI. Combined SDK and OTel releases build both distributions from
+the tagged source.
 
 The publishing job uses the `lambda-layer-publish` GitHub environment and its
 `LAYER_PUBLISH_ROLE_ARN` secret. Set the optional `LAYER_PUBLISH_REGIONS`
