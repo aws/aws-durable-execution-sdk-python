@@ -175,13 +175,17 @@ class InvocationInfo:
     execution_arn: str | None
     is_first_invocation: bool
     execution_start_time: datetime.datetime | None = None
-    # The deserialized execution input, surfaced to instrumentation plugins that
-    # need to record it (e.g. Workflow Insight). Mirrors the JS SDK's
-    # InvocationInfo.executionInput. kw_only so it never reorders the positional
-    # fields above. Defaults to None only when the field is not populated (a
-    # hook info built without it); durable_execution() always populates it with
-    # the deserialized input payload, which is {} when the payload is empty.
     execution_input: Any = field(default=None, kw_only=True)
+    """EXPERIMENTAL: the deserialized execution input. May change or be removed.
+
+    Surfaced to instrumentation plugins that need to record it (e.g. Workflow
+    Insight). Mirrors the JS SDK's ``InvocationInfo.executionInput``. kw_only so
+    it never reorders the positional fields above.
+
+    Defaults to ``None`` only when the field is not populated (a hook info built
+    without it); ``durable_execution()`` always populates it with the
+    deserialized input payload, which is ``{}`` when the payload is empty.
+    """
 
 
 @dataclass(frozen=True)
@@ -197,11 +201,14 @@ class InvocationEndInfo(InvocationInfo):
         metadata={"experimental": True},
     )
     """EXPERIMENTAL: The invocation error, when available."""
-    # The serialized execution result (a JSON string, or "" when the result was
-    # checkpointed out-of-band for a large payload). Surfaced to instrumentation
-    # plugins that record execution output (e.g. Workflow Insight); mirrors the
-    # JS SDK's InvocationEndInfo.executionResult. None on failure/suspend.
     execution_result: str | None = field(default=None, kw_only=True)
+    """EXPERIMENTAL: the serialized execution result. May change or be removed.
+
+    A JSON string, or ``""`` when the result was checkpointed out-of-band for a
+    large payload. Surfaced to instrumentation plugins that record execution
+    output (e.g. Workflow Insight); mirrors the JS SDK's
+    ``InvocationEndInfo.executionResult``. ``None`` on failure or suspend.
+    """
 
     @classmethod
     def from_durable_execution_invocation_output(
