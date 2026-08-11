@@ -9,7 +9,6 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from threading import Lock
 from typing import Any, Callable, Iterator, MutableMapping, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -132,31 +131,37 @@ class _LazyOperationInfoMap(Mapping[str, OperationInfo]):
     mapping operation and then cached. The underlying operations are snapshotted
     before this map is handed out, so deferring the conversion does not move the
     point in time the map describes. Behaves like a plain read-only ``dict``
-    (iteration, ``len``, ``in``, ``get``, ``==`` against any mapping).
+    (iteration, ``len``, ``in``, ``get``, ``==`` against any mapping), and
+    materializes into an ordinary ``dict`` when deep-copied so the enclosing
+    info stays copyable and ``dataclasses.asdict()``-able.
     """
 
-    __slots__ = ("_provider", "_lock", "_resolved")
+    __slots__ = ("_provider", "_resolved")
 
     def __init__(self, provider: Callable[[], dict[str, OperationInfo]] | None) -> None:
         self._provider = provider
-        self._lock = Lock()
         self._resolved: dict[str, OperationInfo] | None = None
 
     def _resolve(self) -> dict[str, OperationInfo]:
-        with self._lock:
-            if self._resolved is None:
-                if self._provider is None:
+        # Deliberately lock-free. Building the map is pure and idempotent, so a
+        # race can only duplicate the work, never corrupt the result, and the
+        # assignment below is atomic. A lock here would make the enclosing
+        # frozen info undeepcopyable, which breaks the plugins this view exists
+        # to serve: dataclasses.asdict() deep-copies non-dict fields, and a
+        # thread lock cannot be copied.
+        if self._resolved is None:
+            if self._provider is None:
+                self._resolved = {}
+            else:
+                try:
+                    self._resolved = self._provider()
+                except Exception:
+                    # A plugin-facing view must never break the execution.
+                    logger.exception(
+                        "Failed to build plugin operations map; using empty map"
+                    )
                     self._resolved = {}
-                else:
-                    try:
-                        self._resolved = self._provider()
-                    except Exception:
-                        # A plugin-facing view must never break the execution.
-                        logger.exception(
-                            "Failed to build plugin operations map; using empty map"
-                        )
-                        self._resolved = {}
-            return self._resolved
+        return self._resolved
 
     def __getitem__(self, key: str) -> OperationInfo:
         return self._resolve()[key]
@@ -179,6 +184,20 @@ class _LazyOperationInfoMap(Mapping[str, OperationInfo]):
         return not result
 
     __hash__ = None  # type: ignore[assignment]  # mutable-by-materialization view
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> dict[str, OperationInfo]:
+        """Materialize into a plain ``dict`` when copied.
+
+        Copying this view has no reason to preserve its laziness, and a plain
+        dict is what callers actually want: it makes
+        ``dataclasses.asdict(info)`` yield an ordinary mapping instead of an
+        opaque object, and keeps the provider closure out of the copy.
+        """
+        resolved = {
+            key: copy.deepcopy(value, memo) for key, value in self._resolve().items()
+        }
+        memo[id(self)] = resolved
+        return resolved
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self._resolve()!r})"
