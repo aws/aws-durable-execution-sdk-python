@@ -3,6 +3,7 @@
 import datetime
 import json
 import time
+import warnings
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -2914,12 +2915,13 @@ def test_durable_execution_loads_plugins_when_handler_is_initialized():
     resolved_plugin = _RecordingPlugin()
 
     with (
+        warnings.catch_warnings(),
         patch(
             "aws_durable_execution_sdk_python.execution.load_configured_plugins",
             return_value=[explicit_plugin, resolved_plugin],
         ) as load_plugins,
-        pytest.warns(FutureWarning),
     ):
+        warnings.simplefilter("error", FutureWarning)
 
         @durable_execution(plugins=[explicit_plugin])
         def test_handler(event: Any, context: DurableContext) -> dict:

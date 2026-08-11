@@ -1,6 +1,7 @@
 import datetime
 import logging
 import unittest
+from dataclasses import fields
 from unittest.mock import MagicMock
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -18,6 +19,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationEndInfo,
+    InvocationInfo,
     InvocationStartInfo,
     OperationChangeInfo,
     OperationEndInfo,
@@ -110,6 +112,29 @@ USER_FUNCTION_END_INFO = UserFunctionEndInfo(
 
 
 class TestDataClasses(unittest.TestCase):
+    def test_payload_fields_are_marked_experimental(self):
+        plugin_info_types = (
+            OperationInfo,
+            OperationStartInfo,
+            OperationEndInfo,
+            OperationChangeInfo,
+            UserFunctionStartInfo,
+            UserFunctionEndInfo,
+            InvocationInfo,
+            InvocationStartInfo,
+            InvocationEndInfo,
+        )
+        payload_field_terms = ("input", "output", "result", "error")
+
+        for info_type in plugin_info_types:
+            for info_field in fields(info_type):
+                if any(term in info_field.name for term in payload_field_terms):
+                    self.assertIs(
+                        info_field.metadata.get("experimental"),
+                        True,
+                        f"{info_type.__name__}.{info_field.name}",
+                    )
+
     def test_operation_start_info(self):
         self.assertEqual(OPERATION_START_INFO.sub_type, OperationSubType.CALLBACK)
         self.assertEqual(OPERATION_START_INFO.name, "my-op")

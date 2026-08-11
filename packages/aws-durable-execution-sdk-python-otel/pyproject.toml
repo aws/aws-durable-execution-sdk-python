@@ -12,7 +12,7 @@ license = "Apache-2.0"
 keywords = ["opentelemetry", "tracing", "observability", "durable-execution"]
 authors = [{ name = "AWS durable-execution-dev", email = "durable-execution-dev@amazon.com" }]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Programming Language :: Python",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
