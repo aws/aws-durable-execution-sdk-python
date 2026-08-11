@@ -300,20 +300,35 @@ class InvocationInfo:
     without it); ``durable_execution()`` always populates it with the
     deserialized input payload, which is ``{}`` when the payload is empty.
     """
-    operations: Mapping[str, OperationInfo] = field(default_factory=dict, kw_only=True)
+    operations: Mapping[str, OperationInfo] = field(
+        default_factory=dict,
+        kw_only=True,
+        repr=False,
+        compare=False,
+        hash=False,
+    )
     """Checkpointed operations for this execution, keyed by operation id.
 
     A point-in-time view of the execution's operation map: as observed at the
     start of the invocation on ``on_invocation_start``, and as observed at the
     end of the invocation on ``on_invocation_end``. Empty on the very first
     invocation-start, before any operation has been checkpointed.
+
+    Excluded from ``repr``, ``__eq__`` and ``__hash__`` for the same reasons as
+    :attr:`execution_input`: the entries carry operation results and errors that
+    instrumentation would otherwise log wholesale, and a mapping-valued field
+    would make a previously hashable info unhashable.
     """
 
 
 @dataclass(frozen=True)
 class InvocationStartInfo(InvocationInfo):
     updated_operations: Mapping[str, OperationInfo] = field(
-        default_factory=dict, kw_only=True
+        default_factory=dict,
+        kw_only=True,
+        repr=False,
+        compare=False,
+        hash=False,
     )
     """Operations updated externally while this execution was suspended.
 
@@ -322,6 +337,9 @@ class InvocationStartInfo(InvocationInfo):
     the subset of :attr:`InvocationInfo.operations` named by the durable
     invocation input's ``UpdatedOperationIds``, so it is empty on the first
     invocation.
+
+    Excluded from ``repr``, ``__eq__`` and ``__hash__`` like
+    :attr:`InvocationInfo.operations`.
     """
 
 
