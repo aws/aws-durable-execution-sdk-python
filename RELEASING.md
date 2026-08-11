@@ -71,9 +71,10 @@ The workflow runs on the `release: [published]` event, so it fires whenever a re
 
 Releases containing an `otel-v` tag also trigger the
 [`lambda-layer-publish.yml`](.github/workflows/lambda-layer-publish.yml)
-workflow. It builds the SDK and OTel plugin into Lambda layers for each
-supported Python runtime and architecture, then publishes public versions of the
-`aws-durable-execution-sdk-python-otel-plugin` layer.
+workflow. It builds the SDK and OTel plugin into a universal Lambda layer, then
+publishes public versions of the
+`aws-durable-execution-sdk-python-otel-plugin` layer compatible with every
+supported Python runtime and architecture.
 For OTel-only releases, the workflow downloads the exact SDK version pinned by
 `layer.sdk-version` in `.github/lambda-layer-publish.toml`; that version must
 already be published to PyPI. Combined SDK and OTel releases require the pin to
@@ -82,12 +83,14 @@ match the new SDK version and build both distributions from the tagged source.
 The publishing job uses the `lambda-layer-publish` GitHub environment and its
 `LAYER_PUBLISH_ROLE_ARN` secret. Set the optional `LAYER_PUBLISH_REGIONS`
 environment variable to a comma-separated list of AWS Regions. When unset, the
-workflow publishes to every commercial AWS Region supported by Lambda.
+workflow publishes to commercial AWS Regions except `me-central-1` and
+`me-south-1`, which are temporarily excluded while AWS reports service
+disruptions caused by the conflict in the Middle East.
 The workflow can also be run manually from the Actions tab on `main`; its
 optional `regions` input overrides `LAYER_PUBLISH_REGIONS` for that run.
-Each runtime and architecture layer archive is built once and retained as a
-workflow artifact so retries publish the exact same resolved dependencies. Its
-SHA-256 is included in the layer description and verified before reuse.
+The universal layer archive is built once and retained as a workflow artifact
+so retries publish the exact same distributions. Its SHA-256 is included in the
+layer description and verified before reuse.
 The publishing role must allow `lambda:PublishLayerVersion` and
 `lambda:AddLayerVersionPermission`, as well as `lambda:ListLayerVersions` and
 `lambda:GetLayerVersion` for identity-checked, idempotent release retries.
