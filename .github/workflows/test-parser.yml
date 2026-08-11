@@ -6,12 +6,14 @@ on:
       - '.github/scripts/build_lambda_layer.py'
       - '.github/scripts/parse_sdk_branch.py'
       - '.github/scripts/tests/**'
+      - '.github/workflows/lambda-layer-publish.yml'
   push:
     branches: [ main ]
     paths:
       - '.github/scripts/build_lambda_layer.py'
       - '.github/scripts/parse_sdk_branch.py'
       - '.github/scripts/tests/**'
+      - '.github/workflows/lambda-layer-publish.yml'
 
 permissions:
   contents: read
@@ -29,4 +31,5 @@ jobs:
       run: |
         python -m pytest \
           .github/scripts/tests/test_build_lambda_layer.py \
+          .github/scripts/tests/test_lambda_layer_publish_workflow.py \
           .github/scripts/tests/test_parse_sdk_branch.py

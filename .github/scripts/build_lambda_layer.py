@@ -14,18 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-ARCHITECTURE_PLATFORMS = {
-    "x86_64": "manylinux2014_x86_64",
-    "arm64": "manylinux2014_aarch64",
-}
-SUPPORTED_PYTHON_VERSIONS = ("3.11", "3.12", "3.13", "3.14")
-
-
 @dataclass(frozen=True)
 class BuildConfig:
     output: Path
-    target_python: str
-    architecture: str
     sdk_distribution: Path
     otel_distribution: Path
     build_dir: Path | None = None
@@ -51,20 +42,6 @@ def build_layer(config: BuildConfig) -> Path:
 
 
 def _validate_config(config: BuildConfig) -> None:
-    if config.architecture not in ARCHITECTURE_PLATFORMS:
-        supported = ", ".join(sorted(ARCHITECTURE_PLATFORMS))
-        raise ValueError(
-            f"Unsupported architecture: {config.architecture}. "
-            f"Supported architectures: {supported}"
-        )
-
-    if config.target_python not in SUPPORTED_PYTHON_VERSIONS:
-        supported = ", ".join(SUPPORTED_PYTHON_VERSIONS)
-        raise ValueError(
-            f"Unsupported Python version: {config.target_python}. "
-            f"Supported versions: {supported}"
-        )
-
     for distribution in (config.sdk_distribution, config.otel_distribution):
         if not distribution.is_file():
             raise FileNotFoundError(distribution)
@@ -76,10 +53,6 @@ def _validate_output_location(output: Path, build_dir: Path) -> None:
 
 
 def _install_layer_dependencies(config: BuildConfig, target_dir: Path) -> None:
-    python_version = config.target_python
-    abi = f"cp{python_version.replace('.', '')}"
-    platform = ARCHITECTURE_PLATFORMS[config.architecture]
-
     command = [
         sys.executable,
         "-m",
@@ -88,14 +61,6 @@ def _install_layer_dependencies(config: BuildConfig, target_dir: Path) -> None:
         "--upgrade",
         "--target",
         str(target_dir),
-        "--platform",
-        platform,
-        "--implementation",
-        "cp",
-        "--python-version",
-        python_version,
-        "--abi",
-        abi,
         "--only-binary",
         ":all:",
         "--no-compile",
@@ -122,18 +87,6 @@ def main(argv: list[str] | None = None) -> int:
         description="Build the AWS Durable Execution SDK OTel plugin Lambda layer.",
     )
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument(
-        "--target-python",
-        choices=SUPPORTED_PYTHON_VERSIONS,
-        required=True,
-        help="Lambda Python minor version.",
-    )
-    parser.add_argument(
-        "--architecture",
-        choices=sorted(ARCHITECTURE_PLATFORMS),
-        required=True,
-        help="Lambda instruction set architecture.",
-    )
     parser.add_argument("--sdk-distribution", type=Path, required=True)
     parser.add_argument("--otel-distribution", type=Path, required=True)
     parser.add_argument(
@@ -146,8 +99,6 @@ def main(argv: list[str] | None = None) -> int:
     output = build_layer(
         BuildConfig(
             output=args.output,
-            target_python=args.target_python,
-            architecture=args.architecture,
             sdk_distribution=args.sdk_distribution,
             otel_distribution=args.otel_distribution,
             build_dir=args.build_dir,
