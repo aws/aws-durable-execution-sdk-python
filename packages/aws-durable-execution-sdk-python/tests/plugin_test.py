@@ -916,6 +916,98 @@ class TestInvocationHookOperationMaps(unittest.TestCase):
         self.assertEqual({}, start_info.updated_operations)
         self.assertEqual({}, end_info.operations)
 
+    def test_plugin_cannot_mutate_checkpointed_error(self):
+        """A plugin must not be able to alter the error replayed to user code.
+
+        ``ErrorObject.stack_trace`` is a mutable list and the checkpointed error
+        is handed to user code on replay, so the plugin-facing view gets its own
+        copy.
+        """
+        checkpoint_error = ErrorObject(
+            message="boom", type="Error", data=None, stack_trace=["frame-A"]
+        )
+        operation = Operation(
+            operation_id="op-1",
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="failing",
+            parent_id="root",
+            status=OperationStatus.FAILED,
+            start_timestamp=START_TS,
+            end_timestamp=END_TS,
+            step_details=StepDetails(attempt=1, error=checkpoint_error),
+        )
+
+        info = OperationInfo.from_operation(operation)
+
+        # A distinct ErrorObject, and a distinct stack_trace list.
+        self.assertIsNot(checkpoint_error, info.error)
+        self.assertIsNot(checkpoint_error.stack_trace, info.error.stack_trace)
+        self.assertEqual(["frame-A"], info.error.stack_trace)
+
+        # Mutating the plugin's view leaves the checkpointed error untouched.
+        info.error.stack_trace.append("injected-by-plugin")
+        info.error.stack_trace.clear()
+        self.assertEqual(["frame-A"], checkpoint_error.stack_trace)
+
+    def test_no_plugins_never_invokes_the_operations_provider(self):
+        """durable_execution() always passes a provider; an empty executor must
+        not call it, at either hook."""
+        calls = []
+
+        def provider():
+            calls.append(1)
+            return {}
+
+        executor = PluginExecutor(plugins=[])
+        with executor.run():
+            executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+                operations_provider=provider,
+                updated_operation_ids=["op-1"],
+            )
+            executor.on_invocation_end(
+                output=DurableExecutionInvocationOutput(
+                    status=InvocationStatus.SUCCEEDED, result=None, error=None
+                )
+            )
+            # The retained provider is dropped too, not just the snapshot.
+            self.assertIsNone(executor._operations_provider)  # noqa: SLF001
+
+        self.assertEqual([], calls)
+
+    def test_snapshot_is_pinned_against_a_live_provider_mapping(self):
+        """The snapshot must pin the point in time, whatever the provider returns.
+
+        The SDK's own provider returns a fresh copy, but the eager snapshot is
+        what actually pins the hook's view, so it must not depend on that.
+        """
+        live = {"op-1": self._operation("op-1")}
+        seen: list[object] = []
+
+        class _CapturingPlugin(DurableInstrumentationPlugin):
+            def on_invocation_start(_self, info):  # noqa: N805
+                seen.append(info)
+
+        executor = PluginExecutor(plugins=[_CapturingPlugin()])
+        with executor.run():
+            executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+                operations_provider=lambda: live,
+            )
+            # Mutating the provider's own mapping after the hook must not change
+            # what that hook reported.
+            live["op-2"] = self._operation("op-2")
+
+        (start_info,) = seen
+        self.assertEqual(["op-1"], list(start_info.operations))
+
     def test_operation_info_conversion_is_deferred_and_cached(self):
         conversions: list[str] = []
         real_from_operation = OperationInfo.from_operation
