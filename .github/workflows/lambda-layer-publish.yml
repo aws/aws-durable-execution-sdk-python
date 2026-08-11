@@ -140,45 +140,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  build-layers:
+  build-layer:
     needs: build-distributions
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target_python: "3.11"
-            runtime: python3.11
-            runtime_slug: python311
-            architecture: x86_64
-          - target_python: "3.11"
-            runtime: python3.11
-            runtime_slug: python311
-            architecture: arm64
-          - target_python: "3.12"
-            runtime: python3.12
-            runtime_slug: python312
-            architecture: x86_64
-          - target_python: "3.12"
-            runtime: python3.12
-            runtime_slug: python312
-            architecture: arm64
-          - target_python: "3.13"
-            runtime: python3.13
-            runtime_slug: python313
-            architecture: x86_64
-          - target_python: "3.13"
-            runtime: python3.13
-            runtime_slug: python313
-            architecture: arm64
-          - target_python: "3.14"
-            runtime: python3.14
-            runtime_slug: python314
-            architecture: x86_64
-          - target_python: "3.14"
-            runtime: python3.14
-            runtime_slug: python314
-            architecture: arm64
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -188,7 +152,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: ${{ matrix.target_python }}
+          python-version: "3.11"
 
       - name: Download wheels
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -199,28 +163,26 @@ jobs:
       - name: Build layer zip
         id: build-layer
         env:
-          LAYER_ZIP: dist/${{ env.LAYER_NAME }}-${{ matrix.runtime_slug }}-${{ matrix.architecture }}.zip
+          LAYER_ZIP: dist/${{ env.LAYER_NAME }}.zip
         run: |
           SDK_WHEEL=$(find release-dists -name 'aws_durable_execution_sdk_python-*.whl' -print -quit)
           OTEL_WHEEL=$(find release-dists -name 'aws_durable_execution_sdk_python_otel-*.whl' -print -quit)
           python .github/scripts/build_lambda_layer.py \
             --sdk-distribution "$SDK_WHEEL" \
             --otel-distribution "$OTEL_WHEEL" \
-            --target-python "${{ matrix.target_python }}" \
-            --architecture "${{ matrix.architecture }}" \
             --output "$LAYER_ZIP"
           echo "layer_zip=${LAYER_ZIP}" >> "$GITHUB_OUTPUT"
 
       - name: Upload layer artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: otel-plugin-layer-${{ matrix.runtime_slug }}-${{ matrix.architecture }}
+          name: otel-plugin-layer
           path: ${{ steps.build-layer.outputs.layer_zip }}
           if-no-files-found: error
           retention-days: 30
 
   publish-layer:
-    needs: [build-distributions, build-layers]
+    needs: [build-distributions, build-layer]
     runs-on: ubuntu-latest
     environment:
       name: lambda-layer-publish
@@ -229,60 +191,24 @@ jobs:
       id-token: write
     env:
       LAYER_REGIONS: ${{ inputs.regions || vars.LAYER_PUBLISH_REGIONS }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target_python: "3.11"
-            runtime: python3.11
-            runtime_slug: python311
-            architecture: x86_64
-          - target_python: "3.11"
-            runtime: python3.11
-            runtime_slug: python311
-            architecture: arm64
-          - target_python: "3.12"
-            runtime: python3.12
-            runtime_slug: python312
-            architecture: x86_64
-          - target_python: "3.12"
-            runtime: python3.12
-            runtime_slug: python312
-            architecture: arm64
-          - target_python: "3.13"
-            runtime: python3.13
-            runtime_slug: python313
-            architecture: x86_64
-          - target_python: "3.13"
-            runtime: python3.13
-            runtime_slug: python313
-            architecture: arm64
-          - target_python: "3.14"
-            runtime: python3.14
-            runtime_slug: python314
-            architecture: x86_64
-          - target_python: "3.14"
-            runtime: python3.14
-            runtime_slug: python314
-            architecture: arm64
 
     steps:
       - name: Download layer artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: otel-plugin-layer-${{ matrix.runtime_slug }}-${{ matrix.architecture }}
+          name: otel-plugin-layer
           path: dist/
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
         with:
           role-to-assume: ${{ secrets.LAYER_PUBLISH_ROLE_ARN }}
-          role-session-name: otelLayerPublish-${{ matrix.runtime_slug }}-${{ matrix.architecture }}
+          role-session-name: otelLayerPublish
           aws-region: us-east-1
 
       - name: Publish layer versions
         env:
-          LAYER_ZIP: dist/${{ env.LAYER_NAME }}-${{ matrix.runtime_slug }}-${{ matrix.architecture }}.zip
+          LAYER_ZIP: dist/${{ env.LAYER_NAME }}.zip
           SDK_VERSION: ${{ needs.build-distributions.outputs.sdk_version }}
           OTEL_VERSION: ${{ needs.build-distributions.outputs.otel_version }}
         run: |
@@ -297,11 +223,9 @@ jobs:
               continue
             fi
 
-            LAYER_DESCRIPTION="AWS Durable Execution SDK ${SDK_VERSION} OTel plugin ${OTEL_VERSION} (${{ matrix.runtime }}/${{ matrix.architecture }}) sha256:${LOCAL_CODE_SHA256}"
+            LAYER_DESCRIPTION="AWS Durable Execution SDK ${SDK_VERSION} OTel plugin ${OTEL_VERSION} sha256:${LOCAL_CODE_SHA256}"
             if ! EXISTING_RESULT=$(aws lambda list-layer-versions \
                 --layer-name "$LAYER_NAME" \
-                --compatible-runtime "${{ matrix.runtime }}" \
-                --compatible-architecture "${{ matrix.architecture }}" \
                 --region "$REGION" \
                 --query "LayerVersions[?Description=='${LAYER_DESCRIPTION}'] | [0].[LayerVersionArn,Version]" \
                 --output text 2>&1); then
@@ -339,8 +263,8 @@ jobs:
                   --layer-name "$LAYER_NAME" \
                   --description "$LAYER_DESCRIPTION" \
                   --zip-file "fileb://${LAYER_ZIP}" \
-                  --compatible-runtimes "${{ matrix.runtime }}" \
-                  --compatible-architectures "${{ matrix.architecture }}" \
+                  --compatible-runtimes python3.11 python3.12 python3.13 python3.14 \
+                  --compatible-architectures x86_64 arm64 \
                   --license-info Apache-2.0 \
                   --region "$REGION" \
                   --query '[LayerVersionArn,Version,Content.CodeSha256]' \

@@ -14,7 +14,45 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from build_lambda_layer import BuildConfig, build_layer
 
 
-def test_build_layer_installs_dependencies_and_zips_lambda_layout(
+def _write_test_wheel(
+    directory: Path,
+    distribution: str,
+    package_files: tuple[str, ...],
+    dependencies: tuple[str, ...] = (),
+) -> Path:
+    normalized_distribution = distribution.replace("-", "_")
+    wheel = directory / f"{normalized_distribution}-1.0.0-py3-none-any.whl"
+    dist_info = f"{normalized_distribution}-1.0.0.dist-info"
+    metadata = [
+        "Metadata-Version: 2.1",
+        f"Name: {distribution}",
+        "Version: 1.0.0",
+        *(f"Requires-Dist: {dependency}==1.0.0" for dependency in dependencies),
+        "",
+    ]
+
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for package_file in package_files:
+            archive.writestr(package_file, "")
+        archive.writestr(f"{dist_info}/METADATA", "\n".join(metadata))
+        archive.writestr(
+            f"{dist_info}/WHEEL",
+            "\n".join(
+                (
+                    "Wheel-Version: 1.0",
+                    "Generator: test",
+                    "Root-Is-Purelib: true",
+                    "Tag: py3-none-any",
+                    "",
+                )
+            ),
+        )
+        archive.writestr(f"{dist_info}/RECORD", "")
+
+    return wheel
+
+
+def test_build_layer_installs_distributions_and_zips_lambda_layout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -42,17 +80,17 @@ def test_build_layer_installs_dependencies_and_zips_lambda_layout(
     output = build_layer(
         BuildConfig(
             output=tmp_path / "layer.zip",
-            target_python="3.12",
-            architecture="arm64",
             sdk_distribution=sdk_wheel,
             otel_distribution=otel_wheel,
         )
     )
 
     assert output == tmp_path / "layer.zip"
-    assert commands[0][commands[0].index("--platform") + 1] == "manylinux2014_aarch64"
-    assert commands[0][commands[0].index("--abi") + 1] == "cp312"
     assert "--no-compile" in commands[0]
+    assert "--no-deps" in commands[0]
+    assert "--platform" not in commands[0]
+    assert "--python-version" not in commands[0]
+    assert "--abi" not in commands[0]
     assert str(sdk_wheel) in commands[0]
     assert str(otel_wheel) in commands[0]
 
@@ -66,34 +104,52 @@ def test_build_layer_installs_dependencies_and_zips_lambda_layout(
         )
 
 
-@pytest.mark.parametrize(
-    ("target_python", "architecture", "error"),
-    [
-        ("3.10", "x86_64", "Unsupported Python version"),
-        ("3.12", "sparc", "Unsupported architecture"),
-    ],
-)
-def test_build_layer_rejects_unsupported_targets(
-    target_python: str,
-    architecture: str,
-    error: str,
+def test_build_layer_excludes_adot_and_runtime_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    sdk_wheel = tmp_path / "sdk.whl"
-    otel_wheel = tmp_path / "otel.whl"
-    sdk_wheel.write_text("sdk")
-    otel_wheel.write_text("otel")
+    sdk_wheel = _write_test_wheel(
+        tmp_path,
+        "aws-durable-execution-sdk-python",
+        ("aws_durable_execution_sdk_python/__init__.py",),
+        ("boto3",),
+    )
+    otel_wheel = _write_test_wheel(
+        tmp_path,
+        "aws-durable-execution-sdk-python-otel",
+        ("aws_durable_execution_sdk_python_otel/__init__.py",),
+        ("aws-opentelemetry-distro", "opentelemetry-api"),
+    )
+    _write_test_wheel(tmp_path, "boto3", ("boto3/__init__.py",))
+    _write_test_wheel(
+        tmp_path,
+        "aws-opentelemetry-distro",
+        ("amazon/opentelemetry/distro/__init__.py",),
+    )
+    _write_test_wheel(
+        tmp_path,
+        "opentelemetry-api",
+        ("opentelemetry/__init__.py",),
+    )
+    monkeypatch.setenv("PIP_FIND_LINKS", str(tmp_path))
+    monkeypatch.setenv("PIP_NO_INDEX", "1")
 
-    with pytest.raises(ValueError, match=error):
-        build_layer(
-            BuildConfig(
-                output=tmp_path / "layer.zip",
-                target_python=target_python,
-                architecture=architecture,
-                sdk_distribution=sdk_wheel,
-                otel_distribution=otel_wheel,
-            )
+    output = build_layer(
+        BuildConfig(
+            output=tmp_path / "layer.zip",
+            sdk_distribution=sdk_wheel,
+            otel_distribution=otel_wheel,
         )
+    )
+
+    with zipfile.ZipFile(output) as archive:
+        names = archive.namelist()
+
+    assert "python/aws_durable_execution_sdk_python/__init__.py" in names
+    assert "python/aws_durable_execution_sdk_python_otel/__init__.py" in names
+    assert not any(name.startswith("python/amazon/") for name in names)
+    assert not any(name.startswith("python/boto3/") for name in names)
+    assert not any(name.startswith("python/opentelemetry/") for name in names)
 
 
 def test_build_layer_requires_built_distributions(tmp_path: Path) -> None:
@@ -101,17 +157,31 @@ def test_build_layer_requires_built_distributions(tmp_path: Path) -> None:
         build_layer(
             BuildConfig(
                 output=tmp_path / "layer.zip",
-                target_python="3.13",
-                architecture="x86_64",
                 sdk_distribution=tmp_path / "missing-sdk.whl",
                 otel_distribution=tmp_path / "missing-otel.whl",
             )
         )
 
 
+def test_build_layer_requires_universal_wheels(tmp_path: Path) -> None:
+    sdk_wheel = tmp_path / "sdk-1.0.0-cp311-cp311-manylinux2014_x86_64.whl"
+    otel_wheel = tmp_path / "otel-1.0.0-py3-none-any.whl"
+    sdk_wheel.write_text("sdk")
+    otel_wheel.write_text("otel")
+
+    with pytest.raises(ValueError, match="must be universal wheels"):
+        build_layer(
+            BuildConfig(
+                output=tmp_path / "layer.zip",
+                sdk_distribution=sdk_wheel,
+                otel_distribution=otel_wheel,
+            )
+        )
+
+
 def test_build_layer_rejects_output_inside_build_directory(tmp_path: Path) -> None:
-    sdk_wheel = tmp_path / "sdk.whl"
-    otel_wheel = tmp_path / "otel.whl"
+    sdk_wheel = tmp_path / "sdk-1.0.0-py3-none-any.whl"
+    otel_wheel = tmp_path / "otel-1.0.0-py3-none-any.whl"
     sdk_wheel.write_text("sdk")
     otel_wheel.write_text("otel")
     build_dir = tmp_path / "layer"
@@ -120,8 +190,6 @@ def test_build_layer_rejects_output_inside_build_directory(tmp_path: Path) -> No
         build_layer(
             BuildConfig(
                 output=build_dir / "layer.zip",
-                target_python="3.13",
-                architecture="x86_64",
                 sdk_distribution=sdk_wheel,
                 otel_distribution=otel_wheel,
                 build_dir=build_dir,
