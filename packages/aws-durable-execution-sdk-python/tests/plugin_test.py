@@ -230,6 +230,42 @@ class TestDataClasses(unittest.TestCase):
             ),
         )
 
+    def test_operation_map_fields_are_additive(self):
+        """The operation maps must be as additive as the payload fields.
+
+        They are mapping-valued, so including them in the generated methods
+        would make a previously hashable info unhashable, and their entries
+        carry operation results and errors that instrumentation logs wholesale.
+        """
+        start_fields = {f.name: f for f in fields(InvocationStartInfo)}
+        end_fields = {f.name: f for f in fields(InvocationEndInfo)}
+
+        for holder, name in (
+            (start_fields, "operations"),
+            (start_fields, "updated_operations"),
+            (end_fields, "operations"),
+        ):
+            self.assertFalse(holder[name].repr, name)
+            self.assertFalse(holder[name].compare, name)
+            self.assertIs(holder[name].hash, False, name)
+
+        base = {
+            "request_id": "req-1",
+            "execution_arn": "arn:test",
+            "is_first_invocation": True,
+        }
+        with_maps = InvocationStartInfo(
+            **base,
+            operations={"op-1": OPERATION_END_INFO},
+            updated_operations={"op-1": OPERATION_END_INFO},
+        )
+
+        # Hashable despite the mapping fields, and equal to the map-free info.
+        self.assertEqual(hash(InvocationStartInfo(**base)), hash(with_maps))
+        self.assertEqual(InvocationStartInfo(**base), with_maps)
+        # Operation results do not leak through the info's repr.
+        self.assertNotIn("op-1", repr(with_maps))
+
     def test_payload_fields_are_declared_non_compare(self):
         """Pin the declarations, not just the observed behaviour."""
         start_fields = {f.name: f for f in fields(InvocationStartInfo)}
