@@ -98,13 +98,34 @@ class OperationInfo:
             start_time=operation.start_timestamp,
             end_time=operation.end_timestamp,
             result=_extract_result(operation),
-            error=_extract_error(operation),
+            error=_copy_error(_extract_error(operation)),
             attempt=(
                 operation.step_details.attempt if operation.step_details else None
             ),
             is_replayed=is_replayed,
             status=operation.status,
         )
+
+
+def _copy_error(error: ErrorObject | None) -> ErrorObject | None:
+    """Return a plugin-owned copy of an operation error.
+
+    The checkpointed ``ErrorObject`` is handed straight to user code on replay,
+    and its ``stack_trace`` is a mutable list. Without a copy a plugin reading
+    ``info.operations`` could append to (or clear) that list and change the error
+    the execution later raises. Only the list needs cloning -- the other fields
+    are immutable strings -- so this is cheaper than a full deep copy.
+    """
+    if error is None:
+        return None
+    return ErrorObject(
+        message=error.message,
+        type=error.type,
+        data=error.data,
+        stack_trace=(
+            list(error.stack_trace) if error.stack_trace is not None else None
+        ),
+    )
 
 
 def _to_operation_info_map(
@@ -306,8 +327,9 @@ class InvocationInfo:
         repr=False,
         compare=False,
         hash=False,
+        metadata={"experimental": True},
     )
-    """Checkpointed operations for this execution, keyed by operation id.
+    """EXPERIMENTAL: Checkpointed operations for this execution, keyed by id.
 
     A point-in-time view of the execution's operation map: as observed at the
     start of the invocation on ``on_invocation_start``, and as observed at the
@@ -329,8 +351,9 @@ class InvocationStartInfo(InvocationInfo):
         repr=False,
         compare=False,
         hash=False,
+        metadata={"experimental": True},
     )
-    """Operations updated externally while this execution was suspended.
+    """EXPERIMENTAL: Operations updated externally while this execution was suspended.
 
     A wait timer that expired, a callback that was delivered, or a chained
     invoke that completed between the previous invocation and this one. This is
@@ -535,19 +558,30 @@ class PluginExecutor:
                 # this is called asynchronously, so plugins cannot manipulate thread local objects
                 self._executor.submit(self._dispatch_plugin, plugin, info)
 
-    @staticmethod
     def _snapshot_operation_infos(
+        self,
         operations_provider: Callable[[], Mapping[str, Operation]] | None,
     ) -> Mapping[str, OperationInfo]:
         """Capture the operation map now; defer the ``OperationInfo`` conversion.
 
-        Copying the map is cheap, building an ``OperationInfo`` per operation is
-        not. Snapshotting eagerly pins the point in time the hook reports, so a
-        plugin that stashes the info and reads it later still sees the state as
-        of its hook; deferring the conversion keeps operation-heavy executions
-        from paying for a view no plugin reads.
+        Snapshotting eagerly pins the point in time the hook reports, so a plugin
+        that stashes the info and reads it later still sees the state as of its
+        hook; deferring the conversion keeps operation-heavy executions from
+        paying for a view no plugin reads.
+
+        Skipped entirely when no plugins are registered -- ``durable_execution()``
+        passes a provider unconditionally, so without this gate a plugin-free
+        execution would still invoke it at both hooks.
+
+        The returned mapping is copied even though the SDK's provider
+        (``ExecutionState.operations``) already returns a copy: the copy is what
+        pins the point in time, and relying on every provider to hand over a
+        mapping it will never touch again would make that invariant contingent on
+        an external contract. It is a shallow copy of pointers, and now only
+        happens when plugins are registered, so it is far cheaper than the
+        ``OperationInfo`` conversion it guards.
         """
-        if operations_provider is None:
+        if not self._plugins or operations_provider is None:
             return _LazyOperationInfoMap(None)
         try:
             snapshot = dict(operations_provider())
@@ -582,7 +616,7 @@ class PluginExecutor:
                 ``UpdatedOperationIds`` -- those updated while suspended.
         """
         aws_request_id = lambda_context.aws_request_id if lambda_context else None
-        self._operations_provider = operations_provider
+        self._operations_provider = operations_provider if self._plugins else None
         operations = self._snapshot_operation_infos(operations_provider)
         self._invocation_status = InvocationStartInfo(
             execution_arn=execution_arn,
