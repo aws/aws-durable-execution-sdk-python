@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import datetime
 import functools
 import logging
@@ -378,9 +379,39 @@ class PluginExecutor:
             request_id=aws_request_id,
             is_first_invocation=is_first_invocation,
             execution_start_time=execution_start_time,
-            execution_input=execution_input,
+            execution_input=self._snapshot_execution_input(execution_input),
         )
         self.execute_plugins(self._invocation_status, sync=True)
+
+    def _snapshot_execution_input(self, execution_input: Any) -> Any:
+        """Deep-copy the execution input so the plugin view is isolated.
+
+        ``durable_execution()`` hands the same mutable object to the user handler
+        and to this hook. Without a copy the aliasing runs both ways: a plugin
+        mutating ``info.execution_input`` would change the handler's event and so
+        alter execution behaviour, and a handler mutating its event would change
+        what this frozen info -- and the invocation-end info derived from it --
+        reports afterwards.
+
+        The copy is eager rather than deferred: the handler starts running
+        immediately after this hook, so a lazily-taken snapshot could already
+        have observed the handler's mutations. It is skipped when no plugins are
+        registered, so non-plugin executions pay nothing.
+
+        The snapshot is shared by all plugins for this invocation; plugins should
+        still treat it as read-only with respect to each other.
+        """
+        if not self._plugins or execution_input is None:
+            return execution_input
+        try:
+            return copy.deepcopy(execution_input)
+        except Exception:
+            # A plugin-facing view must never break the execution. Fall back to
+            # the shared reference rather than dropping the input entirely.
+            logger.exception(
+                "Failed to copy execution input for plugins; passing shared reference"
+            )
+            return execution_input
 
     def on_invocation_end(
         self,
