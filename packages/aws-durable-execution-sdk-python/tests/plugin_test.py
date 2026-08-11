@@ -1,7 +1,8 @@
 import datetime
 import logging
 import unittest
-from dataclasses import fields
+from copy import deepcopy
+from dataclasses import asdict, fields
 from unittest.mock import MagicMock, patch
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -957,6 +958,103 @@ class TestInvocationHookOperationMaps(unittest.TestCase):
             self.assertIsNotNone(self.executor._operations_provider)  # noqa: SLF001
 
         self.assertIsNone(self.executor._operations_provider)  # noqa: SLF001
+
+
+class TestInvocationInfoCopySafety(unittest.TestCase):
+    """Invocation infos carrying the lazy operation map must stay copyable.
+
+    ``dataclasses.asdict()`` deep-copies any field that is not a dict/list/tuple
+    or dataclass, so anything uncopyable embedded in the lazy map would make
+    every plugin that serializes an info raise -- and because plugin exceptions
+    are swallowed, the hook would be silently dropped.
+    """
+
+    def setUp(self):
+        self.operation = Operation(
+            operation_id="op-1",
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="name-op-1",
+            parent_id="root",
+            status=OperationStatus.SUCCEEDED,
+            start_timestamp=START_TS,
+            end_timestamp=END_TS,
+            step_details=StepDetails(attempt=1),
+        )
+        self.captured: list[object] = []
+
+        class _CapturingPlugin(DurableInstrumentationPlugin):
+            def on_invocation_start(_self, info):  # noqa: N805
+                self.captured.append(info)
+
+            def on_invocation_end(_self, info):  # noqa: N805
+                self.captured.append(info)
+
+        self.executor = PluginExecutor(plugins=[_CapturingPlugin()])
+
+    def _fire_hooks(self):
+        with self.executor.run():
+            self.executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=False,
+                operations_provider=lambda: {"op-1": self.operation},
+                updated_operation_ids=["op-1"],
+            )
+            self.executor.on_invocation_end(
+                output=DurableExecutionInvocationOutput(
+                    status=InvocationStatus.SUCCEEDED, result=None, error=None
+                )
+            )
+        return self.captured
+
+    def test_asdict_on_invocation_start_info(self):
+        start_info, _ = self._fire_hooks()
+
+        as_dict = asdict(start_info)
+
+        # Both lazy maps materialize as ordinary dicts.
+        self.assertIsInstance(as_dict["operations"], dict)
+        self.assertIsInstance(as_dict["updated_operations"], dict)
+        self.assertEqual(["op-1"], list(as_dict["operations"]))
+        self.assertEqual(["op-1"], list(as_dict["updated_operations"]))
+
+    def test_asdict_on_invocation_end_info(self):
+        _, end_info = self._fire_hooks()
+
+        as_dict = asdict(end_info)
+
+        self.assertIsInstance(as_dict["operations"], dict)
+        self.assertEqual(["op-1"], list(as_dict["operations"]))
+
+    def test_deepcopy_on_invocation_infos(self):
+        start_info, end_info = self._fire_hooks()
+
+        for info in (start_info, end_info):
+            copied = deepcopy(info)
+            self.assertIsInstance(copied.operations, dict)
+            self.assertEqual(["op-1"], list(copied.operations))
+
+    def test_deepcopy_is_independent_of_the_original(self):
+        start_info, _ = self._fire_hooks()
+
+        copied = deepcopy(start_info)
+        copied.operations["op-2"] = OPERATION_END_INFO
+
+        self.assertEqual(["op-1"], list(start_info.operations))
+
+    def test_unresolved_map_is_still_copyable(self):
+        """Copying must not require the map to have been read first."""
+        start_info, _ = self._fire_hooks()
+        fresh = InvocationStartInfo(
+            request_id=start_info.request_id,
+            execution_arn=start_info.execution_arn,
+            is_first_invocation=start_info.is_first_invocation,
+            operations=start_info.operations,
+        )
+
+        self.assertIsInstance(asdict(fresh)["operations"], dict)
 
 
 class TestPluginExecutorOnOperationAction(unittest.TestCase):
