@@ -406,12 +406,11 @@ class PluginExecutor:
         try:
             return copy.deepcopy(execution_input)
         except Exception:
-            # A plugin-facing view must never break the execution. Fall back to
-            # the shared reference rather than dropping the input entirely.
+            # Preserve handler isolation if a snapshot cannot be created.
             logger.exception(
-                "Failed to copy execution input for plugins; passing shared reference"
+                "Failed to copy execution input for plugins; omitting plugin input"
             )
-            return execution_input
+            return None
 
     def on_invocation_end(
         self,
