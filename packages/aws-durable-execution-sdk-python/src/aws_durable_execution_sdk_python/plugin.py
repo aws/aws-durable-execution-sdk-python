@@ -180,6 +180,8 @@ class InvocationInfo:
         default=None,
         kw_only=True,
         repr=False,
+        compare=False,
+        hash=False,
         metadata={"experimental": True},
     )
     """EXPERIMENTAL: The deserialized execution input, when available.
@@ -192,6 +194,11 @@ class InvocationInfo:
     including the payload here would implicitly write customer input -- possibly
     secrets, possibly megabytes -- into logs. Read the attribute explicitly to
     record it.
+
+    Excluded from ``__eq__`` and ``__hash__`` so adding it stays additive. The
+    value is arbitrary deserialized JSON, so a dict or list payload would make a
+    previously hashable info unhashable, and comparisons against infos built
+    from the earlier field set would start returning False.
 
     Defaults to ``None`` only when the field is not populated (a hook info built
     without it); ``durable_execution()`` always populates it with the
@@ -216,6 +223,8 @@ class InvocationEndInfo(InvocationInfo):
         default=None,
         kw_only=True,
         repr=False,
+        compare=False,
+        hash=False,
         metadata={"experimental": True},
     )
     """EXPERIMENTAL: The serialized execution result, when available.
@@ -224,9 +233,10 @@ class InvocationEndInfo(InvocationInfo):
     large payload. Mirrors the JS SDK's ``InvocationEndInfo.executionResult``.
     ``None`` on failure or suspend.
 
-    Excluded from ``repr`` for the same reason as
+    Excluded from ``repr``, ``__eq__`` and ``__hash__`` for the same reasons as
     :attr:`InvocationInfo.execution_input`: hook infos are logged wholesale by
-    instrumentation, and the result is customer data.
+    instrumentation, and adding the field should not change how existing infos
+    compare.
     """
 
     @classmethod
