@@ -4,6 +4,7 @@ import datetime
 import json
 import time
 import warnings
+from copy import deepcopy
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -3020,6 +3021,78 @@ def test_durable_execution_surfaces_empty_input_as_empty_mapping():
     )
 
     assert plugin.start_execution_inputs == [{}]
+
+
+def test_durable_execution_isolates_execution_input_from_handler():
+    """Plugin and handler must not observe each other's input mutations.
+
+    durable_execution() hands one mutable object to both, so the plugin view is
+    deep-copied. Without that, a plugin could alter execution behaviour and a
+    handler could retroactively change what the frozen hook info reports.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    observed: dict[str, Any] = {}
+
+    class _MutatingPlugin(DurableInstrumentationPlugin):
+        def on_invocation_start(self, info):
+            # Direction A: plugin mutates its view before the handler runs.
+            info.execution_input["injected_by_plugin"] = True
+
+        def on_invocation_end(self, info):
+            observed["end_input"] = dict(info.execution_input)
+
+    @durable_execution(plugins=[_MutatingPlugin()])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        observed["handler_saw"] = dict(event)
+        # Direction B: handler mutates its event after the start hook fired.
+        event["injected_by_handler"] = True
+        return {"ok": True}
+
+    test_handler(
+        _make_invocation_input(mock_client, input_payload='{"name": "World"}'),
+        _make_lambda_context(),
+    )
+
+    # Direction A: the plugin's mutation must not reach the handler.
+    assert observed["handler_saw"] == {"name": "World"}
+    # Direction B: the handler's mutation must not reach the end hook, which
+    # still reports the plugin-side snapshot taken at invocation-start.
+    assert "injected_by_handler" not in observed["end_input"]
+    assert observed["end_input"] == {"name": "World", "injected_by_plugin": True}
+
+
+def test_durable_execution_isolates_nested_execution_input():
+    """Isolation must be deep, not just a top-level copy."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    observed: dict[str, Any] = {}
+
+    class _NestedMutatingPlugin(DurableInstrumentationPlugin):
+        def on_invocation_start(self, info):
+            info.execution_input["outer"]["inner"].append("from_plugin")
+
+    @durable_execution(plugins=[_NestedMutatingPlugin()])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        observed["handler_saw"] = deepcopy(event)
+        return {"ok": True}
+
+    test_handler(
+        _make_invocation_input(
+            mock_client, input_payload='{"outer": {"inner": ["original"]}}'
+        ),
+        _make_lambda_context(),
+    )
+
+    assert observed["handler_saw"] == {"outer": {"inner": ["original"]}}
 
 
 def test_durable_execution_with_plugins_failure():
