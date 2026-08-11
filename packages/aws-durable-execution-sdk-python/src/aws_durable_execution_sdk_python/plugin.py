@@ -178,7 +178,9 @@ class InvocationInfo:
     # The deserialized execution input, surfaced to instrumentation plugins that
     # need to record it (e.g. Workflow Insight). Mirrors the JS SDK's
     # InvocationInfo.executionInput. kw_only so it never reorders the positional
-    # fields above. None when the input is empty or unavailable.
+    # fields above. Defaults to None only when the field is not populated (a
+    # hook info built without it); durable_execution() always populates it with
+    # the deserialized input payload, which is {} when the payload is empty.
     execution_input: Any = field(default=None, kw_only=True)
 
 

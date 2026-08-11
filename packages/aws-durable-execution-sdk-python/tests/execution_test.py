@@ -2675,13 +2675,13 @@ def test_from_dict_leaves_timestamps_as_integers():
 # =============================================================================
 
 
-def _make_invocation_input(mock_client, next_marker=""):
+def _make_invocation_input(mock_client, next_marker="", input_payload="{}"):
     """Helper to create a standard test invocation input."""
     operation = Operation(
         operation_id="exec1",
         operation_type=OperationType.EXECUTION,
         status=OperationStatus.STARTED,
-        execution_details=ExecutionDetails(input_payload="{}"),
+        execution_details=ExecutionDetails(input_payload=input_payload),
     )
     return DurableExecutionInvocationInputWithClient(
         durable_execution_arn="arn:test:execution/exec1",
@@ -2855,6 +2855,12 @@ class _RecordingPlugin(DurableInstrumentationPlugin):
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        # Payload surfaces observed on the invocation hooks, so tests can assert
+        # durable_execution() actually forwards them (not just that the
+        # dataclasses can hold them).
+        self.start_execution_inputs: list[Any] = []
+        self.end_execution_inputs: list[Any] = []
+        self.end_execution_results: list[str | None] = []
 
     def on_execution_start(self, info):
         self.calls.append("execution_start")
@@ -2864,9 +2870,12 @@ class _RecordingPlugin(DurableInstrumentationPlugin):
 
     def on_invocation_start(self, info):
         self.calls.append("invocation_start")
+        self.start_execution_inputs.append(info.execution_input)
 
     def on_invocation_end(self, info):
         self.calls.append(f"invocation_end:{info.status.value}")
+        self.end_execution_inputs.append(info.execution_input)
+        self.end_execution_results.append(info.execution_result)
 
     def on_operation_start(self, info):
         self.calls.append(f"operation_start:{info.operation_id}")
@@ -2955,6 +2964,62 @@ def test_durable_execution_with_plugins_success():
     # ExecutionStartInfo dispatches to on_invocation_start in the match block
     assert "invocation_start" in plugin.calls
     assert "invocation_end:SUCCEEDED" in plugin.calls
+
+
+def test_durable_execution_forwards_execution_input_to_plugins():
+    """durable_execution() must hand the deserialized input to both hooks.
+
+    Guards the one production line that surfaces real input
+    (`execution_input=input_event`). A non-empty payload is used deliberately:
+    the field's own default is None and an empty payload deserializes to {}, so
+    only a populated payload distinguishes real forwarding from either.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"echoed": event["name"]}
+
+    result = test_handler(
+        _make_invocation_input(mock_client, input_payload='{"name": "World"}'),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    # The invocation-start hook sees the deserialized input, not the raw payload.
+    assert plugin.start_execution_inputs == [{"name": "World"}]
+    # The end info inherits the same input from the start info.
+    assert plugin.end_execution_inputs == [{"name": "World"}]
+    # And the end hook carries the serialized result.
+    assert plugin.end_execution_results == ['{"echoed": "World"}']
+
+
+def test_durable_execution_surfaces_empty_input_as_empty_mapping():
+    """An empty payload reaches plugins as {}, never None."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> str:
+        return "ok"
+
+    test_handler(
+        _make_invocation_input(mock_client, input_payload=""),
+        _make_lambda_context(),
+    )
+
+    assert plugin.start_execution_inputs == [{}]
 
 
 def test_durable_execution_with_plugins_failure():
