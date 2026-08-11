@@ -115,6 +115,52 @@ USER_FUNCTION_END_INFO = UserFunctionEndInfo(
 
 
 class TestDataClasses(unittest.TestCase):
+    def test_payload_fields_are_excluded_from_repr(self):
+        """Payload values must not leak into repr.
+
+        Instrumentation logs hook infos wholesale -- the bundled OTel plugins at
+        debug level, the plugin example at info -- so a payload in repr would
+        implicitly write customer input and results into logs.
+        """
+        secret_input = {"password": "hunter2", "ssn": "123-45-6789"}
+        secret_result = '{"token": "sk-live-do-not-log"}'
+
+        start_info = InvocationStartInfo(
+            request_id="req-1",
+            execution_arn="arn:test",
+            is_first_invocation=True,
+            execution_input=secret_input,
+        )
+        end_info = InvocationEndInfo(
+            request_id="req-1",
+            execution_arn="arn:test",
+            is_first_invocation=False,
+            status=InvocationStatus.SUCCEEDED,
+            execution_input=secret_input,
+            execution_result=secret_result,
+        )
+
+        for info in (start_info, end_info):
+            rendered = repr(info)
+            for leaked in ("hunter2", "123-45-6789", "sk-live-do-not-log"):
+                self.assertNotIn(leaked, rendered, f"{type(info).__name__}: {leaked}")
+            # Identity fields are still rendered, so the repr stays useful.
+            self.assertIn("req-1", rendered)
+            self.assertIn("arn:test", rendered)
+
+        # The values remain readable via the attributes themselves.
+        self.assertEqual(secret_input, start_info.execution_input)
+        self.assertEqual(secret_result, end_info.execution_result)
+
+    def test_payload_fields_are_declared_non_repr(self):
+        """Pin the field declaration, not just the rendered string."""
+        start_fields = {f.name: f for f in fields(InvocationStartInfo)}
+        end_fields = {f.name: f for f in fields(InvocationEndInfo)}
+
+        self.assertFalse(start_fields["execution_input"].repr)
+        self.assertFalse(end_fields["execution_input"].repr)
+        self.assertFalse(end_fields["execution_result"].repr)
+
     def test_payload_fields_are_marked_experimental(self):
         plugin_info_types = (
             OperationInfo,

@@ -179,12 +179,19 @@ class InvocationInfo:
     execution_input: Any = field(
         default=None,
         kw_only=True,
+        repr=False,
         metadata={"experimental": True},
     )
     """EXPERIMENTAL: The deserialized execution input, when available.
 
     Surfaced to instrumentation plugins that need to record it (e.g. Workflow
     Insight). Mirrors the JS SDK's ``InvocationInfo.executionInput``.
+
+    Excluded from ``repr`` on purpose: instrumentation logs hook infos wholesale
+    (the bundled OTel plugins at debug level, the plugin example at info), so
+    including the payload here would implicitly write customer input -- possibly
+    secrets, possibly megabytes -- into logs. Read the attribute explicitly to
+    record it.
 
     Defaults to ``None`` only when the field is not populated (a hook info built
     without it); ``durable_execution()`` always populates it with the
@@ -208,6 +215,7 @@ class InvocationEndInfo(InvocationInfo):
     execution_result: str | None = field(
         default=None,
         kw_only=True,
+        repr=False,
         metadata={"experimental": True},
     )
     """EXPERIMENTAL: The serialized execution result, when available.
@@ -215,6 +223,10 @@ class InvocationEndInfo(InvocationInfo):
     A JSON string, or ``""`` when the result was checkpointed out-of-band for a
     large payload. Mirrors the JS SDK's ``InvocationEndInfo.executionResult``.
     ``None`` on failure or suspend.
+
+    Excluded from ``repr`` for the same reason as
+    :attr:`InvocationInfo.execution_input`: hook infos are logged wholesale by
+    instrumentation, and the result is customer data.
     """
 
     @classmethod
