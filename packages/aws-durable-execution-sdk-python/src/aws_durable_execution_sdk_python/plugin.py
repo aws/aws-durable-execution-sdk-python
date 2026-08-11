@@ -68,8 +68,18 @@ class OperationInfo:
     is_replayed: bool
     status: OperationStatus
     end_time: datetime.datetime | None = field(default=None, kw_only=True)
-    result: str | None = field(default=None, kw_only=True)
-    error: ErrorObject | None = field(default=None, kw_only=True)
+    result: str | None = field(
+        default=None,
+        kw_only=True,
+        metadata={"experimental": True},
+    )
+    """EXPERIMENTAL: The serialized operation result, when available."""
+    error: ErrorObject | None = field(
+        default=None,
+        kw_only=True,
+        metadata={"experimental": True},
+    )
+    """EXPERIMENTAL: The operation error, when available."""
     attempt: int | None = field(default=None, kw_only=True)
 
     @staticmethod
@@ -175,7 +185,11 @@ class InvocationStartInfo(InvocationInfo):
 @dataclass(frozen=True)
 class InvocationEndInfo(InvocationInfo):
     status: InvocationStatus = field(kw_only=True)
-    error: ErrorObject | None = None
+    error: ErrorObject | None = field(
+        default=None,
+        metadata={"experimental": True},
+    )
+    """EXPERIMENTAL: The invocation error, when available."""
 
     @classmethod
     def from_durable_execution_invocation_output(
