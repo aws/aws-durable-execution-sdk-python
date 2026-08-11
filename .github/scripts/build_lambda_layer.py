@@ -14,25 +14,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-ARCHITECTURE_PLATFORMS = {
-    "x86_64": "manylinux2014_x86_64",
-    "arm64": "manylinux2014_aarch64",
-}
-SUPPORTED_PYTHON_VERSIONS = ("3.11", "3.12", "3.13", "3.14")
+UNIVERSAL_WHEEL_SUFFIX = "-py3-none-any.whl"
 
 
 @dataclass(frozen=True)
 class BuildConfig:
     output: Path
-    target_python: str
-    architecture: str
     sdk_distribution: Path
     otel_distribution: Path
     build_dir: Path | None = None
 
 
 def build_layer(config: BuildConfig) -> Path:
-    """Build a Lambda layer containing the SDK and OpenTelemetry plugin."""
+    """Build a universal Lambda layer containing the SDK and OTel plugin."""
 
     _validate_config(config)
 
@@ -44,30 +38,20 @@ def build_layer(config: BuildConfig) -> Path:
         layer_python_dir = work_dir / "python"
         layer_python_dir.mkdir(parents=True)
 
-        _install_layer_dependencies(config, layer_python_dir)
+        _install_layer_distributions(config, layer_python_dir)
         _write_zip(config.output, work_dir)
 
     return config.output
 
 
 def _validate_config(config: BuildConfig) -> None:
-    if config.architecture not in ARCHITECTURE_PLATFORMS:
-        supported = ", ".join(sorted(ARCHITECTURE_PLATFORMS))
-        raise ValueError(
-            f"Unsupported architecture: {config.architecture}. "
-            f"Supported architectures: {supported}"
-        )
-
-    if config.target_python not in SUPPORTED_PYTHON_VERSIONS:
-        supported = ", ".join(SUPPORTED_PYTHON_VERSIONS)
-        raise ValueError(
-            f"Unsupported Python version: {config.target_python}. "
-            f"Supported versions: {supported}"
-        )
-
     for distribution in (config.sdk_distribution, config.otel_distribution):
         if not distribution.is_file():
             raise FileNotFoundError(distribution)
+        if not distribution.name.endswith(UNIVERSAL_WHEEL_SUFFIX):
+            raise ValueError(
+                f"Layer distributions must be universal wheels: {distribution}"
+            )
 
 
 def _validate_output_location(output: Path, build_dir: Path) -> None:
@@ -75,11 +59,7 @@ def _validate_output_location(output: Path, build_dir: Path) -> None:
         raise ValueError("Layer output must be outside the build directory")
 
 
-def _install_layer_dependencies(config: BuildConfig, target_dir: Path) -> None:
-    python_version = config.target_python
-    abi = f"cp{python_version.replace('.', '')}"
-    platform = ARCHITECTURE_PLATFORMS[config.architecture]
-
+def _install_layer_distributions(config: BuildConfig, target_dir: Path) -> None:
     command = [
         sys.executable,
         "-m",
@@ -88,17 +68,10 @@ def _install_layer_dependencies(config: BuildConfig, target_dir: Path) -> None:
         "--upgrade",
         "--target",
         str(target_dir),
-        "--platform",
-        platform,
-        "--implementation",
-        "cp",
-        "--python-version",
-        python_version,
-        "--abi",
-        abi,
         "--only-binary",
         ":all:",
         "--no-compile",
+        "--no-deps",
         str(config.sdk_distribution),
         str(config.otel_distribution),
     ]
@@ -119,21 +92,9 @@ def _write_zip(output: Path, layer_root: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="build_lambda_layer.py",
-        description="Build the AWS Durable Execution SDK OTel plugin Lambda layer.",
+        description="Build the universal AWS Durable Execution SDK OTel plugin layer.",
     )
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument(
-        "--target-python",
-        choices=SUPPORTED_PYTHON_VERSIONS,
-        required=True,
-        help="Lambda Python minor version.",
-    )
-    parser.add_argument(
-        "--architecture",
-        choices=sorted(ARCHITECTURE_PLATFORMS),
-        required=True,
-        help="Lambda instruction set architecture.",
-    )
     parser.add_argument("--sdk-distribution", type=Path, required=True)
     parser.add_argument("--otel-distribution", type=Path, required=True)
     parser.add_argument(
@@ -146,8 +107,6 @@ def main(argv: list[str] | None = None) -> int:
     output = build_layer(
         BuildConfig(
             output=args.output,
-            target_python=args.target_python,
-            architecture=args.architecture,
             sdk_distribution=args.sdk_distribution,
             otel_distribution=args.otel_distribution,
             build_dir=args.build_dir,
