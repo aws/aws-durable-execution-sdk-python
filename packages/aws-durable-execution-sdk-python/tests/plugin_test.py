@@ -1,5 +1,6 @@
 import datetime
 import logging
+import pickle
 import unittest
 from copy import deepcopy
 from dataclasses import asdict, fields
@@ -1008,7 +1009,63 @@ class TestInvocationHookOperationMaps(unittest.TestCase):
         (start_info,) = seen
         self.assertEqual(["op-1"], list(start_info.operations))
 
-    def test_operation_info_conversion_is_deferred_and_cached(self):
+    def test_maps_are_plain_dicts_for_serialization(self):
+        """The maps must be real dicts, not a custom Mapping.
+
+        ``dataclasses.asdict()`` and ``pickle`` only traverse real dicts, so a
+        custom Mapping here would leave the hook info unserializable for exactly
+        the plugins these fields exist to serve.
+        """
+        with self.executor.run():
+            self._start(
+                operations={"op-1": self._operation("op-1")},
+                updated_operation_ids=["op-1"],
+            )
+            self.executor.on_invocation_end(
+                output=DurableExecutionInvocationOutput(
+                    status=InvocationStatus.SUCCEEDED, result=None, error=None
+                )
+            )
+
+        start_info, end_info = self.captured
+        for info in (start_info, end_info):
+            self.assertIs(dict, type(info.operations))
+        self.assertIs(dict, type(start_info.updated_operations))
+
+        # asdict recurses all the way down, so the values become nested dicts.
+        as_dict = asdict(start_info)
+        self.assertIs(dict, type(as_dict["operations"]))
+        self.assertIs(dict, type(as_dict["operations"]["op-1"]))
+        self.assertEqual("op-1", as_dict["operations"]["op-1"]["operation_id"])
+        self.assertIs(dict, type(as_dict["updated_operations"]["op-1"]))
+
+    def test_hook_infos_survive_a_pickle_round_trip(self):
+        """Plugins hand infos to multiprocessing queues and caches."""
+        with self.executor.run():
+            self._start(
+                operations={"op-1": self._operation("op-1")},
+                updated_operation_ids=["op-1"],
+            )
+            self.executor.on_invocation_end(
+                output=DurableExecutionInvocationOutput(
+                    status=InvocationStatus.SUCCEEDED, result=None, error=None
+                )
+            )
+
+        start_info, end_info = self.captured
+        for info in (start_info, end_info):
+            restored = pickle.loads(pickle.dumps(info))  # noqa: S301
+            self.assertEqual(["op-1"], list(restored.operations))
+            self.assertEqual("op-1", restored.operations["op-1"].operation_id)
+
+        # And with the empty maps a plugin-free-style info carries.
+        empty = InvocationStartInfo(
+            request_id="req-1", execution_arn="arn:test", is_first_invocation=True
+        )
+        self.assertEqual({}, pickle.loads(pickle.dumps(empty)).operations)  # noqa: S301
+
+    def test_conversion_happens_at_hook_time(self):
+        """The map is built during the hook, pinning the point in time."""
         conversions: list[str] = []
         real_from_operation = OperationInfo.from_operation
 
@@ -1021,16 +1078,13 @@ class TestInvocationHookOperationMaps(unittest.TestCase):
             self.executor.run(),
         ):
             self._start(operations={"op-1": self._operation("op-1")})
-            # Nothing read the map inside the hook, so nothing was converted.
-            self.assertEqual([], conversions)
+            # Converted while the hook ran, not on first read afterwards.
+            self.assertEqual(["op-1"], conversions)
 
-            (start_info,) = self.captured
-            self.assertEqual(1, len(start_info.operations))
-            self.assertEqual(["op-1"], conversions)
-            # Repeated reads reuse the cached conversion.
-            self.assertEqual(["op-1"], list(start_info.operations))
-            self.assertIn("op-1", start_info.operations)
-            self.assertEqual(["op-1"], conversions)
+        (start_info,) = self.captured
+        self.assertEqual(["op-1"], list(start_info.operations))
+        # Reading again does not reconvert.
+        self.assertEqual(["op-1"], conversions)
 
     def test_end_info_reflects_operations_added_during_the_invocation(self):
         operations = {"op-1": self._operation("op-1")}
