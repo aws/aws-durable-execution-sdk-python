@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Iterator, MutableMapping, cast
+from typing import Any, Callable, MutableMapping, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -143,87 +143,6 @@ def _to_operation_info_map(
     }
 
 
-class _LazyOperationInfoMap(Mapping[str, OperationInfo]):
-    """Read-only ``operation id -> OperationInfo`` map built on first access.
-
-    Invocation hook infos carry the execution's whole operation map. Converting
-    it eagerly would charge every invocation of an operation-heavy execution for
-    a view most plugins never read, so the conversion is deferred to the first
-    mapping operation and then cached. The underlying operations are snapshotted
-    before this map is handed out, so deferring the conversion does not move the
-    point in time the map describes. Behaves like a plain read-only ``dict``
-    (iteration, ``len``, ``in``, ``get``, ``==`` against any mapping), and
-    materializes into an ordinary ``dict`` when deep-copied so the enclosing
-    info stays copyable and ``dataclasses.asdict()``-able.
-    """
-
-    __slots__ = ("_provider", "_resolved")
-
-    def __init__(self, provider: Callable[[], dict[str, OperationInfo]] | None) -> None:
-        self._provider = provider
-        self._resolved: dict[str, OperationInfo] | None = None
-
-    def _resolve(self) -> dict[str, OperationInfo]:
-        # Deliberately lock-free. Building the map is pure and idempotent, so a
-        # race can only duplicate the work, never corrupt the result, and the
-        # assignment below is atomic. A lock here would make the enclosing
-        # frozen info undeepcopyable, which breaks the plugins this view exists
-        # to serve: dataclasses.asdict() deep-copies non-dict fields, and a
-        # thread lock cannot be copied.
-        if self._resolved is None:
-            if self._provider is None:
-                self._resolved = {}
-            else:
-                try:
-                    self._resolved = self._provider()
-                except Exception:
-                    # A plugin-facing view must never break the execution.
-                    logger.exception(
-                        "Failed to build plugin operations map; using empty map"
-                    )
-                    self._resolved = {}
-        return self._resolved
-
-    def __getitem__(self, key: str) -> OperationInfo:
-        return self._resolve()[key]
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._resolve())
-
-    def __len__(self) -> int:
-        return len(self._resolve())
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, Mapping):
-            return self._resolve() == dict(other)
-        return NotImplemented
-
-    def __ne__(self, other: object) -> bool:
-        result = self.__eq__(other)
-        if result is NotImplemented:
-            return result
-        return not result
-
-    __hash__ = None  # type: ignore[assignment]  # mutable-by-materialization view
-
-    def __deepcopy__(self, memo: dict[int, Any]) -> dict[str, OperationInfo]:
-        """Materialize into a plain ``dict`` when copied.
-
-        Copying this view has no reason to preserve its laziness, and a plain
-        dict is what callers actually want: it makes
-        ``dataclasses.asdict(info)`` yield an ordinary mapping instead of an
-        opaque object, and keeps the provider closure out of the copy.
-        """
-        resolved = {
-            key: copy.deepcopy(value, memo) for key, value in self._resolve().items()
-        }
-        memo[id(self)] = resolved
-        return resolved
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({self._resolve()!r})"
-
-
 @dataclass(frozen=True)
 class OperationStartInfo(OperationInfo):
     pass
@@ -321,7 +240,7 @@ class InvocationInfo:
     without it); ``durable_execution()`` always populates it with the
     deserialized input payload, which is ``{}`` when the payload is empty.
     """
-    operations: Mapping[str, OperationInfo] = field(
+    operations: dict[str, OperationInfo] = field(
         default_factory=dict,
         kw_only=True,
         repr=False,
@@ -333,8 +252,13 @@ class InvocationInfo:
 
     A point-in-time view of the execution's operation map: as observed at the
     start of the invocation on ``on_invocation_start``, and as observed at the
-    end of the invocation on ``on_invocation_end``. Empty on the very first
-    invocation-start, before any operation has been checkpointed.
+    end of the invocation on ``on_invocation_end``.
+
+    Not a reliable signal of whether this is the first invocation: the initial
+    execution state already carries the ``EXECUTION`` operation, so even a first
+    invocation-start sees a non-empty map. Use
+    :attr:`is_first_invocation` for that. What a first invocation lacks is prior
+    non-execution operations.
 
     Excluded from ``repr``, ``__eq__`` and ``__hash__`` for the same reasons as
     :attr:`execution_input`: the entries carry operation results and errors that
@@ -345,7 +269,7 @@ class InvocationInfo:
 
 @dataclass(frozen=True)
 class InvocationStartInfo(InvocationInfo):
-    updated_operations: Mapping[str, OperationInfo] = field(
+    updated_operations: dict[str, OperationInfo] = field(
         default_factory=dict,
         kw_only=True,
         repr=False,
@@ -399,7 +323,7 @@ class InvocationEndInfo(InvocationInfo):
         cls,
         invocation_start_info: InvocationStartInfo,
         output: "DurableExecutionInvocationOutput",
-        operations: Mapping[str, OperationInfo] | None = None,
+        operations: dict[str, OperationInfo] | None = None,
     ):
         return InvocationEndInfo(
             request_id=invocation_start_info.request_id,
@@ -561,35 +485,31 @@ class PluginExecutor:
     def _snapshot_operation_infos(
         self,
         operations_provider: Callable[[], Mapping[str, Operation]] | None,
-    ) -> Mapping[str, OperationInfo]:
-        """Capture the operation map now; defer the ``OperationInfo`` conversion.
+    ) -> dict[str, OperationInfo]:
+        """Build the plugin ``OperationInfo`` view of the current operation map.
 
-        Snapshotting eagerly pins the point in time the hook reports, so a plugin
-        that stashes the info and reads it later still sees the state as of its
-        hook; deferring the conversion keeps operation-heavy executions from
-        paying for a view no plugin reads.
+        Returns a plain ``dict``, matching :class:`OperationChangeInfo`. That
+        matters beyond consistency: ``dataclasses.asdict()`` and ``pickle`` only
+        traverse real dicts, so a custom ``Mapping`` here would leave the
+        enclosing hook info unserializable for the very plugins these fields
+        exist to serve.
+
+        Built eagerly, which also pins the point in time the hook reports: a
+        plugin that stashes the info and reads it later still sees the state as
+        of its own hook.
 
         Skipped entirely when no plugins are registered -- ``durable_execution()``
         passes a provider unconditionally, so without this gate a plugin-free
-        execution would still invoke it at both hooks.
-
-        The returned mapping is copied even though the SDK's provider
-        (``ExecutionState.operations``) already returns a copy: the copy is what
-        pins the point in time, and relying on every provider to hand over a
-        mapping it will never touch again would make that invariant contingent on
-        an external contract. It is a shallow copy of pointers, and now only
-        happens when plugins are registered, so it is far cheaper than the
-        ``OperationInfo`` conversion it guards.
+        execution would pay for a view nothing can read.
         """
         if not self._plugins or operations_provider is None:
-            return _LazyOperationInfoMap(None)
+            return {}
         try:
-            snapshot = dict(operations_provider())
+            return _to_operation_info_map(operations_provider())
         except Exception:
             # A plugin-facing view must never break the execution.
             logger.exception("Failed to snapshot operations for plugin hook")
-            return _LazyOperationInfoMap(None)
-        return _LazyOperationInfoMap(lambda: _to_operation_info_map(snapshot))
+            return {}
 
     def on_invocation_start(
         self,
@@ -609,9 +529,8 @@ class PluginExecutor:
             execution_start_time: Start timestamp of the execution operation.
             lambda_context: Lambda context, for the request id.
             execution_input: The deserialized execution input event.
-            operations_provider: Returns the current checkpointed operation map.
-                Called once here to snapshot it; the conversion to the plugin's
-                ``OperationInfo`` view is deferred to first access.
+            operations_provider: Returns the current checkpointed operation map,
+                converted here into the plugin's ``OperationInfo`` view.
             updated_operation_ids: Operation ids from the invocation input's
                 ``UpdatedOperationIds`` -- those updated while suspended.
         """
@@ -625,13 +544,11 @@ class PluginExecutor:
             execution_start_time=execution_start_time,
             execution_input=self._snapshot_execution_input(execution_input),
             operations=operations,
-            updated_operations=_LazyOperationInfoMap(
-                lambda: {
-                    operation_id: operations[operation_id]
-                    for operation_id in (updated_operation_ids or [])
-                    if operation_id in operations
-                }
-            ),
+            updated_operations={
+                operation_id: operations[operation_id]
+                for operation_id in (updated_operation_ids or [])
+                if operation_id in operations
+            },
         )
         self.execute_plugins(self._invocation_status, sync=True)
 
