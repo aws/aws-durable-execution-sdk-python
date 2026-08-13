@@ -197,7 +197,7 @@ class Executor(ExecutionObserver):
         )
 
     @staticmethod
-    def _require_valid_arn(execution_arn: str) -> None:
+    def _validate_execution_arn(execution_arn: str) -> None:
         """Reject a blank or non-string execution ARN before it reaches the registry or store.
 
         This runner's execution ARNs are opaque local identifiers, not
@@ -209,7 +209,7 @@ class Executor(ExecutionObserver):
                 non-empty string.
         """
         if not isinstance(execution_arn, str) or not execution_arn.strip():
-            msg: str = f"Invalid execution ARN: {execution_arn!r}"
+            msg: str = "Invalid Durable Execution ARN"
             raise InvalidParameterValueException(msg)
 
     def get_execution(self, execution_arn: str) -> Execution:
@@ -225,7 +225,7 @@ class Executor(ExecutionObserver):
             InvalidParameterValueException: If the ARN is blank.
             ResourceNotFoundException: If execution does not exist
         """
-        self._require_valid_arn(execution_arn)
+        self._validate_execution_arn(execution_arn)
         try:
             return self._store.load(execution_arn)
         except KeyError as e:
@@ -397,7 +397,7 @@ class Executor(ExecutionObserver):
             InvalidParameterValueException: If the ARN is blank.
             ResourceNotFoundException: If execution does not exist
         """
-        self._require_valid_arn(execution_arn)
+        self._validate_execution_arn(execution_arn)
         return self._registry.submit(
             execution_arn,
             CallableTask(lambda: self._apply_stop(execution_arn, error)),
@@ -440,7 +440,7 @@ class Executor(ExecutionObserver):
         Raises:
             InvalidParameterValueException: If the ARN is blank.
         """
-        self._require_valid_arn(execution_arn)
+        self._validate_execution_arn(execution_arn)
         return self._registry.submit(
             execution_arn,
             CallableTask(
@@ -824,7 +824,7 @@ class Executor(ExecutionObserver):
         Raises:
             InvalidParameterValueException: If the ARN is blank.
         """
-        self._require_valid_arn(execution_arn)
+        self._validate_execution_arn(execution_arn)
         return self._registry.submit(
             execution_arn,
             CallableTask(
