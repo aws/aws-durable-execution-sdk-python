@@ -59,7 +59,7 @@ class AuditPlugin(DurableInstrumentationPlugin):
 AUDIT_PLUGIN_PROVIDER = DurableInstrumentationPluginProvider(
     plugin_type=AuditPlugin,
     factory=AuditPlugin,
-    plugin_api_version=2,
+    plugin_api_version=1,
 )
 ```
 

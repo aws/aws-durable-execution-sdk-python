@@ -28,7 +28,7 @@ from aws_durable_execution_sdk_python.types import LambdaContext
 
 logger = logging.getLogger(__name__)
 
-DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION = 2
+DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION = 1
 
 
 class InvocationStatus(Enum):
