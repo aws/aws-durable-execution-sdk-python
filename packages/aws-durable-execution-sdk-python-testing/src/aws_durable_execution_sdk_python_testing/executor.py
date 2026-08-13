@@ -196,6 +196,22 @@ class Executor(ExecutionObserver):
             execution_arn=execution.durable_execution_arn
         )
 
+    @staticmethod
+    def _require_valid_arn(execution_arn: str) -> None:
+        """Reject a blank or non-string execution ARN before it reaches the registry or store.
+
+        This runner's execution ARNs are opaque local identifiers, not
+        real AWS ARNs (see ``Execution.new``), so this only rules out
+        empty/malformed input rather than checking AWS ARN shape.
+
+        Raises:
+            InvalidParameterValueException: If the ARN is not a
+                non-empty string.
+        """
+        if not isinstance(execution_arn, str) or not execution_arn.strip():
+            msg: str = f"Invalid execution ARN: {execution_arn!r}"
+            raise InvalidParameterValueException(msg)
+
     def get_execution(self, execution_arn: str) -> Execution:
         """Get execution by ARN.
 
@@ -206,8 +222,10 @@ class Executor(ExecutionObserver):
             Execution: The execution object
 
         Raises:
+            InvalidParameterValueException: If the ARN is blank.
             ResourceNotFoundException: If execution does not exist
         """
+        self._require_valid_arn(execution_arn)
         try:
             return self._store.load(execution_arn)
         except KeyError as e:
@@ -376,8 +394,10 @@ class Executor(ExecutionObserver):
             StopDurableExecutionResponse: Response containing end timestamp
 
         Raises:
+            InvalidParameterValueException: If the ARN is blank.
             ResourceNotFoundException: If execution does not exist
         """
+        self._require_valid_arn(execution_arn)
         return self._registry.submit(
             execution_arn,
             CallableTask(lambda: self._apply_stop(execution_arn, error)),
@@ -415,7 +435,12 @@ class Executor(ExecutionObserver):
         marker: str | None = None,
         max_items: int | None = None,
     ) -> GetDurableExecutionStateResponse:
-        """Return a page of operations, serialized on the execution's worker."""
+        """Return a page of operations, serialized on the execution's worker.
+
+        Raises:
+            InvalidParameterValueException: If the ARN is blank.
+        """
+        self._require_valid_arn(execution_arn)
         return self._registry.submit(
             execution_arn,
             CallableTask(
@@ -795,7 +820,11 @@ class Executor(ExecutionObserver):
 
         Routes through the per-execution worker so checkpoints for one
         execution never overlap.
+
+        Raises:
+            InvalidParameterValueException: If the ARN is blank.
         """
+        self._require_valid_arn(execution_arn)
         return self._registry.submit(
             execution_arn,
             CallableTask(
