@@ -8,23 +8,25 @@ from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     DurableExecutionInvocationOutput,
     ErrorObject,
-    InvocationStatus,
+    InvocationStatus as ServiceInvocationStatus,
     Operation,
     OperationAction,
     OperationStatus,
     OperationSubType,
-    OperationType,
+    OperationType as ServiceOperationType,
     StepDetails,
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationEndInfo,
     InvocationInfo,
+    InvocationStatus,
     InvocationStartInfo,
     OperationChangeInfo,
     OperationEndInfo,
     OperationInfo,
     OperationStartInfo,
+    OperationType,
     PluginExecutor,
     UserFunctionEndInfo,
     UserFunctionOutcome,
@@ -242,6 +244,41 @@ class TestDataClasses(unittest.TestCase):
             self.assertFalse(holder[name].compare, name)
             self.assertIs(holder[name].hash, False, name)
 
+    def test_plugin_enums_are_independent_from_service_enums(self):
+        self.assertIsNot(InvocationStatus, ServiceInvocationStatus)
+        self.assertIsNot(OperationType, ServiceOperationType)
+        self.assertEqual(
+            {status.value for status in InvocationStatus},
+            {status.value for status in ServiceInvocationStatus},
+        )
+        self.assertEqual(
+            {operation_type.value for operation_type in OperationType},
+            {operation_type.value for operation_type in ServiceOperationType},
+        )
+
+    def test_operation_info_converts_service_operation_type(self):
+        operation = Operation(
+            operation_id="wait-1",
+            operation_type=ServiceOperationType.WAIT,
+            status=OperationStatus.STARTED,
+        )
+
+        info = OperationInfo.from_operation(operation)
+
+        self.assertIs(info.operation_type, OperationType.WAIT)
+
+    def test_invocation_end_info_converts_service_invocation_status(self):
+        output = DurableExecutionInvocationOutput(
+            status=ServiceInvocationStatus.PENDING,
+        )
+
+        info = InvocationEndInfo.from_durable_execution_invocation_output(
+            INVOCATION_START_INFO,
+            output,
+        )
+
+        self.assertIs(info.status, InvocationStatus.PENDING)
+
     def test_payload_fields_are_marked_experimental(self):
         plugin_info_types = (
             OperationInfo,
@@ -443,7 +480,7 @@ class TestPluginExecutor(unittest.TestCase):
             is_first_invocation=False,
         )
         output = DurableExecutionInvocationOutput(
-            status=InvocationStatus.SUCCEEDED, result=None, error=None
+            status=ServiceInvocationStatus.SUCCEEDED, result=None, error=None
         )
 
         # Should not raise
@@ -456,7 +493,7 @@ class TestPluginExecutor(unittest.TestCase):
         update = MagicMock()
         update.action = OperationAction.START
         update.operation_id = "op-1"
-        update.operation_type = OperationType.STEP
+        update.operation_type = ServiceOperationType.STEP
         update.sub_type = OperationSubType.STEP
         update.name = "my-step"
         update.parent_id = None
@@ -468,7 +505,7 @@ class TestPluginExecutor(unittest.TestCase):
         executor = PluginExecutor(plugins=[])
         op = MagicMock()
         op.operation_id = "op-1"
-        op.operation_type = OperationType.STEP
+        op.operation_type = ServiceOperationType.STEP
         op.sub_type = OperationSubType.STEP
         op.name = "my-step"
         op.parent_id = None
@@ -653,7 +690,7 @@ class TestPluginExecutorOnInvocationEnd(unittest.TestCase):
 
     def test_succeeded_fires_invocation_end(self):
         output = DurableExecutionInvocationOutput(
-            status=InvocationStatus.SUCCEEDED, result=None, error=None
+            status=ServiceInvocationStatus.SUCCEEDED, result=None, error=None
         )
 
         with self.executor.run():
@@ -671,7 +708,7 @@ class TestPluginExecutorOnInvocationEnd(unittest.TestCase):
 
     def test_failed_fires_invocation_end(self):
         output = DurableExecutionInvocationOutput(
-            status=InvocationStatus.FAILED, result=None, error=ERROR
+            status=ServiceInvocationStatus.FAILED, result=None, error=ERROR
         )
 
         with self.executor.run():
@@ -689,7 +726,7 @@ class TestPluginExecutorOnInvocationEnd(unittest.TestCase):
 
     def test_pending_fires_invocation_end(self):
         output = DurableExecutionInvocationOutput(
-            status=InvocationStatus.PENDING, result=None, error=None
+            status=ServiceInvocationStatus.PENDING, result=None, error=None
         )
 
         with self.executor.run():
@@ -726,7 +763,7 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
         update = MagicMock()
         update.action = OperationAction.START
         update.operation_id = "op-1"
-        update.operation_type = OperationType.STEP
+        update.operation_type = ServiceOperationType.STEP
         update.sub_type = OperationSubType.STEP
         update.name = "my-step"
         update.parent_id = "parent-1"
@@ -735,6 +772,7 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
             self.executor.on_operation_action(update)
 
         self.assertIn("operation_start:op-1", self.plugin.calls)
+        self.assertIs(captured[0].operation_type, OperationType.STEP)
         self.assertEqual(captured[0].status, OperationStatus.STARTED)
         self.assertFalse(captured[0].is_replayed)
 
@@ -751,14 +789,14 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
         update = MagicMock()
         update.action = OperationAction.START
         update.operation_id = "op-1"
-        update.operation_type = OperationType.STEP
+        update.operation_type = ServiceOperationType.STEP
         update.sub_type = OperationSubType.STEP
         update.name = "my-step"
         update.parent_id = "parent-1"
 
         operation = Operation(
             operation_id="op-1",
-            operation_type=OperationType.STEP,
+            operation_type=ServiceOperationType.STEP,
             status=OperationStatus.STARTED,
             start_timestamp=START_TS,
         )
@@ -781,19 +819,19 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
         update = MagicMock()
         update.action = OperationAction.START
         update.operation_id = "op-1"
-        update.operation_type = OperationType.STEP
+        update.operation_type = ServiceOperationType.STEP
         update.sub_type = OperationSubType.STEP
         update.name = "my-step"
         update.parent_id = "parent-1"
 
         current_operation = Operation(
             operation_id="op-1",
-            operation_type=OperationType.STEP,
+            operation_type=ServiceOperationType.STEP,
             status=OperationStatus.STARTED,
         )
         previous_operation = Operation(
             operation_id="op-1",
-            operation_type=OperationType.STEP,
+            operation_type=ServiceOperationType.STEP,
             status=OperationStatus.READY,
         )
 
@@ -843,7 +881,7 @@ class TestPluginExecutorOnOperationReplay(unittest.TestCase):
                 executor = PluginExecutor(plugins=[plugin])
                 operation = Operation(
                     operation_id="op-1",
-                    operation_type=OperationType.STEP,
+                    operation_type=ServiceOperationType.STEP,
                     status=status,
                 )
 
@@ -857,7 +895,7 @@ class TestPluginExecutorOnOperationReplay(unittest.TestCase):
         executor = PluginExecutor(plugins=[plugin])
         operation = Operation(
             operation_id="op-1",
-            operation_type=OperationType.WAIT,
+            operation_type=ServiceOperationType.WAIT,
             status=OperationStatus.STARTED,
         )
 
@@ -914,6 +952,20 @@ class TestPluginExecutorOnChildContextEnd(unittest.TestCase):
         self.assertLessEqual(info.end_time, after)
 
 
+class TestPluginExecutorOnUserFunction(unittest.TestCase):
+    def test_user_function_info_uses_plugin_operation_type(self):
+        executor = PluginExecutor(plugins=[_TrackingPlugin()])
+        identifier = OperationIdentifier(
+            operation_id="step-1",
+            sub_type=OperationSubType.STEP,
+        )
+
+        with executor.run():
+            info = executor.on_user_function_start(identifier)
+
+        self.assertIs(info.operation_type, OperationType.STEP)
+
+
 class TestPluginExecutorOnOperationUpdate(unittest.TestCase):
     """Tests for PluginExecutor.on_operation_update."""
 
@@ -931,7 +983,7 @@ class TestPluginExecutorOnOperationUpdate(unittest.TestCase):
     ):
         op = MagicMock()
         op.operation_id = "op-1"
-        op.operation_type = OperationType.STEP
+        op.operation_type = ServiceOperationType.STEP
         op.sub_type = OperationSubType.STEP
         op.name = "my-step"
         op.parent_id = "parent-1"
@@ -1003,7 +1055,7 @@ class TestPluginExecutorOnOperationChange(unittest.TestCase):
     def test_operation_change_uses_invocation_and_operation_maps(self):
         updated_operation = Operation(
             operation_id="op-1",
-            operation_type=OperationType.STEP,
+            operation_type=ServiceOperationType.STEP,
             status=OperationStatus.SUCCEEDED,
             name="my-step",
             parent_id="parent-1",
@@ -1014,7 +1066,7 @@ class TestPluginExecutorOnOperationChange(unittest.TestCase):
         )
         other_operation = Operation(
             operation_id="op-2",
-            operation_type=OperationType.WAIT,
+            operation_type=ServiceOperationType.WAIT,
             status=OperationStatus.STARTED,
             name="my-wait",
             sub_type=OperationSubType.WAIT,
@@ -1052,6 +1104,7 @@ class TestPluginExecutorOnOperationChange(unittest.TestCase):
 
         updated_info = captured[0].updated_operations["op-1"]
         self.assertIsInstance(updated_info, OperationInfo)
+        self.assertIs(updated_info.operation_type, OperationType.STEP)
         self.assertEqual(updated_info.status, OperationStatus.SUCCEEDED)
         self.assertEqual(updated_info.result, '"done"')
         self.assertEqual(updated_info.attempt, 2)
@@ -1061,7 +1114,7 @@ class TestPluginExecutorOnOperationChange(unittest.TestCase):
     def test_operation_change_without_invocation_start_is_noop(self):
         operation = Operation(
             operation_id="op-1",
-            operation_type=OperationType.STEP,
+            operation_type=ServiceOperationType.STEP,
             status=OperationStatus.STARTED,
         )
 

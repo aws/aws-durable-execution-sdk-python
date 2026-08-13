@@ -17,16 +17,16 @@ from datetime import UTC, datetime
 import opentelemetry.context as otel_context
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
-    InvocationStatus,
     OperationStatus,
     OperationSubType,
-    OperationType,
 )
 from aws_durable_execution_sdk_python.plugin import (
     InvocationEndInfo,
+    InvocationStatus,
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
+    OperationType,
     UserFunctionEndInfo,
     UserFunctionOutcome,
     UserFunctionStartInfo,

@@ -7,10 +7,10 @@ from datetime import UTC, datetime
 
 from aws_durable_execution_sdk_python.lambda_service import (
     OperationStatus,
-    OperationType,
 )
 from aws_durable_execution_sdk_python.plugin import (
     InvocationStartInfo,
+    OperationType,
     UserFunctionStartInfo,
 )
 from opentelemetry.context import Context

@@ -13,11 +13,11 @@ from aws_durable_execution_sdk_python_otel.invocation_plugin import (
 INVOCATION_OTEL_PLUGIN_PROVIDER = DurableInstrumentationPluginProvider(
     plugin_type=InvocationOtelPlugin,
     factory=InvocationOtelPlugin,
-    plugin_api_version=1,
+    plugin_api_version=2,
 )
 
 EXECUTION_OTEL_PLUGIN_PROVIDER = DurableInstrumentationPluginProvider(
     plugin_type=ExecutionOtelPlugin,
     factory=ExecutionOtelPlugin,
-    plugin_api_version=1,
+    plugin_api_version=2,
 )
