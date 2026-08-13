@@ -344,9 +344,21 @@ class Execution:
             return list(self.operations)
 
     def get_assertable_operations(self) -> list[Operation]:
-        """Get list of operations, but exclude the EXECUTION operations"""
-        # TODO: this excludes EXECUTION at start, but can there be an EXECUTION at the end if there was a checkpoint with large payload?
-        return self.operations[1:]
+        """Return a snapshot of operations, excluding EXECUTION operations.
+
+        Filters by ``operation_type`` rather than assuming the EXECUTION
+        operation is always the first entry, so a second EXECUTION-type
+        entry (e.g. a future large-payload checkpoint recorded at the end
+        of the list) is excluded too. Snapshot taken under ``_state_lock``,
+        matching ``get_navigable_operations``, so a concurrent checkpoint
+        can't produce a torn read.
+        """
+        with self._state_lock:
+            return [
+                operation
+                for operation in self.operations
+                if operation.operation_type != OperationType.EXECUTION
+            ]
 
     def has_pending_operations(self, execution: Execution) -> bool:
         """True if execution has pending operations."""
