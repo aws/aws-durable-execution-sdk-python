@@ -15,7 +15,7 @@ jobs:
     permissions:
       contents: read
       models: read
-    uses: aws/aws-durable-execution-ci/.github/workflows/notify.yml@d69a436185c855810c6806c8e1fd76e5f0b8ff9b
+    uses: aws/aws-durable-execution-ci/.github/workflows/notify.yml@6cade565b59817027aa0fe4949d5923286b6675c
     secrets:
       SLACK_WEBHOOK_URL_PR: ${{ secrets.SLACK_WEBHOOK_URL_PR }}
       SLACK_WEBHOOK_URL_ISSUE: ${{ secrets.SLACK_WEBHOOK_URL_ISSUE }}

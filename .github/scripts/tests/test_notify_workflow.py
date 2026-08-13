@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 WORKFLOW_PATH = Path(__file__).parents[2] / "workflows" / "notify.yml"
-SHARED_WORKFLOW_SHA = "d69a436185c855810c6806c8e1fd76e5f0b8ff9b"
+SHARED_WORKFLOW_SHA = "6cade565b59817027aa0fe4949d5923286b6675c"
 
 
 def test_notify_workflow_reuses_pinned_shared_implementation() -> None:
