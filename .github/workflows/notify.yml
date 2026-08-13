@@ -11,9 +11,106 @@ on:
 permissions: {}
 
 jobs:
-  notify:
-    uses: aws/aws-durable-execution-ci/.github/workflows/notify.yml@71259cf476e37255752d8f9445a1a48ec92be1df
-    secrets:
-      SLACK_WEBHOOK_URL_PR: ${{ secrets.SLACK_WEBHOOK_URL_PR }}
-      SLACK_WEBHOOK_URL_ISSUE: ${{ secrets.SLACK_WEBHOOK_URL_ISSUE }}
-      SLACK_WEBHOOK_URL_RELEASE: ${{ secrets.SLACK_WEBHOOK_URL_RELEASE }}
+  summarize:
+    name: Generate notification summary
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      summary: ${{ steps.summary.outputs.summary }}
+    permissions:
+      contents: read
+      models: read
+    steps:
+      # Load support code from the same immutable revision as this workflow.
+      # Pull request code is never checked out or executed.
+      - name: Check out notification toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .notification-toolkit
+          sparse-checkout: .github/scripts/summarize_notification.py
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Generate concise notification summary
+        id: summary
+        env:
+          AI_SUMMARY_MODEL: openai/gpt-4.1-mini
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python
+          .notification-toolkit/.github/scripts/summarize_notification.py
+
+  notify-pr:
+    name: Notify Slack - Pull Requests
+    needs: summarize
+    if: >-
+      needs.summarize.result == 'success' &&
+      github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Send pull request notification to Slack
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL_PR }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "action": ${{ toJSON(github.event.action) }},
+              "pr_url": ${{ toJSON(github.event.pull_request.html_url) }},
+              "package_name": ${{ toJSON(github.repository) }},
+              "summary": ${{ toJSON(needs.summarize.outputs.summary) }}
+            }
+
+  notify-issues:
+    name: Notify Slack - Issues
+    needs: summarize
+    if: >-
+      needs.summarize.result == 'success' &&
+      github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Send issue notification to Slack
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL_ISSUE }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "action": ${{ toJSON(github.event.action) }},
+              "issue_url": ${{ toJSON(github.event.issue.html_url) }},
+              "package_name": ${{ toJSON(github.repository) }},
+              "summary": ${{ toJSON(needs.summarize.outputs.summary) }}
+            }
+
+  notify-release:
+    name: Notify Slack - Release
+    needs: summarize
+    if: >-
+      needs.summarize.result == 'success' &&
+      github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Send release notification to Slack
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL_RELEASE }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "tag_name": ${{ toJSON(github.event.release.tag_name) }},
+              "release_url": ${{ toJSON(github.event.release.html_url) }},
+              "package_name": ${{ toJSON(github.repository) }},
+              "summary": ${{ toJSON(needs.summarize.outputs.summary) }}
+            }
