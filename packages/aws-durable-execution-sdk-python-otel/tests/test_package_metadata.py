@@ -4,7 +4,7 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
-CORE_DEPENDENCY = "aws-durable-execution-sdk-python>=1.9.0"
+CORE_DEPENDENCY = "aws-durable-execution-sdk-python>=1.8.0"
 
 
 def _load_pyproject(path: Path) -> dict:
