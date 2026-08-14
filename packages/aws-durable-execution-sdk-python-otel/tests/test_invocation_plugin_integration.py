@@ -41,6 +41,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind
 
+from aws_durable_execution_sdk_python_otel import context_scope
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
@@ -63,12 +64,17 @@ XRAY_TRACE_ID = int("5759e988bd862e3fe1be46a994272793", 16)
 
 
 @pytest.fixture(autouse=True)
-def _reset_otel_context():
-    token = otel_context.attach(Context())
-    try:
-        yield
-    finally:
-        otel_context.detach(token)
+def _assert_otel_context_balanced():
+    """Fail any test that leaves an OTel context scope attached."""
+    before = otel_context.get_current()
+    before_depth = context_scope.depth()
+    yield
+    assert context_scope.depth() == before_depth, (
+        "test left OTel context scopes attached"
+    )
+    assert otel_context.get_current() is before, (
+        "test did not restore the OTel context it started with"
+    )
 
 
 def _provider() -> tuple[TracerProvider, InMemorySpanExporter]:

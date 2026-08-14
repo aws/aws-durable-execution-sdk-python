@@ -28,6 +28,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from aws_durable_execution_sdk_python_otel import context_scope
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     derive_workflow_span_id,
     operation_id_to_span_id,
@@ -45,17 +46,22 @@ EXECUTION_ARN = "arn:aws:lambda:us-west-2:123456789012:function:workflow:$LATEST
 
 
 @pytest.fixture(autouse=True)
-def _reset_otel_context():
-    """Reset the OTel thread-local context around each test.
+def _assert_otel_context_balanced():
+    """Fail any test that leaves an OTel context scope attached.
 
-    The plugin attaches spans via context.attach() without detaching, so state
-    would otherwise leak between tests running on the same thread.
+    The plugins must detach every context they attach, so no reset is needed to
+    isolate tests -- instead this asserts the invariant.
     """
-    token = otel_context.attach(Context())
-    try:
-        yield
-    finally:
-        otel_context.detach(token)
+    before = otel_context.get_current()
+    before_depth = context_scope.depth()
+    yield
+    assert context_scope.depth() == before_depth, (
+        "test left OTel context scopes attached: "
+        f"{context_scope.depth() - before_depth} extra"
+    )
+    assert otel_context.get_current() is before, (
+        "test did not restore the OTel context it started with"
+    )
 
 
 def _create_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
@@ -444,6 +450,77 @@ def test_default_mode_invocation_span_parented_to_ambient_span(monkeypatch):
     invocation = {s.name: s for s in exporter.get_finished_spans()}["Invocation"]
     assert invocation.parent is not None
     assert invocation.parent.span_id == ambient.get_span_context().span_id
+
+
+# ----------------------------------------------------------------------
+# Warm invocation reuse: no context leaks from one execution into the next
+# ----------------------------------------------------------------------
+def test_invocation_end_restores_the_pre_invocation_context():
+    """Verify the plugin leaves the handler thread's context untouched.
+
+    The invocation lifecycle attaches nothing on this thread, so the Workflow
+    span must not be current afterwards -- an ended span left current is what
+    previously bled into the next invocation on a warm container.
+    """
+    plugin, _ = _create_plugin()
+    before = otel_context.get_current()
+
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_invocation_end(_invocation_end_info())
+
+    assert otel_context.get_current() is before
+    assert trace.get_current_span().get_span_context().is_valid is False
+
+
+def test_warm_reuse_does_not_share_a_trace_between_executions(monkeypatch):
+    """Verify a reused plugin instance keeps two executions in separate traces.
+
+    In GLOBAL mode the Invocation span is parented to whatever is ambient. When
+    the previous invocation left its Workflow span attached, that span became the
+    parent and its trace ID won, merging two unrelated executions into one trace.
+    """
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
+    # The default X-Ray extractor falls back to the ambient context when no
+    # trace header is present, so it observes any leak too.
+    monkeypatch.delenv("_X_AMZN_TRACE_ID", raising=False)
+    plugin = ExecutionOtelPlugin(
+        OtelPluginConfig(
+            provider_source=ProviderSource.GLOBAL,
+            enrich_logger=False,
+        )
+    )
+
+    def run(arn: str) -> None:
+        info = InvocationStartInfo(
+            request_id="request-1",
+            execution_arn=arn,
+            execution_start_time=START_TIME,
+            is_first_invocation=True,
+        )
+        plugin.on_invocation_start(info)
+        plugin.on_invocation_end(
+            InvocationEndInfo(
+                request_id="request-1",
+                execution_arn=arn,
+                execution_start_time=START_TIME,
+                is_first_invocation=True,
+                status=InvocationStatus.SUCCEEDED,
+                error=None,
+            )
+        )
+
+    run(EXECUTION_ARN)
+    run(EXECUTION_ARN + "-second")
+
+    invocations = [s for s in exporter.get_finished_spans() if s.name == "Invocation"]
+    assert len(invocations) == 2
+    first, second = invocations
+    assert first.context.trace_id != second.context.trace_id
+    # The second invocation is a root, not a child of the first execution's span.
+    assert second.parent is None
 
 
 def test_open_operation_span_not_exported_at_invocation_end():

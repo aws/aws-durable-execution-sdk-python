@@ -31,6 +31,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode
 
+from aws_durable_execution_sdk_python_otel import context_scope
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     derive_workflow_span_id,
     operation_id_to_span_id,
@@ -48,17 +49,23 @@ EXECUTION_ARN = "arn:aws:lambda:us-west-2:123456789012:function:workflow:$LATEST
 
 
 @pytest.fixture(autouse=True)
-def _reset_otel_context():
-    """Reset the OTel thread-local context before and after each test.
+def _assert_otel_context_balanced():
+    """Fail any test that leaves an OTel context scope attached.
 
-    The plugin attaches spans via context.attach() without ever detaching,
-    so state would otherwise leak between tests running on the same thread.
+    The plugins must detach every context they attach, so no reset is needed to
+    isolate tests -- instead this asserts the invariant. A test that drives hooks
+    the SDK itself leaves unpaired (a suspension) is responsible for unwinding.
     """
-    token = otel_context.attach(Context())
-    try:
-        yield
-    finally:
-        otel_context.detach(token)
+    before = otel_context.get_current()
+    before_depth = context_scope.depth()
+    yield
+    assert context_scope.depth() == before_depth, (
+        "test left OTel context scopes attached: "
+        f"{context_scope.depth() - before_depth} extra"
+    )
+    assert otel_context.get_current() is before, (
+        "test did not restore the OTel context it started with"
+    )
 
 
 def _create_plugin() -> tuple[InvocationOtelPlugin, InMemorySpanExporter]:
@@ -791,13 +798,14 @@ def test_span_registry_helpers_can_be_called_from_multiple_threads():
 
 
 # ----------------------------------------------------------------------
-# on_user_function_end restores the invocation span to the context
+# on_user_function_end restores the context the operation was entered from
 # ----------------------------------------------------------------------
-def test_user_function_end_restores_invocation_span():
-    """Verify the invocation span is current again after a step completes."""
+def test_user_function_end_restores_enclosing_context():
+    """Verify the exact pre-step context is restored after a step completes."""
     plugin, _ = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
-    invocation_span_id = plugin._get_span(None).get_span_context().span_id
+    before = otel_context.get_current()
+    before_depth = context_scope.depth(plugin)
 
     operation_id = "step-1"
     plugin.on_user_function_start(_user_function_start_info(operation_id))
@@ -808,18 +816,23 @@ def test_user_function_end_restores_invocation_span():
         trace.get_current_span().get_span_context().span_id
         == active_attempt_span.get_span_context().span_id
     )
+    assert context_scope.depth(plugin) == before_depth + 1
 
     plugin.on_user_function_end(_user_function_end_info(operation_id))
 
-    # After the step, the invocation span is restored.
-    assert trace.get_current_span().get_span_context().span_id == invocation_span_id
+    # The scope is detached, restoring the context byte for byte. The invocation
+    # span is never attached (matching the Java plugins), so between-step log
+    # correlation goes through get_current_span_context() instead.
+    assert otel_context.get_current() is before
+    assert context_scope.depth(plugin) == before_depth
+    plugin.on_invocation_end(_invocation_end_info())
 
 
-def test_user_function_end_restores_invocation_span_on_failure():
-    """Verify the invocation span is restored even when the step fails."""
+def test_user_function_end_restores_enclosing_context_on_failure():
+    """Verify the context is restored even when the step fails."""
     plugin, _ = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
-    invocation_span_id = plugin._get_span(None).get_span_context().span_id
+    before = otel_context.get_current()
 
     operation_id = "step-fail"
     plugin.on_user_function_start(_user_function_start_info(operation_id))
@@ -827,21 +840,27 @@ def test_user_function_end_restores_invocation_span_on_failure():
         _user_function_end_info(operation_id, outcome=UserFunctionOutcome.FAILED)
     )
 
-    assert trace.get_current_span().get_span_context().span_id == invocation_span_id
+    assert otel_context.get_current() is before
+    assert context_scope.depth(plugin) == 0
+    plugin.on_invocation_end(_invocation_end_info())
 
 
-def test_user_function_end_restores_invocation_span_across_multiple_steps():
-    """Verify between-step context is the invocation span across many steps."""
+def test_sequential_steps_do_not_accumulate_scopes():
+    """Verify N sequential steps leave no residue: depth returns to 0 each time."""
     plugin, _ = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
-    invocation_span_id = plugin._get_span(None).get_span_context().span_id
+    before = otel_context.get_current()
 
     for index in range(3):
         operation_id = f"step-{index}"
         plugin.on_user_function_start(_user_function_start_info(operation_id))
+        assert context_scope.depth(plugin) == 1
         plugin.on_user_function_end(_user_function_end_info(operation_id))
-        # Between each step, the invocation span is the current span.
-        assert trace.get_current_span().get_span_context().span_id == invocation_span_id
+        # Between each step the context is exactly what preceded the step, and
+        # no scope has accumulated.
+        assert otel_context.get_current() is before
+        assert context_scope.depth(plugin) == 0
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 # ----------------------------------------------------------------------
@@ -877,6 +896,11 @@ def test_get_current_span_context_returns_operation_span_inside_step():
     assert span_context is not None
     assert active_attempt_span is not None
     assert span_context.span_id == active_attempt_span.get_span_context().span_id
+
+    # Close the lifecycle so the attempt scope is detached; the autouse fixture
+    # asserts no scope outlives the test.
+    plugin.on_user_function_end(_user_function_end_info(operation_id))
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_get_current_span_context_returns_invocation_span_between_steps():
@@ -929,25 +953,37 @@ def test_user_function_end_restores_parent_context_span_for_nested_step():
     )
 
     # After the inner step, the enclosing child-context span is current again,
-    # NOT the invocation span.
+    # NOT the invocation span. The inner scope was detached, landing back on the
+    # context scope that is still attached.
     assert trace.get_current_span().get_span_context().span_id == context_span_id
     assert (
         trace.get_current_span().get_span_context().span_id
         != plugin._get_span(None).get_span_context().span_id
     )
 
+    plugin.on_user_function_end(
+        _user_function_end_info(context_id, operation_type=OperationType.CONTEXT)
+    )
+    plugin.on_invocation_end(_invocation_end_info())
 
-def test_user_function_end_falls_back_to_invocation_when_parent_missing():
-    """Verify a top-level step (parent_id=None) restores the invocation span."""
+
+def test_top_level_step_restores_ambient_context():
+    """Verify a top-level step (parent_id=None) restores the ambient context.
+
+    There is no enclosing operation scope to fall back to, so the thread returns
+    to whatever was current before the step. Log correlation for that window is
+    covered by get_current_span_context()'s invocation-span fallback.
+    """
     plugin, _ = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
-    invocation_span_id = plugin._get_span(None).get_span_context().span_id
+    before = otel_context.get_current()
 
     operation_id = "step-1"
     plugin.on_user_function_start(_user_function_start_info(operation_id))
     plugin.on_user_function_end(_user_function_end_info(operation_id))
 
-    assert trace.get_current_span().get_span_context().span_id == invocation_span_id
+    assert otel_context.get_current() is before
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_get_current_span_context_returns_context_span_between_nested_steps():
@@ -979,6 +1015,11 @@ def test_get_current_span_context_returns_context_span_between_nested_steps():
     assert span_context.span_id == context_span.get_span_context().span_id
     assert span_context.span_id != plugin._get_span(None).get_span_context().span_id
 
+    plugin.on_user_function_end(
+        _user_function_end_info(context_id, operation_type=OperationType.CONTEXT)
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
 
 def test_nested_steps_restore_context_span_across_multiple_iterations():
     """Verify each inner step restores the child-context span between iterations."""
@@ -1001,6 +1042,11 @@ def test_nested_steps_restore_context_span_across_multiple_iterations():
         )
         # Between each inner step, the child-context span is current.
         assert trace.get_current_span().get_span_context().span_id == context_span_id
+
+    plugin.on_user_function_end(
+        _user_function_end_info(context_id, operation_type=OperationType.CONTEXT)
+    )
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 @pytest.mark.parametrize(

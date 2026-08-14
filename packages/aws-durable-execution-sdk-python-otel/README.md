@@ -235,6 +235,23 @@ context onto every emitted log record using these attributes:
 These attributes are only set when a valid span context is active, so any log
 formatter or schema must treat the fields as optional.
 
+### Active Span Scope
+
+The plugin makes a span current only while your step or child-context function
+runs, and detaches it when that function returns. Two consequences are worth
+knowing:
+
+- Auto-instrumented calls (botocore, urllib3, and similar) made **inside** a step
+  or child context become children of that operation's span.
+- Auto-instrumented calls made **outside** any operation -- for example directly
+  in the handler between two steps -- are not parented to the durable spans. In
+  an ADOT deployment they attach to the ambient Lambda invocation span instead.
+  Put such work in a step if you need it inside the durable trace.
+
+Log correlation is unaffected either way: the logging filter resolves the trace
+context from the plugin's own span registry, so records emitted between
+operations still carry the invocation's `traceId` and `spanId`.
+
 ## Verification
 
 After deploying your function with the plugin configured:

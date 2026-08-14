@@ -6,18 +6,26 @@ import logging
 from datetime import UTC, datetime
 
 from aws_durable_execution_sdk_python.lambda_service import (
+    InvocationStatus,
     OperationStatus,
     OperationType,
 )
 from aws_durable_execution_sdk_python.plugin import (
+    InvocationEndInfo,
     InvocationStartInfo,
+    UserFunctionEndInfo,
+    UserFunctionOutcome,
     UserFunctionStartInfo,
 )
+import opentelemetry.context as otel_context
+import pytest
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from aws_durable_execution_sdk_python_otel import context_scope
+from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
 from aws_durable_execution_sdk_python_otel.log_filter import (
     OtelContextLogFilter,
     install_log_filter,
@@ -31,6 +39,32 @@ from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
 EXECUTION_ARN = "arn:aws:lambda:us-west-2:123456789012:function:workflow:$LATEST"
+
+
+@pytest.fixture(autouse=True)
+def _assert_otel_context_balanced():
+    """Fail any test that leaves an OTel context scope attached."""
+    before = otel_context.get_current()
+    before_depth = context_scope.depth()
+    yield
+    assert context_scope.depth() == before_depth
+    assert otel_context.get_current() is before
+
+
+def _create_execution_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
+    """Create an ExecutionOtelPlugin wired to an in-memory span exporter."""
+    exporter = InMemorySpanExporter()
+    trace_provider = TracerProvider()
+    trace_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    plugin = ExecutionOtelPlugin(
+        OtelPluginConfig(
+            provider_source=ProviderSource.EXPLICIT,
+            tracer_provider=trace_provider,
+            context_extractor=lambda _: Context(),
+            enrich_logger=False,
+        )
+    )
+    return plugin, exporter
 
 
 def _create_plugin(
@@ -74,6 +108,37 @@ def _user_function_start_info(operation_id: str) -> UserFunctionStartInfo:
         status=OperationStatus.STARTED,
         is_replay_children=False,
         attempt=1,
+    )
+
+
+def _invocation_end_info() -> InvocationEndInfo:
+    """Create standard invocation end info for tests."""
+    return InvocationEndInfo(
+        request_id="request-1",
+        execution_arn=EXECUTION_ARN,
+        execution_start_time=START_TIME,
+        is_first_invocation=True,
+        status=InvocationStatus.SUCCEEDED,
+        error=None,
+    )
+
+
+def _user_function_end_info(operation_id: str) -> UserFunctionEndInfo:
+    """Create standard user function end info for tests."""
+    return UserFunctionEndInfo(
+        operation_id=operation_id,
+        operation_type=OperationType.STEP,
+        sub_type=None,
+        name="fetch-user",
+        parent_id=None,
+        start_time=START_TIME,
+        end_time=START_TIME,
+        is_replayed=False,
+        status=OperationStatus.SUCCEEDED,
+        is_replay_children=False,
+        attempt=1,
+        outcome=UserFunctionOutcome.SUCCEEDED,
+        error=None,
     )
 
 
@@ -147,6 +212,31 @@ def test_filter_uses_attempt_span_inside_user_function():
     assert attempt_span is not None
     expected_span_id = format(attempt_span.get_span_context().span_id, "016x")
     assert record.spanId == expected_span_id
+
+    plugin.on_user_function_end(_user_function_end_info(operation_id))
+    plugin.on_invocation_end(_invocation_end_info())
+
+
+def test_execution_plugin_handler_thread_uses_the_invocation_span():
+    """Handler-thread records correlate to the Invocation span, not Workflow.
+
+    ExecutionOtelPlugin attaches nothing on the handler thread, so the filter
+    resolves through the plugin registry, which prefers the Invocation span. The
+    trace ID is shared with the Workflow span either way.
+    """
+    plugin, _ = _create_execution_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+
+    record = _make_record()
+    OtelContextLogFilter(plugin).filter(record)
+
+    invocation_context = plugin._invocation_span.get_span_context()
+    workflow_context = plugin._workflow_span.get_span_context()
+    assert record.spanId == format(invocation_context.span_id, "016x")
+    assert record.spanId != format(workflow_context.span_id, "016x")
+    assert record.traceId == format(workflow_context.trace_id, "032x")
+
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_install_log_filter_attaches_to_handlers():
