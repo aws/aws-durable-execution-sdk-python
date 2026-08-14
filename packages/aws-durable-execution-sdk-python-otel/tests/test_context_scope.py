@@ -81,7 +81,7 @@ def test_enter_then_exit_restores_the_previous_context():
     owner = _Owner()
     before = otel_context.get_current()
 
-    context_scope.enter_scope(owner, "a", _span_context("a"))
+    context_scope.enter_scope(owner, "a", lambda: _span_context("a"))
     assert otel_context.get_current() is not before
     assert context_scope.depth(owner) == 1
 
@@ -94,11 +94,9 @@ def test_nested_scopes_pop_in_lifo_order():
     owner = _Owner()
     before = otel_context.get_current()
 
-    context_scope.enter_scope(owner, "outer", _span_context("outer"))
+    context_scope.enter_scope(owner, "outer", lambda: _span_context("outer"))
     outer = otel_context.get_current()
-    context_scope.enter_scope(
-        owner, "inner", _span_context("inner"), parent_key="outer"
-    )
+    context_scope.enter_scope(owner, "inner", lambda: _span_context("inner"))
 
     context_scope.exit_scope(owner, "inner")
     assert otel_context.get_current() is outer
@@ -116,10 +114,8 @@ def test_exit_unwinds_scopes_stacked_above_the_target():
     owner = _Owner()
     before = otel_context.get_current()
 
-    context_scope.enter_scope(owner, "outer", _span_context("outer"))
-    context_scope.enter_scope(
-        owner, "orphan", _span_context("orphan"), parent_key="outer"
-    )
+    context_scope.enter_scope(owner, "outer", lambda: _span_context("outer"))
+    context_scope.enter_scope(owner, "orphan", lambda: _span_context("orphan"))
 
     context_scope.exit_scope(owner, "outer")
 
@@ -147,8 +143,8 @@ def test_reentering_the_same_key_replaces_the_previous_scope():
     owner = _Owner()
     before = otel_context.get_current()
 
-    context_scope.enter_scope(owner, "wfc-1", _span_context("poll-1"), epoch=1)
-    context_scope.enter_scope(owner, "wfc-1", _span_context("poll-2"), epoch=1)
+    context_scope.enter_scope(owner, "wfc-1", lambda: _span_context("poll-1"), epoch=1)
+    context_scope.enter_scope(owner, "wfc-1", lambda: _span_context("poll-2"), epoch=1)
 
     assert context_scope.depth(owner) == 1
 
@@ -157,88 +153,20 @@ def test_reentering_the_same_key_replaces_the_previous_scope():
     assert context_scope.depth(owner) == 0
 
 
-def test_a_suspended_sibling_scope_is_dropped_not_nested_into():
-    """A worker that moves to another branch must not inherit the old one's scope.
-
-    Branch-pool workers have no branch affinity. Branch A suspends without an end
-    hook; the same worker then runs branch B. B's scope must replace A's, not
-    stack on it -- otherwise exiting B would detach back into A and correlate
-    later records to the wrong branch.
-    """
-    owner = _Owner()
-    before = otel_context.get_current()
-
-    # Branch A runs and suspends: entered, never exited.
-    context_scope.enter_scope(owner, "branch-a", _span_context("branch-a"), epoch=1)
-
-    # The worker picks up branch B, a sibling: same epoch, different key, no parent.
-    context_scope.enter_scope(owner, "branch-b", _span_context("branch-b"), epoch=1)
-
-    assert context_scope.depth(owner) == 1
-
-    context_scope.exit_scope(owner, "branch-b")
-    assert otel_context.get_current() is before
-    assert context_scope.depth(owner) == 0
-
-
-def test_a_scope_whose_parent_never_ran_here_replaces_the_stale_one():
-    """A nested scope whose parent is absent cannot nest inside what is here."""
-    owner = _Owner()
-    before = otel_context.get_current()
-
-    context_scope.enter_scope(owner, "ctx-a", _span_context("ctx-a"), epoch=1)
-    # An operation nested under a context that ran on another thread.
-    context_scope.enter_scope(
-        owner, "step-b", _span_context("step-b"), epoch=1, parent_key="ctx-b"
-    )
-
-    assert context_scope.depth(owner) == 1
-    context_scope.exit_scope(owner, "step-b")
-    assert otel_context.get_current() is before
-
-
 def test_reentry_guard_keeps_enclosing_scopes():
     """Re-entering a nested key must not disturb the scope it is nested in."""
     owner = _Owner()
-    context_scope.enter_scope(owner, "ctx", _span_context("ctx"), epoch=1)
+    context_scope.enter_scope(owner, "ctx", lambda: _span_context("ctx"), epoch=1)
     enclosing = otel_context.get_current()
 
-    context_scope.enter_scope(
-        owner, "inner", _span_context("inner-1"), epoch=1, parent_key="ctx"
-    )
-    context_scope.enter_scope(
-        owner, "inner", _span_context("inner-2"), epoch=1, parent_key="ctx"
-    )
+    context_scope.enter_scope(owner, "inner", lambda: _span_context("inner-1"), epoch=1)
+    context_scope.enter_scope(owner, "inner", lambda: _span_context("inner-2"), epoch=1)
 
     assert context_scope.depth(owner) == 2
     context_scope.exit_scope(owner, "inner")
     assert otel_context.get_current() is enclosing
 
     context_scope.exit_scope(owner, "ctx")
-
-
-def test_legitimate_nesting_leaves_another_owners_scope_alone():
-    """Two plugins tracking the same operations must not evict each other.
-
-    The normal nesting path has to be a no-op, because detaching necessarily
-    discards everything stacked above the cut.
-    """
-    first, second = _Owner(), _Owner()
-    before = otel_context.get_current()
-
-    context_scope.enter_scope(first, "ctx", _span_context("first-ctx"), epoch=1)
-    context_scope.enter_scope(second, "ctx", _span_context("second-ctx"), epoch=1)
-    context_scope.enter_scope(
-        first, "step", _span_context("first-step"), epoch=1, parent_key="ctx"
-    )
-
-    # The second plugin's context scope survived the first plugin's nesting.
-    assert context_scope.depth(second) == 1
-
-    context_scope.exit_scope(first, "step")
-    context_scope.exit_scope(second, "ctx")
-    context_scope.exit_scope(first, "ctx")
-    assert otel_context.get_current() is before
 
 
 def test_enter_discards_scopes_from_a_previous_epoch():
@@ -251,10 +179,12 @@ def test_enter_discards_scopes_from_a_previous_epoch():
     owner = _Owner()
     before = otel_context.get_current()
 
-    context_scope.enter_scope(owner, "suspended", _span_context("suspended"), epoch=1)
+    context_scope.enter_scope(
+        owner, "suspended", lambda: _span_context("suspended"), epoch=1
+    )
     assert context_scope.depth(owner) == 1
 
-    context_scope.enter_scope(owner, "next", _span_context("next"), epoch=2)
+    context_scope.enter_scope(owner, "next", lambda: _span_context("next"), epoch=2)
     assert context_scope.depth(owner) == 1
 
     context_scope.exit_scope(owner, "next")
@@ -266,8 +196,8 @@ def test_unwind_detaches_every_scope_for_one_owner():
     owner = _Owner()
     before = otel_context.get_current()
 
-    context_scope.enter_scope(owner, "a", _span_context("a"))
-    context_scope.enter_scope(owner, "b", _span_context("b"))
+    context_scope.enter_scope(owner, "a", lambda: _span_context("a"))
+    context_scope.enter_scope(owner, "b", lambda: _span_context("b"))
 
     context_scope.unwind(owner)
 
@@ -294,7 +224,7 @@ def test_scopes_are_confined_to_the_thread_that_attached_them():
     observed: dict[str, object] = {}
 
     def worker() -> None:
-        context_scope.enter_scope(owner, "worker", _span_context("worker"))
+        context_scope.enter_scope(owner, "worker", lambda: _span_context("worker"))
         observed["worker_depth"] = context_scope.depth(owner)
         observed["worker_span_valid"] = (
             trace.get_current_span().get_span_context().is_valid
@@ -405,6 +335,41 @@ def _step_end(operation_id: str) -> UserFunctionEndInfo:
     )
 
 
+def _context_start(operation_id: str, parent_id: str | None) -> UserFunctionStartInfo:
+    """Start info for a child-context (including virtual/FLAT branch) body."""
+    return UserFunctionStartInfo(
+        operation_id=operation_id,
+        operation_type=OperationType.CONTEXT,
+        sub_type=None,
+        name=operation_id,
+        parent_id=parent_id,
+        start_time=START_TIME,
+        is_replayed=False,
+        status=OperationStatus.STARTED,
+        is_replay_children=False,
+        attempt=None,
+    )
+
+
+def _context_end(operation_id: str, parent_id: str | None) -> UserFunctionEndInfo:
+    """End info for a child-context body."""
+    return UserFunctionEndInfo(
+        operation_id=operation_id,
+        operation_type=OperationType.CONTEXT,
+        sub_type=None,
+        name=operation_id,
+        parent_id=parent_id,
+        start_time=START_TIME,
+        end_time=END_TIME,
+        is_replayed=False,
+        status=OperationStatus.SUCCEEDED,
+        is_replay_children=False,
+        attempt=None,
+        outcome=UserFunctionOutcome.SUCCEEDED,
+        error=None,
+    )
+
+
 @pytest.mark.parametrize("factory", [_execution_plugin, _invocation_plugin])
 def test_invocation_end_unwinds_a_suspended_operation_scope(factory):
     """A step that suspends never gets its end hook; invocation end cleans up.
@@ -455,46 +420,90 @@ def test_user_function_hooks_on_a_worker_thread_leave_the_caller_alone(factory):
     plugin.on_invocation_end(_invocation_end())
 
 
-@pytest.mark.parametrize("factory", [_execution_plugin, _invocation_plugin])
-def test_worker_reassigned_to_another_branch_drops_the_suspended_scope(factory):
-    """One worker running branch A (suspends) then branch B leaves no residue.
+def test_the_new_context_is_built_after_stale_scopes_are_dropped():
+    """The attached context must not inherit a scope that is being detached.
 
-    Branch pools reuse workers with no branch affinity, so the worker that ran a
-    suspended branch goes on to another. B must not nest inside A's abandoned
-    scope, and after B ends the thread must be clean.
+    The context is normally derived from what is current, so building it before
+    cleanup would copy baggage or suppression values out of the stale scope, and
+    detaching afterwards cannot remove them from an already-built Context.
+    """
+    owner = _Owner()
+    before = otel_context.get_current()
+
+    # A stale scope under the same key, carrying baggage.
+    context_scope.enter_scope(
+        owner,
+        "op-1",
+        lambda: baggage.set_baggage(
+            "poll", "first", context=otel_context.get_current()
+        ),
+        epoch=1,
+    )
+    assert baggage.get_baggage("poll") == "first"
+
+    # Re-entering builds its context from whatever is current at that moment,
+    # which must already be the pre-stale context.
+    observed: dict[str, object] = {}
+
+    def build() -> Context:
+        observed["seen_during_build"] = baggage.get_baggage("poll")
+        return otel_context.get_current()
+
+    context_scope.enter_scope(owner, "op-1", build, epoch=1)
+
+    assert observed["seen_during_build"] is None
+    assert baggage.get_baggage("poll") is None
+
+    context_scope.exit_scope(owner, "op-1")
+    assert otel_context.get_current() is before
+
+
+@pytest.mark.parametrize("factory", [_execution_plugin, _invocation_plugin])
+def test_flat_branch_scope_survives_its_inner_operations(factory):
+    """A FLAT map/parallel branch scope must stay attached across inner steps.
+
+    A virtual (FLAT) branch reports its inner operations' parent as the
+    grandparent -- None for a top-level branch -- while the branch's own context
+    scope is still running (see DurableContext.is_virtual). Physical nesting is
+    therefore not derivable from parent_id, and treating an inner step as
+    root-level must not detach the live branch scope: work between two inner steps
+    would fall out of the durable trace.
     """
     plugin, _ = factory()
-    before = otel_context.get_current()
     plugin.on_invocation_start(_invocation_start())
     observed: dict[str, object] = {}
 
-    def branch_a() -> None:
-        # Suspends: start fires, end never does.
-        plugin.on_user_function_start(_step_start("branch-a"))
-
-    def branch_b() -> None:
-        plugin.on_user_function_start(_step_start("branch-b"))
-        observed["depth_in_b"] = context_scope.depth(plugin)
-        observed["current_is_b"] = trace.get_current_span().get_span_context().span_id
-        plugin.on_user_function_end(_step_end("branch-b"))
-        observed["depth_after_b"] = context_scope.depth(plugin)
-        observed["span_after_b_valid"] = (
-            trace.get_current_span().get_span_context().is_valid
+    def run_branch() -> None:
+        # The virtual branch body: a CONTEXT operation at the top level.
+        plugin.on_user_function_start(
+            _context_start("flat-branch", parent_id=None),
         )
+        branch_span_id = trace.get_current_span().get_span_context().span_id
 
-    # A single worker, so branch B is guaranteed to land on branch A's thread.
+        # Inner steps of a FLAT branch report parent_id=None, not the branch.
+        for index in range(2):
+            step_id = f"flat-branch-step-{index}"
+            plugin.on_user_function_start(_step_start(step_id))
+            plugin.on_user_function_end(_step_end(step_id))
+            # Between inner steps the branch scope is still current.
+            observed[f"between-{index}"] = (
+                trace.get_current_span().get_span_context().span_id
+            )
+
+        observed["branch"] = branch_span_id
+        plugin.on_user_function_end(
+            _context_end("flat-branch", parent_id=None),
+        )
+        observed["after_branch_depth"] = context_scope.depth(plugin)
+
     with ThreadPoolExecutor(max_workers=1) as executor:
-        executor.submit(branch_a).result()
-        executor.submit(branch_b).result()
+        executor.submit(run_branch).result()
 
-    # B replaced A's scope rather than stacking on it.
-    assert observed["depth_in_b"] == 1
-    # Exiting B did not fall back into A.
-    assert observed["depth_after_b"] == 0
-    assert observed["span_after_b_valid"] is False
-    assert otel_context.get_current() is before
+    assert observed["between-0"] == observed["branch"]
+    assert observed["between-1"] == observed["branch"]
+    assert observed["after_branch_depth"] == 0
 
-    plugin.on_invocation_end(_invocation_end(InvocationStatus.PENDING))
+    plugin.on_invocation_end(_invocation_end())
 
 
 @pytest.mark.parametrize("factory", [_execution_plugin, _invocation_plugin])

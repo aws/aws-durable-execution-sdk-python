@@ -620,9 +620,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         context_scope.enter_scope(
             self,
             self._scope_key(info),
-            trace.set_span_in_context(span, self._scope_base_context()),
+            # Built after enter_scope's cleanup so it cannot inherit values
+            # from a scope that is about to be detached.
+            lambda: trace.set_span_in_context(span, self._scope_base_context()),
             epoch=self._epoch,
-            parent_key=info.parent_id,
         )
 
     def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
