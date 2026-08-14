@@ -1,15 +1,16 @@
 # AWS Durable Execution SDK - OpenTelemetry Plugin
 
-OpenTelemetry instrumentation plugin for the [AWS Durable Execution SDK for Python](https://github.com/aws/aws-durable-execution-sdk-python). Emits distributed traces that correlate across multiple Lambda invocations of a single durable execution, producing deterministic span and trace IDs so that spans from different invocations are stitched into a single coherent trace.
+OpenTelemetry instrumentation plugin for the [AWS Durable Execution SDK for Python](https://github.com/aws/aws-durable-execution-sdk-python). Emits durable execution spans with deterministic workflow and operation IDs while keeping invocation spans in the ambient Lambda trace.
 
 ## Features
 
-- **Deterministic Trace IDs**: All invocations of the same durable execution share a single trace, derived from the X-Ray trace header or execution ARN
+- **Deterministic Workflow Traces**: Durable operations use an execution-derived trace that is independent of the ambient Lambda/X-Ray trace
+- **Ambient Invocation Traces**: Invocation spans inherit the active Lambda or extracted upstream context
 - **Span-per-Operation**: Each durable operation (step, wait, invoke) gets its own span with accurate timing
-- **Continuation Spans**: Operations completing in a different invocation are linked back to the original span
+- **Continuation Spans**: Operations completing in another invocation produce a new correlated span without fabricating an unobserved prior span context
 - **Log Correlation**: Enrich application logs with trace ID and span ID for end-to-end observability
-- **Configurable Sampling**: Control trace volume via plugin options
-- **Self-Contained Setup**: No manual TracerProvider configuration required
+- **Provider Integration**: Use the global ADOT provider or supply an explicit SDK `TracerProvider`
+- **Provider-Managed Sampling**: Use standard OpenTelemetry or ADOT sampling configuration
 
 ## Installation
 
@@ -157,7 +158,8 @@ def handler(event: dict, context: DurableContext) -> dict:
     return result
 ```
 
-That's it. The plugin handles TracerProvider setup, deterministic ID generation, and span lifecycle internally.
+The ADOT layer supplies the global `TracerProvider`; the plugin handles
+deterministic ID generation and span lifecycle.
 
 ### 4. Grant Permissions
 
@@ -182,15 +184,14 @@ See the [ADOT sampling configuration](https://aws-otel.github.io/docs/getting-st
 from aws_durable_execution_sdk_python_otel import (
     InvocationOtelPlugin,
     OtelPluginConfig,
+    ProviderSource,
     xray_context_extractor,
 )
 
 plugin = InvocationOtelPlugin(
     OtelPluginConfig(
-        # Provide your own TracerProvider if you already have one configured.
-        # When omitted, an OTLP provider is auto-configured (like ExecutionOtelPlugin);
-        # set use_default_tracer_provider=True to use the global (e.g. ADOT) provider.
-        tracer_provider=None,
+        # Use the global provider configured by ADOT (the default).
+        provider_source=ProviderSource.GLOBAL,
         # Use a custom context extractor (default: xray_context_extractor).
         context_extractor=xray_context_extractor,
         # Custom instrumentation scope name
@@ -270,16 +271,18 @@ The main plugin class. Implements `DurableInstrumentationPlugin` from `aws_durab
 ```python
 InvocationOtelPlugin(
     OtelPluginConfig(
+        provider_source=ProviderSource.GLOBAL,
         tracer_provider=None,
         context_extractor=None,
         instrument_name="aws-durable-execution-sdk-python",
         enrich_logger=True,
         workflow_span_name="Workflow",
-        # ...and the rest of OtelPluginConfig (use_default_tracer_provider,
-        # enable_http_instrumentation, exporter_config, propagators).
     )
 )
 ```
+
+Set `provider_source=ProviderSource.EXPLICIT` and pass `tracer_provider=...`
+when the application owns the OpenTelemetry SDK provider.
 
 ### `DeterministicIdGenerator`
 
@@ -309,7 +312,6 @@ setups.
 - `aws-durable-execution-sdk-python` >= 1.8.0
 - `opentelemetry-api` >= 1.20.0
 - `opentelemetry-sdk` >= 1.20.0
-- `opentelemetry-exporter-otlp`
 
 ## License
 

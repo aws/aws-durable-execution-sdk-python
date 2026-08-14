@@ -25,7 +25,6 @@ dependencies = [
   "aws-durable-execution-sdk-python>=1.8.0",
   "opentelemetry-api>=1.20.0",
   "opentelemetry-sdk>=1.20.0",
-  "opentelemetry-exporter-otlp",
   "opentelemetry-propagator-aws-xray",
 ]
 
@@ -34,12 +33,10 @@ otel-invocation = "aws_durable_execution_sdk_python_otel.plugin_provider:INVOCAT
 otel-execution = "aws_durable_execution_sdk_python_otel.plugin_provider:EXECUTION_OTEL_PLUGIN_PROVIDER"
 
 [project.optional-dependencies]
-# Instrumentation used by ExecutionOtelPlugin's auto-configured provider path.
-# Kept optional so the InvocationOtelPlugin (ADOT / global provider) install
-# stays lean; the instrumentations module degrades gracefully when absent.
+# Optional AWS SDK instrumentation for the global provider path. The
+# instrumentations module degrades gracefully when it is absent.
 instrumentation = [
   "opentelemetry-instrumentation-botocore",
-  "opentelemetry-instrumentation-urllib3",
 ]
 
 [project.urls]

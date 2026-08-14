@@ -16,7 +16,6 @@ from aws_durable_execution_sdk_python_otel.execution_plugin import (
 )
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     OtelPluginConfig,
-    ExporterConfig,
     ProviderSource,
 )
 from aws_durable_execution_sdk_python_otel.instrumentations import (
@@ -41,7 +40,6 @@ __all__ = [
     "DeterministicIdGenerator",
     "ExecutionOtelPlugin",
     "OtelPluginConfig",
-    "ExporterConfig",
     "InvocationOtelPlugin",
     "OtelContextLogFilter",
     "ProviderResult",

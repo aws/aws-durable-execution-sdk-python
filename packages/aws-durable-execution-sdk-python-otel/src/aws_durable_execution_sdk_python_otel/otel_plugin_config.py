@@ -7,13 +7,12 @@ consistent and not duplicated across plugins.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
-    from opentelemetry.propagators.textmap import TextMapPropagator
     from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
 
     from aws_durable_execution_sdk_python_otel.context_extractors import (
@@ -23,9 +22,6 @@ if TYPE_CHECKING:
 
 DEFAULT_INSTRUMENT_NAME = "aws-durable-execution-sdk-python"
 DEFAULT_WORKFLOW_SPAN_NAME = "Workflow"
-# OTLPSpanExporter appends /v1/traces itself, so the base endpoint must NOT
-# include it (mirrors the JS fix in PR #729 that removed the duplicate path).
-DEFAULT_OTLP_ENDPOINT = "http://localhost:4318"
 
 
 class ProviderSource(Enum):
@@ -37,15 +33,6 @@ class ProviderSource(Enum):
 
     EXPLICIT = "explicit"  # use config.tracer_provider as-is
     GLOBAL = "global"  # default: use the global provider (trace.get_tracer_provider())
-    AUTO_OTLP = "auto_otlp"  # plugin builds and owns an OTLP provider
-
-
-@dataclass
-class ExporterConfig:
-    """OTLP exporter configuration for the auto-configured TracerProvider."""
-
-    endpoint: str | None = None
-    headers: dict[str, str] | None = None
 
 
 @dataclass
@@ -59,20 +46,14 @@ class OtelPluginConfig:
         provider_source: Selects how the tracer provider is obtained
             (:class:`ProviderSource`). Defaults to ``GLOBAL`` (uses the globally
             configured provider, e.g. the ADOT Lambda layer, via
-            ``trace.get_tracer_provider()``). ``AUTO_OTLP`` makes the plugin
-            build and own an OTLP provider. ``EXPLICIT`` uses ``tracer_provider``
-            as-is and skips instrumentation registration.
+            ``trace.get_tracer_provider()``). ``EXPLICIT`` uses
+            ``tracer_provider`` as-is and skips instrumentation registration.
         tracer_provider: The provider used when ``provider_source`` is
             ``EXPLICIT``. Required in that case and must be left unset for
-            ``GLOBAL`` / ``AUTO_OTLP``.
+            ``GLOBAL``.
         context_extractor: Upstream trace-context extractor. Defaults to the
             X-Ray extractor when omitted.
         instrument_name: Instrumentation scope name.
-        enable_http_instrumentation: Whether to register HTTP instrumentation
-            when the plugin owns an auto-configured provider. Defaults to True.
-        exporter_config: OTLP exporter settings for the auto-configured provider.
-        propagators: Custom propagators for the auto-configured provider.
-            Defaults to ``[AWSXRayPropagator, W3CTraceContextPropagator]``.
         workflow_span_name: Name of the Workflow root span (ExecutionOtelPlugin).
         enrich_logger: Install the root-logger OTel context filter.
     """
@@ -81,9 +62,6 @@ class OtelPluginConfig:
     tracer_provider: SdkTracerProvider | None = None
     context_extractor: ContextExtractor | None = None
     instrument_name: str = DEFAULT_INSTRUMENT_NAME
-    enable_http_instrumentation: bool = True
-    exporter_config: ExporterConfig = field(default_factory=ExporterConfig)
-    propagators: Sequence[TextMapPropagator] | None = None
     workflow_span_name: str = DEFAULT_WORKFLOW_SPAN_NAME
     enrich_logger: bool = True
 
@@ -92,8 +70,7 @@ class OtelPluginConfig:
 
         The config is fully driven by :attr:`provider_source`; ``tracer_provider``
         is the one source-specific field, so it must be present for ``EXPLICIT``
-        and absent for ``GLOBAL`` / ``AUTO_OTLP`` (where it would be silently
-        ignored).
+        and absent for ``GLOBAL`` (where it would be silently ignored).
         """
         if self.provider_source is ProviderSource.EXPLICIT:
             if self.tracer_provider is None:
@@ -103,5 +80,5 @@ class OtelPluginConfig:
                 "tracer_provider is only valid with provider_source=EXPLICIT; "
                 f"got provider_source={self.provider_source.name}. Set "
                 "ProviderSource.EXPLICIT, or drop tracer_provider for "
-                "GLOBAL / AUTO_OTLP."
+                "GLOBAL."
             )
