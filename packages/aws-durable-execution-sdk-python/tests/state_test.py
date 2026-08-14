@@ -45,6 +45,7 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationStartInfo,
     PluginExecutor,
     UserFunctionEndInfo,
+    UserFunctionOutcome,
 )
 from aws_durable_execution_sdk_python.state import (
     CheckpointBatcherConfig,
@@ -4821,15 +4822,17 @@ def test_plugin_executor_exception_does_not_break_checkpointing():
             executor.shutdown(wait=True)
 
 
-def test_wrap_user_function_suspend_does_not_fire_end_hook():
-    """A user function that suspends does not fire the end hook.
+def test_wrap_user_function_suspend_fires_end_hook_with_suspended_outcome():
+    """A user function that suspends fires the end hook with SUSPENDED.
 
-    Regression: a timed suspend (TimedSuspendExecution) raised inside a wrapped
-    user function (e.g. a child context that waits) must not be surfaced to
-    plugins as a FAILED outcome. The suspend is normal durable control flow,
-    and the plugin observes it by absence (no end hook fires), with the
-    instrumentation plugin's own per-invocation span sweep closing any open
-    spans cleanly at invocation end.
+    A timed suspend (TimedSuspendExecution) raised inside a wrapped user function
+    (e.g. a child context that waits) is normal durable control flow, so it must
+    not be surfaced as a FAILED outcome. It must still fire the end hook: that is
+    the only signal a plugin gets that this operation's user code stopped
+    running, and per-operation state a plugin opened in on_user_function_start
+    cannot always be released at invocation end -- an OTel context token, for
+    one, is only detachable on the thread that attached it, which is not the
+    thread the invocation hooks run on.
     """
     captured: list[UserFunctionEndInfo] = []
 
@@ -4858,7 +4861,12 @@ def test_wrap_user_function_suspend_does_not_fire_end_hook():
         with pytest.raises(TimedSuspendExecution):
             wrapped(None)
 
-    assert captured == []
+    assert len(captured) == 1
+    assert captured[0].outcome is UserFunctionOutcome.SUSPENDED
+    # A suspension is not a failure, so no error is reported.
+    assert captured[0].error is None
+    assert captured[0].operation_id == "op-1"
+    assert captured[0].attempt == 1
 
 
 def test_plugin_executor_not_called_for_pending_operations():

@@ -662,6 +662,13 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 "on_user_function_end called without matching on_user_function_start"
             )
 
+        if info.outcome is UserFunctionOutcome.SUSPENDED:
+            # The user function stopped so the execution can resume later, so the
+            # attempt did not conclude. Leave the span open rather than recording
+            # an outcome on it; on_invocation_end closes whatever is still open.
+            # Detaching the scope above is all this hook owes.
+            return
+
         if info.operation_type is OperationType.STEP:
             span.set_attributes(self._extract_attributes(info))
             if info.outcome is UserFunctionOutcome.FAILED:

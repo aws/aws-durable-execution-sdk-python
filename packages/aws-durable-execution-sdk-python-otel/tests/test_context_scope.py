@@ -30,6 +30,7 @@ from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from aws_durable_execution_sdk_python_otel import context_scope
 from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
@@ -429,6 +430,25 @@ def _context_end(operation_id: str, parent_id: str | None) -> UserFunctionEndInf
     )
 
 
+def _step_suspended(operation_id: str) -> UserFunctionEndInfo:
+    """End info for a step whose user function suspended."""
+    return UserFunctionEndInfo(
+        operation_id=operation_id,
+        operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name=operation_id,
+        parent_id=None,
+        start_time=START_TIME,
+        end_time=END_TIME,
+        is_replayed=False,
+        status=OperationStatus.STARTED,
+        is_replay_children=False,
+        attempt=1,
+        outcome=UserFunctionOutcome.SUSPENDED,
+        error=None,
+    )
+
+
 @pytest.mark.parametrize("factory", [_execution_plugin, _invocation_plugin])
 def test_invocation_end_unwinds_a_suspended_operation_scope(factory):
     """A step that suspends never gets its end hook; invocation end cleans up.
@@ -745,6 +765,48 @@ def test_suspend_then_reenter_then_end_leaves_no_residue(factory):
     assert otel_context.get_current() is before
 
     plugin.on_invocation_end(_invocation_end())
+
+
+@pytest.mark.parametrize("factory", [_execution_plugin, _invocation_plugin])
+def test_suspended_outcome_detaches_scope_without_ending_the_span(factory):
+    """A suspended attempt releases its scope but is not exported as finished.
+
+    The core SDK fires on_user_function_end with SUSPENDED when a user function
+    stops so the execution can resume later. The scope must come off -- that is
+    the leak this hook exists to prevent -- but the attempt did not conclude, so
+    the span must not be ended with an outcome here.
+    """
+    plugin, exporter = factory()
+    before = otel_context.get_current()
+    plugin.on_invocation_start(_invocation_start())
+
+    plugin.on_user_function_start(_step_start("step-suspends"))
+    assert context_scope.depth(plugin) == 1
+
+    plugin.on_user_function_end(_step_suspended("step-suspends"))
+
+    # Scope released, context restored.
+    assert context_scope.depth(plugin) == 0
+    assert otel_context.get_current() is before
+    # Nothing exported for the attempt: it has not finished.
+    assert [s.name for s in exporter.get_finished_spans()] == []
+
+    plugin.on_invocation_end(_invocation_end(InvocationStatus.PENDING))
+
+
+@pytest.mark.parametrize("factory", [_execution_plugin, _invocation_plugin])
+def test_suspended_outcome_is_not_recorded_as_an_error(factory):
+    """A suspension must not mark the attempt span ERROR."""
+    plugin, exporter = factory()
+    plugin.on_invocation_start(_invocation_start())
+    plugin.on_user_function_start(_step_start("step-suspends"))
+
+    plugin.on_user_function_end(_step_suspended("step-suspends"))
+    plugin.on_invocation_end(_invocation_end(InvocationStatus.PENDING))
+
+    for span in exporter.get_finished_spans():
+        assert span.status.status_code is not StatusCode.ERROR
+        assert span.attributes.get("durable.attempt.outcome") != "SUSPENDED"
 
 
 def test_two_plugins_on_one_thread_unwind_in_lifo_order():

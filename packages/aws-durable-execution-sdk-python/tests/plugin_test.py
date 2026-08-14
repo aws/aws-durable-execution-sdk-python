@@ -1788,7 +1788,7 @@ class TestUserFunctionOutcomeValues(unittest.TestCase):
     def test_outcome_values(self):
         self.assertEqual(
             {o.value for o in UserFunctionOutcome},
-            {"SUCCEEDED", "FAILED"},
+            {"SUCCEEDED", "FAILED", "SUSPENDED"},
         )
 
 

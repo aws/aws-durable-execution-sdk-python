@@ -37,6 +37,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.plugin import (
     PluginExecutor,
+    UserFunctionOutcome,
 )
 from aws_durable_execution_sdk_python.threading import CompletionEvent
 
@@ -1170,6 +1171,16 @@ class ExecutionState:
                 self._plugin_executor.on_user_function_end(start_info, None)
                 return result
             except SuspendExecution:
+                # The user function did not finish -- it stopped so the execution
+                # can resume in a later invocation. The end hook still has to
+                # fire: it is the only signal a plugin gets that this operation's
+                # user code is no longer running, and without it any per-operation
+                # state a plugin opened in on_user_function_start (an OTel context
+                # scope, a timer, an open log group) is stranded. Reported as
+                # SUSPENDED with no error so plugins do not record a failure.
+                self._plugin_executor.on_user_function_end(
+                    start_info, None, UserFunctionOutcome.SUSPENDED
+                )
                 raise
             except Exception as e:
                 self._plugin_executor.on_user_function_end(

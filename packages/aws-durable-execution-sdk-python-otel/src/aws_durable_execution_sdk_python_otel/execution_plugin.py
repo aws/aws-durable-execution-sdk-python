@@ -557,6 +557,13 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             raise RuntimeError(
                 "on_user_function_end without matching on_user_function_start"
             )
+        if info.outcome is UserFunctionOutcome.SUSPENDED:
+            # The user function stopped so the execution can resume later. Leave
+            # the span open and unexported, exactly as an operation that suspends
+            # mid-invocation is treated: it is ended when the operation reaches a
+            # terminal status, in a later invocation if necessary. Detaching the
+            # scope above is all this hook owes.
+            return
         if info.operation_type is OperationType.STEP:
             span.set_attributes(self._operation_attributes(info))
             if info.outcome is UserFunctionOutcome.FAILED:

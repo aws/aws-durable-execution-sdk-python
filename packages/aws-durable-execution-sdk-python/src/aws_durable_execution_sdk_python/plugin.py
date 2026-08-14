@@ -163,6 +163,13 @@ class OperationChangeInfo:
 class UserFunctionOutcome(Enum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
+    # The user function did not finish: it suspended so the execution can be
+    # resumed in a later invocation (e.g. a child context whose inner operation
+    # is still pending). Reported as its own outcome rather than FAILED because
+    # nothing went wrong -- plugins that count failures or set an error status
+    # must not treat a suspension as one, and plugins holding per-operation
+    # state need the hook to fire so they can release it.
+    SUSPENDED = "SUSPENDED"
 
     @classmethod
     def from_error(cls, error: ErrorObject | None) -> UserFunctionOutcome:
@@ -187,8 +194,20 @@ class UserFunctionEndInfo(OperationInfo):
 
     @classmethod
     def from_start_info(
-        cls, start_info: UserFunctionStartInfo, error: ErrorObject | None
+        cls,
+        start_info: UserFunctionStartInfo,
+        error: ErrorObject | None,
+        outcome: UserFunctionOutcome | None = None,
     ) -> UserFunctionEndInfo:
+        """Build the end info for a user function that has stopped running.
+
+        Args:
+            start_info: The info reported when the user function started.
+            error: The failure, if the user function raised one.
+            outcome: Overrides the outcome derived from ``error``. Used for
+                suspension, which is neither a success nor a failure and carries
+                no error.
+        """
         return UserFunctionEndInfo(
             operation_id=start_info.operation_id,
             operation_type=start_info.operation_type,
@@ -200,7 +219,9 @@ class UserFunctionEndInfo(OperationInfo):
             status=start_info.status,
             is_replay_children=start_info.is_replay_children,
             attempt=start_info.attempt,
-            outcome=UserFunctionOutcome.from_error(error),
+            outcome=outcome
+            if outcome is not None
+            else UserFunctionOutcome.from_error(error),
             end_time=datetime.datetime.now(datetime.UTC),
             error=error,
         )
@@ -622,10 +643,15 @@ class PluginExecutor:
         self.execute_plugins(start_info, sync=True)
         return start_info
 
-    def on_user_function_end(self, start_info: UserFunctionStartInfo, error) -> None:
+    def on_user_function_end(
+        self,
+        start_info: UserFunctionStartInfo,
+        error,
+        outcome: UserFunctionOutcome | None = None,
+    ) -> None:
         """Execute any registered plugins for the operation when its user function finishes execution."""
         self.execute_plugins(
-            UserFunctionEndInfo.from_start_info(start_info, error), sync=True
+            UserFunctionEndInfo.from_start_info(start_info, error, outcome), sync=True
         )
 
     def on_operation_action(

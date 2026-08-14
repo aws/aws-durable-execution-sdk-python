@@ -2923,6 +2923,12 @@ class _RecordingPlugin(DurableInstrumentationPlugin):
     def on_operation_attempt_end(self, info):
         self.calls.append(f"attempt_end:{info.operation_id}")
 
+    def on_user_function_start(self, info):
+        self.calls.append(f"user_function_start:{info.operation_id}")
+
+    def on_user_function_end(self, info):
+        self.calls.append(f"user_function_end:{info.operation_id}:{info.outcome.value}")
+
 
 class _FailingPlugin(DurableInstrumentationPlugin):
     """Plugin that raises on every hook call."""
@@ -3180,6 +3186,46 @@ def test_durable_execution_with_plugins_pending():
     # Execution end should NOT be fired for PENDING
     execution_end_calls = [c for c in plugin.calls if c.startswith("execution_end")]
     assert len(execution_end_calls) == 0
+
+
+def test_durable_execution_with_plugins_child_context_suspends():
+    """A child context that suspends reports SUSPENDED, not FAILED.
+
+    This is the reachable suspension path: the child context's user function runs
+    inner durable operations, one of them is still pending, and SuspendExecution
+    propagates out of the user function. Plugins must see the end hook so they can
+    release whatever they opened at start, with an outcome that does not read as a
+    failure.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        def child(ctx: DurableContext) -> dict:
+            raise SuspendExecution("inner operation still pending")
+
+        return context.run_in_child_context(child, name="child-1")
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.PENDING.value
+    suspended = [
+        c
+        for c in plugin.calls
+        if c.startswith("user_function_end") and c.endswith(":SUSPENDED")
+    ]
+    assert len(suspended) == 1, plugin.calls
+    # Never reported as a failure.
+    assert not [c for c in plugin.calls if c.endswith("user_function_end:FAILED")]
 
 
 def test_durable_execution_with_plugins_retryable_error():
