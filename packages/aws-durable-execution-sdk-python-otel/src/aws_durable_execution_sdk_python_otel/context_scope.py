@@ -95,6 +95,7 @@ def enter_scope(owner: Any, key: str, context: Context, epoch: int = 0) -> None:
 
     owner_id = id(owner)
     _discard_stale(owner_id, epoch)
+    _discard_reentered(owner_id, key)
     try:
         token = otel_context.attach(context)
     except Exception:  # noqa: BLE001
@@ -143,6 +144,32 @@ def depth(owner: Any | None = None) -> int:
         return len(_state.entries)
     owner_id = id(owner)
     return sum(1 for entry in _state.entries if entry.owner_id == owner_id)
+
+
+def _discard_reentered(owner_id: int, key: str) -> None:
+    """Unwind a scope this owner already holds under ``key`` on this thread.
+
+    The epoch check only catches a *previous invocation's* leftovers. The same
+    operation key can also be entered twice inside one invocation: a suspended
+    operation is re-entered when its branch is resubmitted, and its first scope
+    is still attached because the suspending path had no end hook to pop it.
+    Without this, the second enter would stack on the first and the eventual end
+    hook -- which pops one scope -- would leave the original attached, one stale
+    layer per re-entry.
+    """
+    index = next(
+        (
+            position
+            for position, entry in enumerate(_state.entries)
+            if entry.owner_id == owner_id and entry.key == key
+        ),
+        None,
+    )
+    if index is None:
+        return
+    for entry in reversed(_state.entries[index:]):
+        _detach(entry)
+    del _state.entries[index:]
 
 
 def _discard_stale(owner_id: int, epoch: int) -> None:

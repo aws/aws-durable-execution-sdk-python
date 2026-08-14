@@ -211,28 +211,48 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             return cls._attempt_span_key(info)
         return info.operation_id
 
+    def _scope_base_context(self) -> Context:
+        """Return the context a new operation scope should be layered onto.
+
+        For the outermost durable scope on a thread, the extracted upstream
+        context is the base: user code runs on a worker whose context starts
+        empty, so anything the context extractor supplied -- a remote parent,
+        baggage -- would be dropped by using the current context there, and
+        downstream propagation inside steps would lose it.
+
+        For a nested scope the current context already carries that extracted
+        context transitively, via the enclosing scope, so it is used as the base
+        to preserve whatever ran in between (ambient spans, baggage added by user
+        code).
+        """
+        if context_scope.depth(self) > 0:
+            return context.get_current()
+        return self._extracted_context or context.get_current()
+
     def get_current_span_context(self) -> SpanContext | None:
         """Return the span context to use for log correlation.
 
         Resolution order:
-        1. The span attached to the OTel thread-local context. Inside a step
-           this is the active attempt span, and inside a child context this is
-           the active context span (attached in on_user_function_start). After a
-           nested operation ends, its scope is detached and the enclosing child
-           context span -- still attached -- becomes current again.
-        2. The invocation span from the plugin registry. This is the path used
-           for top-level handler code: the invocation span is never attached to
-           any thread's context, so the registry is the only way to resolve it.
-           It also covers code that runs between top-level operations, where
-           detaching the operation scope leaves the thread's ambient context
-           current.
+        1. The span attached to the OTel thread-local context, but only while this
+           plugin holds an operation scope on this thread. Inside a step that is
+           the active attempt span, and inside a child context the active context
+           span. After a nested operation ends, its scope is detached and the
+           enclosing child context span -- still attached -- becomes current
+           again.
+        2. The invocation span from the plugin registry. This covers top-level
+           handler code (the invocation span is never attached to any thread's
+           context) and code between top-level operations. Gating step 1 on an
+           owned scope matters in GLOBAL (ADOT) mode: the ambient Lambda span is
+           current on the handler thread and would otherwise be reported in place
+           of the durable span.
 
         Returns:
             A valid SpanContext, or None if no span is active.
         """
-        span_context = trace.get_current_span().get_span_context()
-        if span_context and span_context.is_valid:
-            return span_context
+        if context_scope.depth(self) > 0:
+            span_context = trace.get_current_span().get_span_context()
+            if span_context and span_context.is_valid:
+                return span_context
 
         invocation_span = self._get_span(None)
         if invocation_span:
@@ -588,14 +608,13 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             deterministic_span_id=info.operation_type is not OperationType.STEP,
         )
         # Attach on this worker thread so auto-instrumented calls made by the
-        # user function become children of this span. The scope is pushed onto
-        # whatever is already current (rather than replacing it with
-        # _extracted_context) so an ambient context on this thread survives; the
-        # span's own parent was chosen explicitly in _start_span.
+        # user function become children of this span. The span's own parent was
+        # chosen explicitly in _start_span; this only sets what is ambient while
+        # the user function runs.
         context_scope.enter_scope(
             self,
             self._scope_key(info),
-            trace.set_span_in_context(span, context.get_current()),
+            trace.set_span_in_context(span, self._scope_base_context()),
             epoch=self._epoch,
         )
 

@@ -18,6 +18,7 @@ from aws_durable_execution_sdk_python.plugin import (
     UserFunctionStartInfo,
 )
 import opentelemetry.context as otel_context
+from opentelemetry import trace
 import pytest
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider
@@ -237,6 +238,46 @@ def test_execution_plugin_handler_thread_uses_the_invocation_span():
     assert record.traceId == format(workflow_context.trace_id, "032x")
 
     plugin.on_invocation_end(_invocation_end_info())
+
+
+def test_ambient_lambda_span_does_not_displace_the_invocation_span(monkeypatch):
+    """An ambient ADOT span must not be reported in place of the durable span.
+
+    In GLOBAL mode the Lambda invocation span from the ADOT layer stays current on
+    the handler thread. Log records emitted there must still carry the durable
+    Invocation span, so the filter only trusts the current span while the plugin
+    holds an operation scope on that thread.
+    """
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
+    plugin = ExecutionOtelPlugin(
+        OtelPluginConfig(
+            provider_source=ProviderSource.GLOBAL,
+            context_extractor=lambda _: Context(),
+            enrich_logger=False,
+        )
+    )
+
+    ambient = provider.get_tracer("ambient").start_span("lambda-invocation")
+    token = otel_context.attach(trace.set_span_in_context(ambient))
+    try:
+        plugin.on_invocation_start(_invocation_start_info())
+        record = _make_record()
+        OtelContextLogFilter(plugin).filter(record)
+
+        ambient_span_id = format(ambient.get_span_context().span_id, "016x")
+        invocation_span_id = format(
+            plugin._invocation_span.get_span_context().span_id, "016x"
+        )
+        assert record.spanId == invocation_span_id
+        assert record.spanId != ambient_span_id
+
+        plugin.on_invocation_end(_invocation_end_info())
+    finally:
+        otel_context.detach(token)
+        ambient.end()
 
 
 def test_install_log_filter_attaches_to_handlers():

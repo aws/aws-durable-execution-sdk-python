@@ -25,7 +25,7 @@ from aws_durable_execution_sdk_python.plugin import (
     UserFunctionOutcome,
     UserFunctionStartInfo,
 )
-from opentelemetry import trace
+from opentelemetry import baggage, trace
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -131,6 +131,42 @@ def test_exit_with_unknown_key_is_a_noop():
 
     assert otel_context.get_current() is before
     assert context_scope.depth(owner) == 0
+
+
+def test_reentering_the_same_key_replaces_the_previous_scope():
+    """Re-entering a key inside one invocation must not stack a second scope.
+
+    A suspended operation is re-entered when its branch is resubmitted, and its
+    first scope is still attached because the suspending path had no end hook to
+    pop it. The epoch is unchanged, so only the same-key guard catches this.
+    """
+    owner = _Owner()
+    before = otel_context.get_current()
+
+    context_scope.enter_scope(owner, "wfc-1", _span_context("poll-1"), epoch=1)
+    context_scope.enter_scope(owner, "wfc-1", _span_context("poll-2"), epoch=1)
+
+    assert context_scope.depth(owner) == 1
+
+    context_scope.exit_scope(owner, "wfc-1")
+    assert otel_context.get_current() is before
+    assert context_scope.depth(owner) == 0
+
+
+def test_reentry_guard_keeps_enclosing_scopes():
+    """Re-entering a nested key must not disturb the scope it is nested in."""
+    owner = _Owner()
+    context_scope.enter_scope(owner, "ctx", _span_context("ctx"), epoch=1)
+    enclosing = otel_context.get_current()
+
+    context_scope.enter_scope(owner, "inner", _span_context("inner-1"), epoch=1)
+    context_scope.enter_scope(owner, "inner", _span_context("inner-2"), epoch=1)
+
+    assert context_scope.depth(owner) == 2
+    context_scope.exit_scope(owner, "inner")
+    assert otel_context.get_current() is enclosing
+
+    context_scope.exit_scope(owner, "ctx")
 
 
 def test_enter_discards_scopes_from_a_previous_epoch():
@@ -343,6 +379,72 @@ def test_user_function_hooks_on_a_worker_thread_leave_the_caller_alone(factory):
     assert observed["after"] == 0
     assert otel_context.get_current() is before
     assert trace.get_current_span().get_span_context().is_valid is False
+
+    plugin.on_invocation_end(_invocation_end())
+
+
+@pytest.mark.parametrize("factory", [_execution_plugin, _invocation_plugin])
+def test_extracted_context_values_reach_user_code_on_a_worker_thread(factory):
+    """Values from the context extractor must be current inside user code.
+
+    The worker running user code starts with an empty context, so the outermost
+    durable scope has to be layered onto the extracted context -- otherwise
+    baggage and any other non-span values the extractor supplied are dropped and
+    downstream instrumentation inside the step cannot propagate them.
+    """
+    plugin, _ = factory()
+    # An extractor that supplies baggage, as a propagator-based one would.
+    plugin._context_extractor = lambda _info: baggage.set_baggage(
+        "tenant", "acme", context=Context()
+    )
+    plugin.on_invocation_start(_invocation_start())
+    observed: dict[str, object] = {}
+
+    def run_step() -> None:
+        plugin.on_user_function_start(_step_start("step-1"))
+        observed["inside"] = baggage.get_baggage("tenant")
+        # A nested scope keeps it too, since it layers onto the current context.
+        plugin.on_user_function_start(_step_start("step-2"))
+        observed["nested"] = baggage.get_baggage("tenant")
+        plugin.on_user_function_end(_step_end("step-2"))
+        plugin.on_user_function_end(_step_end("step-1"))
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(run_step).result()
+
+    assert observed["inside"] == "acme"
+    assert observed["nested"] == "acme"
+
+    plugin.on_invocation_end(_invocation_end())
+
+
+@pytest.mark.parametrize("factory", [_execution_plugin, _invocation_plugin])
+def test_suspend_then_reenter_then_end_leaves_no_residue(factory):
+    """A suspended operation re-entered in the same invocation stays balanced.
+
+    The first start has no matching end (the SDK re-raises SuspendExecution), so
+    the re-entry must replace that scope rather than stack on it.
+    """
+    plugin, _ = factory()
+    before = otel_context.get_current()
+    plugin.on_invocation_start(_invocation_start())
+    observed: dict[str, object] = {}
+
+    def run_polls() -> None:
+        # Poll 1 suspends: start fires, end never does.
+        plugin.on_user_function_start(_step_start("wfc-1"))
+        # Poll 2 re-enters the same operation and completes.
+        plugin.on_user_function_start(_step_start("wfc-1"))
+        observed["depth_after_reentry"] = context_scope.depth(plugin)
+        plugin.on_user_function_end(_step_end("wfc-1"))
+        observed["depth_after_end"] = context_scope.depth(plugin)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(run_polls).result()
+
+    assert observed["depth_after_reentry"] == 1
+    assert observed["depth_after_end"] == 0
+    assert otel_context.get_current() is before
 
     plugin.on_invocation_end(_invocation_end())
 
