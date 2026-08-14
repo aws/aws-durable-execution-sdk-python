@@ -96,7 +96,9 @@ def test_nested_scopes_pop_in_lifo_order():
 
     context_scope.enter_scope(owner, "outer", _span_context("outer"))
     outer = otel_context.get_current()
-    context_scope.enter_scope(owner, "inner", _span_context("inner"))
+    context_scope.enter_scope(
+        owner, "inner", _span_context("inner"), parent_key="outer"
+    )
 
     context_scope.exit_scope(owner, "inner")
     assert otel_context.get_current() is outer
@@ -115,7 +117,9 @@ def test_exit_unwinds_scopes_stacked_above_the_target():
     before = otel_context.get_current()
 
     context_scope.enter_scope(owner, "outer", _span_context("outer"))
-    context_scope.enter_scope(owner, "orphan", _span_context("orphan"))
+    context_scope.enter_scope(
+        owner, "orphan", _span_context("orphan"), parent_key="outer"
+    )
 
     context_scope.exit_scope(owner, "outer")
 
@@ -138,7 +142,7 @@ def test_reentering_the_same_key_replaces_the_previous_scope():
 
     A suspended operation is re-entered when its branch is resubmitted, and its
     first scope is still attached because the suspending path had no end hook to
-    pop it. The epoch is unchanged, so only the same-key guard catches this.
+    pop it. The epoch is unchanged, so only the ancestry check catches this.
     """
     owner = _Owner()
     before = otel_context.get_current()
@@ -153,20 +157,88 @@ def test_reentering_the_same_key_replaces_the_previous_scope():
     assert context_scope.depth(owner) == 0
 
 
+def test_a_suspended_sibling_scope_is_dropped_not_nested_into():
+    """A worker that moves to another branch must not inherit the old one's scope.
+
+    Branch-pool workers have no branch affinity. Branch A suspends without an end
+    hook; the same worker then runs branch B. B's scope must replace A's, not
+    stack on it -- otherwise exiting B would detach back into A and correlate
+    later records to the wrong branch.
+    """
+    owner = _Owner()
+    before = otel_context.get_current()
+
+    # Branch A runs and suspends: entered, never exited.
+    context_scope.enter_scope(owner, "branch-a", _span_context("branch-a"), epoch=1)
+
+    # The worker picks up branch B, a sibling: same epoch, different key, no parent.
+    context_scope.enter_scope(owner, "branch-b", _span_context("branch-b"), epoch=1)
+
+    assert context_scope.depth(owner) == 1
+
+    context_scope.exit_scope(owner, "branch-b")
+    assert otel_context.get_current() is before
+    assert context_scope.depth(owner) == 0
+
+
+def test_a_scope_whose_parent_never_ran_here_replaces_the_stale_one():
+    """A nested scope whose parent is absent cannot nest inside what is here."""
+    owner = _Owner()
+    before = otel_context.get_current()
+
+    context_scope.enter_scope(owner, "ctx-a", _span_context("ctx-a"), epoch=1)
+    # An operation nested under a context that ran on another thread.
+    context_scope.enter_scope(
+        owner, "step-b", _span_context("step-b"), epoch=1, parent_key="ctx-b"
+    )
+
+    assert context_scope.depth(owner) == 1
+    context_scope.exit_scope(owner, "step-b")
+    assert otel_context.get_current() is before
+
+
 def test_reentry_guard_keeps_enclosing_scopes():
     """Re-entering a nested key must not disturb the scope it is nested in."""
     owner = _Owner()
     context_scope.enter_scope(owner, "ctx", _span_context("ctx"), epoch=1)
     enclosing = otel_context.get_current()
 
-    context_scope.enter_scope(owner, "inner", _span_context("inner-1"), epoch=1)
-    context_scope.enter_scope(owner, "inner", _span_context("inner-2"), epoch=1)
+    context_scope.enter_scope(
+        owner, "inner", _span_context("inner-1"), epoch=1, parent_key="ctx"
+    )
+    context_scope.enter_scope(
+        owner, "inner", _span_context("inner-2"), epoch=1, parent_key="ctx"
+    )
 
     assert context_scope.depth(owner) == 2
     context_scope.exit_scope(owner, "inner")
     assert otel_context.get_current() is enclosing
 
     context_scope.exit_scope(owner, "ctx")
+
+
+def test_legitimate_nesting_leaves_another_owners_scope_alone():
+    """Two plugins tracking the same operations must not evict each other.
+
+    The normal nesting path has to be a no-op, because detaching necessarily
+    discards everything stacked above the cut.
+    """
+    first, second = _Owner(), _Owner()
+    before = otel_context.get_current()
+
+    context_scope.enter_scope(first, "ctx", _span_context("first-ctx"), epoch=1)
+    context_scope.enter_scope(second, "ctx", _span_context("second-ctx"), epoch=1)
+    context_scope.enter_scope(
+        first, "step", _span_context("first-step"), epoch=1, parent_key="ctx"
+    )
+
+    # The second plugin's context scope survived the first plugin's nesting.
+    assert context_scope.depth(second) == 1
+
+    context_scope.exit_scope(first, "step")
+    context_scope.exit_scope(second, "ctx")
+    context_scope.exit_scope(first, "ctx")
+    assert otel_context.get_current() is before
 
 
 def test_enter_discards_scopes_from_a_previous_epoch():
@@ -379,6 +451,81 @@ def test_user_function_hooks_on_a_worker_thread_leave_the_caller_alone(factory):
     assert observed["after"] == 0
     assert otel_context.get_current() is before
     assert trace.get_current_span().get_span_context().is_valid is False
+
+    plugin.on_invocation_end(_invocation_end())
+
+
+@pytest.mark.parametrize("factory", [_execution_plugin, _invocation_plugin])
+def test_worker_reassigned_to_another_branch_drops_the_suspended_scope(factory):
+    """One worker running branch A (suspends) then branch B leaves no residue.
+
+    Branch pools reuse workers with no branch affinity, so the worker that ran a
+    suspended branch goes on to another. B must not nest inside A's abandoned
+    scope, and after B ends the thread must be clean.
+    """
+    plugin, _ = factory()
+    before = otel_context.get_current()
+    plugin.on_invocation_start(_invocation_start())
+    observed: dict[str, object] = {}
+
+    def branch_a() -> None:
+        # Suspends: start fires, end never does.
+        plugin.on_user_function_start(_step_start("branch-a"))
+
+    def branch_b() -> None:
+        plugin.on_user_function_start(_step_start("branch-b"))
+        observed["depth_in_b"] = context_scope.depth(plugin)
+        observed["current_is_b"] = trace.get_current_span().get_span_context().span_id
+        plugin.on_user_function_end(_step_end("branch-b"))
+        observed["depth_after_b"] = context_scope.depth(plugin)
+        observed["span_after_b_valid"] = (
+            trace.get_current_span().get_span_context().is_valid
+        )
+
+    # A single worker, so branch B is guaranteed to land on branch A's thread.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(branch_a).result()
+        executor.submit(branch_b).result()
+
+    # B replaced A's scope rather than stacking on it.
+    assert observed["depth_in_b"] == 1
+    # Exiting B did not fall back into A.
+    assert observed["depth_after_b"] == 0
+    assert observed["span_after_b_valid"] is False
+    assert otel_context.get_current() is before
+
+    plugin.on_invocation_end(_invocation_end(InvocationStatus.PENDING))
+
+
+@pytest.mark.parametrize("factory", [_execution_plugin, _invocation_plugin])
+def test_an_empty_extracted_context_isolates_the_operation(factory):
+    """An extractor returning an empty Context must not inherit ambient values.
+
+    Context subclasses dict, so an empty one is falsy; treating it as "no context"
+    would silently invert the extractor's intent and leak the worker's ambient
+    baggage into the operation.
+    """
+    plugin, _ = factory()
+    plugin._context_extractor = lambda _info: Context()
+    plugin.on_invocation_start(_invocation_start())
+    observed: dict[str, object] = {}
+
+    def run_step() -> None:
+        # Something ambient on the worker, as auto-instrumentation might leave.
+        token = otel_context.attach(
+            baggage.set_baggage("ambient", "leaked", context=otel_context.get_current())
+        )
+        try:
+            plugin.on_user_function_start(_step_start("step-1"))
+            observed["inside"] = baggage.get_baggage("ambient")
+            plugin.on_user_function_end(_step_end("step-1"))
+        finally:
+            otel_context.detach(token)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(run_step).result()
+
+    assert observed["inside"] is None
 
     plugin.on_invocation_end(_invocation_end())
 

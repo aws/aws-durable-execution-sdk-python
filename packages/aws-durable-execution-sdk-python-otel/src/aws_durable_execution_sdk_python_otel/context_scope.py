@@ -75,14 +75,20 @@ def _detach(entry: _Entry) -> None:
         logger.debug("Failed to detach OTel context scope %s", entry.key, exc_info=True)
 
 
-def enter_scope(owner: Any, key: str, context: Context, epoch: int = 0) -> None:
+def enter_scope(
+    owner: Any,
+    key: str,
+    context: Context,
+    epoch: int = 0,
+    parent_key: str | None = None,
+) -> None:
     """Attach ``context`` on this thread and remember how to restore it.
 
-    Any scope still on this thread's stack from an earlier ``epoch`` is unwound
-    first. That covers the paths where a paired pop never runs: the SDK re-raises
-    ``SuspendExecution`` without calling ``on_user_function_end``, so a suspended
-    operation leaves its scope attached, and a reused thread would otherwise
-    inherit it.
+    Scopes this owner holds that the new one does not nest inside are unwound
+    first, as are any left over from an earlier ``epoch``. Both cover the paths
+    where a paired pop never runs: the SDK re-raises ``SuspendExecution`` without
+    calling ``on_user_function_end``, so a suspended operation leaves its scope
+    attached, and the worker that ran it goes on to other work.
 
     Args:
         owner: The plugin instance pushing the scope.
@@ -90,12 +96,14 @@ def enter_scope(owner: Any, key: str, context: Context, epoch: int = 0) -> None:
         context: The context to attach.
         epoch: The owner's invocation counter; scopes from older epochs are
             discarded before the new scope is pushed.
+        parent_key: Scope key of the enclosing operation, or None for a
+            root-level one. Used to tell legitimate nesting from a stale scope.
     """
     from opentelemetry import context as otel_context
 
     owner_id = id(owner)
     _discard_stale(owner_id, epoch)
-    _discard_reentered(owner_id, key)
+    _unwind_non_ancestors(owner_id, parent_key)
     try:
         token = otel_context.attach(context)
     except Exception:  # noqa: BLE001
@@ -146,30 +154,48 @@ def depth(owner: Any | None = None) -> int:
     return sum(1 for entry in _state.entries if entry.owner_id == owner_id)
 
 
-def _discard_reentered(owner_id: int, key: str) -> None:
-    """Unwind a scope this owner already holds under ``key`` on this thread.
+def _unwind_non_ancestors(owner_id: int, parent_key: str | None) -> None:
+    """Drop scopes this owner holds on this thread that the new scope is not inside.
 
-    The epoch check only catches a *previous invocation's* leftovers. The same
-    operation key can also be entered twice inside one invocation: a suspended
-    operation is re-entered when its branch is resubmitted, and its first scope
-    is still attached because the suspending path had no end hook to pop it.
-    Without this, the second enter would stack on the first and the eventual end
-    hook -- which pops one scope -- would leave the original attached, one stale
-    layer per re-entry.
+    A scope may stay attached only while the operation it belongs to is still
+    running on this thread, and the only place that can be checked is here: the
+    suspending path has no end hook, so a suspended operation leaves its scope
+    behind. Two cases produce one:
+
+    * A branch-pool worker has no branch affinity. If branch A suspends and its
+      worker next runs branch B, A's scope has the same epoch and a different key,
+      so neither the epoch nor a same-key check clears it. B would nest inside A
+      and, on exit, detach back into it.
+    * The same operation can be re-entered when its branch is resubmitted.
+
+    The new scope nests inside its parent operation, so anything above that parent
+    is stale. When the parent is absent -- a root-level operation, or a parent that
+    never ran on this thread -- nothing this owner holds here can enclose it.
+
+    Detaching necessarily discards entries stacked above the cut, including other
+    owners', because the underlying ``ContextVar`` can only be reset in order. The
+    normal nesting path is a no-op, so that does not disturb a second plugin
+    tracking the same operations.
     """
-    index = next(
-        (
-            position
-            for position, entry in enumerate(_state.entries)
-            if entry.owner_id == owner_id and entry.key == key
-        ),
-        None,
-    )
-    if index is None:
+    positions = [
+        position
+        for position, entry in enumerate(_state.entries)
+        if entry.owner_id == owner_id
+    ]
+    if not positions:
         return
-    for entry in reversed(_state.entries[index:]):
+    if parent_key is not None and _state.entries[positions[-1]].key == parent_key:
+        # Normal nesting: the innermost scope we hold is the new scope's parent.
+        return
+    cut = positions[0]
+    if parent_key is not None:
+        for position in reversed(positions):
+            if _state.entries[position].key == parent_key:
+                cut = position + 1
+                break
+    for entry in reversed(_state.entries[cut:]):
         _detach(entry)
-    del _state.entries[index:]
+    del _state.entries[cut:]
 
 
 def _discard_stale(owner_id: int, epoch: int) -> None:

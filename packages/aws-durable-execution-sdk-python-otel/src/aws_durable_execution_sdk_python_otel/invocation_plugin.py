@@ -227,7 +227,13 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         """
         if context_scope.depth(self) > 0:
             return context.get_current()
-        return self._extracted_context or context.get_current()
+        # An extractor may deliberately return an empty Context to isolate the
+        # operation from whatever is ambient. Context subclasses dict, so an empty
+        # one is falsy -- test for None, or that intent silently inverts into
+        # inheriting the worker's ambient baggage and suppression values.
+        if self._extracted_context is not None:
+            return self._extracted_context
+        return context.get_current()
 
     def get_current_span_context(self) -> SpanContext | None:
         """Return the span context to use for log correlation.
@@ -616,6 +622,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             self._scope_key(info),
             trace.set_span_in_context(span, self._scope_base_context()),
             epoch=self._epoch,
+            parent_key=info.parent_id,
         )
 
     def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
