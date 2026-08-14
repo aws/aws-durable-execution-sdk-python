@@ -25,6 +25,8 @@ from aws_durable_execution_sdk_python.exceptions import (
     InvokeError,
     OrderedLockError,
     OrphanedChildException,
+    RetryableSerDesError,
+    SerDesError,
     StepError,
     StepInterruptedError,
     SuspendExecution,
@@ -219,7 +221,10 @@ def test_durable_operation_error_defaults_error_type_to_class_name():
     error = DurableOperationError("boom")
     assert str(error) == "boom"
     assert error.message == "boom"
-    assert error.error_type == "DurableOperationError"
+    assert (
+        error.error_type
+        == "aws_durable_execution_sdk_python.exceptions.DurableOperationError"
+    )
     assert error.data is None
     assert error.stack_trace is None
     assert isinstance(error, DurableExecutionsError)
@@ -240,7 +245,10 @@ def test_durable_operation_error_with_none_message():
     """DurableOperationError tolerates a None message."""
     error = DurableOperationError(None)
     assert error.message is None
-    assert error.error_type == "DurableOperationError"
+    assert (
+        error.error_type
+        == "aws_durable_execution_sdk_python.exceptions.DurableOperationError"
+    )
     assert error.data is None
 
 
@@ -262,32 +270,60 @@ def test_operation_error_subclasses(error_cls):
     error = error_cls("failed")
     assert isinstance(error, DurableOperationError)
     assert isinstance(error, DurableExecutionsError)
-    assert error.error_type == error_cls.__name__
+    assert error.error_type == f"{error_cls.__module__}.{error_cls.__qualname__}"
     assert error.message == "failed"
 
 
 def test_operation_error_registry_contains_all_subclasses():
-    """The reconstruction registry is keyed by class name for every subclass."""
-    assert _DURABLE_OPERATION_ERROR_REGISTRY["StepError"] is StepError
-    assert _DURABLE_OPERATION_ERROR_REGISTRY["InvokeError"] is InvokeError
-    assert _DURABLE_OPERATION_ERROR_REGISTRY["ChildContextError"] is ChildContextError
+    """The reconstruction registry is keyed by fully-qualified class name."""
+    mod: str = "aws_durable_execution_sdk_python.exceptions"
+    assert _DURABLE_OPERATION_ERROR_REGISTRY[f"{mod}.StepError"] is StepError
+    assert _DURABLE_OPERATION_ERROR_REGISTRY[f"{mod}.InvokeError"] is InvokeError
     assert (
-        _DURABLE_OPERATION_ERROR_REGISTRY["WaitForConditionError"]
+        _DURABLE_OPERATION_ERROR_REGISTRY[f"{mod}.ChildContextError"]
+        is ChildContextError
+    )
+    assert (
+        _DURABLE_OPERATION_ERROR_REGISTRY[f"{mod}.WaitForConditionError"]
         is WaitForConditionError
     )
-    assert _DURABLE_OPERATION_ERROR_REGISTRY["CallbackError"] is CallbackError
+    assert _DURABLE_OPERATION_ERROR_REGISTRY[f"{mod}.CallbackError"] is CallbackError
     assert (
-        _DURABLE_OPERATION_ERROR_REGISTRY["CallbackExternalError"]
+        _DURABLE_OPERATION_ERROR_REGISTRY[f"{mod}.CallbackExternalError"]
         is CallbackExternalError
     )
     assert (
-        _DURABLE_OPERATION_ERROR_REGISTRY["CallbackTimeoutError"]
+        _DURABLE_OPERATION_ERROR_REGISTRY[f"{mod}.CallbackTimeoutError"]
         is CallbackTimeoutError
     )
     assert (
-        _DURABLE_OPERATION_ERROR_REGISTRY["CallbackSubmitterError"]
+        _DURABLE_OPERATION_ERROR_REGISTRY[f"{mod}.CallbackSubmitterError"]
         is CallbackSubmitterError
     )
+
+
+# =============================================================================
+# SerDes error hierarchy
+# =============================================================================
+
+
+def test_serdes_error_hierarchy():
+    """SerDesError is a catchable SDK error, separate from operation failures
+    and from errors that terminate execution."""
+    error = SerDesError("serdes boom")
+    assert isinstance(error, DurableExecutionsError)
+    assert not isinstance(error, DurableOperationError)
+    assert not isinstance(error, UnrecoverableError)
+    assert error.error_type == f"{SerDesError.__module__}.{SerDesError.__qualname__}"
+
+
+def test_retryable_serdes_error_is_retryable_invocation_error():
+    """RetryableSerDesError fails the invocation for backend retry."""
+    error = RetryableSerDesError("transient boom")
+    assert isinstance(error, InvocationError)
+    assert error.is_retryable() is True
+    # Not an operation error, so it is not caught as a per-operation failure.
+    assert not isinstance(error, DurableOperationError)
 
 
 # =============================================================================
@@ -310,7 +346,9 @@ def test_callback_error_defaults():
     """CallbackError defaults error_type to its class name and carries no callback_id."""
     error = CallbackError("boom")
     assert error.message == "boom"
-    assert error.error_type == "CallbackError"
+    assert (
+        error.error_type == "aws_durable_execution_sdk_python.exceptions.CallbackError"
+    )
     assert error.data is None
     assert error.stack_trace is None
     assert not hasattr(error, "callback_id")
@@ -325,7 +363,7 @@ def test_graded_callback_errors_subclass_callback_error(error_cls):
     error = error_cls("failed")
     assert isinstance(error, CallbackError)
     assert isinstance(error, DurableOperationError)
-    assert error.error_type == error_cls.__name__
+    assert error.error_type == f"{error_cls.__module__}.{error_cls.__qualname__}"
 
 
 @pytest.mark.parametrize(
@@ -340,10 +378,13 @@ def test_graded_callback_errors_subclass_callback_error(error_cls):
 def test_from_error_fields_reconstructs_callback_types(error_cls):
     """from_error_fields rebuilds each callback type from its class-name discriminator."""
     error = DurableOperationError.from_error_fields(
-        error_cls.__name__, "callback boom", "payload", ["frame"]
+        f"{error_cls.__module__}.{error_cls.__qualname__}",
+        "callback boom",
+        "payload",
+        ["frame"],
     )
     assert isinstance(error, error_cls)
-    assert error.error_type == error_cls.__name__
+    assert error.error_type == f"{error_cls.__module__}.{error_cls.__qualname__}"
     assert error.message == "callback boom"
     assert error.data == "payload"
     assert error.stack_trace == ["frame"]
@@ -376,11 +417,12 @@ def test_from_error_fields_user_subclass_falls_back_without_typeerror():
 
 def test_from_error_fields_by_name():
     """from_error_fields rebuilds the correct subclass from its discriminator."""
+    qualified: str = f"{StepError.__module__}.{StepError.__qualname__}"
     error = DurableOperationError.from_error_fields(
-        "StepError", "step failed", "data", ["frame"]
+        qualified, "step failed", "data", ["frame"]
     )
     assert isinstance(error, StepError)
-    assert error.error_type == "StepError"
+    assert error.error_type == qualified
     assert error.message == "step failed"
     assert error.data == "data"
     assert error.stack_trace == ["frame"]

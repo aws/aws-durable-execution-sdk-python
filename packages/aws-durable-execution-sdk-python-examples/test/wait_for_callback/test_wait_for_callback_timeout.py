@@ -58,4 +58,7 @@ def test_handle_wait_for_callback_timeout_scenarios(durable_runner):
     assert len(wait_for_callback_ops) == 1
     wait_for_callback_error = wait_for_callback_ops[0].error
     assert wait_for_callback_error is not None
-    assert wait_for_callback_error.type == "CallbackTimeoutError"
+    assert (
+        wait_for_callback_error.type
+        == "aws_durable_execution_sdk_python.exceptions.CallbackTimeoutError"
+    )

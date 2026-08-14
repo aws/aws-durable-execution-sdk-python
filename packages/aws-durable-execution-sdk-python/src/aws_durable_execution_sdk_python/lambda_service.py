@@ -17,6 +17,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     CheckpointError,
     DurableOperationError,
     GetExecutionStateError,
+    SerDesError,
 )
 
 
@@ -206,6 +207,17 @@ class ContextDetails:
         )
 
 
+def _qualified_error_type(exception: BaseException) -> str:
+    """Return the fully-qualified class name for use as the wire ErrorType.
+
+    Builtins (e.g. ValueError) are left unqualified; everything else is
+    prefixed with its module path.
+    """
+    cls_: type[BaseException] = type(exception)
+    module: str = "" if cls_.__module__ == "builtins" else f"{cls_.__module__}."
+    return f"{module}{cls_.__qualname__}"
+
+
 @dataclass(frozen=True)
 class ErrorObject:
     message: str | None
@@ -224,20 +236,28 @@ class ErrorObject:
 
     @classmethod
     def from_exception(cls, exception: Exception) -> ErrorObject:
-        # The wire ErrorType is always the class name (the discriminant): a raw
-        # error records its own type; a typed wrapper records its operation kind.
-        # For a DurableOperationError also preserve its own data and stack_trace
-        # so the inner info survives across a single operation boundary.
+        # SerDesError and subclasses pin to the base discriminator so replay
+        # always reconstructs them as SerDesError.
+        if isinstance(exception, SerDesError):
+            return cls(
+                message=exception.message,
+                type=f"{SerDesError.__module__}.{SerDesError.__qualname__}",
+                data=exception.data,
+                stack_trace=exception.stack_trace,
+            )
+        # The wire ErrorType is the fully-qualified class name, with builtins
+        # left unqualified for brevity.
+        wire_type: str = _qualified_error_type(exception)
         if isinstance(exception, DurableOperationError):
             return cls(
                 message=exception.message,
-                type=type(exception).__name__,
+                type=wire_type,
                 data=exception.data,
                 stack_trace=exception.stack_trace,
             )
         return cls(
             message=str(exception),
-            type=type(exception).__name__,
+            type=wire_type,
             data=None,
             stack_trace=None,
         )
@@ -278,10 +298,10 @@ class ErrorObject:
 
         Used by both the first-run terminal-failure path and replay, so the
         surfaced error is identical (a durable-execution determinism guarantee):
-        the wrapper is ``operation_error_cls`` carrying this object's
-        ``error_type``/``data``/``stack_trace``, and ``__cause__`` is the escaping
-        error rebuilt via the registry (a typed subclass when known, else the
-        base ``DurableOperationError``).
+        the wrapper is ``operation_error_cls`` (or ``SerDesError`` for a serdes
+        failure) carrying this object's ``error_type``/``data``/``stack_trace``,
+        and ``__cause__`` is the escaping error rebuilt via the registry (a typed
+        subclass when known, else the base ``DurableOperationError``).
         """
         cause: DurableOperationError = DurableOperationError.from_error_fields(
             error_type=self.type,
@@ -289,6 +309,15 @@ class ErrorObject:
             data=self.data,
             stack_trace=self.stack_trace,
         )
+        # A serdes failure surfaces as SerDesError regardless of the operation
+        # kind, so it is catchable as itself on both first run and replay.
+        if self.type == f"{SerDesError.__module__}.{SerDesError.__qualname__}":
+            raise SerDesError(
+                message=self.message,
+                error_type=self.type,
+                data=self.data,
+                stack_trace=self.stack_trace,
+            ) from cause
         raise operation_error_cls(
             message=self.message,
             error_type=self.type,
@@ -587,7 +616,7 @@ class OperationUpdate:
     def create_context_succeed(
         cls,
         identifier: OperationIdentifier,
-        payload: str,
+        payload: str | None,
         sub_type: OperationSubType,
         context_options: ContextOptions | None = None,
     ) -> OperationUpdate:
@@ -649,7 +678,7 @@ class OperationUpdate:
     # region step
     @classmethod
     def create_step_succeed(
-        cls, identifier: OperationIdentifier, payload: str
+        cls, identifier: OperationIdentifier, payload: str | None
     ) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: STEP, action: SUCCEED."""
         return cls(
@@ -717,7 +746,7 @@ class OperationUpdate:
     def create_invoke_start(
         cls,
         identifier: OperationIdentifier,
-        payload: str,
+        payload: str | None,
         chained_invoke_options: ChainedInvokeOptions,
     ) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: INVOKE, action: START."""
@@ -751,7 +780,7 @@ class OperationUpdate:
 
     @classmethod
     def create_wait_for_condition_succeed(
-        cls, identifier: OperationIdentifier, payload: str
+        cls, identifier: OperationIdentifier, payload: str | None
     ) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: STEP, action: SUCCEED."""
         return cls(
@@ -768,7 +797,7 @@ class OperationUpdate:
     def create_wait_for_condition_retry(
         cls,
         identifier: OperationIdentifier,
-        payload: str,
+        payload: str | None,
         next_attempt_delay_seconds: int,
     ) -> OperationUpdate:
         """Create an instance of OperationUpdate for type: STEP, action: RETRY."""
