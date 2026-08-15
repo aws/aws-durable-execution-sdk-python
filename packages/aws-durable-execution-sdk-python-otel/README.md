@@ -184,14 +184,11 @@ See the [ADOT sampling configuration](https://aws-otel.github.io/docs/getting-st
 from aws_durable_execution_sdk_python_otel import (
     InvocationOtelPlugin,
     OtelPluginConfig,
-    ProviderSource,
     xray_context_extractor,
 )
 
 plugin = InvocationOtelPlugin(
     OtelPluginConfig(
-        # Use the global provider configured by ADOT (the default).
-        provider_source=ProviderSource.GLOBAL,
         # Use a custom context extractor (default: xray_context_extractor).
         context_extractor=xray_context_extractor,
         # Custom instrumentation scope name
@@ -271,7 +268,6 @@ The main plugin class. Implements `DurableInstrumentationPlugin` from `aws_durab
 ```python
 InvocationOtelPlugin(
     OtelPluginConfig(
-        provider_source=ProviderSource.GLOBAL,
         tracer_provider=None,
         context_extractor=None,
         instrument_name="aws-durable-execution-sdk-python",
@@ -281,8 +277,8 @@ InvocationOtelPlugin(
 )
 ```
 
-Set `provider_source=ProviderSource.EXPLICIT` and pass `tracer_provider=...`
-when the application owns the OpenTelemetry SDK provider.
+Pass `tracer_provider=...` when the application owns the OpenTelemetry SDK
+provider. When omitted, the globally configured provider is used.
 
 ### `DeterministicIdGenerator`
 

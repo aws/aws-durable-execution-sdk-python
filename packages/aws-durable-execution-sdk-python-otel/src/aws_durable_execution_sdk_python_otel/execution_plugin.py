@@ -63,10 +63,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     derive_workflow_span_id,
     operation_id_to_span_id,
 )
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
-    OtelPluginConfig,
-    ProviderSource,
-)
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 from aws_durable_execution_sdk_python_otel.instrumentations import (
     register_standalone_instrumentations,
 )
@@ -109,10 +106,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
 
         result = create_tracer_provider(self._config)
         self._provider = result.tracer_provider
-        # GLOBAL (ADOT) mode parents the Invocation span to the ambient Lambda
-        # invocation span instead of the Workflow span (see
-        # _start_invocation_span).
-        self._provider_source = result.source
+        self._uses_global_provider = result.uses_global_provider
 
         self._tracer: Tracer = self._provider.get_tracer(self._config.instrument_name)
         self._id_generator = DeterministicIdGenerator()
@@ -140,7 +134,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         """Bind to an SDK tracer, retrying a deferred global provider."""
         tracer = self._tracer
         if not isinstance(tracer, SdkTracer):
-            if self._provider_source is ProviderSource.GLOBAL:
+            if self._uses_global_provider:
                 self._provider = trace.get_tracer_provider()
             tracer = self._provider.get_tracer(self._config.instrument_name)
             self._tracer = tracer

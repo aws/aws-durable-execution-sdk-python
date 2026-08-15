@@ -51,10 +51,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
-    OtelPluginConfig,
-    ProviderSource,
-)
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -168,30 +165,27 @@ def _run_step_lifecycle(plugin: InvocationOtelPlugin) -> None:
     )
 
 
-def _config_for_source(
-    source: ProviderSource,
+def _config_for_provider(
+    uses_global_provider: bool,
     provider: TracerProvider,
     monkeypatch: pytest.MonkeyPatch,
 ) -> OtelPluginConfig:
-    if source is ProviderSource.GLOBAL:
+    if uses_global_provider:
         monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     return OtelPluginConfig(
-        provider_source=source,
-        tracer_provider=provider if source is ProviderSource.EXPLICIT else None,
+        tracer_provider=None if uses_global_provider else provider,
         context_extractor=lambda _: Context(),
         enrich_logger=False,
     )
 
 
 @pytest.mark.parametrize(
-    "source",
-    [
-        ProviderSource.EXPLICIT,
-        ProviderSource.GLOBAL,
-    ],
+    "uses_global_provider",
+    [False, True],
+    ids=["explicit", "global"],
 )
 def test_unrelated_root_spans_keep_provider_id_generation(
-    source: ProviderSource, monkeypatch: pytest.MonkeyPatch
+    uses_global_provider: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Unrelated scopes receive fresh roots throughout a durable invocation."""
     provider, _ = _provider()
@@ -199,7 +193,9 @@ def test_unrelated_root_spans_keep_provider_id_generation(
     unrelated_tracer = provider.get_tracer("unrelated-library")
     before = unrelated_tracer.start_span("before", context=Context())
 
-    plugin = InvocationOtelPlugin(_config_for_source(source, provider, monkeypatch))
+    plugin = InvocationOtelPlugin(
+        _config_for_provider(uses_global_provider, provider, monkeypatch)
+    )
     assert provider.id_generator is provider_generator
     assert isinstance(plugin._id_generator, DeterministicIdGenerator)
 
@@ -232,7 +228,6 @@ def test_global_proxy_binds_sdk_provider_before_first_invocation(
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: current_provider[0])
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.GLOBAL,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
         )
@@ -258,7 +253,6 @@ def test_global_proxy_disables_entire_invocation_until_sdk_provider_is_ready(
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: current_provider[0])
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.GLOBAL,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
         )
@@ -312,17 +306,17 @@ def _assert_hierarchy(exporter: InMemorySpanExporter) -> None:
 
 
 @pytest.mark.parametrize(
-    "source",
-    [
-        ProviderSource.EXPLICIT,
-        ProviderSource.GLOBAL,
-    ],
+    "uses_global_provider",
+    [False, True],
+    ids=["explicit", "global"],
 )
-def test_invocation_span_parents_to_ambient_for_all_provider_sources(
-    source: ProviderSource, monkeypatch: pytest.MonkeyPatch
+def test_invocation_span_parents_to_ambient_for_all_provider_modes(
+    uses_global_provider: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     provider, exporter = _provider()
-    plugin = InvocationOtelPlugin(_config_for_source(source, provider, monkeypatch))
+    plugin = InvocationOtelPlugin(
+        _config_for_provider(uses_global_provider, provider, monkeypatch)
+    )
 
     ambient = provider.get_tracer("ambient").start_span("lambda-invocation")
     token = otel_context.attach(trace.set_span_in_context(ambient))
@@ -358,7 +352,6 @@ def test_community_layer_full_lifecycle_uses_supplied_provider():
     provider, exporter = _provider()
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=provider,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
@@ -382,7 +375,6 @@ def test_adot_layer_full_lifecycle_uses_global_provider(monkeypatch):
 
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.GLOBAL,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
         )
@@ -401,7 +393,6 @@ def test_second_plugin_uses_execution_trace_id_independent_of_xray(monkeypatch):
     provider, exporter = _provider()
     first_plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=provider,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
@@ -409,7 +400,6 @@ def test_second_plugin_uses_execution_trace_id_independent_of_xray(monkeypatch):
     )
     target_plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=provider,
             context_extractor=lambda _: Context(),
             enrich_logger=False,

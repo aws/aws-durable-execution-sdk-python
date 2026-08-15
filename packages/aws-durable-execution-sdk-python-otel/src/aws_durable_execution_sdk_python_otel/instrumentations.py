@@ -3,8 +3,8 @@
 Mirrors the JS ``registerStandaloneInstrumentations``:
 
 * A custom (explicit) provider skips ALL instrumentation registration.
-* When the global provider is in use (``ProviderSource.GLOBAL``), only the
-  AWS SDK instrumentation is registered (not HTTP).
+* When the global provider is in use, only the AWS SDK instrumentation is
+  registered (not HTTP).
 
 The JS SDK uses ``AwsInstrumentation`` (AWS SDK v3). The Python equivalent is
 ``BotocoreInstrumentor`` because boto3/botocore is the AWS SDK for Python. The
@@ -17,8 +17,6 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
-
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import ProviderSource
 
 
 if TYPE_CHECKING:
@@ -48,16 +46,13 @@ def _register_aws_instrumentation(tracer_provider: object | None) -> None:
 
 
 def register_standalone_instrumentations(result: ProviderResult) -> None:
-    """Register AWS SDK instrumentation per the resolved source.
+    """Register AWS SDK instrumentation for the global provider.
 
     Args:
-        result: The resolved provider and its :class:`ProviderSource`.
+        result: The resolved provider and how it was selected.
     """
-    if result.source is ProviderSource.EXPLICIT:
-        # Caller manages their own instrumentation: skip everything.
+    if not result.uses_global_provider:
+        # Applications that supply a provider manage their own instrumentation.
         return
 
-    if result.source is ProviderSource.GLOBAL:
-        # Global provider: register AWS instrumentation only.
-        _register_aws_instrumentation(None)
-        return
+    _register_aws_instrumentation(None)

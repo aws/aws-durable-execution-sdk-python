@@ -3,12 +3,11 @@
 Drives the full plugin lifecycle against a real TracerProvider +
 InMemorySpanExporter for the two deployment shapes:
 
-* Community collector layer: the caller supplies a provider
-  (``provider_source=EXPLICIT``); the Workflow and Invocation spans root
-  separate traces when no ambient parent exists.
+* Community collector layer: the caller supplies a provider; the Workflow and
+  Invocation spans root separate traces when no ambient parent exists.
 * ADOT layer: the ADOT Lambda layer supplies the global provider and the ambient
-  Lambda invocation span (``provider_source=GLOBAL``); the plugin's Invocation
-  span parents to that ambient span.
+  Lambda invocation span; the plugin's Invocation span parents to that ambient
+  span.
 """
 
 from __future__ import annotations
@@ -48,10 +47,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
-    OtelPluginConfig,
-    ProviderSource,
-)
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -165,30 +161,27 @@ def _run_step_lifecycle(plugin: ExecutionOtelPlugin) -> None:
     )
 
 
-def _config_for_source(
-    source: ProviderSource,
+def _config_for_provider(
+    uses_global_provider: bool,
     provider: TracerProvider,
     monkeypatch: pytest.MonkeyPatch,
 ) -> OtelPluginConfig:
-    if source is ProviderSource.GLOBAL:
+    if uses_global_provider:
         monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     return OtelPluginConfig(
-        provider_source=source,
-        tracer_provider=provider if source is ProviderSource.EXPLICIT else None,
+        tracer_provider=None if uses_global_provider else provider,
         context_extractor=lambda _: Context(),
         enrich_logger=False,
     )
 
 
 @pytest.mark.parametrize(
-    "source",
-    [
-        ProviderSource.EXPLICIT,
-        ProviderSource.GLOBAL,
-    ],
+    "uses_global_provider",
+    [False, True],
+    ids=["explicit", "global"],
 )
 def test_unrelated_root_spans_keep_provider_id_generation(
-    source: ProviderSource, monkeypatch: pytest.MonkeyPatch
+    uses_global_provider: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Unrelated scopes receive fresh roots throughout a durable invocation."""
     provider, _ = _provider()
@@ -196,7 +189,9 @@ def test_unrelated_root_spans_keep_provider_id_generation(
     unrelated_tracer = provider.get_tracer("unrelated-library")
     before = unrelated_tracer.start_span("before", context=Context())
 
-    plugin = ExecutionOtelPlugin(_config_for_source(source, provider, monkeypatch))
+    plugin = ExecutionOtelPlugin(
+        _config_for_provider(uses_global_provider, provider, monkeypatch)
+    )
     assert provider.id_generator is provider_generator
     assert isinstance(plugin._id_generator, DeterministicIdGenerator)
 
@@ -229,7 +224,6 @@ def test_global_proxy_binds_sdk_provider_before_first_invocation(
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: current_provider[0])
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.GLOBAL,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
         )
@@ -255,7 +249,6 @@ def test_global_proxy_disables_entire_invocation_until_sdk_provider_is_ready(
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: current_provider[0])
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.GLOBAL,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
         )
@@ -288,7 +281,6 @@ def test_community_layer_full_lifecycle_is_workflow_rooted():
     provider, exporter = _provider()
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=provider,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
@@ -341,7 +333,6 @@ def test_adot_layer_full_lifecycle_parents_to_ambient_span(monkeypatch):
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.GLOBAL,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
         )
@@ -387,7 +378,6 @@ def test_second_plugin_uses_execution_trace_id_independent_of_xray(monkeypatch):
     provider, exporter = _provider()
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     config = OtelPluginConfig(
-        provider_source=ProviderSource.GLOBAL,
         context_extractor=lambda _: Context(),
         enrich_logger=False,
     )

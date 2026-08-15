@@ -44,10 +44,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
-    OtelPluginConfig,
-    ProviderSource,
-)
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
 from aws_durable_execution_sdk_python_otel.instrumentations import (
     register_standalone_instrumentations,
@@ -87,10 +84,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     Args:
         config: Shared plugin configuration (the same OtelPluginConfig accepted
             by ExecutionOtelPlugin). When omitted, defaults are used (X-Ray
-            extractor, "Workflow" span name, log enrichment on). Like
-            ExecutionOtelPlugin and the JS SDK plugins, the default
-            ``provider_source`` is ``GLOBAL``: the plugin uses the globally
-            configured tracer provider (e.g. the ADOT Lambda layer).
+            extractor, "Workflow" span name, log enrichment on) and the plugin
+            uses the globally configured tracer provider (for example, the
+            provider installed by the ADOT Lambda layer).
     """
 
     DEFAULT_INSTRUMENT_NAME = "aws-durable-execution-sdk-python"
@@ -100,9 +96,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
 
         Accepts the same OtelPluginConfig as ExecutionOtelPlugin so both plugins
         share one configuration surface (context extractor, instrumentation name,
-        provider selection, and log enrichment). Like ExecutionOtelPlugin and the
-        JS SDK plugins, the default ``provider_source`` is ``GLOBAL``: it uses the
-        globally configured (e.g. ADOT) provider.
+        provider selection, and log enrichment). When no provider is supplied,
+        the globally configured provider is used.
 
         The plugin tracer is configured with a scoped deterministic ID generator
         so durable spans share stable identifiers without changing unrelated
@@ -119,12 +114,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._workflow_span_name = self._config.workflow_span_name
         self._enrich_logger = self._config.enrich_logger
 
-        # Like ExecutionOtelPlugin (and the JS SDK plugins), InvocationOtelPlugin
-        # defaults to provider_source=GLOBAL (the globally configured, e.g. ADOT,
-        # provider).
         result = create_tracer_provider(self._config)
         self._provider = result.tracer_provider
-        self._provider_source = result.source
+        self._uses_global_provider = result.uses_global_provider
         self._tracer: Tracer = self._provider.get_tracer(self._config.instrument_name)
         self._id_generator = DeterministicIdGenerator()
         self._bind_sdk_tracer()
@@ -155,7 +147,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         """Bind to an SDK tracer, retrying a deferred global provider."""
         tracer = self._tracer
         if not isinstance(tracer, SdkTracer):
-            if self._provider_source is ProviderSource.GLOBAL:
+            if self._uses_global_provider:
                 self._provider = trace.get_tracer_provider()
             tracer = self._provider.get_tracer(self._config.instrument_name)
             self._tracer = tracer

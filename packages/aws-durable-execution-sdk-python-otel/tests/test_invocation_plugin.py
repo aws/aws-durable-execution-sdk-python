@@ -36,10 +36,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
-    OtelPluginConfig,
-    ProviderSource,
-)
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -68,7 +65,6 @@ def _create_plugin() -> tuple[InvocationOtelPlugin, InMemorySpanExporter]:
     trace_provider.add_span_processor(SimpleSpanProcessor(exporter))
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=trace_provider,
             context_extractor=lambda _: Context(),
         )
@@ -1115,7 +1111,6 @@ def test_workflow_span_name_is_configurable():
     trace_provider.add_span_processor(SimpleSpanProcessor(exporter))
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=trace_provider,
             context_extractor=lambda _: Context(),
             workflow_span_name="MyExecution",

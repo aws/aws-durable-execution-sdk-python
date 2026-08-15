@@ -8,7 +8,6 @@ consistent and not duplicated across plugins.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import TYPE_CHECKING
 
 
@@ -24,17 +23,6 @@ DEFAULT_INSTRUMENT_NAME = "aws-durable-execution-sdk-python"
 DEFAULT_WORKFLOW_SPAN_NAME = "Workflow"
 
 
-class ProviderSource(Enum):
-    """Which tracer-provider tier an :class:`OtelPluginConfig` selects.
-
-    The single value that drives provider construction (``create_tracer_provider``)
-    and the plugins' instrumentation, span-parenting and flush decisions.
-    """
-
-    EXPLICIT = "explicit"  # use config.tracer_provider as-is
-    GLOBAL = "global"  # default: use the global provider (trace.get_tracer_provider())
-
-
 @dataclass
 class OtelPluginConfig:
     """Canonical configuration shared by both OTel plugins.
@@ -43,14 +31,11 @@ class OtelPluginConfig:
     are ignored without error by :class:`InvocationOtelPlugin`.
 
     Attributes:
-        provider_source: Selects how the tracer provider is obtained
-            (:class:`ProviderSource`). Defaults to ``GLOBAL`` (uses the globally
-            configured provider, e.g. the ADOT Lambda layer, via
-            ``trace.get_tracer_provider()``). ``EXPLICIT`` uses
-            ``tracer_provider`` as-is and skips instrumentation registration.
-        tracer_provider: The provider used when ``provider_source`` is
-            ``EXPLICIT``. Required in that case and must be left unset for
-            ``GLOBAL``.
+        tracer_provider: An application-owned provider to use as-is. When
+            omitted, the globally configured provider is used (for example, the
+            provider installed by the ADOT Lambda layer). Standalone
+            instrumentation registration is skipped for an application-owned
+            provider.
         context_extractor: Upstream trace-context extractor. Defaults to the
             X-Ray extractor when omitted.
         instrument_name: Instrumentation scope name.
@@ -58,27 +43,8 @@ class OtelPluginConfig:
         enrich_logger: Install the root-logger OTel context filter.
     """
 
-    provider_source: ProviderSource = ProviderSource.GLOBAL
     tracer_provider: SdkTracerProvider | None = None
     context_extractor: ContextExtractor | None = None
     instrument_name: str = DEFAULT_INSTRUMENT_NAME
     workflow_span_name: str = DEFAULT_WORKFLOW_SPAN_NAME
     enrich_logger: bool = True
-
-    def __post_init__(self) -> None:
-        """Validate that each provider source has the fields it requires.
-
-        The config is fully driven by :attr:`provider_source`; ``tracer_provider``
-        is the one source-specific field, so it must be present for ``EXPLICIT``
-        and absent for ``GLOBAL`` (where it would be silently ignored).
-        """
-        if self.provider_source is ProviderSource.EXPLICIT:
-            if self.tracer_provider is None:
-                raise ValueError("provider_source=EXPLICIT requires a tracer_provider.")
-        elif self.tracer_provider is not None:
-            raise ValueError(
-                "tracer_provider is only valid with provider_source=EXPLICIT; "
-                f"got provider_source={self.provider_source.name}. Set "
-                "ProviderSource.EXPLICIT, or drop tracer_provider for "
-                "GLOBAL."
-            )

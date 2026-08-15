@@ -33,10 +33,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
-    OtelPluginConfig,
-    ProviderSource,
-)
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -65,7 +62,6 @@ def _create_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=provider,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
@@ -415,11 +411,11 @@ def test_step_attempt_span_omits_operation_status():
 def _create_default_mode_plugin(
     monkeypatch,
 ) -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
-    """ExecutionOtelPlugin in GLOBAL (ADOT) mode wired to an in-memory exporter.
+    """ExecutionOtelPlugin in global (ADOT) mode wired to an in-memory exporter.
 
     The capture provider is installed as the global provider so
-    ``provider_source=GLOBAL`` resolves to it, letting the test assert spans
-    while exercising the ambient-parenting path.
+    the default configuration resolves to it, letting the test assert spans while
+    exercising the ambient-parenting path.
     """
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
@@ -427,7 +423,6 @@ def _create_default_mode_plugin(
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.GLOBAL,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
         )
