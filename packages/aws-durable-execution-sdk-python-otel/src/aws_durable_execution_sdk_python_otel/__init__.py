@@ -17,9 +17,6 @@ from aws_durable_execution_sdk_python_otel.execution_plugin import (
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     OtelPluginConfig,
 )
-from aws_durable_execution_sdk_python_otel.instrumentations import (
-    register_standalone_instrumentations,
-)
 from aws_durable_execution_sdk_python_otel.log_filter import (
     OtelContextLogFilter,
     install_log_filter,
@@ -46,7 +43,6 @@ __all__ = [
     "derive_workflow_span_id",
     "install_log_filter",
     "operation_id_to_span_id",
-    "register_standalone_instrumentations",
     "w3c_client_context_extractor",
     "xray_context_extractor",
 ]

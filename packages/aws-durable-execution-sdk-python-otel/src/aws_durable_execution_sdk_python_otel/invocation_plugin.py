@@ -46,9 +46,6 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
 from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
-from aws_durable_execution_sdk_python_otel.instrumentations import (
-    register_standalone_instrumentations,
-)
 
 
 logger = logging.getLogger(__name__)
@@ -120,11 +117,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._tracer: Tracer = self._provider.get_tracer(self._config.instrument_name)
         self._id_generator = DeterministicIdGenerator()
         self._bind_sdk_tracer()
-
-        try:
-            register_standalone_instrumentations(result)
-        except Exception:
-            logger.exception("Failed to register standalone instrumentations")
 
         # per invocation status:
         self._execution_arn = ""
