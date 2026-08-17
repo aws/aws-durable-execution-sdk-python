@@ -169,6 +169,65 @@ def test_reentry_guard_keeps_enclosing_scopes():
     context_scope.exit_scope(owner, "ctx")
 
 
+def test_ownership_is_read_from_the_context_not_the_thread():
+    """A propagated context reports its owner on a thread with no tokens.
+
+    Thread-local bookkeeping cannot answer "is the current span mine?" on a thread
+    that received a context rather than attaching it, which is why ownership is
+    recorded in the context.
+    """
+    owner = _Owner()
+    context_scope.enter_scope(owner, "op-1", lambda: _span_context("op-1"))
+    propagated = otel_context.get_current()
+    assert context_scope.owns_current(owner) is True
+
+    observed: dict[str, object] = {}
+
+    def receive() -> None:
+        # No scope was entered on this thread, so it holds no tokens.
+        observed["depth"] = context_scope.depth(owner)
+        observed["owns_before"] = context_scope.owns_current(owner)
+        token = otel_context.attach(propagated)
+        try:
+            observed["owns_after"] = context_scope.owns_current(owner)
+        finally:
+            otel_context.detach(token)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(receive).result()
+
+    assert observed["depth"] == 0
+    assert observed["owns_before"] is False
+    assert observed["owns_after"] is True
+
+    context_scope.exit_scope(owner, "op-1")
+    assert context_scope.owns_current(owner) is False
+
+
+def test_an_unowned_context_is_not_claimed():
+    """A context this plugin never attached must not be reported as its own."""
+    owner = _Owner()
+    token = otel_context.attach(_span_context("ambient"))
+    try:
+        assert context_scope.owns_current(owner) is False
+    finally:
+        otel_context.detach(token)
+
+
+def test_two_owners_each_recognise_their_own_scope():
+    """Ownership accumulates, so the innermost scope does not mask the outer one."""
+    first, second = _Owner(), _Owner()
+    context_scope.enter_scope(first, "op-1", lambda: _span_context("first"))
+    context_scope.enter_scope(second, "op-1", lambda: _span_context("second"))
+
+    assert context_scope.owns_current(first) is True
+    assert context_scope.owns_current(second) is True
+
+    context_scope.exit_scope(first, "op-1")
+    assert context_scope.owns_current(first) is False
+    assert context_scope.owns_current(second) is False
+
+
 def test_enter_discards_scopes_from_a_previous_epoch():
     """A scope a suspended operation left behind must not outlive its invocation.
 
@@ -502,6 +561,89 @@ def test_flat_branch_scope_survives_its_inner_operations(factory):
     assert observed["between-0"] == observed["branch"]
     assert observed["between-1"] == observed["branch"]
     assert observed["after_branch_depth"] == 0
+
+    plugin.on_invocation_end(_invocation_end())
+
+
+@pytest.mark.parametrize("factory", [_execution_plugin, _invocation_plugin])
+def test_propagated_operation_context_still_correlates_to_its_span(factory):
+    """Logs on a thread that received an operation's context keep that span.
+
+    User code may hand the operation's context to another thread. That thread has
+    the attempt span current but holds no scope tokens, so a thread-local depth
+    check would drop to the invocation span and lose precision.
+    """
+    plugin, _ = factory()
+    plugin.on_invocation_start(_invocation_start())
+    observed: dict[str, object] = {}
+
+    def run_step() -> None:
+        plugin.on_user_function_start(_step_start("step-1"))
+        propagated = otel_context.get_current()
+        attempt_span_id = trace.get_current_span().get_span_context().span_id
+
+        def worker() -> None:
+            token = otel_context.attach(propagated)
+            try:
+                resolved = plugin.get_current_span_context()
+                observed["propagated"] = resolved.span_id if resolved else None
+            finally:
+                otel_context.detach(token)
+
+        # A thread the user handed the operation's context to.
+        with ThreadPoolExecutor(max_workers=1) as inner:
+            inner.submit(worker).result()
+
+        observed["attempt"] = attempt_span_id
+        plugin.on_user_function_end(_step_end("step-1"))
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(run_step).result()
+
+    assert observed["propagated"] == observed["attempt"]
+
+    plugin.on_invocation_end(_invocation_end())
+
+
+@pytest.mark.parametrize("factory", [_execution_plugin, _invocation_plugin])
+def test_a_nested_scope_on_a_propagated_context_builds_on_it(factory):
+    """A scope entered where a context was propagated must not discard it.
+
+    The receiving thread holds no tokens, so treating the scope as outermost would
+    rebase onto the extracted context and drop the propagated baggage.
+    """
+    plugin, _ = factory()
+    plugin._context_extractor = lambda _info: Context()
+    plugin.on_invocation_start(_invocation_start())
+    observed: dict[str, object] = {}
+
+    def run_step() -> None:
+        plugin.on_user_function_start(_step_start("outer"))
+        # Baggage added by user code inside the operation.
+        token = otel_context.attach(
+            baggage.set_baggage("tenant", "acme", context=otel_context.get_current())
+        )
+        propagated = otel_context.get_current()
+        otel_context.detach(token)
+
+        def worker() -> None:
+            handed = otel_context.attach(propagated)
+            try:
+                plugin.on_user_function_start(_step_start("inner"))
+                observed["baggage"] = baggage.get_baggage("tenant")
+                plugin.on_user_function_end(_step_end("inner"))
+            finally:
+                otel_context.detach(handed)
+
+        with ThreadPoolExecutor(max_workers=1) as inner:
+            inner.submit(worker).result()
+
+        plugin.on_user_function_end(_step_end("outer"))
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(run_step).result()
+
+    assert observed["baggage"] == "acme"
 
     plugin.on_invocation_end(_invocation_end())
 

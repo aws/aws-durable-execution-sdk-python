@@ -64,6 +64,38 @@ class _ThreadState(threading.local):
 
 _state = _ThreadState()
 
+# Records which plugin instances established the current OTel context. Unlike the
+# token stack, this lives *in* the context, so it survives propagation: code that
+# carries an operation's context to another thread -- asyncio.to_thread,
+# contextvars.copy_context, an instrumented executor -- takes the marker with it,
+# and a plugin can still tell that the current span is one of its own. Thread-local
+# bookkeeping cannot answer that, because the receiving thread has no tokens.
+_OWNER_KEY = "aws-durable-execution-otel-scope-owners"
+
+
+def _owner_ids(context: Context | None = None) -> tuple[int, ...]:
+    """Return the plugin ids that established ``context`` (default: current)."""
+    from opentelemetry import context as otel_context
+
+    owners = otel_context.get_value(_OWNER_KEY, context=context)
+    if isinstance(owners, tuple):
+        return owners
+    return ()
+
+
+def owns_current(owner: Any) -> bool:
+    """True if ``owner`` established the context that is current on this thread.
+
+    Answers "is the current span one of mine?" -- the question both plugins need
+    before trusting ``trace.get_current_span()`` over their own span registry. A
+    context this plugin never attached (the ambient Lambda span an ADOT layer makes
+    current on the handler thread) has no marker and correctly reports False.
+
+    Ids accumulate, so two plugins tracking the same operation each recognise their
+    own scope rather than only the innermost one.
+    """
+    return id(owner) in _owner_ids()
+
 
 def _detach(entry: _Entry) -> None:
     """Detach one entry, swallowing any failure."""
@@ -107,7 +139,13 @@ def enter_scope(
     _discard_stale(owner_id, epoch)
     _discard_reentered(owner_id, key)
     try:
-        token = otel_context.attach(context_factory())
+        context = context_factory()
+        # Stamp ownership into the context itself so it travels with any
+        # propagation of it (see _OWNER_KEY).
+        context = otel_context.set_value(
+            _OWNER_KEY, (*_owner_ids(context), owner_id), context=context
+        )
+        token = otel_context.attach(context)
     except Exception:  # noqa: BLE001
         logger.debug("Failed to attach OTel context scope %s", key, exc_info=True)
         return

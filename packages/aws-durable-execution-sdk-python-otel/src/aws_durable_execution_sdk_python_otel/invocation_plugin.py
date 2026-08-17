@@ -223,9 +223,11 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         For a nested scope the current context already carries that extracted
         context transitively, via the enclosing scope, so it is used as the base
         to preserve whatever ran in between (ambient spans, baggage added by user
-        code).
+        code). "Nested" is decided by reading ownership out of the context, not
+        from thread-local state, so a scope entered on a thread that received a
+        propagated operation context builds on it instead of discarding it.
         """
-        if context_scope.depth(self) > 0:
+        if context_scope.owns_current(self):
             return context.get_current()
         # An extractor may deliberately return an empty Context to isolate the
         # operation from whatever is ambient. Context subclasses dict, so an empty
@@ -239,12 +241,12 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         """Return the span context to use for log correlation.
 
         Resolution order:
-        1. The span attached to the OTel thread-local context, but only while this
-           plugin holds an operation scope on this thread. Inside a step that is
-           the active attempt span, and inside a child context the active context
-           span. After a nested operation ends, its scope is detached and the
-           enclosing child context span -- still attached -- becomes current
-           again.
+        1. The span in the current OTel context, but only when this plugin
+           established that context. Inside a step that is the active attempt span,
+           and inside a child context the active context span. After a nested
+           operation ends, its scope is detached and the enclosing child context
+           span -- still attached -- becomes current again. Ownership travels with
+           the context, so a propagated operation context still resolves here.
         2. The invocation span from the plugin registry. This covers top-level
            handler code (the invocation span is never attached to any thread's
            context) and code between top-level operations. Gating step 1 on an
@@ -255,7 +257,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         Returns:
             A valid SpanContext, or None if no span is active.
         """
-        if context_scope.depth(self) > 0:
+        if context_scope.owns_current(self):
             span_context = trace.get_current_span().get_span_context()
             if span_context and span_context.is_valid:
                 return span_context

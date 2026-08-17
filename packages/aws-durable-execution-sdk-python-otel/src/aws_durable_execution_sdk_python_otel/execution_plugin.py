@@ -195,9 +195,11 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         For a nested scope the current context already carries that extracted
         context transitively, via the enclosing scope, so it is used as the base
         to preserve whatever ran in between (ambient spans, baggage added by user
-        code).
+        code). "Nested" is decided by reading ownership out of the context, not
+        from thread-local state, so a scope entered on a thread that received a
+        propagated operation context builds on it instead of discarding it.
         """
-        if context_scope.depth(self) > 0:
+        if context_scope.owns_current(self):
             return otel_context.get_current()
         # An extractor may deliberately return an empty Context to isolate the
         # operation from whatever is ambient. Context subclasses dict, so an empty
@@ -210,16 +212,19 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     def get_current_span_context(self) -> SpanContext | None:
         """Return the active span context for log correlation (see log_filter).
 
-        The current span is used only while this plugin holds an operation scope
-        on this thread -- inside a step or child context, where the current span
-        is the one this plugin attached. Otherwise the registry is used, so a
-        record emitted between operations, or on the handler thread, correlates to
-        the durable Invocation span rather than to whatever else happens to be
-        current. That distinction matters in GLOBAL (ADOT) mode: the ambient
-        Lambda span is current on the handler thread and would otherwise be
-        reported in place of the durable span.
+        The current span is used only when this plugin established the current
+        context -- inside a step or child context, where the current span is one it
+        attached. Otherwise the registry is used, so a record emitted between
+        operations, or on the handler thread, correlates to the durable Invocation
+        span rather than to whatever else happens to be current. That distinction
+        matters in GLOBAL (ADOT) mode: the ambient Lambda span is current on the
+        handler thread and would otherwise be reported in place of the durable span.
+
+        Ownership is read from the context rather than from thread-local state, so
+        an operation's context that user code propagates to another thread still
+        resolves to that operation's span.
         """
-        if context_scope.depth(self) > 0:
+        if context_scope.owns_current(self):
             span_context = trace.get_current_span().get_span_context()
             if span_context and span_context.is_valid:
                 return span_context
