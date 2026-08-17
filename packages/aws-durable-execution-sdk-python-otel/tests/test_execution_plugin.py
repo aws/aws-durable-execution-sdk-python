@@ -34,10 +34,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
-    OtelPluginConfig,
-    ProviderSource,
-)
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -66,7 +63,6 @@ def _create_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=provider,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
@@ -149,7 +145,7 @@ def test_derive_workflow_span_id_rejects_empty_arn():
 # ---------------------------------------------------------------------------
 # Workflow + invocation span hierarchy
 # ---------------------------------------------------------------------------
-def test_workflow_span_is_root_and_invocation_is_its_child():
+def test_workflow_and_invocation_are_separate_roots_without_ambient_parent():
     plugin, exporter = _create_plugin()
 
     plugin.on_invocation_start(_invocation_start_info())
@@ -171,9 +167,30 @@ def test_workflow_span_is_root_and_invocation_is_its_child():
         == InvocationStatus.SUCCEEDED.value
     )
 
-    # Invocation is parented under the Workflow span.
+    # Without ambient context, Invocation starts a separate provider trace.
+    assert invocation.parent is None
+    assert invocation.context.trace_id != workflow.context.trace_id
+
+
+def test_explicit_mode_invocation_span_parented_to_ambient_span():
+    plugin, exporter = _create_plugin()
+
+    ambient = plugin._provider.get_tracer("ambient").start_span("lambda-invocation")
+    token = otel_context.attach(trace.set_span_in_context(ambient))
+    try:
+        plugin.on_invocation_start(_invocation_start_info())
+        plugin.on_invocation_end(_invocation_end_info())
+    finally:
+        otel_context.detach(token)
+        ambient.end()
+
+    spans = {s.name: s for s in exporter.get_finished_spans()}
+    workflow = spans["Workflow"]
+    invocation = spans["Invocation"]
     assert invocation.parent is not None
-    assert invocation.parent.span_id == workflow.context.span_id
+    assert invocation.parent.span_id == ambient.get_span_context().span_id
+    assert invocation.context.trace_id == ambient.get_span_context().trace_id
+    assert workflow.context.trace_id != ambient.get_span_context().trace_id
 
 
 def test_workflow_span_dropped_on_non_terminal_status():
@@ -419,11 +436,11 @@ def test_step_attempt_span_omits_operation_status():
 def _create_default_mode_plugin(
     monkeypatch,
 ) -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
-    """ExecutionOtelPlugin in GLOBAL (ADOT) mode wired to an in-memory exporter.
+    """ExecutionOtelPlugin in global (ADOT) mode wired to an in-memory exporter.
 
     The capture provider is installed as the global provider so
-    ``provider_source=GLOBAL`` resolves to it, letting the test assert spans
-    while exercising the ambient-parenting path.
+    the default configuration resolves to it, letting the test assert spans while
+    exercising the ambient-parenting path.
     """
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
@@ -431,7 +448,6 @@ def _create_default_mode_plugin(
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.GLOBAL,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
         )
@@ -451,6 +467,8 @@ def test_default_mode_creates_invocation_span(monkeypatch):
     invocation = spans["Invocation"]
     assert invocation.attributes["durable.execution.arn"] == EXECUTION_ARN
     assert invocation.attributes["durable.invocation.first"] is True
+    assert invocation.parent is None
+    assert invocation.context.trace_id != spans["Workflow"].context.trace_id
 
 
 def test_default_mode_invocation_span_parented_to_ambient_span(monkeypatch):
@@ -469,6 +487,7 @@ def test_default_mode_invocation_span_parented_to_ambient_span(monkeypatch):
     invocation = {s.name: s for s in exporter.get_finished_spans()}["Invocation"]
     assert invocation.parent is not None
     assert invocation.parent.span_id == ambient.get_span_context().span_id
+    assert invocation.context.trace_id == ambient.get_span_context().trace_id
 
 
 def test_open_operation_span_not_exported_at_invocation_end():

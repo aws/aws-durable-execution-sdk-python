@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
-import os
-import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -13,59 +14,22 @@ from opentelemetry.sdk.trace import IdGenerator, RandomIdGenerator
 
 
 if TYPE_CHECKING:
-    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace import Tracer as SdkTracer
 
 
-HASHED_ID_PATTERN = re.compile(r"^[0-9a-f]{16}$")
-
-# Scoping the pending span ID to the execution context ensures concurrent
-# operations cannot consume each other's deterministic span ID.
-_next_span_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
-    "next_span_id", default=None
-)
-
-
-def _parse_xray_root_trace_id(trace_header: str | None) -> str | None:
-    """Parse the Root trace ID from an X-Ray trace header string.
-
-    The header format is:
-      Root=1-<8 hex>-<24 hex>;Parent=<16 hex>;Sampled=0|1
-
-    Returns the root value (e.g. "1-5759e988-bd862e3fe1be46a994272793")
-    or None if the header is missing or malformed.
-    """
-    if not trace_header:
-        return None
-    match = re.search(r"Root=(1-[0-9a-fA-F]{8}-[0-9a-fA-F]{24})", trace_header)
-    return match.group(1) if match else None
-
-
-def _xray_trace_id_to_otel(xray_trace_id: str) -> int:
-    """Convert an X-Ray trace ID to the W3C/OpenTelemetry 32-char hex format.
-
-    X-Ray format: "1-<8hex>-<24hex>" (36 chars with prefix and dashes)
-    OTel format:  "<8hex><24hex>" (32 lowercase hex chars)
-    """
-    otel_id = xray_trace_id.replace("1-", "", 1).replace("-", "").lower()
-    return int(otel_id, 16)
+@dataclass(frozen=True)
+class _IdOverride:
+    trace_id: int | None
+    span_id: int | None
 
 
 def _to_otel_trace_id(execution_arn: str, start_timestamp: datetime | None) -> int:
-    """Build an OTel-compatible trace ID (128 bits)
+    """Build a deterministic OTel-compatible execution trace ID (128 bits).
 
-    First attempts to read the trace ID from the _X_AMZN_TRACE_ID environment
-    variable that Lambda populates on each invocation. This ties the durable
-    execution spans to the same trace that X-Ray is already tracking.
-
-    Falls back to generating a deterministic trace ID from the execution ARN
-    and timestamp when the environment variable is not set (e.g. in tests or
-    non-Lambda environments).
+    The ID is independent of ambient Lambda or X-Ray trace context so the
+    parentless Workflow span remains the only root of the durable execution
+    trace. Invocation spans inherit ambient context separately.
     """
-    env_trace_id = _parse_xray_root_trace_id(os.environ.get("_X_AMZN_TRACE_ID"))
-    if env_trace_id:
-        return _xray_trace_id_to_otel(env_trace_id)
-
-    # Fallback: deterministic ID from execution ARN + timestamp
     time_part = format(int((start_timestamp or datetime.now(UTC)).timestamp()), "08x")
     hash_part = hashlib.blake2b(execution_arn.encode()).hexdigest()[:24]  # noqa: S324
     return int(f"{time_part}{hash_part}", 16)
@@ -112,13 +76,12 @@ def derive_workflow_span_id(durable_execution_arn: str) -> int:
 
 
 class DeterministicIdGenerator(RandomIdGenerator):
-    """An ID generator that produces deterministic span IDs when a pending
-    operation ID is set, and falls back to the provided generator otherwise.
+    """An ID generator with invocation-scoped deterministic ID overrides.
 
-    Trace IDs are deterministic when an execution ARN is set, ensuring all
-    invocations of the same durable execution share a single trace. When no
-    deterministic ID is available, generation is delegated to the fallback
-    generator (the tracer provider's original ID generator by default).
+    Deterministic IDs are active only inside :meth:`use_ids`. All other
+    generation is delegated to the fallback generator. The override is stored
+    in a context variable so concurrent threads and async tasks cannot consume
+    or overwrite each other's IDs.
 
     Trace IDs embed a real timestamp so they satisfy the X-Ray format
     requirement (first 8 hex chars = Unix epoch seconds).
@@ -129,54 +92,60 @@ class DeterministicIdGenerator(RandomIdGenerator):
     """
 
     def __init__(self, fallback_id_generator: IdGenerator | None = None) -> None:
-        self._execution_trace_id: int | None = None
         self._fallback_id_generator = fallback_id_generator or RandomIdGenerator()
+        self._id_override: contextvars.ContextVar[_IdOverride | None] = (
+            contextvars.ContextVar("durable_execution_id_override", default=None)
+        )
 
     @classmethod
-    def install_on_provider(cls, provider: TracerProvider) -> DeterministicIdGenerator:
-        """Return the provider's deterministic generator, installing one if needed.
+    def install_on_tracer(cls, tracer: SdkTracer) -> DeterministicIdGenerator:
+        """Return the tracer's deterministic generator, installing one if needed.
 
-        OpenTelemetry tracers capture the provider's ID generator when they are
-        created. Reusing an installed generator ensures multiple plugin instances
-        with the same instrumentation scope configure the generator referenced by
-        the provider's cached tracer.
+        Installing on the plugin's tracer keeps unrelated instrumentation scopes
+        on the provider's original generator. Reusing an installed generator also
+        supports SDK versions that cache tracers by instrumentation scope.
         """
-        current_generator = provider.id_generator
+        current_generator = tracer.id_generator
         if isinstance(current_generator, cls):
             return current_generator
 
         generator = cls(fallback_id_generator=current_generator)
-        provider.id_generator = generator
+        tracer.id_generator = generator
         return generator
 
-    def set_next_span_id(self, span_id: int | None) -> None:
-        """Set the operation ID to use for the next span's ID.
-
-        After one span is created, it resets to random.
-        """
-        _next_span_id.set(span_id)
-
-    def set_trace_id(
-        self, execution_arn: str, start_timestamp: datetime | None
-    ) -> None:
-        """Compute and cache the deterministic trace ID for this execution.
-
-        Args:
-            execution_arn: The durable execution ARN (used for the hash portion).
-            start_timestamp: start time of invocation
-        """
-        self._execution_trace_id = _to_otel_trace_id(execution_arn, start_timestamp)
+    @contextmanager
+    def use_ids(self, *, trace_id: int | None, span_id: int | None) -> Iterator[None]:
+        """Temporarily override IDs generated in the current execution context."""
+        token = self._id_override.set(_IdOverride(trace_id, span_id))
+        try:
+            yield
+        finally:
+            self._id_override.reset(token)
 
     def generate_trace_id(self) -> int:
         """Generate a 128-bit trace ID."""
-        return (
-            self._execution_trace_id or self._fallback_id_generator.generate_trace_id()
-        )
+        override = self._id_override.get()
+        if override is not None and override.trace_id is not None:
+            return override.trace_id
+        return self._fallback_id_generator.generate_trace_id()
 
     def generate_span_id(self) -> int:
         """Generate a 64-bit span ID."""
-        span_id = _next_span_id.get()
-        # Consume once: the deterministic ID applies only to the next span
-        # created in this context; subsequent spans fall back to random.
-        _next_span_id.set(None)
-        return span_id or self._fallback_id_generator.generate_span_id()
+        override = self._id_override.get()
+        if override is not None and override.span_id is not None:
+            span_id = override.span_id
+            # Consume before returning so a re-entrant call in the same span
+            # creation falls back instead of reusing the deterministic ID.
+            self._id_override.set(_IdOverride(override.trace_id, None))
+            return span_id
+        return self._fallback_id_generator.generate_span_id()
+
+    def is_trace_id_random(self) -> bool:
+        """Report whether the current trace ID is randomly generated."""
+        override = self._id_override.get()
+        if override is not None and override.trace_id is not None:
+            return False
+        fallback_method = getattr(
+            self._fallback_id_generator, "is_trace_id_random", None
+        )
+        return bool(fallback_method()) if fallback_method is not None else False

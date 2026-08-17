@@ -37,10 +37,7 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
-    OtelPluginConfig,
-    ProviderSource,
-)
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -69,7 +66,6 @@ def _create_plugin() -> tuple[InvocationOtelPlugin, InMemorySpanExporter]:
     trace_provider.add_span_processor(SimpleSpanProcessor(exporter))
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=trace_provider,
             context_extractor=lambda _: Context(),
         )
@@ -199,7 +195,31 @@ def test_invocation_start_and_end_emit_invocation_span():
         invocation.attributes["durable.invocation.status"]
         == InvocationStatus.SUCCEEDED.value
     )
+    workflow = spans_by_name["Workflow"]
+    assert invocation.parent is None
+    assert invocation.context.trace_id != workflow.context.trace_id
     assert plugin._get_span(None) is None
+
+
+def test_invocation_span_parents_to_ambient_span():
+    plugin, exporter = _create_plugin()
+
+    ambient = plugin._provider.get_tracer("ambient").start_span("lambda-invocation")
+    token = otel_context.attach(trace.set_span_in_context(ambient))
+    try:
+        plugin.on_invocation_start(_invocation_start_info())
+        plugin.on_invocation_end(_invocation_end_info())
+    finally:
+        otel_context.detach(token)
+        ambient.end()
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    invocation = spans["Invocation"]
+    workflow = spans["Workflow"]
+    assert invocation.parent is not None
+    assert invocation.parent.span_id == ambient.get_span_context().span_id
+    assert invocation.context.trace_id == ambient.get_span_context().trace_id
+    assert workflow.context.trace_id != ambient.get_span_context().trace_id
 
 
 def test_invocation_span_records_subsequent_invocation():
@@ -358,8 +378,8 @@ def test_operation_callbacks_emit_child_span_with_deterministic_span_id():
     )
 
 
-def test_operation_end_without_start_emits_continuation_span_with_link():
-    """Verify completed existing operations link to their logical operation span."""
+def test_operation_end_without_start_omits_unobserved_previous_span_link():
+    """A continuation cannot link to a SpanContext that was not checkpointed."""
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     operation_id = "wait-existing"
@@ -386,9 +406,9 @@ def test_operation_end_without_start_emits_continuation_span_with_link():
     span = exporter.get_finished_spans()[0]
     assert span.name == "existing-wait"
     assert span.context.span_id == random_span_id
-    assert span.links[0].context.span_id == operation_id_to_span_id(
-        EXECUTION_ARN, operation_id
-    )
+    linked_span_ids = {link.context.span_id for link in span.links}
+    assert linked_span_ids == {derive_workflow_span_id(EXECUTION_ARN)}
+    assert operation_id_to_span_id(EXECUTION_ARN, operation_id) not in linked_span_ids
     assert (
         span.attributes["durable.operation.status"] == OperationStatus.SUCCEEDED.value
     )
@@ -423,8 +443,8 @@ def test_continuation_span_uses_current_start_and_end_times():
     assert before_callback <= span.start_time <= span.end_time <= after_callback
 
 
-def test_retried_operation_start_emits_continuation_span_with_link():
-    """Retried operation spans should not reuse the original deterministic span ID."""
+def test_retried_operation_uses_fresh_id_without_unobserved_previous_span_link():
+    """Retried segments use fresh IDs without fabricating a prior context."""
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     operation_id = "step-retried"
@@ -463,9 +483,9 @@ def test_retried_operation_start_emits_continuation_span_with_link():
     span = exporter.get_finished_spans()[0]
     assert span.name == "retried-step"
     assert span.context.span_id == random_span_id
-    assert span.links[0].context.span_id == operation_id_to_span_id(
-        EXECUTION_ARN, operation_id
-    )
+    linked_span_ids = {link.context.span_id for link in span.links}
+    assert linked_span_ids == {derive_workflow_span_id(EXECUTION_ARN)}
+    assert operation_id_to_span_id(EXECUTION_ARN, operation_id) not in linked_span_ids
 
 
 def test_step_operation_span_parents_attempt_span():
@@ -1121,7 +1141,6 @@ def test_workflow_span_name_is_configurable():
     trace_provider.add_span_processor(SimpleSpanProcessor(exporter))
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=trace_provider,
             context_extractor=lambda _: Context(),
             workflow_span_name="MyExecution",

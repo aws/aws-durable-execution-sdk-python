@@ -34,10 +34,6 @@ on:
         required: true
         default: us-west-2
         type: string
-      otlp_endpoint:
-        description: OTLP ingest endpoint for community-layer jobs
-        required: false
-        type: string
       conformance_test_ref:
         description: Conformance test commit SHA or branch name
         required: true
@@ -57,7 +53,6 @@ jobs:
       phase: ${{ inputs.phase || 'short' }}
       delay_seconds: ${{ inputs.delay_seconds || '82800' }}
       aws_region: ${{ inputs.aws_region || 'us-west-2' }}
-      otlp_endpoint: ${{ inputs.otlp_endpoint || '' }}
       conformance_test_ref: ${{ inputs.conformance_test_ref || 'main' }}
       python_sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}
     secrets:
@@ -65,6 +60,6 @@ jobs:
       CONFORMANCE_TEST_ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
       CONFORMANCE_TEST_LAMBDA_EXECUTION_ROLE_ARN: ${{ secrets.TEST_LAMBDA_EXECUTION_ROLE_ARN }}
       DASH0_AUTH_TOKEN: ${{ secrets.DASH0_AUTH_TOKEN }}
-      DD_API_KEY: ${{ secrets.DD_API_KEY }}
-      DD_APPLICATION_KEY: ${{ secrets.DD_APPLICATION_KEY }}
-      DATADOG_OTLP_HEADERS: ${{ secrets.DATADOG_OTLP_HEADERS }}
+      DATADOG_ACCESS_TOKEN: ${{ secrets.DATADOG_ACCESS_TOKEN }}
+      DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+      DATADOG_APPLICATION_KEY: ${{ secrets.DATADOG_APPLICATION_KEY }}
