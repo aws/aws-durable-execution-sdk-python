@@ -46,17 +46,18 @@ EXECUTION_ARN = "arn:aws:lambda:us-west-2:123456789012:function:workflow:$LATEST
 
 
 @pytest.fixture(autouse=True)
-def _reset_otel_context():
-    """Reset the OTel thread-local context before and after each test.
+def _assert_otel_context_balanced():
+    """Assert each test leaves the OTel thread-local context as it found it.
 
-    The plugin attaches spans via context.attach() without ever detaching,
-    so state would otherwise leak between tests running on the same thread.
+    The plugin pairs every context.attach() with a context.detach(), so no
+    global reset is needed to keep tests isolated. Asserting the invariant here
+    turns a plugin lifecycle leak into a test failure instead of hiding it.
     """
-    token = otel_context.attach(Context())
-    try:
-        yield
-    finally:
-        otel_context.detach(token)
+    before = otel_context.get_current()
+    yield
+    assert otel_context.get_current() == before, (
+        "test leaked OTel context state: an attach() was not detached"
+    )
 
 
 def _create_plugin() -> tuple[InvocationOtelPlugin, InMemorySpanExporter]:
@@ -841,13 +842,14 @@ def test_span_registry_helpers_can_be_called_from_multiple_threads():
 
 
 # ----------------------------------------------------------------------
-# on_user_function_end restores the invocation span to the context
+# on_user_function_end restores the context enclosing the user function
 # ----------------------------------------------------------------------
-def test_user_function_end_restores_invocation_span():
-    """Verify the invocation span is current again after a step completes."""
+def test_user_function_end_restores_enclosing_context():
+    """Verify a completed step leaves the pre-step context current again."""
     plugin, _ = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     invocation_span_id = plugin._get_span(None).get_span_context().span_id
+    enclosing_context = otel_context.get_current()
 
     operation_id = "step-1"
     plugin.on_user_function_start(_user_function_start_info(operation_id))
@@ -861,15 +863,18 @@ def test_user_function_end_restores_invocation_span():
 
     plugin.on_user_function_end(_user_function_end_info(operation_id))
 
-    # After the step, the invocation span is restored.
-    assert trace.get_current_span().get_span_context().span_id == invocation_span_id
+    # After the step, the enclosing context is restored and no scope is left
+    # behind. Log correlation resolves the invocation span from the registry.
+    assert otel_context.get_current() == enclosing_context
+    assert plugin._context_tokens == {}
+    assert plugin.get_current_span_context().span_id == invocation_span_id
 
 
-def test_user_function_end_restores_invocation_span_on_failure():
-    """Verify the invocation span is restored even when the step fails."""
+def test_user_function_end_restores_enclosing_context_on_failure():
+    """Verify the enclosing context is restored even when the step fails."""
     plugin, _ = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
-    invocation_span_id = plugin._get_span(None).get_span_context().span_id
+    enclosing_context = otel_context.get_current()
 
     operation_id = "step-fail"
     plugin.on_user_function_start(_user_function_start_info(operation_id))
@@ -877,21 +882,26 @@ def test_user_function_end_restores_invocation_span_on_failure():
         _user_function_end_info(operation_id, outcome=UserFunctionOutcome.FAILED)
     )
 
-    assert trace.get_current_span().get_span_context().span_id == invocation_span_id
+    assert otel_context.get_current() == enclosing_context
+    assert plugin._context_tokens == {}
 
 
-def test_user_function_end_restores_invocation_span_across_multiple_steps():
-    """Verify between-step context is the invocation span across many steps."""
+def test_user_function_end_restores_enclosing_context_across_multiple_steps():
+    """Verify sequential steps do not accumulate context scopes."""
     plugin, _ = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     invocation_span_id = plugin._get_span(None).get_span_context().span_id
+    enclosing_context = otel_context.get_current()
 
     for index in range(3):
         operation_id = f"step-{index}"
         plugin.on_user_function_start(_user_function_start_info(operation_id))
         plugin.on_user_function_end(_user_function_end_info(operation_id))
-        # Between each step, the invocation span is the current span.
-        assert trace.get_current_span().get_span_context().span_id == invocation_span_id
+        # Between each step the context is back to where it started, and log
+        # correlation still resolves the invocation span.
+        assert otel_context.get_current() == enclosing_context
+        assert plugin._context_tokens == {}
+        assert plugin.get_current_span_context().span_id == invocation_span_id
 
 
 # ----------------------------------------------------------------------
@@ -927,6 +937,9 @@ def test_get_current_span_context_returns_operation_span_inside_step():
     assert span_context is not None
     assert active_attempt_span is not None
     assert span_context.span_id == active_attempt_span.get_span_context().span_id
+
+    # The step never ends here, so invocation cleanup releases its scope.
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_get_current_span_context_returns_invocation_span_between_steps():
@@ -986,18 +999,26 @@ def test_user_function_end_restores_parent_context_span_for_nested_step():
         != plugin._get_span(None).get_span_context().span_id
     )
 
+    # The child context never ends here, so invocation cleanup releases it.
+    plugin.on_invocation_end(_invocation_end_info())
 
-def test_user_function_end_falls_back_to_invocation_when_parent_missing():
-    """Verify a top-level step (parent_id=None) restores the invocation span."""
+
+def test_top_level_step_end_falls_back_to_invocation_for_correlation():
+    """Verify a top-level step (parent_id=None) correlates to the invocation."""
     plugin, _ = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     invocation_span_id = plugin._get_span(None).get_span_context().span_id
+    enclosing_context = otel_context.get_current()
 
     operation_id = "step-1"
     plugin.on_user_function_start(_user_function_start_info(operation_id))
     plugin.on_user_function_end(_user_function_end_info(operation_id))
 
-    assert trace.get_current_span().get_span_context().span_id == invocation_span_id
+    # No durable span is attached at the top level, so the registry fallback
+    # supplies the invocation span for log correlation.
+    assert otel_context.get_current() == enclosing_context
+    assert not trace.get_current_span().get_span_context().is_valid
+    assert plugin.get_current_span_context().span_id == invocation_span_id
 
 
 def test_get_current_span_context_returns_context_span_between_nested_steps():
@@ -1029,6 +1050,9 @@ def test_get_current_span_context_returns_context_span_between_nested_steps():
     assert span_context.span_id == context_span.get_span_context().span_id
     assert span_context.span_id != plugin._get_span(None).get_span_context().span_id
 
+    # The child context never ends here, so invocation cleanup releases it.
+    plugin.on_invocation_end(_invocation_end_info())
+
 
 def test_nested_steps_restore_context_span_across_multiple_iterations():
     """Verify each inner step restores the child-context span between iterations."""
@@ -1051,6 +1075,9 @@ def test_nested_steps_restore_context_span_across_multiple_iterations():
         )
         # Between each inner step, the child-context span is current.
         assert trace.get_current_span().get_span_context().span_id == context_span_id
+
+    # The child context never ends here, so invocation cleanup releases it.
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 @pytest.mark.parametrize(
@@ -1152,3 +1179,143 @@ def test_workflow_span_name_is_configurable():
     names = [s.name for s in exporter.get_finished_spans()]
     assert "MyExecution" in names
     assert "Workflow" not in names
+
+
+# ----------------------------------------------------------------------
+# Context attach/detach balance across the plugin lifecycle
+# ----------------------------------------------------------------------
+def test_child_context_end_restores_context_active_before_it():
+    """Verify leaving a child context restores the context that enclosed it."""
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    enclosing_context = otel_context.get_current()
+
+    context_id = "ctx-1"
+    plugin.on_user_function_start(
+        _user_function_start_info(context_id, operation_type=OperationType.CONTEXT)
+    )
+    assert otel_context.get_current() != enclosing_context
+
+    plugin.on_user_function_end(
+        _user_function_end_info(context_id, operation_type=OperationType.CONTEXT)
+    )
+
+    assert otel_context.get_current() == enclosing_context
+    assert plugin._context_tokens == {}
+
+
+def test_nested_scopes_are_released_without_accumulating():
+    """Verify a child context and its inner step unwind to their entry contexts."""
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    before_context = otel_context.get_current()
+
+    context_id = "ctx-1"
+    plugin.on_user_function_start(
+        _user_function_start_info(context_id, operation_type=OperationType.CONTEXT)
+    )
+    inside_context = otel_context.get_current()
+
+    inner_step_id = "ctx-1-step"
+    plugin.on_user_function_start(
+        _user_function_start_info(inner_step_id, parent_id=context_id)
+    )
+    plugin.on_user_function_end(
+        _user_function_end_info(inner_step_id, parent_id=context_id)
+    )
+    # The inner step restored the child-context scope, not a copy of it.
+    assert otel_context.get_current() == inside_context
+    assert set(plugin._context_tokens) == {context_id}
+
+    plugin.on_user_function_end(
+        _user_function_end_info(context_id, operation_type=OperationType.CONTEXT)
+    )
+    assert otel_context.get_current() == before_context
+    assert plugin._context_tokens == {}
+
+
+def test_invocation_end_releases_scope_of_suspended_user_function():
+    """Verify a user function that never ends does not leak its scope.
+
+    A suspending user function raises before ``on_user_function_end`` runs, so
+    invocation cleanup is what releases the scope it attached.
+    """
+    plugin, _ = _create_plugin()
+    before_context = otel_context.get_current()
+    plugin.on_invocation_start(_invocation_start_info())
+
+    plugin.on_user_function_start(_user_function_start_info("step-suspends"))
+    assert plugin._context_tokens
+
+    plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+
+    assert otel_context.get_current() == before_context
+    assert plugin._context_tokens == {}
+
+
+def test_ambient_span_is_current_again_after_full_lifecycle():
+    """Verify an ambient (e.g. ADOT) span survives a full plugin lifecycle."""
+    plugin, _ = _create_plugin()
+    ambient_provider = TracerProvider()
+    ambient = ambient_provider.get_tracer("ambient").start_span("AmbientLambda")
+    token = otel_context.attach(trace.set_span_in_context(ambient))
+    try:
+        plugin.on_invocation_start(_invocation_start_info())
+        operation_id = "step-1"
+        plugin.on_user_function_start(_user_function_start_info(operation_id))
+        plugin.on_user_function_end(_user_function_end_info(operation_id))
+        plugin.on_invocation_end(_invocation_end_info())
+
+        assert (
+            trace.get_current_span().get_span_context().span_id
+            == ambient.get_span_context().span_id
+        )
+    finally:
+        otel_context.detach(token)
+        ambient.end()
+
+
+def test_warm_invocation_reuse_does_not_accumulate_scopes():
+    """Verify repeated invocations on one plugin instance stay balanced."""
+    plugin, _ = _create_plugin()
+    ambient_provider = TracerProvider()
+    ambient = ambient_provider.get_tracer("ambient").start_span("AmbientLambda")
+    token = otel_context.attach(trace.set_span_in_context(ambient))
+    try:
+        warm_context = otel_context.get_current()
+        for index in range(3):
+            plugin.on_invocation_start(_invocation_start_info())
+            operation_id = f"step-{index}"
+            plugin.on_user_function_start(_user_function_start_info(operation_id))
+            plugin.on_user_function_end(_user_function_end_info(operation_id))
+            plugin.on_invocation_end(_invocation_end_info())
+
+            # Each invocation leaves the warm environment as it found it.
+            assert otel_context.get_current() == warm_context
+            assert plugin._context_tokens == {}
+    finally:
+        otel_context.detach(token)
+        ambient.end()
+
+
+def test_detach_ignores_token_attached_on_another_thread():
+    """Verify a scope attached on another thread is dropped, not reset here.
+
+    A context token can only be reset on the thread that created it, so the
+    plugin drops foreign tokens instead of asking OpenTelemetry to fail.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    before_context = otel_context.get_current()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(
+            plugin.on_user_function_start, _user_function_start_info("step-1")
+        ).result()
+
+    plugin._detach_context("step-1:attempt:1")
+
+    assert plugin._context_tokens == {}
+    assert otel_context.get_current() == before_context
+
+    plugin.on_invocation_end(_invocation_end_info())

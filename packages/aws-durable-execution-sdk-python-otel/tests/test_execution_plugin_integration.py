@@ -63,12 +63,13 @@ EXECUTION_TRACE_ID = int("65937d253aa8c3f7ffe36c50d65b1a6d", 16)
 
 
 @pytest.fixture(autouse=True)
-def _reset_otel_context():
-    token = otel_context.attach(Context())
-    try:
-        yield
-    finally:
-        otel_context.detach(token)
+def _assert_otel_context_balanced():
+    """Assert each test leaves the OTel thread-local context as it found it."""
+    before = otel_context.get_current()
+    yield
+    assert otel_context.get_current() == before, (
+        "test leaked OTel context state: an attach() was not detached"
+    )
 
 
 def _provider() -> tuple[TracerProvider, InMemorySpanExporter]:

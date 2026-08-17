@@ -123,6 +123,11 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._workflow_span: Span | None = None
         # Maps operation ID (None for root) to the active span.
         self._operation_spans: dict[str | None, Span] = {}
+        # Tokens returned by context.attach(), keyed by the span registry key,
+        # paired with the thread that attached them. Every attach the plugin
+        # owns is released through _detach_context so the plugin never leaves a
+        # scope on the context stack.
+        self._context_tokens: dict[str, tuple[int, object]] = {}
         self._operation_spans_lock = threading.RLock()
         self._tracing_enabled = False
 
@@ -167,6 +172,46 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         """Return the registry key for a STEP attempt span."""
         return f"{info.operation_id}:attempt:{info.attempt or 1}"
 
+    # ------------------------------------------------------------------
+    # Context scope helpers
+    # ------------------------------------------------------------------
+    def _attach_context(self, key: str, new_context: Context) -> None:
+        """Attach a context and remember its token under ``key``."""
+        with self._operation_spans_lock:
+            self._context_tokens[key] = (
+                threading.get_ident(),
+                context.attach(new_context),
+            )
+
+    def _detach_context(self, key: str) -> None:
+        """Detach the context attached under ``key``, restoring its predecessor.
+
+        A context token can only be reset on the thread that created it, so a
+        token recorded on another thread is dropped instead of detached (OTel
+        logs an error for a cross-thread reset). In practice the pairs always
+        line up: user-function hooks run on the thread executing user code, and
+        both the start and end hook for one attempt run on that same thread.
+        """
+        with self._operation_spans_lock:
+            entry = self._context_tokens.pop(key, None)
+        if entry is None:
+            return
+        thread_ident, token = entry
+        if thread_ident == threading.get_ident():
+            context.detach(token)  # type: ignore[arg-type]
+
+    def _detach_remaining_contexts(self) -> None:
+        """Release scopes still open, newest first, so nothing outlives the plugin.
+
+        Reached when a lifecycle end hook never fires -- for example a user
+        function that suspends, or a warm invocation that starts before the
+        previous one was cleaned up.
+        """
+        with self._operation_spans_lock:
+            keys = list(reversed(self._context_tokens))
+        for key in keys:
+            self._detach_context(key)
+
     def get_current_span_context(self) -> SpanContext | None:
         """Return the span context to use for log correlation.
 
@@ -174,12 +219,15 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         1. The span attached to the OTel thread-local context. Inside a step
            this is the active attempt span, and inside a child context this is
            the active context span (attached in
-           on_user_function_start), and between operations it is the enclosing
-           operation span (restored in on_user_function_end).
+           on_user_function_start), and between the steps of a child context it
+           is the enclosing context span, restored when on_user_function_end
+           detaches the inner scope.
         2. The invocation span from the plugin registry. This is the path used
            for top-level handler code: the invocation span is never attached to
            the worker thread's context, so the registry is the only way to
-           resolve it.
+           resolve it. It also covers code between top-level operations, where
+           detaching the operation scope restores a context with no durable
+           span.
 
         Returns:
             A valid SpanContext, or None if no span is active.
@@ -445,6 +493,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
 
     def _reset_state(self) -> None:
         """Clear per-invocation state for warm Lambda environment reuse."""
+        self._detach_remaining_contexts()
         self._execution_arn = ""
         self._execution_trace_id = None
         self._extracted_context = None
@@ -557,7 +606,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             span_key=span_key,
             deterministic_span_id=info.operation_type is not OperationType.STEP,
         )
-        context.attach(trace.set_span_in_context(span, self._extracted_context))
+        self._attach_context(
+            span_key, trace.set_span_in_context(span, self._extracted_context)
+        )
 
     def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
         """Called when a context or step operation finishes user code.
@@ -607,16 +658,13 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             if end_timestamp is not None and end_timestamp == info.start_time:
                 end_timestamp += datetime.timedelta(microseconds=1)
             self._end_span(span_key, end_timestamp)
-        # Restore the enclosing operation span as current so code that runs
-        # after this operation (e.g. between steps in a child context)
-        # correlates to its enclosing operation, not the operation that just
-        # ended. For a top-level operation (parent_id is None) this is the
-        # invocation span; for a nested operation it is the parent context span.
-        parent_span = self._get_span(info.parent_id) or self._get_span(None)
-        if parent_span:
-            context.attach(
-                trace.set_span_in_context(parent_span, self._extracted_context)
-            )
+        # Restore the enclosing context by releasing the scope this user
+        # function attached. Code that runs after this operation (e.g. between
+        # steps in a child context) correlates to its enclosing operation
+        # again -- the parent context span for a nested operation, and the
+        # context active before the operation for a top-level one, where
+        # get_current_span_context falls back to the invocation span.
+        self._detach_context(span_key)
 
     def _extract_attributes(self, info: Any) -> _SpanAttributes:
         """Extract durable execution fields as OpenTelemetry span attributes.
