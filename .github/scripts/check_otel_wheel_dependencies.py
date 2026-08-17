@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 
 EXPECTED_STANDALONE_DEPENDENCIES = {
@@ -20,9 +21,9 @@ def check_otel_wheel_dependencies(wheel: Path) -> None:
     """Validate that OpenTelemetry dependencies are layer-provided by default."""
     requirements = _read_requirements(wheel)
     base_otel_dependencies = {
-        requirement.name
+        canonicalize_name(requirement.name)
         for requirement in requirements
-        if requirement.name.startswith("opentelemetry-")
+        if canonicalize_name(requirement.name).startswith("opentelemetry-")
         and (requirement.marker is None or requirement.marker.evaluate({"extra": ""}))
     }
     if base_otel_dependencies:
@@ -32,9 +33,9 @@ def check_otel_wheel_dependencies(wheel: Path) -> None:
         )
 
     standalone_dependencies = {
-        requirement.name
+        canonicalize_name(requirement.name)
         for requirement in requirements
-        if requirement.name.startswith("opentelemetry-")
+        if canonicalize_name(requirement.name).startswith("opentelemetry-")
         and requirement.marker is not None
         and requirement.marker.evaluate({"extra": "standalone"})
     }

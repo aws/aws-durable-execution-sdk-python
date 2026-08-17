@@ -61,7 +61,13 @@ def test_test_environments_install_layer_provided_dependencies() -> None:
         "envs"
     ]
 
-    for environment_name in ("test", "dev-otel", "dev-examples", "test-pypi-otel"):
+    for environment_name in (
+        "test",
+        "dev-otel",
+        "dev-examples",
+        "test-pypi-otel",
+        "test-pypi-examples",
+    ):
         assert TEST_OTEL_DEPENDENCIES <= set(
             environments[environment_name]["dependencies"]
         )
