@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       regions:
-        description: "Comma-separated AWS Regions; defaults to all commercial Regions"
+        description: "Comma-separated AWS Regions; defaults to all configured Regions"
         required: false
         type: string
 
@@ -20,41 +20,6 @@ concurrency:
 env:
   LAYER_NAME: aws-durable-execution-sdk-python-otel-plugin
   SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.event.release.tag_name }}
-  DEFAULT_LAYER_REGIONS: >-
-    af-south-1,
-    ap-east-1,
-    ap-east-2,
-    ap-northeast-1,
-    ap-northeast-2,
-    ap-northeast-3,
-    ap-south-1,
-    ap-south-2,
-    ap-southeast-1,
-    ap-southeast-2,
-    ap-southeast-3,
-    ap-southeast-4,
-    ap-southeast-5,
-    ap-southeast-6,
-    ap-southeast-7,
-    ca-central-1,
-    ca-west-1,
-    eu-central-1,
-    eu-central-2,
-    eu-north-1,
-    eu-south-1,
-    eu-south-2,
-    eu-west-1,
-    eu-west-2,
-    eu-west-3,
-    il-central-1,
-    me-central-1,
-    me-south-1,
-    mx-central-1,
-    sa-east-1,
-    us-east-1,
-    us-east-2,
-    us-west-1,
-    us-west-2
 
 jobs:
   build-distributions:
@@ -66,6 +31,7 @@ jobs:
     outputs:
       sdk_version: ${{ steps.versions.outputs.sdk_version }}
       otel_version: ${{ steps.versions.outputs.otel_version }}
+      publish_targets: ${{ steps.publish-targets.outputs.publish_targets }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -94,6 +60,15 @@ jobs:
             --metadata .github/lambda-layer-publish.toml)
           echo "sdk_version=${SDK_VERSION}" >> "$GITHUB_OUTPUT"
           echo "otel_version=${OTEL_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve publish targets
+        id: publish-targets
+        env:
+          LAYER_REGIONS: ${{ inputs.regions || vars.LAYER_PUBLISH_REGIONS }}
+        run: |
+          PUBLISH_TARGETS=$(python .github/scripts/resolve_layer_publish_targets.py \
+            --regions "$LAYER_REGIONS")
+          echo "publish_targets=${PUBLISH_TARGETS}" >> "$GITHUB_OUTPUT"
 
       - name: Build SDK distribution
         if: >-
@@ -189,8 +164,10 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    env:
-      LAYER_REGIONS: ${{ inputs.regions || vars.LAYER_PUBLISH_REGIONS }}
+    strategy:
+      fail-fast: false
+      matrix:
+        publish_target: ${{ fromJSON(needs.build-distributions.outputs.publish_targets) }}
 
     steps:
       - name: Download layer artifact
@@ -202,12 +179,14 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
         with:
-          role-to-assume: ${{ secrets.LAYER_PUBLISH_ROLE_ARN }}
-          role-session-name: otelLayerPublish
-          aws-region: us-east-1
+          role-to-assume: ${{ secrets[matrix.publish_target.role_secret] }}
+          role-session-name: otelLayerPublish-${{ matrix.publish_target.name }}
+          aws-region: ${{ matrix.publish_target.aws_region }}
+          audience: ${{ matrix.publish_target.audience }}
 
       - name: Publish layer versions
         env:
+          LAYER_REGIONS: ${{ matrix.publish_target.regions }}
           LAYER_ZIP: dist/${{ env.LAYER_NAME }}.zip
           SDK_VERSION: ${{ needs.build-distributions.outputs.sdk_version }}
           OTEL_VERSION: ${{ needs.build-distributions.outputs.otel_version }}
@@ -215,8 +194,7 @@ jobs:
           PUBLISHED=false
           FAILED_REGIONS=()
           LOCAL_CODE_SHA256=$(openssl dgst -sha256 -binary "$LAYER_ZIP" | openssl base64 -A)
-          REGION_LIST=${LAYER_REGIONS:-$DEFAULT_LAYER_REGIONS}
-          IFS=',' read -ra REGIONS <<< "$REGION_LIST"
+          IFS=',' read -ra REGIONS <<< "$LAYER_REGIONS"
           for REGION in "${REGIONS[@]}"; do
             REGION=$(echo "$REGION" | xargs)
             if [ -z "$REGION" ]; then

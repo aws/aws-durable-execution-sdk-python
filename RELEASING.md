@@ -79,16 +79,30 @@ For OTel-only releases, the workflow downloads the exact SDK version pinned by
 already be published to PyPI. Combined SDK and OTel releases require the pin to
 match the new SDK version and build both distributions from the tagged source.
 
-The publishing job uses the `lambda-layer-publish` GitHub environment and its
-`LAYER_PUBLISH_ROLE_ARN` secret. Set the optional `LAYER_PUBLISH_REGIONS`
-environment variable to a comma-separated list of AWS Regions. When unset, the
-workflow publishes to every commercial AWS Region supported by Lambda.
+The publishing job uses the `lambda-layer-publish` GitHub environment and
+credential-scoped role ARN secrets:
+
+- `LAYER_PUBLISH_ROLE_ARN` covers the default-enabled commercial Regions.
+- Each opt-in commercial Region uses
+  `LAYER_PUBLISH_ROLE_ARN_<REGION>`, with the Region uppercased and hyphens
+  replaced by underscores. Configure one secret for each of `af-south-1`,
+  `ap-east-1`, `ap-east-2`, `ap-south-2`, `ap-southeast-3`,
+  `ap-southeast-4`, `ap-southeast-5`, `ap-southeast-6`, `ap-southeast-7`,
+  `ca-west-1`, `eu-central-2`, `eu-south-1`, `eu-south-2`, `il-central-1`,
+  `me-central-1`, `me-south-1`, and `mx-central-1`.
+- `LAYER_PUBLISH_ROLE_ARN_CHINA` covers `cn-north-1` and `cn-northwest-1`.
+- `LAYER_PUBLISH_ROLE_ARN_US_GOV` covers `us-gov-east-1` and
+  `us-gov-west-1`.
+
+Set the optional `LAYER_PUBLISH_REGIONS` environment variable to a
+comma-separated list of these AWS Regions. When unset, the workflow publishes
+to every configured Region.
 The workflow can also be run manually from the Actions tab on `main`; its
 optional `regions` input overrides `LAYER_PUBLISH_REGIONS` for that run.
-Each runtime and architecture layer archive is built once and retained as a
-workflow artifact so retries publish the exact same resolved dependencies. Its
-SHA-256 is included in the layer description and verified before reuse.
-The publishing role must allow `lambda:PublishLayerVersion` and
+The universal layer archive is built once and retained as a workflow artifact
+so retries publish the exact same resolved dependencies. Its SHA-256 is included
+in the layer description and verified before reuse.
+Each publishing role must allow `lambda:PublishLayerVersion` and
 `lambda:AddLayerVersionPermission`, as well as `lambda:ListLayerVersions` and
 `lambda:GetLayerVersion` for identity-checked, idempotent release retries.
 
