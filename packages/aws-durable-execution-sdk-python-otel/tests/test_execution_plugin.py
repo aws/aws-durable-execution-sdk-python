@@ -3,21 +3,22 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import opentelemetry.context as otel_context
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
-    InvocationStatus,
     OperationStatus,
     OperationSubType,
-    OperationType,
 )
 from aws_durable_execution_sdk_python.plugin import (
     InvocationEndInfo,
+    InvocationStatus,
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
+    OperationType,
     UserFunctionEndInfo,
     UserFunctionOutcome,
     UserFunctionStartInfo,
@@ -90,6 +91,30 @@ def _invocation_end_info(
         status=status,
         error=None,
     )
+
+
+def test_operation_attributes_use_structural_user_function_marker():
+    plugin, _ = _create_plugin()
+
+    operation_attributes = plugin._operation_attributes(
+        SimpleNamespace(
+            operation_type=OperationType.STEP,
+            status=OperationStatus.STARTED,
+        )
+    )
+    assert (
+        operation_attributes["durable.operation.status"]
+        == OperationStatus.STARTED.value
+    )
+
+    user_function_attributes = plugin._operation_attributes(
+        SimpleNamespace(
+            operation_type=OperationType.STEP,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+        )
+    )
+    assert "durable.operation.status" not in user_function_attributes
 
 
 # ---------------------------------------------------------------------------

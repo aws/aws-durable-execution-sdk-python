@@ -26,16 +26,14 @@ import logging
 import threading
 from typing import Any
 
-from aws_durable_execution_sdk_python.lambda_service import (
-    InvocationStatus,
-    OperationType,
-)
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationEndInfo,
+    InvocationStatus,
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
+    OperationType,
     UserFunctionEndInfo,
     UserFunctionOutcome,
     UserFunctionStartInfo,
@@ -527,7 +525,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # STEP user-function spans represent attempts, not durable operations.
         if (
             not (
-                isinstance(info, (UserFunctionStartInfo, UserFunctionEndInfo))
+                hasattr(info, "is_replay_children")
                 and info.operation_type is OperationType.STEP
             )
             and getattr(info, "status", None) is not None
