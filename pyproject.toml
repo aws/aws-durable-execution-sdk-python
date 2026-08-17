@@ -15,6 +15,7 @@ dependencies = [
   "pytest-cov",
   "pytest-xdist",
   "opentelemetry-sdk>=1.20.0",
+  "opentelemetry-propagator-aws-xray",
   "aws-durable-execution-sdk-python-testing",
   "PyYAML==6.0.2",
 ]
@@ -49,6 +50,7 @@ extra-dependencies = [
   "pytest",
   "boto3-stubs[lambda]",
   "opentelemetry-sdk>=1.20.0",
+  "opentelemetry-propagator-aws-xray",
 ]
 
 [tool.hatch.envs.types.scripts]
@@ -80,6 +82,7 @@ dependencies = [
   "pytest-cov",
   "coverage[toml]",
   "opentelemetry-sdk>=1.20.0",
+  "opentelemetry-propagator-aws-xray",
   "mypy>=1.0.0",
 ]
 
@@ -115,6 +118,8 @@ workspace.members = [
 dependencies = [
   "pytest",
   "aws-durable-execution-sdk-python-testing",
+  "opentelemetry-sdk>=1.20.0",
+  "opentelemetry-propagator-aws-xray",
 ]
 
 [tool.hatch.envs.dev-examples.scripts]
@@ -124,6 +129,7 @@ test = "pytest packages/aws-durable-execution-sdk-python-examples/test {args}"
 dependencies = [
   "aws-durable-execution-sdk-python>=1.8.0",
   "opentelemetry-sdk>=1.20.0",
+  "opentelemetry-propagator-aws-xray",
   "pytest",
   "pytest-cov",
   "coverage[toml]",
