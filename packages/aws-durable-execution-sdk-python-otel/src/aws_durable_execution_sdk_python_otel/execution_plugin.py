@@ -17,6 +17,11 @@ from JS (there is no ``wrapInvocation``/``wrapChildContextFn``/``enrichLogContex
 - context is attached inside the synchronous ``on_user_function_*`` hooks and
 log correlation is handled by :mod:`log_filter`), the hook wiring mirrors the
 existing :class:`~aws_durable_execution_sdk_python_otel.invocation_plugin.InvocationOtelPlugin`.
+
+Every context the plugin attaches is tracked by its token and detached at the
+matching lifecycle end: a user-function scope is released in
+``on_user_function_end`` and the invocation scope in ``on_invocation_end``, so
+the plugin never leaves an ended or suspended span current.
 """
 
 from __future__ import annotations
@@ -75,6 +80,9 @@ _TERMINAL_INVOCATION_STATUSES = frozenset(
 # Registry key for the invocation span (operations use their operation_id).
 _INVOCATION_KEY = "__invocation__"
 
+# Token key for the invocation-level context scope attached at invocation start.
+_INVOCATION_CONTEXT_KEY = "__invocation_context__"
+
 
 def _to_otel_timestamp(dt: datetime.datetime | None) -> int | None:
     """Convert a datetime to an OTel timestamp (ns since epoch), or None."""
@@ -114,6 +122,11 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._workflow_span: Span | None = None
         self._invocation_span: Span | None = None
         self._operation_spans: dict[str, Span] = {}
+        # Tokens returned by context.attach(), keyed by the span registry key,
+        # paired with the thread that attached them. Every attach the plugin
+        # owns is released through _detach_context so the plugin never leaves a
+        # scope on the context stack.
+        self._context_tokens: dict[str, tuple[int, object]] = {}
         self._lock = threading.RLock()
         self._tracing_enabled = False
 
@@ -156,6 +169,46 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     @staticmethod
     def _attempt_key(info: UserFunctionStartInfo | UserFunctionEndInfo) -> str:
         return f"{info.operation_id}:attempt:{info.attempt or 1}"
+
+    # ------------------------------------------------------------------
+    # Context scope helpers
+    # ------------------------------------------------------------------
+    def _attach_context(self, key: str, new_context: Context) -> None:
+        """Attach a context and remember its token under ``key``."""
+        with self._lock:
+            self._context_tokens[key] = (
+                threading.get_ident(),
+                otel_context.attach(new_context),
+            )
+
+    def _detach_context(self, key: str) -> None:
+        """Detach the context attached under ``key``, restoring its predecessor.
+
+        A context token can only be reset on the thread that created it, so a
+        token recorded on another thread is dropped instead of detached (OTel
+        logs an error for a cross-thread reset). In practice the pairs always
+        line up: invocation hooks run on the Lambda handler thread and
+        user-function hooks run on the thread executing user code.
+        """
+        with self._lock:
+            entry = self._context_tokens.pop(key, None)
+        if entry is None:
+            return
+        thread_ident, token = entry
+        if thread_ident == threading.get_ident():
+            otel_context.detach(token)  # type: ignore[arg-type]
+
+    def _detach_remaining_contexts(self) -> None:
+        """Release scopes still open, newest first, so nothing outlives the plugin.
+
+        Reached when a lifecycle end hook never fires -- for example a user
+        function that suspends, or a warm invocation that starts before the
+        previous one was cleaned up.
+        """
+        with self._lock:
+            keys = list(reversed(self._context_tokens))
+        for key in keys:
+            self._detach_context(key)
 
     def get_current_span_context(self) -> SpanContext | None:
         """Return the active span context for log correlation (see log_filter)."""
@@ -225,10 +278,13 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._start_invocation_span(info)
 
         # Make the Workflow span the active span so auto-instrumented spans
-        # created during the invocation become its children.
+        # created during the invocation become its children. The token is
+        # released in _reset_state at invocation end, restoring the context that
+        # was active before the invocation started.
         if self._workflow_span is not None:
-            otel_context.attach(
-                trace.set_span_in_context(self._workflow_span, self._extracted_context)
+            self._attach_context(
+                _INVOCATION_CONTEXT_KEY,
+                trace.set_span_in_context(self._workflow_span, self._extracted_context),
             )
 
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
@@ -324,6 +380,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 logger.exception("force_flush failed at invocation end")
 
     def _reset_state(self) -> None:
+        self._detach_remaining_contexts()
         self._execution_arn = ""
         self._execution_trace_id = None
         self._extracted_context = None
@@ -439,17 +496,19 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 info.parent_id
             )
             name = f"{info.name or info.operation_id} attempt {info.attempt or 1}"
+            key = self._attempt_key(info)
             span = self._start_span(
                 operation_id=info.operation_id,
                 name=name,
                 info=info,
                 parent=parent,
                 start_time=info.start_time,
-                span_key=self._attempt_key(info),
+                span_key=key,
                 deterministic=False,
             )
         else:  # CONTEXT
             parent = self._resolve_parent(info.parent_id)
+            key = info.operation_id
             span = self._start_span(
                 operation_id=info.operation_id,
                 name=info.name or info.operation_id,
@@ -457,7 +516,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 parent=parent,
                 start_time=info.start_time,
             )
-        otel_context.attach(trace.set_span_in_context(span, self._extracted_context))
+        self._attach_context(
+            key, trace.set_span_in_context(span, self._extracted_context)
+        )
 
     def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
         logger.debug("Durable user function ended: %s", info)
@@ -500,16 +561,11 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             if popped is not None:
                 popped.end(end_time=_to_otel_timestamp(end_time))
 
-        # Restore the enclosing span as active (parent op, else invocation/workflow).
-        enclosing = (
-            self._get_span(info.parent_id)
-            or self._invocation_span
-            or self._workflow_span
-        )
-        if enclosing is not None:
-            otel_context.attach(
-                trace.set_span_in_context(enclosing, self._extracted_context)
-            )
+        # Restore the enclosing context by releasing the scope this user
+        # function attached, so the parent operation (or, at the top level, the
+        # context that was active before the operation) becomes current again
+        # without stacking another scope.
+        self._detach_context(key)
 
     # ------------------------------------------------------------------
     # Attributes
