@@ -15,12 +15,12 @@ from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     DurableExecutionInvocationOutput,
     ErrorObject,
-    InvocationStatus,
+    InvocationStatus as ServiceInvocationStatus,
     Operation,
     OperationAction,
     OperationStatus,
     OperationSubType,
-    OperationType,
+    OperationType as ServiceOperationType,
     OperationUpdate,
 )
 from aws_durable_execution_sdk_python.types import LambdaContext
@@ -29,6 +29,34 @@ from aws_durable_execution_sdk_python.types import LambdaContext
 logger = logging.getLogger(__name__)
 
 DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION = 1
+
+
+class InvocationStatus(Enum):
+    """Invocation outcomes exposed to instrumentation plugins."""
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    PENDING = "PENDING"
+    RETRY = "RETRY"
+
+
+class OperationType(Enum):
+    """Durable operation categories exposed to instrumentation plugins."""
+
+    EXECUTION = "EXECUTION"
+    CONTEXT = "CONTEXT"
+    STEP = "STEP"
+    WAIT = "WAIT"
+    CALLBACK = "CALLBACK"
+    CHAINED_INVOKE = "CHAINED_INVOKE"
+
+
+def _to_invocation_status(status: ServiceInvocationStatus) -> InvocationStatus:
+    return InvocationStatus(status.value)
+
+
+def _to_operation_type(operation_type: ServiceOperationType) -> OperationType:
+    return OperationType(operation_type.value)
 
 
 def _extract_result(operation: Operation) -> str | None:
@@ -91,7 +119,7 @@ class OperationInfo:
     ) -> OperationInfo:
         return OperationInfo(
             operation_id=operation.operation_id,
-            operation_type=operation.operation_type,
+            operation_type=_to_operation_type(operation.operation_type),
             sub_type=operation.sub_type,
             name=operation.name,
             parent_id=operation.parent_id,
@@ -338,7 +366,7 @@ class InvocationEndInfo(InvocationInfo):
                 if operations is not None
                 else invocation_start_info.operations
             ),
-            status=output.status,
+            status=_to_invocation_status(output.status),
             error=output.error,
             execution_result=output.result,
         )
@@ -609,7 +637,7 @@ class PluginExecutor:
         """Execute any registered plugins for the operation when its user function starts to execute."""
         start_info = UserFunctionStartInfo(
             operation_id=operation_identifier.operation_id,
-            operation_type=operation_identifier.type,
+            operation_type=_to_operation_type(operation_identifier.type),
             sub_type=operation_identifier.sub_type,
             name=operation_identifier.name,
             parent_id=operation_identifier.parent_id,
@@ -647,7 +675,7 @@ class PluginExecutor:
             self.execute_plugins(
                 OperationStartInfo(
                     operation_id=update.operation_id,
-                    operation_type=update.operation_type,
+                    operation_type=_to_operation_type(update.operation_type),
                     sub_type=update.sub_type,
                     name=update.name,
                     parent_id=update.parent_id,
@@ -665,7 +693,7 @@ class PluginExecutor:
 
         start_info = OperationStartInfo(
             operation_id=operation.operation_id,
-            operation_type=operation.operation_type,
+            operation_type=_to_operation_type(operation.operation_type),
             sub_type=operation.sub_type,
             name=operation.name,
             parent_id=operation.parent_id,
@@ -688,7 +716,7 @@ class PluginExecutor:
         self.execute_plugins(
             OperationEndInfo(
                 operation_id=operation_identifier.operation_id,
-                operation_type=operation_identifier.type,
+                operation_type=_to_operation_type(operation_identifier.type),
                 sub_type=operation_identifier.sub_type,
                 name=operation_identifier.name,
                 parent_id=operation_identifier.parent_id,
@@ -732,7 +760,7 @@ class PluginExecutor:
                 self.execute_plugins(
                     OperationEndInfo(
                         operation_id=operation.operation_id,
-                        operation_type=operation.operation_type,
+                        operation_type=_to_operation_type(operation.operation_type),
                         sub_type=operation.sub_type,
                         name=operation.name,
                         parent_id=operation.parent_id,
