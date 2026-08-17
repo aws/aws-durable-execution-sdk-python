@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 import opentelemetry.context as otel_context
@@ -28,11 +29,17 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from aws_durable_execution_sdk_python_otel.context_extractors import (
+    xray_context_extractor,
+)
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     derive_workflow_span_id,
     operation_id_to_span_id,
 )
-from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
+from aws_durable_execution_sdk_python_otel.execution_plugin import (
+    _INVOCATION_KEY,
+    ExecutionOtelPlugin,
+)
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     OtelPluginConfig,
     ProviderSource,
@@ -45,17 +52,18 @@ EXECUTION_ARN = "arn:aws:lambda:us-west-2:123456789012:function:workflow:$LATEST
 
 
 @pytest.fixture(autouse=True)
-def _reset_otel_context():
-    """Reset the OTel thread-local context around each test.
+def _assert_otel_context_balanced():
+    """Fail any test that leaves an OTel context attached.
 
-    The plugin attaches spans via context.attach() without detaching, so state
-    would otherwise leak between tests running on the same thread.
+    The plugins must detach every context they attach, so no reset is needed to
+    isolate tests -- instead this asserts the invariant. Resetting here would hide
+    exactly the leak this suite exists to catch.
     """
-    token = otel_context.attach(Context())
-    try:
-        yield
-    finally:
-        otel_context.detach(token)
+    before = otel_context.get_current()
+    yield
+    assert otel_context.get_current() is before, (
+        "test did not restore the OTel context it started with"
+    )
 
 
 def _create_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
@@ -338,6 +346,10 @@ def test_context_span_waits_for_terminal_operation_status(
     assert span.attributes["durable.operation.status"] == terminal_status.value
     assert span.status.status_code is expected_span_status
 
+    # Close the invocation so its scope is detached; the autouse
+    # fixture asserts no context outlives the test.
+    plugin.on_invocation_end(_invocation_end_info())
+
 
 def test_step_attempt_span_omits_operation_status():
     plugin, exporter = _create_plugin()
@@ -387,10 +399,15 @@ def test_step_attempt_span_omits_operation_status():
     )
     assert "durable.operation.status" not in span.attributes
 
+    # ---------------------------------------------------------------------------
+    # Default-provider mode: invocation span
+    # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Default-provider mode: invocation span
-# ---------------------------------------------------------------------------
+    # Close the invocation so its scope is detached; the autouse
+    # fixture asserts no context outlives the test.
+    plugin.on_invocation_end(_invocation_end_info())
+
+
 def _create_default_mode_plugin(
     monkeypatch,
 ) -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
@@ -444,6 +461,224 @@ def test_default_mode_invocation_span_parented_to_ambient_span(monkeypatch):
     invocation = {s.name: s for s in exporter.get_finished_spans()}["Invocation"]
     assert invocation.parent is not None
     assert invocation.parent.span_id == ambient.get_span_context().span_id
+
+
+# ----------------------------------------------------------------------
+# Invocation scope is paired, so nothing leaks into the next invocation
+# ----------------------------------------------------------------------
+def test_invocation_end_restores_the_pre_invocation_context():
+    """Verify the invocation scope is detached when the invocation ends.
+
+    The Lambda handler thread is reused across warm invocations, so an unpaired
+    attach here left an ended Workflow span current for the next execution.
+    """
+    plugin, _ = _create_plugin()
+    before = otel_context.get_current()
+
+    plugin.on_invocation_start(_invocation_start_info())
+    # The Workflow span is current while the invocation runs.
+    assert (
+        trace.get_current_span().get_span_context().span_id
+        == plugin._workflow_span.get_span_context().span_id
+    )
+
+    plugin.on_invocation_end(_invocation_end_info())
+
+    assert otel_context.get_current() is before
+    assert trace.get_current_span().get_span_context().is_valid is False
+
+
+def test_a_suspended_operation_scope_is_swept_at_invocation_end():
+    """Verify a scope whose end hook never ran does not outlive the invocation.
+
+    The SDK re-raises SuspendExecution without calling on_user_function_end, so
+    the operation's scope is still attached when the invocation winds down.
+    """
+    plugin, _ = _create_plugin()
+    before = otel_context.get_current()
+    plugin.on_invocation_start(_invocation_start_info())
+
+    plugin.on_user_function_start(
+        UserFunctionStartInfo(
+            operation_id="step-suspends",
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="step-suspends",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            is_replay_children=False,
+            attempt=1,
+        )
+    )
+    assert len(plugin._scopes) == 2  # invocation + operation
+
+    plugin.on_invocation_end(_invocation_end_info(InvocationStatus.PENDING))
+
+    assert plugin._scopes == {}
+    assert otel_context.get_current() is before
+
+
+def test_warm_reuse_does_not_share_a_trace_between_executions(monkeypatch):
+    """Verify a reused plugin instance keeps two executions in separate traces.
+
+    In GLOBAL mode the Invocation span is parented to whatever is ambient. When a
+    previous invocation left its Workflow span attached, that span became the
+    parent and its trace ID won, merging two unrelated executions into one trace.
+    """
+    plugin, _ = _create_default_mode_plugin(monkeypatch)
+    # The default X-Ray extractor falls back to the ambient context when no trace
+    # header is present, so it observes any leak too.
+    monkeypatch.delenv("_X_AMZN_TRACE_ID", raising=False)
+    plugin._context_extractor = xray_context_extractor
+
+    traces: list[int] = []
+
+    def run(arn: str) -> None:
+        plugin.on_invocation_start(
+            InvocationStartInfo(
+                request_id="request-1",
+                execution_arn=arn,
+                execution_start_time=START_TIME,
+                is_first_invocation=True,
+            )
+        )
+        traces.append(plugin._invocation_span.get_span_context().trace_id)
+        assert plugin._invocation_span.parent is None, (
+            "the Invocation span adopted a parent from a previous invocation"
+        )
+        plugin.on_invocation_end(
+            InvocationEndInfo(
+                request_id="request-1",
+                execution_arn=arn,
+                execution_start_time=START_TIME,
+                is_first_invocation=True,
+                status=InvocationStatus.SUCCEEDED,
+                error=None,
+            )
+        )
+
+    run(EXECUTION_ARN)
+    run(EXECUTION_ARN + "-second")
+
+    assert traces[0] != traces[1], "two executions were merged into one trace"
+
+
+# ----------------------------------------------------------------------
+# The identity guard: a detach that is not the current scope is skipped
+# ----------------------------------------------------------------------
+def test_out_of_order_exit_is_skipped_rather_than_reviving_a_stale_context():
+    """Verify a mismatched detach leaves the context alone.
+
+    ``ContextVar.reset`` writes back its captured value unconditionally, so
+    detaching a scope that is no longer current would *revive* what preceded it,
+    silently making a stale span current again. The guard makes that a no-op,
+    matching OpenTelemetry Java's ``ScopeImpl.close()``.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    outer = otel_context.get_current()
+
+    # A second scope stacked on top of the invocation scope.
+    plugin._enter_scope("inner", trace.set_span_in_context(plugin._invocation_span))
+    inner = otel_context.get_current()
+    assert inner is not outer
+
+    # Popping the *outer* scope while the inner one is current must not revive
+    # the pre-invocation context. The entry is kept, so it can still be undone
+    # once it is current again.
+    plugin._exit_scope(_INVOCATION_KEY)
+    assert otel_context.get_current() is inner
+    assert _INVOCATION_KEY in plugin._scopes
+
+    plugin._exit_scope("inner")
+    assert otel_context.get_current() is outer
+    # And the retained outer scope is undone at invocation end.
+    plugin.on_invocation_end(_invocation_end_info())
+    assert plugin._scopes == {}
+
+
+def test_exit_from_another_thread_is_skipped():
+    """Verify a scope is never detached from a thread that did not attach it.
+
+    A token can only be reset in the context that created it, so a cross-thread
+    detach would corrupt the calling thread. The identity check rejects it because
+    the other thread's current context is not the attached one.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    attached = otel_context.get_current()
+    observed: dict[str, object] = {}
+
+    def worker() -> None:
+        # This thread never attached anything, so its context does not match.
+        plugin._exit_scope(_INVOCATION_KEY)
+        observed["worker_valid"] = trace.get_current_span().get_span_context().is_valid
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(worker).result()
+
+    assert observed["worker_valid"] is False
+    # The attaching thread is untouched, and the scope was not consumed by the
+    # failed attempt -- so the thread that owns it can still undo it.
+    assert otel_context.get_current() is attached
+    assert _INVOCATION_KEY in plugin._scopes
+    plugin.on_invocation_end(_invocation_end_info())
+    assert plugin._scopes == {}
+
+
+def test_a_worker_thread_scope_does_not_disturb_the_caller():
+    """Verify user-function scopes stay on the thread that runs user code.
+
+    User code runs on a worker the SDK owns, and ThreadPoolExecutor does not copy
+    contextvars, so the plugin's scope must not reach the handler thread.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    before = otel_context.get_current()
+    observed: dict[str, object] = {}
+
+    def run_step() -> None:
+        plugin.on_user_function_start(
+            UserFunctionStartInfo(
+                operation_id="step-1",
+                operation_type=OperationType.STEP,
+                sub_type=OperationSubType.STEP,
+                name="step-1",
+                parent_id=None,
+                start_time=START_TIME,
+                is_replayed=False,
+                status=OperationStatus.STARTED,
+                is_replay_children=False,
+                attempt=1,
+            )
+        )
+        observed["inside"] = trace.get_current_span().get_span_context().is_valid
+        plugin.on_user_function_end(
+            UserFunctionEndInfo(
+                operation_id="step-1",
+                operation_type=OperationType.STEP,
+                sub_type=OperationSubType.STEP,
+                name="step-1",
+                parent_id=None,
+                start_time=START_TIME,
+                end_time=END_TIME,
+                is_replayed=False,
+                status=OperationStatus.SUCCEEDED,
+                is_replay_children=False,
+                attempt=1,
+                outcome=UserFunctionOutcome.SUCCEEDED,
+                error=None,
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(run_step).result()
+
+    assert observed["inside"] is True
+    assert otel_context.get_current() is before
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_open_operation_span_not_exported_at_invocation_end():

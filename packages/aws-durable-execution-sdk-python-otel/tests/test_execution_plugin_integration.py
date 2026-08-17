@@ -60,12 +60,18 @@ XRAY_TRACE_ID = int("5759e988bd862e3fe1be46a994272793", 16)
 
 
 @pytest.fixture(autouse=True)
-def _reset_otel_context():
-    token = otel_context.attach(Context())
-    try:
-        yield
-    finally:
-        otel_context.detach(token)
+def _assert_otel_context_balanced():
+    """Fail any test that leaves an OTel context attached.
+
+    The plugins must detach every context they attach, so no reset is needed to
+    isolate tests -- instead this asserts the invariant. Resetting here would hide
+    exactly the leak this suite exists to catch.
+    """
+    before = otel_context.get_current()
+    yield
+    assert otel_context.get_current() is before, (
+        "test did not restore the OTel context it started with"
+    )
 
 
 def _provider() -> tuple[TracerProvider, InMemorySpanExporter]:

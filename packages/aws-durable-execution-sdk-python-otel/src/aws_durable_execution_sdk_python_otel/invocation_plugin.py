@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
+from contextvars import Token
 from typing import Any
 
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -167,6 +168,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._workflow_span: Span | None = None
         # Maps operation ID (None for root) to the active span.
         self._operation_spans: dict[str | None, Span] = {}
+        # Contexts this plugin has attached, keyed the same way as the span
+        # registry, so each attach can be undone by the hook that pairs with it.
+        self._scopes: dict[str, tuple[Token[Context], Context]] = {}
         self._operation_spans_lock = threading.RLock()
 
         if self._enrich_logger:
@@ -175,6 +179,59 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             # handler before the handler module is imported (and thus before the
             # plugin is constructed), so the handlers are available here.
             install_log_filter(self)
+
+    def _enter_scope(self, key: str, context_to_attach: Context) -> None:
+        """Attach a context and remember what is needed to restore it.
+
+        ``context.attach`` returns a token that is the only way to undo it, and
+        the hook that attaches is not the hook that pops, so the token has to be
+        kept. The context is kept alongside it for the identity check in
+        :meth:`_exit_scope`.
+        """
+        with self._operation_spans_lock:
+            self._scopes[key] = (context.attach(context_to_attach), context_to_attach)
+
+    def _exit_scope(self, key: str) -> None:
+        """Restore the context that preceded the scope attached under ``key``.
+
+        Only detaches when the scope being popped is still the current one. This
+        mirrors OpenTelemetry Java's ``ScopeImpl.close()``, which ignores a close
+        that does not represent the current context, and it matters more here:
+        ``ContextVar.reset`` writes back its captured value unconditionally, so an
+        out-of-order or wrong-thread detach would *revive* a stale context instead
+        of failing safe. Skipping leaves the layer attached, which is inert.
+        """
+        with self._operation_spans_lock:
+            entry = self._scopes.get(key)
+            if entry is None:
+                return
+            token, attached = entry
+            if context.get_current() is not attached:
+                # Not ours to pop right now: another scope is stacked above it, or
+                # this is not the thread that attached it. The entry is left in
+                # place so it can still be undone later -- discarding the token
+                # here would strand the context permanently.
+                logger.debug("Skipping out-of-scope OTel context detach for %s", key)
+                return
+            del self._scopes[key]
+        try:
+            context.detach(token)
+        except Exception:  # noqa: BLE001 - observability must not break execution
+            logger.debug("Failed to detach OTel context for %s", key, exc_info=True)
+
+    def _exit_all_scopes(self) -> None:
+        """Pop every scope this plugin still holds, newest first.
+
+        Reached when a hook that would have popped a scope never ran: the SDK
+        re-raises ``SuspendExecution`` without calling ``on_user_function_end``.
+        Scopes attached on another thread fail the identity check and are dropped
+        without detaching; those threads are per-invocation and their context dies
+        with them.
+        """
+        with self._operation_spans_lock:
+            keys = list(reversed(self._scopes))
+        for key in keys:
+            self._exit_scope(key)
 
     def _set_span(self, operation_id: str | None, span: Span) -> None:
         """Register the active span for an operation ID."""
@@ -195,6 +252,17 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     def _attempt_span_key(info: UserFunctionStartInfo | UserFunctionEndInfo) -> str:
         """Return the registry key for a STEP attempt span."""
         return f"{info.operation_id}:attempt:{info.attempt or 1}"
+
+    @classmethod
+    def _scope_key(cls, info: UserFunctionStartInfo | UserFunctionEndInfo) -> str:
+        """Return the context-scope key for a user-function hook pair.
+
+        Mirrors the span registry key so the scope attached by
+        ``on_user_function_start`` is the one ``on_user_function_end`` pops.
+        """
+        if info.operation_type is OperationType.STEP:
+            return cls._attempt_span_key(info)
+        return info.operation_id
 
     def get_current_span_context(self) -> SpanContext | None:
         """Return the span context to use for log correlation.
@@ -453,6 +521,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                     self._workflow_span.set_status(StatusCode.OK)
                 self._workflow_span.end()
 
+        # Undo anything a suspended operation left attached, so no scope outlives
+        # the invocation that created it.
+        self._exit_all_scopes()
+
         # Clear all per-invocation state to prevent leaks across warm Lambda reuses
         self._execution_arn = ""
         self._extracted_context = None
@@ -562,7 +634,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             span_key=span_key,
             deterministic_span_id=info.operation_type is not OperationType.STEP,
         )
-        context.attach(trace.set_span_in_context(span, self._extracted_context))
+        self._enter_scope(
+            self._scope_key(info),
+            trace.set_span_in_context(span, self._extracted_context),
+        )
 
     def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
         """Called when a context or step operation finishes user code.
@@ -578,6 +653,13 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             raise RuntimeError(
                 "on_user_function_end should only be called for CONTEXT and STEP operations"
             )
+        # Pop the scope this operation attached, restoring exactly what preceded
+        # it. Detaching rather than attaching the enclosing span again is what
+        # keeps this balanced: the previous code pushed a second context here, so
+        # every operation added a layer and removed none. Between operations the
+        # log filter resolves through the span registry (see
+        # get_current_span_context), so correlation is unaffected.
+        self._exit_scope(self._scope_key(info))
         # key = f"{info.operation_id}-{int(info.start_time.timestamp())}"
         span_key = (
             self._attempt_span_key(info)
@@ -610,16 +692,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             if end_timestamp is not None and end_timestamp == info.start_time:
                 end_timestamp += datetime.timedelta(microseconds=1)
             self._end_span(span_key, end_timestamp)
-        # Restore the enclosing operation span as current so code that runs
-        # after this operation (e.g. between steps in a child context)
-        # correlates to its enclosing operation, not the operation that just
-        # ended. For a top-level operation (parent_id is None) this is the
-        # invocation span; for a nested operation it is the parent context span.
-        parent_span = self._get_span(info.parent_id) or self._get_span(None)
-        if parent_span:
-            context.attach(
-                trace.set_span_in_context(parent_span, self._extracted_context)
-            )
 
     def _extract_attributes(self, info: Any) -> _SpanAttributes:
         """Extract durable execution fields as OpenTelemetry span attributes.

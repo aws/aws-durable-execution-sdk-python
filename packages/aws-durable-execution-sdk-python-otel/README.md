@@ -235,6 +235,12 @@ context onto every emitted log record using these attributes:
 These attributes are only set when a valid span context is active, so any log
 formatter or schema must treat the fields as optional.
 
+Between two operations the plugin holds no span current: the scope a step or child
+context attached is detached when that function returns. Log correlation is
+unaffected -- the filter resolves the trace context from the plugin's own span
+registry, so records emitted between operations still carry the invocation's
+`traceId` and `spanId`.
+
 ## Verification
 
 After deploying your function with the plugin configured:

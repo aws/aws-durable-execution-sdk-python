@@ -11,6 +11,8 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.plugin import (
     InvocationStartInfo,
+    UserFunctionEndInfo,
+    UserFunctionOutcome,
     UserFunctionStartInfo,
 )
 from opentelemetry.context import Context
@@ -74,6 +76,25 @@ def _user_function_start_info(operation_id: str) -> UserFunctionStartInfo:
         status=OperationStatus.STARTED,
         is_replay_children=False,
         attempt=1,
+    )
+
+
+def _user_function_end_info(operation_id: str) -> UserFunctionEndInfo:
+    """Create standard user function end info for tests."""
+    return UserFunctionEndInfo(
+        operation_id=operation_id,
+        operation_type=OperationType.STEP,
+        sub_type=None,
+        name="fetch-user",
+        parent_id=None,
+        start_time=START_TIME,
+        end_time=START_TIME,
+        is_replayed=False,
+        status=OperationStatus.SUCCEEDED,
+        is_replay_children=False,
+        attempt=1,
+        outcome=UserFunctionOutcome.SUCCEEDED,
+        error=None,
     )
 
 
@@ -147,6 +168,8 @@ def test_filter_uses_attempt_span_inside_user_function():
     assert attempt_span is not None
     expected_span_id = format(attempt_span.get_span_context().span_id, "016x")
     assert record.spanId == expected_span_id
+
+    plugin.on_user_function_end(_user_function_end_info(operation_id))
 
 
 def test_install_log_filter_attaches_to_handlers():
