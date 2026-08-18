@@ -3,11 +3,11 @@
 Drives the full plugin lifecycle against a real TracerProvider +
 InMemorySpanExporter for the two deployment shapes:
 
-* Community collector layer: the plugin owns its provider
-  (``provider_source=AUTO_OTLP`` / ``EXPLICIT``); the Workflow span is the trace root.
+* Community collector layer: the caller supplies a provider; the Workflow and
+  Invocation spans root separate traces when no ambient parent exists.
 * ADOT layer: the ADOT Lambda layer supplies the global provider and the ambient
-  Lambda invocation span (``provider_source=GLOBAL``); the plugin's
-  Invocation span parents to that ambient span.
+  Lambda invocation span; the plugin's Invocation span parents to that ambient
+  span.
 """
 
 from __future__ import annotations
@@ -17,16 +17,16 @@ from datetime import UTC, datetime
 import opentelemetry.context as otel_context
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
-    InvocationStatus,
     OperationStatus,
     OperationSubType,
-    OperationType,
 )
 from aws_durable_execution_sdk_python.plugin import (
     InvocationEndInfo,
+    InvocationStatus,
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
+    OperationType,
     UserFunctionEndInfo,
     UserFunctionOutcome,
     UserFunctionStartInfo,
@@ -36,16 +36,18 @@ from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import (
+    ProxyTracerProvider,
+    TracerProvider as ApiTracerProvider,
+)
 
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
+    DeterministicIdGenerator,
     derive_workflow_span_id,
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
-    OtelPluginConfig,
-    ProviderSource,
-)
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 
 
 START_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -57,6 +59,7 @@ XRAY_TRACE_HEADER = (
     "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1"
 )
 XRAY_TRACE_ID = int("5759e988bd862e3fe1be46a994272793", 16)
+EXECUTION_TRACE_ID = int("65937d253aa8c3f7ffe36c50d65b1a6d", 16)
 
 
 @pytest.fixture(autouse=True)
@@ -158,6 +161,119 @@ def _run_step_lifecycle(plugin: ExecutionOtelPlugin) -> None:
     )
 
 
+def _config_for_provider(
+    uses_global_provider: bool,
+    provider: TracerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> OtelPluginConfig:
+    if uses_global_provider:
+        monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
+    return OtelPluginConfig(
+        tracer_provider=None if uses_global_provider else provider,
+        context_extractor=lambda _: Context(),
+        enrich_logger=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "uses_global_provider",
+    [False, True],
+    ids=["explicit", "global"],
+)
+def test_unrelated_root_spans_keep_provider_id_generation(
+    uses_global_provider: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unrelated scopes receive fresh roots throughout a durable invocation."""
+    provider, _ = _provider()
+    provider_generator = provider.id_generator
+    unrelated_tracer = provider.get_tracer("unrelated-library")
+    before = unrelated_tracer.start_span("before", context=Context())
+
+    plugin = ExecutionOtelPlugin(
+        _config_for_provider(uses_global_provider, provider, monkeypatch)
+    )
+    assert provider.id_generator is provider_generator
+    assert isinstance(plugin._id_generator, DeterministicIdGenerator)
+
+    plugin.on_invocation_start(_invocation_start())
+    workflow = plugin._workflow_span
+    assert workflow is not None
+    during = unrelated_tracer.start_span("during", context=Context())
+    plugin.on_invocation_end(_invocation_end())
+    after = unrelated_tracer.start_span("after", context=Context())
+
+    trace_ids = {
+        before.get_span_context().trace_id,
+        during.get_span_context().trace_id,
+        after.get_span_context().trace_id,
+        workflow.get_span_context().trace_id,
+    }
+    assert len(trace_ids) == 4
+
+    before.end()
+    during.end()
+    after.end()
+
+
+def test_global_proxy_binds_sdk_provider_before_first_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin created before global SDK setup binds when invocation starts."""
+    monkeypatch.setattr(trace, "_TRACER_PROVIDER", None)
+    current_provider: list[ApiTracerProvider] = [ProxyTracerProvider()]
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: current_provider[0])
+    plugin = ExecutionOtelPlugin(
+        OtelPluginConfig(
+            context_extractor=lambda _: Context(),
+            enrich_logger=False,
+        )
+    )
+
+    provider, exporter = _provider()
+    current_provider[0] = provider
+    plugin.on_invocation_start(_invocation_start())
+    plugin.on_invocation_end(_invocation_end())
+
+    assert {span.name for span in exporter.get_finished_spans()} == {
+        "Invocation",
+        "Workflow",
+    }
+
+
+def test_global_proxy_disables_entire_invocation_until_sdk_provider_is_ready(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Provider setup midway through an invocation cannot produce a partial trace."""
+    monkeypatch.setattr(trace, "_TRACER_PROVIDER", None)
+    current_provider: list[ApiTracerProvider] = [ProxyTracerProvider()]
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: current_provider[0])
+    plugin = ExecutionOtelPlugin(
+        OtelPluginConfig(
+            context_extractor=lambda _: Context(),
+            enrich_logger=False,
+        )
+    )
+    provider, exporter = _provider()
+
+    plugin.on_invocation_start(_invocation_start())
+    assert "telemetry is disabled for this invocation" in caplog.text
+
+    current_provider[0] = provider
+    _run_step_lifecycle(plugin)
+    plugin.on_invocation_end(_invocation_end())
+    assert exporter.get_finished_spans() == ()
+
+    plugin.on_invocation_start(_invocation_start())
+    _run_step_lifecycle(plugin)
+    plugin.on_invocation_end(_invocation_end())
+    assert {span.name for span in exporter.get_finished_spans()} == {
+        "Invocation",
+        "Workflow",
+        OP_NAME,
+        f"{OP_NAME} attempt 1",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Community collector layer (plugin owns the provider)
 # ---------------------------------------------------------------------------
@@ -165,7 +281,6 @@ def test_community_layer_full_lifecycle_is_workflow_rooted():
     provider, exporter = _provider()
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.EXPLICIT,
             tracer_provider=provider,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
@@ -191,9 +306,9 @@ def test_community_layer_full_lifecycle_is_workflow_rooted():
         == InvocationStatus.SUCCEEDED.value
     )
 
-    # Invocation span is a child of the Workflow span.
-    assert invocation.parent is not None
-    assert invocation.parent.span_id == workflow.context.span_id
+    # Without ambient context, Invocation roots a separate provider trace.
+    assert invocation.parent is None
+    assert invocation.context.trace_id != workflow.context.trace_id
 
     # Operation span: deterministic id, parented under Workflow, linked to invocation.
     assert operation.context.span_id == operation_id_to_span_id(EXECUTION_ARN, OP_ID)
@@ -218,7 +333,6 @@ def test_adot_layer_full_lifecycle_parents_to_ambient_span(monkeypatch):
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            provider_source=ProviderSource.GLOBAL,
             context_extractor=lambda _: Context(),
             enrich_logger=False,
         )
@@ -237,12 +351,15 @@ def test_adot_layer_full_lifecycle_parents_to_ambient_span(monkeypatch):
 
     finished = exporter.get_finished_spans()
     spans = {s.name: s for s in finished}
+    workflow = spans["Workflow"]
     invocation = spans["Invocation"]
     operation = spans[OP_NAME]
 
     # Invocation span parents to the ambient ADOT span and carries the first flag.
     assert invocation.parent is not None
     assert invocation.parent.span_id == ambient.get_span_context().span_id
+    assert invocation.context.trace_id == ambient.get_span_context().trace_id
+    assert workflow.context.trace_id != ambient.get_span_context().trace_id
     assert invocation.attributes["durable.invocation.first"] is True
 
     # Operation span still uses the deterministic id and links to the durable
@@ -256,12 +373,11 @@ def test_adot_layer_full_lifecycle_parents_to_ambient_span(monkeypatch):
     assert len([s for s in finished if s.name == OP_NAME]) == 1
 
 
-def test_second_plugin_configures_cached_tracer_generator(monkeypatch):
-    """A second handler's Workflow span uses its deterministic trace ID."""
+def test_second_plugin_uses_execution_trace_id_independent_of_xray(monkeypatch):
+    """Workflow trace IDs remain deterministic and separate from X-Ray."""
     provider, exporter = _provider()
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     config = OtelPluginConfig(
-        provider_source=ProviderSource.GLOBAL,
         context_extractor=lambda _: Context(),
         enrich_logger=False,
     )
@@ -269,11 +385,13 @@ def test_second_plugin_configures_cached_tracer_generator(monkeypatch):
     target_plugin = ExecutionOtelPlugin(config)
     monkeypatch.setenv("_X_AMZN_TRACE_ID", XRAY_TRACE_HEADER)
 
-    assert target_plugin._tracer is first_plugin._tracer
+    if target_plugin._tracer is first_plugin._tracer:
+        assert target_plugin._id_generator is first_plugin._id_generator
     target_plugin.on_invocation_start(_invocation_start())
     target_plugin.on_invocation_end(_invocation_end())
 
     workflow = next(
         span for span in exporter.get_finished_spans() if span.name == "Workflow"
     )
-    assert workflow.context.trace_id == XRAY_TRACE_ID
+    assert workflow.context.trace_id == EXECUTION_TRACE_ID
+    assert workflow.context.trace_id != XRAY_TRACE_ID

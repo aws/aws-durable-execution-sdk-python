@@ -3,6 +3,8 @@
 import datetime
 import json
 import time
+import warnings
+from copy import deepcopy
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -736,7 +738,10 @@ def test_durable_execution_execution_error_handling():
     error_data = result["Error"]
 
     assert error_data["ErrorMessage"] == "Retriable invocation error occurred"
-    assert error_data["ErrorType"] == "ExecutionError"
+    assert (
+        error_data["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.ExecutionError"
+    )
 
 
 def test_durable_execution_client_selection_default():
@@ -1038,7 +1043,10 @@ def test_durable_execution_checkpoint_error_in_background_thread():
 
     response = test_handler(invocation_input, lambda_context)
     assert response["Status"] == InvocationStatus.FAILED.value
-    assert response["Error"]["ErrorType"] == "CheckpointError"
+    assert (
+        response["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+    )
 
 
 # endregion durable_execution
@@ -1093,7 +1101,10 @@ def test_durable_execution_checkpoint_execution_error_stops_background():
     ):
         response = test_handler(invocation_input, lambda_context)
         assert response["Status"] == InvocationStatus.FAILED.value
-        assert response["Error"]["ErrorType"] == "CheckpointError"
+        assert (
+            response["Error"]["ErrorType"]
+            == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+        )
 
 
 def test_durable_execution_checkpoint_invocation_error_retries():
@@ -1184,7 +1195,10 @@ def test_durable_execution_background_thread_execution_error_returns_failed():
 
     response = test_handler(invocation_input, lambda_context)
     assert response["Status"] == InvocationStatus.FAILED.value
-    assert response["Error"]["ErrorType"] == "CheckpointError"
+    assert (
+        response["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+    )
 
 
 def test_durable_execution_background_thread_invocation_error_retries():
@@ -1272,7 +1286,10 @@ def test_durable_execution_final_success_checkpoint_execution_error_returns_fail
 
     response = test_handler(invocation_input, lambda_context)
     assert response["Status"] == InvocationStatus.FAILED.value
-    assert response["Error"]["ErrorType"] == "CheckpointError"
+    assert (
+        response["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+    )
 
 
 def test_durable_execution_final_success_checkpoint_invocation_error_retries():
@@ -1364,7 +1381,10 @@ def test_durable_execution_final_failure_checkpoint_execution_error_returns_fail
 
     response = test_handler(invocation_input, lambda_context)
     assert response["Status"] == InvocationStatus.FAILED.value
-    assert response["Error"]["ErrorType"] == "CheckpointError"
+    assert (
+        response["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+    )
 
 
 def test_durable_execution_final_failure_checkpoint_invocation_error_retries():
@@ -1776,7 +1796,10 @@ def test_durable_execution_logs_checkpoint_error_extras_from_background_thread()
     with patch("aws_durable_execution_sdk_python.execution.logger", mock_logger):
         response = test_handler(invocation_input, lambda_context)
         assert response["Status"] == InvocationStatus.FAILED.value
-        assert response["Error"]["ErrorType"] == "CheckpointError"
+        assert (
+            response["Error"]["ErrorType"]
+            == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+        )
 
     mock_logger.exception.assert_called()
     # First call: "Checkpoint processing failed" with error extras
@@ -1891,7 +1914,10 @@ def test_durable_execution_logs_checkpoint_error_extras_from_user_code():
     with patch("aws_durable_execution_sdk_python.execution.logger", mock_logger):
         response = test_handler(invocation_input, lambda_context)
         assert response["Status"] == InvocationStatus.FAILED.value
-        assert response["Error"]["ErrorType"] == "CheckpointError"
+        assert (
+            response["Error"]["ErrorType"]
+            == "aws_durable_execution_sdk_python.exceptions.CheckpointError"
+        )
 
     mock_logger.exception.assert_called_once()
     call_args = mock_logger.exception.call_args
@@ -2674,13 +2700,13 @@ def test_from_dict_leaves_timestamps_as_integers():
 # =============================================================================
 
 
-def _make_invocation_input(mock_client, next_marker=""):
+def _make_invocation_input(mock_client, next_marker="", input_payload="{}"):
     """Helper to create a standard test invocation input."""
     operation = Operation(
         operation_id="exec1",
         operation_type=OperationType.EXECUTION,
         status=OperationStatus.STARTED,
-        execution_details=ExecutionDetails(input_payload="{}"),
+        execution_details=ExecutionDetails(input_payload=input_payload),
     )
     return DurableExecutionInvocationInputWithClient(
         durable_execution_arn="arn:test:execution/exec1",
@@ -2750,7 +2776,10 @@ def test_durable_execution_non_retryable_invocation_error_returns_failed():
 
     result = test_handler(_make_invocation_input(mock_client), _make_lambda_context())
     assert result["Status"] == InvocationStatus.FAILED.value
-    assert result["Error"]["ErrorType"] == "GetExecutionStateError"
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.GetExecutionStateError"
+    )
 
 
 def test_durable_execution_retryable_invocation_error_raises():
@@ -2790,7 +2819,10 @@ def test_durable_execution_non_retryable_background_thread_error_returns_failed(
 
     result = test_handler(_make_invocation_input(mock_client), _make_lambda_context())
     assert result["Status"] == InvocationStatus.FAILED.value
-    assert result["Error"]["ErrorType"] == "GetExecutionStateError"
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.GetExecutionStateError"
+    )
 
 
 @pytest.mark.parametrize(
@@ -2822,7 +2854,10 @@ def test_durable_execution_non_retryable_initial_pagination_error_returns_failed
         _make_lambda_context(),
     )
     assert result["Status"] == InvocationStatus.FAILED.value
-    assert result["Error"]["ErrorType"] == "GetExecutionStateError"
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.GetExecutionStateError"
+    )
 
 
 def test_durable_execution_retryable_initial_pagination_error_raises():
@@ -2854,6 +2889,12 @@ class _RecordingPlugin(DurableInstrumentationPlugin):
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        # Payload surfaces observed on the invocation hooks, so tests can assert
+        # durable_execution() actually forwards them (not just that the
+        # dataclasses can hold them).
+        self.start_execution_inputs: list[Any] = []
+        self.end_execution_inputs: list[Any] = []
+        self.end_execution_results: list[str | None] = []
 
     def on_execution_start(self, info):
         self.calls.append("execution_start")
@@ -2863,9 +2904,12 @@ class _RecordingPlugin(DurableInstrumentationPlugin):
 
     def on_invocation_start(self, info):
         self.calls.append("invocation_start")
+        self.start_execution_inputs.append(info.execution_input)
 
     def on_invocation_end(self, info):
         self.calls.append(f"invocation_end:{info.status.value}")
+        self.end_execution_inputs.append(info.execution_input)
+        self.end_execution_results.append(info.execution_result)
 
     def on_operation_start(self, info):
         self.calls.append(f"operation_start:{info.operation_id}")
@@ -2914,12 +2958,13 @@ def test_durable_execution_loads_plugins_when_handler_is_initialized():
     resolved_plugin = _RecordingPlugin()
 
     with (
+        warnings.catch_warnings(),
         patch(
             "aws_durable_execution_sdk_python.execution.load_configured_plugins",
             return_value=[explicit_plugin, resolved_plugin],
         ) as load_plugins,
-        pytest.warns(FutureWarning),
     ):
+        warnings.simplefilter("error", FutureWarning)
 
         @durable_execution(plugins=[explicit_plugin])
         def test_handler(event: Any, context: DurableContext) -> dict:
@@ -2953,6 +2998,134 @@ def test_durable_execution_with_plugins_success():
     # ExecutionStartInfo dispatches to on_invocation_start in the match block
     assert "invocation_start" in plugin.calls
     assert "invocation_end:SUCCEEDED" in plugin.calls
+
+
+def test_durable_execution_forwards_execution_input_to_plugins():
+    """durable_execution() must hand the deserialized input to both hooks.
+
+    Guards the one production line that surfaces real input
+    (`execution_input=input_event`). A non-empty payload is used deliberately:
+    the field's own default is None and an empty payload deserializes to {}, so
+    only a populated payload distinguishes real forwarding from either.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"echoed": event["name"]}
+
+    result = test_handler(
+        _make_invocation_input(mock_client, input_payload='{"name": "World"}'),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    # The invocation-start hook sees the deserialized input, not the raw payload.
+    assert plugin.start_execution_inputs == [{"name": "World"}]
+    # The end info inherits the same input from the start info.
+    assert plugin.end_execution_inputs == [{"name": "World"}]
+    # And the end hook carries the serialized result.
+    assert plugin.end_execution_results == ['{"echoed": "World"}']
+
+
+def test_durable_execution_surfaces_empty_input_as_empty_mapping():
+    """An empty payload reaches plugins as {}, never None."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    plugin = _RecordingPlugin()
+
+    @durable_execution(plugins=[plugin])
+    def test_handler(event: Any, context: DurableContext) -> str:
+        return "ok"
+
+    test_handler(
+        _make_invocation_input(mock_client, input_payload=""),
+        _make_lambda_context(),
+    )
+
+    assert plugin.start_execution_inputs == [{}]
+
+
+def test_durable_execution_isolates_execution_input_from_handler():
+    """Plugin and handler must not observe each other's input mutations.
+
+    durable_execution() hands one mutable object to both, so the plugin view is
+    deep-copied. Without that, a plugin could alter execution behaviour and a
+    handler could retroactively change what the frozen hook info reports.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    observed: dict[str, Any] = {}
+
+    class _MutatingPlugin(DurableInstrumentationPlugin):
+        def on_invocation_start(self, info):
+            # Direction A: plugin mutates its view before the handler runs.
+            info.execution_input["injected_by_plugin"] = True
+
+        def on_invocation_end(self, info):
+            observed["end_input"] = dict(info.execution_input)
+
+    @durable_execution(plugins=[_MutatingPlugin()])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        observed["handler_saw"] = dict(event)
+        # Direction B: handler mutates its event after the start hook fired.
+        event["injected_by_handler"] = True
+        return {"ok": True}
+
+    test_handler(
+        _make_invocation_input(mock_client, input_payload='{"name": "World"}'),
+        _make_lambda_context(),
+    )
+
+    # Direction A: the plugin's mutation must not reach the handler.
+    assert observed["handler_saw"] == {"name": "World"}
+    # Direction B: the handler's mutation must not reach the end hook, which
+    # still reports the plugin-side snapshot taken at invocation-start.
+    assert "injected_by_handler" not in observed["end_input"]
+    assert observed["end_input"] == {"name": "World", "injected_by_plugin": True}
+
+
+def test_durable_execution_isolates_nested_execution_input():
+    """Isolation must be deep, not just a top-level copy."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    observed: dict[str, Any] = {}
+
+    class _NestedMutatingPlugin(DurableInstrumentationPlugin):
+        def on_invocation_start(self, info):
+            info.execution_input["outer"]["inner"].append("from_plugin")
+
+    @durable_execution(plugins=[_NestedMutatingPlugin()])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        observed["handler_saw"] = deepcopy(event)
+        return {"ok": True}
+
+    test_handler(
+        _make_invocation_input(
+            mock_client, input_payload='{"outer": {"inner": ["original"]}}'
+        ),
+        _make_lambda_context(),
+    )
+
+    assert observed["handler_saw"] == {"outer": {"inner": ["original"]}}
 
 
 def test_durable_execution_with_plugins_failure():

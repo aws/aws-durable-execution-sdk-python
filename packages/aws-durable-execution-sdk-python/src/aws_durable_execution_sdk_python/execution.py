@@ -4,7 +4,6 @@ import contextlib
 import functools
 import json
 import logging
-import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -178,8 +177,7 @@ def durable_execution(
     Args:
         func: The user function to decorate
         boto3_client: Optional boto3 Lambda client to use
-        plugins: Optional list of plugins to use (EXPERIMENTAL: This
-            feature has known issues and this parameter may change or be removed.)
+        plugins: Optional list of instrumentation plugins to use
     """
     # Decorator called with parameters
     if func is None:
@@ -189,13 +187,6 @@ def durable_execution(
         )
 
     logger.debug("Starting durable execution handler...")
-
-    if plugins:
-        warnings.warn(
-            "The 'plugins' parameter is provisional and may be altered or removed.",
-            category=FutureWarning,
-            stacklevel=2,  # point the warning to the caller of durable_execution
-        )
 
     plugin_executor = PluginExecutor(load_configured_plugins(plugins))
 
@@ -307,6 +298,13 @@ def durable_execution(
                     else None
                 ),
                 is_first_invocation=not has_prior_operations,
+                execution_input=input_event,
+                # Read the map through a callable rather than snapshotting it
+                # here: the invocation-end hook needs the state as of the end of
+                # the invocation, and neither hook pays for the conversion until
+                # a plugin actually reads it.
+                operations_provider=lambda: execution_state.operations,
+                updated_operation_ids=invocation_input.updated_operation_ids,
             )
             # Thread 1: Run background checkpoint processing
             executor.submit(execution_state.checkpoint_batches_forever)

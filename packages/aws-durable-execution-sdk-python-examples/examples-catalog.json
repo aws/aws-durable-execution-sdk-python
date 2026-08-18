@@ -46,15 +46,15 @@
       "path": "./src/step/step_with_retry.py"
     },
     {
-      "name": "Step with Custom SerDes",
-      "description": "Step with a non-identity custom SerDes; the step returns the canonical round-tripped value, consistent across first run and replay",
-      "handler": "step_with_custom_serdes.handler",
+      "name": "Custom SerDes Round-Trip",
+      "description": "One function proving the first-run/replay result-equality guarantee with a non-identity SerDes across step, wait_for_condition, and run_in_child_context (normal, virtual, large-payload)",
+      "handler": "serdes_roundtrip.handler",
       "integration": true,
       "durableConfig": {
         "RetentionPeriodInDays": 7,
         "ExecutionTimeout": 300
       },
-      "path": "./src/step/step_with_custom_serdes.py"
+      "path": "./src/serdes_roundtrip/serdes_roundtrip.py"
     },
     {
       "name": "Wait State",

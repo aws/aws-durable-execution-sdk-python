@@ -16,11 +16,6 @@ from aws_durable_execution_sdk_python_otel.execution_plugin import (
 )
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
     OtelPluginConfig,
-    ExporterConfig,
-    ProviderSource,
-)
-from aws_durable_execution_sdk_python_otel.instrumentations import (
-    register_standalone_instrumentations,
 )
 from aws_durable_execution_sdk_python_otel.log_filter import (
     OtelContextLogFilter,
@@ -41,16 +36,13 @@ __all__ = [
     "DeterministicIdGenerator",
     "ExecutionOtelPlugin",
     "OtelPluginConfig",
-    "ExporterConfig",
     "InvocationOtelPlugin",
     "OtelContextLogFilter",
     "ProviderResult",
-    "ProviderSource",
     "create_tracer_provider",
     "derive_workflow_span_id",
     "install_log_filter",
     "operation_id_to_span_id",
-    "register_standalone_instrumentations",
     "w3c_client_context_extractor",
     "xray_context_extractor",
 ]

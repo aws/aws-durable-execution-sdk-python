@@ -25,5 +25,5 @@ def test_wait_for_callback_failure(durable_runner):
     # on first run and replay.
     assert result.error.to_dict() == {
         "ErrorMessage": "my callback error",
-        "ErrorType": "CallbackExternalError",
+        "ErrorType": "aws_durable_execution_sdk_python.exceptions.CallbackExternalError",
     }

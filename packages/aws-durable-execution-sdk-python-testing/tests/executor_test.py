@@ -1846,6 +1846,44 @@ def test_get_execution_not_found(executor, mock_store):
         executor.get_execution("test-arn")
 
 
+@pytest.mark.parametrize("blank_arn", ["", "   ", None])
+def test_get_execution_rejects_blank_arn(executor, mock_store, blank_arn):
+    with pytest.raises(InvalidParameterValueException):
+        executor.get_execution(blank_arn)
+
+    mock_store.load.assert_not_called()
+
+
+@pytest.mark.parametrize("blank_arn", ["", "   ", None])
+def test_stop_execution_rejects_blank_arn(executor, mock_store, blank_arn):
+    """A blank ARN must be rejected before it reaches the registry, so it
+    never creates a permanent phantom worker for an execution that was
+    never going to exist."""
+    with pytest.raises(InvalidParameterValueException):
+        executor.stop_execution(blank_arn)
+
+    mock_store.load.assert_not_called()
+    assert executor._registry.active_count() == 0  # noqa: SLF001
+
+
+@pytest.mark.parametrize("blank_arn", ["", "   ", None])
+def test_get_execution_state_rejects_blank_arn(executor, mock_store, blank_arn):
+    with pytest.raises(InvalidParameterValueException):
+        executor.get_execution_state(blank_arn, checkpoint_token="token")
+
+    mock_store.load.assert_not_called()
+    assert executor._registry.active_count() == 0  # noqa: SLF001
+
+
+@pytest.mark.parametrize("blank_arn", ["", "   ", None])
+def test_checkpoint_execution_rejects_blank_arn(executor, mock_store, blank_arn):
+    with pytest.raises(InvalidParameterValueException):
+        executor.checkpoint_execution(blank_arn, checkpoint_token="token")
+
+    mock_store.load.assert_not_called()
+    assert executor._registry.active_count() == 0  # noqa: SLF001
+
+
 def test_get_execution_state(mock_scheduler, mock_invoker, mock_checkpoint_processor):
     """GetDurableExecutionState is a pure read from the pinned
     snapshot, bounded by the configured byte cap. Uses a real store

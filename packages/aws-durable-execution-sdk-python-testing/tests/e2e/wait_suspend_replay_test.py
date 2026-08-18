@@ -20,12 +20,12 @@ from aws_durable_execution_sdk_python.execution import (
 )
 from aws_durable_execution_sdk_python.lambda_service import (
     OperationStatus,
-    OperationType,
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationStartInfo,
     OperationEndInfo,
+    OperationType,
 )
 
 from aws_durable_execution_sdk_python_testing.runner import (

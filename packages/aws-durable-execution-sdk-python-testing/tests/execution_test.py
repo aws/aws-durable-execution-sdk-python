@@ -232,6 +232,80 @@ def test_get_assertable_operations():
     assert result[0] == step_op
 
 
+def test_get_assertable_operations_excludes_trailing_execution_operation():
+    """A second EXECUTION-type entry at the end of the list (e.g. a future
+    large-payload checkpoint) must be excluded too, not just the one at
+    index 0."""
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="test-invocation-id",
+    )
+    execution_op = Operation(
+        operation_id="exec-op",
+        parent_id=None,
+        name="execution",
+        start_timestamp=datetime.now(timezone.utc),
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+    )
+    step_op = Operation(
+        operation_id="step-op",
+        parent_id=None,
+        name="step",
+        start_timestamp=datetime.now(timezone.utc),
+        operation_type=OperationType.STEP,
+        status=OperationStatus.STARTED,
+    )
+    trailing_execution_op = Operation(
+        operation_id="exec-op-end",
+        parent_id=None,
+        name="execution",
+        start_timestamp=datetime.now(timezone.utc),
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.SUCCEEDED,
+    )
+    operations = [execution_op, step_op, trailing_execution_op]
+    execution = Execution("test-arn", start_input, operations)
+
+    result = execution.get_assertable_operations()
+
+    assert result == [step_op]
+
+
+def test_get_assertable_operations_returns_independent_snapshot():
+    """The returned list must not alias `self.operations`, so later
+    mutation of the execution's operations doesn't retroactively change
+    a snapshot a caller already holds."""
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="test-invocation-id",
+    )
+    execution_op = Operation(
+        operation_id="exec-op",
+        parent_id=None,
+        name="execution",
+        start_timestamp=datetime.now(timezone.utc),
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+    )
+    execution = Execution("test-arn", start_input, [execution_op])
+
+    result = execution.get_assertable_operations()
+    execution.operations.append(execution_op)
+
+    assert result == []
+
+
 def test_has_pending_operations_with_pending_step():
     """Test has_pending_operations returns True for pending STEP operations."""
     start_input = StartDurableExecutionInput(

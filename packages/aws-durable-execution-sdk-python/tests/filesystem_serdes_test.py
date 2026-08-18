@@ -632,25 +632,25 @@ class TestSerdesApiIntegration:
         assert deserialized == value
 
     def test_serialization_error_handling(self, tmp_path):
-        """Serialize should raise ExecutionError on failure via top-level API."""
-        from aws_durable_execution_sdk_python.exceptions import ExecutionError
+        """Serialize should raise SerDesError on failure via top-level API."""
+        from aws_durable_execution_sdk_python.exceptions import SerDesError
         from aws_durable_execution_sdk_python.serdes import serialize
 
         fs_serdes = FileSystemSerDes("/nonexistent/readonly/path")
 
-        with pytest.raises(ExecutionError, match="Serialization failed"):
+        with pytest.raises(SerDesError, match="Serialization failed"):
             serialize(fs_serdes, {"data": "test"}, TEST_OPERATION_ID, TEST_ARN)
 
     def test_deserialization_error_handling(self, tmp_path):
-        """Deserialize should raise ExecutionError on failure via top-level API."""
-        from aws_durable_execution_sdk_python.exceptions import ExecutionError
+        """Deserialize should raise SerDesError on failure via top-level API."""
+        from aws_durable_execution_sdk_python.exceptions import SerDesError
         from aws_durable_execution_sdk_python.serdes import deserialize
 
         fs_serdes = FileSystemSerDes(str(tmp_path))
         # Invalid envelope pointing to nonexistent file
         invalid_data = json.dumps({"file": "/nonexistent/file.json"})
 
-        with pytest.raises(ExecutionError, match="Deserialization failed"):
+        with pytest.raises(SerDesError, match="Deserialization failed"):
             deserialize(fs_serdes, invalid_data, TEST_OPERATION_ID, TEST_ARN)
 
 

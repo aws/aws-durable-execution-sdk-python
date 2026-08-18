@@ -97,7 +97,10 @@ def test_step_failure_surfaces_typed_step_error():
         # Execution failed; the result (one level up from the step) carries the
         # StepError wrapper, and StepError.error_type is the original error type.
         assert result["Status"] == InvocationStatus.FAILED.value
-        assert result["Error"]["ErrorType"] == "StepError"
+        assert (
+            result["Error"]["ErrorType"]
+            == "aws_durable_execution_sdk_python.exceptions.StepError"
+        )
         assert result["Error"]["ErrorMessage"] == "step boom"
 
         # The step's own FAIL checkpoint records the raw escaping error type.
@@ -173,7 +176,10 @@ def test_failed_step_reconstructs_step_error_on_replay():
         # Reconstructed as a StepError with the checkpointed message; the step
         # body is never re-executed.
         assert result["Status"] == InvocationStatus.FAILED.value
-        assert result["Error"]["ErrorType"] == "StepError"
+        assert (
+            result["Error"]["ErrorType"]
+            == "aws_durable_execution_sdk_python.exceptions.StepError"
+        )
         assert result["Error"]["ErrorMessage"] == "prior boom"
         assert executed["count"] == 0
 
@@ -181,9 +187,18 @@ def test_failed_step_reconstructs_step_error_on_replay():
 @pytest.mark.parametrize(
     ("checkpointed_type", "message"),
     [
-        ("CallbackExternalError", "external boom"),
-        ("CallbackTimeoutError", "timed out"),
-        ("CallbackError", "internal callback boom"),
+        (
+            "aws_durable_execution_sdk_python.exceptions.CallbackExternalError",
+            "external boom",
+        ),
+        (
+            "aws_durable_execution_sdk_python.exceptions.CallbackTimeoutError",
+            "timed out",
+        ),
+        (
+            "aws_durable_execution_sdk_python.exceptions.CallbackError",
+            "internal callback boom",
+        ),
     ],
 )
 def test_failed_callback_reconstructs_typed_error_on_replay(
@@ -294,7 +309,7 @@ def test_failed_submitter_reconstructs_callback_submitter_error_on_replay():
                         "ParentId": "execution-1",
                         "ContextDetails": {
                             "Error": {
-                                "ErrorType": "StepError",
+                                "ErrorType": "aws_durable_execution_sdk_python.exceptions.StepError",
                                 "ErrorMessage": "submitter boom",
                             }
                         },
@@ -308,6 +323,9 @@ def test_failed_submitter_reconstructs_callback_submitter_error_on_replay():
         result = my_handler(event, _lambda_context())
 
         assert result["Status"] == InvocationStatus.FAILED.value
-        assert result["Error"]["ErrorType"] == "CallbackSubmitterError"
+        assert (
+            result["Error"]["ErrorType"]
+            == "aws_durable_execution_sdk_python.exceptions.CallbackSubmitterError"
+        )
         assert result["Error"]["ErrorMessage"] == "submitter boom"
         assert submitter_runs["count"] == 0

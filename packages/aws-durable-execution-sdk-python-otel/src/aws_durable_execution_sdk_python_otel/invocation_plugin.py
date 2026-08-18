@@ -7,30 +7,27 @@ import logging
 import threading
 from typing import Any
 
-from aws_durable_execution_sdk_python.lambda_service import (
-    InvocationStatus,
-    OperationType,
-)
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationEndInfo,
+    InvocationStatus,
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
+    OperationType,
     UserFunctionEndInfo,
     UserFunctionOutcome,
     UserFunctionStartInfo,
 )
 from opentelemetry import context, trace
 from opentelemetry.context import Context
-from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
+from opentelemetry.sdk.trace import Tracer as SdkTracer
 from opentelemetry.trace import (
     Link,
     Span,
     SpanContext,
     SpanKind,
     StatusCode,
-    TraceFlags,
     Tracer,
 )
 
@@ -40,17 +37,13 @@ from aws_durable_execution_sdk_python_otel.context_extractors import (
 )
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     DeterministicIdGenerator,
+    _to_otel_trace_id,
     derive_workflow_span_id,
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
-from aws_durable_execution_sdk_python_otel.otel_plugin_config import (
-    OtelPluginConfig,
-)
+from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
-from aws_durable_execution_sdk_python_otel.instrumentations import (
-    register_standalone_instrumentations,
-)
 
 
 logger = logging.getLogger(__name__)
@@ -73,25 +66,22 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     """OpenTelemetry instrumentation plugin for durable executions.
 
     The plugin creates spans for Lambda invocations, durable operations, and
-    user-function attempts. Trace IDs are derived from the durable execution ARN
-    and execution start time so each replay or resumed invocation contributes to
-    the same trace.
+    user-function attempts. The Workflow trace ID is derived from the durable
+    execution ARN and start time. Invocation spans inherit ambient or extracted
+    upstream context, and operation spans are correlated with the Workflow by a
+    span link.
 
     Operation IDs are converted into deterministic span IDs. The first observed
     span for an operation uses that deterministic ID; later continuation spans
-    use newly generated span IDs and link back to the deterministic span ID so
-    trace viewers can relate retries and cross-invocation completions to the
-    original logical operation.
+    use newly generated span IDs. Operation attributes and links to the Workflow
+    span provide execution-scoped correlation across invocations.
 
     Args:
         config: Shared plugin configuration (the same OtelPluginConfig accepted
             by ExecutionOtelPlugin). When omitted, defaults are used (X-Ray
-            extractor, "Workflow" span name, log enrichment on). Like
-            ExecutionOtelPlugin and the JS SDK plugins, the default
-            ``provider_source`` is ``GLOBAL``: the plugin uses the globally
-            configured tracer provider (e.g. the ADOT Lambda layer). Set
-            ``provider_source=ProviderSource.AUTO_OTLP`` on the config to have
-            the plugin build and own an auto-configured OTLP provider instead.
+            extractor, "Workflow" span name, log enrichment on) and the plugin
+            uses the globally configured tracer provider (for example, the
+            provider installed by the ADOT Lambda layer).
     """
 
     DEFAULT_INSTRUMENT_NAME = "aws-durable-execution-sdk-python"
@@ -100,17 +90,13 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         """Initialize the plugin from a shared OtelPluginConfig.
 
         Accepts the same OtelPluginConfig as ExecutionOtelPlugin so both plugins
-        share one configuration surface (context extractor, instrumentation
-        name, provider selection, exporter/propagator settings, log
-        enrichment). Like ExecutionOtelPlugin and the JS SDK plugins, the
-        default ``provider_source`` is ``GLOBAL``: it uses the globally
-        configured (e.g. ADOT) provider. Pass
-        ``provider_source=ProviderSource.AUTO_OTLP`` to have the plugin build
-        and own an auto-configured OTLP provider instead.
+        share one configuration surface (context extractor, instrumentation name,
+        provider selection, and log enrichment). When no provider is supplied,
+        the globally configured provider is used.
 
-        The tracer provider is configured with this plugin's deterministic ID
-        generator so spans for a durable execution share stable trace and
-        logical operation identifiers.
+        The plugin tracer is configured with a scoped deterministic ID generator
+        so durable spans share stable identifiers without changing unrelated
+        instrumentation scopes on the same provider.
 
         When ``enrich_logger`` is enabled (default), the plugin installs a
         logging filter that stamps the active OTel trace context onto every
@@ -123,51 +109,22 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._workflow_span_name = self._config.workflow_span_name
         self._enrich_logger = self._config.enrich_logger
 
-        # Like ExecutionOtelPlugin (and the JS SDK plugins), InvocationOtelPlugin
-        # defaults to provider_source=GLOBAL (the globally configured, e.g. ADOT,
-        # provider); set provider_source=ProviderSource.AUTO_OTLP on the config
-        # to build and own an auto-configured OTLP provider instead.
-        self._id_generator = DeterministicIdGenerator()
-        result = create_tracer_provider(
-            self._config,
-            id_generator=self._id_generator,
-        )
+        result = create_tracer_provider(self._config)
         self._provider = result.tracer_provider
-
-        # Deterministic trace stitching requires the SDK TracerProvider, which
-        # exposes id_generator/sampler. The API's default ProxyTracerProvider
-        # (returned before an SDK provider is configured) does not. Rather than
-        # fail the invocation over an observability concern, warn and continue:
-        # the proxy's tracer is effectively a no-op (and auto-delegates if an SDK
-        # provider is configured later). In a Lambda OTel/ADOT deployment the
-        # layer configures a real SDK provider before the handler imports.
-        if isinstance(self._provider, SdkTracerProvider):
-            self._id_generator = DeterministicIdGenerator.install_on_provider(
-                self._provider
-            )
-        else:
-            logger.warning(
-                "InvocationOtelPlugin expected an SDK TracerProvider "
-                "(opentelemetry.sdk.trace.TracerProvider) but got %s. Spans will "
-                "not use deterministic IDs. "
-                "Ensure the OpenTelemetry SDK is configured (e.g. via the ADOT "
-                "Lambda layer) or pass an explicit tracer_provider.",
-                type(self._provider).__name__,
-            )
+        self._uses_global_provider = result.uses_global_provider
         self._tracer: Tracer = self._provider.get_tracer(self._config.instrument_name)
-
-        try:
-            register_standalone_instrumentations(self._config, result)
-        except Exception:
-            logger.exception("Failed to register standalone instrumentations")
+        self._id_generator = DeterministicIdGenerator()
+        self._bind_sdk_tracer()
 
         # per invocation status:
         self._execution_arn = ""
+        self._execution_trace_id: int | None = None
         self._extracted_context: Context | None = None
         self._workflow_span: Span | None = None
         # Maps operation ID (None for root) to the active span.
         self._operation_spans: dict[str | None, Span] = {}
         self._operation_spans_lock = threading.RLock()
+        self._tracing_enabled = False
 
         if self._enrich_logger:
             # Install the root-logger filter so every log record is stamped with
@@ -175,6 +132,20 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             # handler before the handler module is imported (and thus before the
             # plugin is constructed), so the handlers are available here.
             install_log_filter(self)
+
+    def _bind_sdk_tracer(self) -> bool:
+        """Bind to an SDK tracer, retrying a deferred global provider."""
+        tracer = self._tracer
+        if not isinstance(tracer, SdkTracer):
+            if self._uses_global_provider:
+                self._provider = trace.get_tracer_provider()
+            tracer = self._provider.get_tracer(self._config.instrument_name)
+            self._tracer = tracer
+        if not isinstance(tracer, SdkTracer):
+            return False
+
+        self._id_generator = DeterministicIdGenerator.install_on_tracer(tracer)
+        return True
 
     def _set_span(self, operation_id: str | None, span: Span) -> None:
         """Register the active span for an operation ID."""
@@ -246,6 +217,16 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
 
         raise ValueError("No parent span found")
 
+    def _invocation_parent_context(self) -> Context:
+        """Return the active ambient context, then extracted upstream context."""
+        ambient_context = context.get_current()
+        ambient_span_context = trace.get_current_span(
+            ambient_context
+        ).get_span_context()
+        if ambient_span_context.is_valid:
+            return ambient_context
+        return self._extracted_context or ambient_context
+
     def _start_span(
         self,
         operation_id: str | None,
@@ -266,10 +247,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             attributes: Span attributes.
             start_time: Optional durable start timestamp.
             parent_span: Active parent span. When omitted, the extracted
-                upstream context is used as the parent.
+                ambient or upstream context is used as the parent.
             existed: Whether the logical operation already had a previous span.
-                Continuation spans link back to the deterministic span ID for
-                the operation while using a fresh generated span ID.
+                Continuation spans use a fresh generated span ID.
             span_key: Optional registry key. Defaults to ``operation_id``.
             deterministic_span_id: Whether to use the deterministic operation
                 span ID. Attempt spans set this to ``False`` so they can be
@@ -286,28 +266,13 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         )
         registry_key = span_key if span_key is not None else operation_id
         with self._operation_spans_lock:
-            if not deterministic_span_id:
+            links: list[Link]
+            if not deterministic_span_id or existed:
                 links = []
-                self._id_generator.set_next_span_id(None)
-            elif existed:
-                if not operation_id:
-                    raise ValueError("operation id is required")
-                span_id = operation_id_to_span_id(self._execution_arn, operation_id)
-                links = [
-                    Link(
-                        context=SpanContext(
-                            trace_id=self._id_generator.generate_trace_id(),
-                            span_id=span_id,
-                            is_remote=False,
-                            trace_flags=TraceFlags(TraceFlags.SAMPLED),
-                        )
-                    )
-                ]
-                self._id_generator.set_next_span_id(None)
+                span_id = None
             else:
                 links = []
-
-                self._id_generator.set_next_span_id(
+                span_id = (
                     operation_id_to_span_id(self._execution_arn, operation_id)
                     if operation_id
                     else None
@@ -319,20 +284,21 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 if workflow_ctx and workflow_ctx.is_valid:
                     links = [*links, Link(context=workflow_ctx)]
             if parent_span is None:
-                # root span
-                parent_context = self._extracted_context
+                parent_context = self._invocation_parent_context()
             else:
                 parent_context = trace.set_span_in_context(
                     parent_span, self._extracted_context
                 )
-            span = self._tracer.start_span(
-                name=name,
-                kind=SpanKind.INTERNAL,
-                attributes=attributes,
-                start_time=_to_otel_timestamp(start_time),
-                context=parent_context,
-                links=links,
-            )
+            trace_id = self._execution_trace_id if operation_id is not None else None
+            with self._id_generator.use_ids(trace_id=trace_id, span_id=span_id):
+                span = self._tracer.start_span(
+                    name=name,
+                    kind=SpanKind.INTERNAL,
+                    attributes=attributes,
+                    start_time=_to_otel_timestamp(start_time),
+                    context=parent_context,
+                    links=links,
+                )
             self._operation_spans[registry_key] = span
 
         logger.debug("Started OTel span: %s", span)
@@ -364,9 +330,22 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         """Called at the start of each invocation. Creates the invocation span."""
         logger.debug("Durable invocation started: %s", info)
+        self._reset_state()
+        self._tracing_enabled = self._bind_sdk_tracer()
+        if not self._tracing_enabled:
+            logger.warning(
+                "InvocationOtelPlugin expected an SDK Tracer at invocation start "
+                "but got %s; telemetry is disabled for this invocation. Ensure "
+                "the OpenTelemetry SDK is configured before invocation start.",
+                type(self._tracer).__name__,
+            )
+            return
+
         self._execution_arn = info.execution_arn or ""
+        self._execution_trace_id = _to_otel_trace_id(
+            self._execution_arn, info.execution_start_time
+        )
         self._extracted_context = self._context_extractor(info)
-        self._id_generator.set_trace_id(self._execution_arn, info.execution_start_time)
 
         self._start_workflow_span(info)
 
@@ -391,22 +370,27 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         if not self._execution_arn:
             logger.warning("No execution ARN; skipping Workflow span creation")
             return
-        self._id_generator.set_next_span_id(
-            derive_workflow_span_id(self._execution_arn)
-        )
         # Empty context => root span with no parent. _to_otel_timestamp falls
         # back to now() when execution_start_time is None.
-        self._workflow_span = self._tracer.start_span(
-            name=self._workflow_span_name,
-            kind=SpanKind.INTERNAL,
-            attributes={"durable.execution.arn": self._execution_arn},
-            start_time=_to_otel_timestamp(info.execution_start_time),
-            context=Context(),
-        )
+        with self._id_generator.use_ids(
+            trace_id=self._execution_trace_id,
+            span_id=derive_workflow_span_id(self._execution_arn),
+        ):
+            self._workflow_span = self._tracer.start_span(
+                name=self._workflow_span_name,
+                kind=SpanKind.INTERNAL,
+                attributes={"durable.execution.arn": self._execution_arn},
+                start_time=_to_otel_timestamp(info.execution_start_time),
+                context=Context(),
+            )
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         """Called at the end of each invocation. Ends the invocation span and flushes."""
         logger.debug("Durable invocation ended: %s", info)
+        if not self._tracing_enabled:
+            self._reset_state()
+            return
+
         # Spans are registered parent-first, so close pending spans in reverse
         # order to keep every child contained within its parent.
         with self._operation_spans_lock:
@@ -453,20 +437,27 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                     self._workflow_span.set_status(StatusCode.OK)
                 self._workflow_span.end()
 
-        # Clear all per-invocation state to prevent leaks across warm Lambda reuses
-        self._execution_arn = ""
-        self._extracted_context = None
-        self._workflow_span = None
-        with self._operation_spans_lock:
-            self._operation_spans = {}
+        self._reset_state()
 
         # Flush before Lambda freeze
         if hasattr(self._provider, "force_flush"):
             self._provider.force_flush()
 
+    def _reset_state(self) -> None:
+        """Clear per-invocation state for warm Lambda environment reuse."""
+        self._execution_arn = ""
+        self._execution_trace_id = None
+        self._extracted_context = None
+        self._workflow_span = None
+        with self._operation_spans_lock:
+            self._operation_spans = {}
+        self._tracing_enabled = False
+
     def on_operation_start(self, info: OperationStartInfo) -> None:
         """Called when an operation begins. Creates a span for the operation."""
         logger.debug("Durable operation started: %s", info)
+        if not self._tracing_enabled:
+            return
         if info.operation_type is OperationType.CONTEXT:
             # Context operations are tracked using on_user_function_start.
             return
@@ -488,14 +479,16 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         Non-user-function operations are started by ``on_operation_start``. If
         an operation end is observed without a matching in-memory span, this
         invocation is completing an operation that began earlier, so a short
-        continuation span is created and linked to the deterministic logical
-        operation span before being ended.
+        continuation span with a fresh span ID is created and ended.
         """
         logger.debug("Durable operation ended: %s", info)
+        if not self._tracing_enabled:
+            return
         span = self._get_span(info.operation_id)
         if span is None:
-            # the span was not started in the current invocation, so we need to
-            # create a new one that links to the previous one
+            # The operation started in a prior invocation. The prior SpanContext
+            # is not checkpointed, so create a new correlated segment without a
+            # fabricated link.
             parent_span = self._resolve_parent_span(info.parent_id)
             attributes = self._extract_attributes(info)
             span = self._start_span(
@@ -532,6 +525,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             info: Information about the operation attempt.
         """
         logger.debug("Durable user function started: %s", info)
+        if not self._tracing_enabled:
+            return
         # Context and Step operations are tracked using on_user_function_start
         if info.operation_type not in [OperationType.CONTEXT, OperationType.STEP]:
             raise RuntimeError(
@@ -574,6 +569,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             info: Information about the operation attempt.
         """
         logger.debug("Durable user function ended: %s", info)
+        if not self._tracing_enabled:
+            return
         if info.operation_type not in [OperationType.CONTEXT, OperationType.STEP]:
             raise RuntimeError(
                 "on_user_function_end should only be called for CONTEXT and STEP operations"
@@ -634,7 +631,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             "durable.execution.arn": self._execution_arn,
         }
 
-        if isinstance(info, InvocationStartInfo):
+        if hasattr(info, "is_first_invocation"):
             attributes["durable.invocation.first"] = info.is_first_invocation
         if hasattr(info, "operation_id") and info.operation_id is not None:
             attributes["durable.operation.id"] = info.operation_id
@@ -645,7 +642,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         # STEP user-function spans represent attempts, not durable operations.
         if (
             not (
-                isinstance(info, (UserFunctionStartInfo, UserFunctionEndInfo))
+                hasattr(info, "is_replay_children")
                 and info.operation_type is OperationType.STEP
             )
             and hasattr(info, "status")
