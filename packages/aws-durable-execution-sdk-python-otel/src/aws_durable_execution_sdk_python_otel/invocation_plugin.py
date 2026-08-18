@@ -176,8 +176,24 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     # Context scope helpers
     # ------------------------------------------------------------------
     def _attach_context(self, key: str, new_context: Context) -> None:
-        """Attach a context and remember its token under ``key``."""
+        """Attach a context and remember its token under ``key``.
+
+        A token already stored under ``key`` means the previous scope for that
+        operation was never released: its user function did not reach
+        ``on_user_function_end``, because it suspended and a timed in-process
+        resume re-entered the same operation. Release it before attaching, so
+        the new token does not bury one that can never be detached -- otherwise
+        releasing the new scope would restore the abandoned span and leave it
+        current for later work on this thread.
+        """
         with self._operation_spans_lock:
+            if key in self._context_tokens:
+                logger.debug(
+                    "Releasing an unreleased context scope for %s before "
+                    "re-attaching; its user function did not report an end.",
+                    key,
+                )
+                self._detach_context(key)
             self._context_tokens[key] = (
                 threading.get_ident(),
                 context.attach(new_context),

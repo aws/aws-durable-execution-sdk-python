@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -801,5 +802,89 @@ def test_detach_ignores_token_attached_on_another_thread():
 
     assert "step-1:attempt:1" not in plugin._context_tokens
     assert otel_context.get_current() == before_context
+
+    plugin.on_invocation_end(_invocation_end_info())
+
+
+# ---------------------------------------------------------------------------
+# Re-entering an operation whose scope was never released
+# ---------------------------------------------------------------------------
+def test_reentered_child_context_does_not_leave_abandoned_span_current():
+    """Verify a timed in-process resume unwinds the abandoned scope.
+
+    A suspended child context never reaches on_user_function_end, and the
+    map/parallel coordinator can resume that branch in-process, re-entering the
+    same operation ID on the same thread. Without releasing the first scope, the
+    second scope's detach would restore the abandoned span and leave it current.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    before_context = otel_context.get_current()
+    context_id = "ctx-1"
+
+    # First run: the child context suspends, so no end hook fires.
+    plugin.on_user_function_start(_context_start_info(context_id))
+    suspended_span = plugin._get_span(context_id)
+    assert suspended_span is not None
+
+    # Timed in-process resume re-enters the same operation.
+    plugin.on_user_function_start(_context_start_info(context_id))
+    assert len([key for key in plugin._context_tokens if key == context_id]) == 1
+
+    plugin.on_user_function_end(_context_end_info(context_id))
+
+    assert otel_context.get_current() == before_context
+    assert context_id not in plugin._context_tokens
+    assert (
+        trace.get_current_span().get_span_context().span_id
+        != suspended_span.get_span_context().span_id
+    )
+
+    plugin.on_invocation_end(_invocation_end_info())
+
+
+def test_reentered_step_attempt_releases_the_previous_scope():
+    """Verify re-entering the same attempt key unwinds the previous scope."""
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    before_context = otel_context.get_current()
+
+    plugin.on_user_function_start(_step_start_info("step-1"))
+    plugin.on_user_function_start(_step_start_info("step-1"))
+    plugin.on_user_function_end(_step_end_info("step-1"))
+
+    assert otel_context.get_current() == before_context
+    assert set(plugin._context_tokens) == {"__invocation_context__"}
+
+    plugin.on_invocation_end(_invocation_end_info())
+    assert plugin._context_tokens == {}
+
+
+def test_reentry_replaces_a_scope_attached_on_another_thread():
+    """Verify a foreign token is replaced without a cross-thread reset.
+
+    A resumed branch can land on a different pool thread than the one that
+    suspended. The foreign token cannot be reset here, so it is dropped and the
+    new scope still unwinds cleanly on this thread.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    before_context = otel_context.get_current()
+    span_key = "step-1:attempt:1"
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(
+            plugin.on_user_function_start, _step_start_info("step-1")
+        ).result()
+    foreign_thread_ident, _foreign_token = plugin._context_tokens[span_key]
+    assert foreign_thread_ident != threading.get_ident()
+
+    plugin.on_user_function_start(_step_start_info("step-1"))
+    assert plugin._context_tokens[span_key][0] == threading.get_ident()
+
+    plugin.on_user_function_end(_step_end_info("step-1"))
+
+    assert otel_context.get_current() == before_context
+    assert set(plugin._context_tokens) == {"__invocation_context__"}
 
     plugin.on_invocation_end(_invocation_end_info())
