@@ -1,0 +1,53 @@
+from pathlib import Path
+
+import yaml
+
+
+WORKFLOW_PATH = (
+    Path(__file__).parents[2] / "workflows" / "opentelemetry-conformance-tests.yml"
+)
+ORCHESTRATOR_REVISION = "4fd176f7ddf696fd57c31ca6a9b23d0ccbbbdc19"
+
+
+def test_opentelemetry_workflow_calls_python_orchestrator() -> None:
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text())
+    job = workflow["jobs"]["opentelemetry"]
+
+    assert job["uses"] == (
+        "aws/aws-durable-execution-conformance-tests/.github/workflows/"
+        f"opentelemetry-orchestrator.yml@{ORCHESTRATOR_REVISION}"
+    )
+    assert job["with"] == {
+        "language": "python",
+        "resource_prefix": "p",
+        "sdk_repository": "aws/aws-durable-execution-sdk-python",
+        "sdk_ref": "${{ github.event.pull_request.head.sha || github.sha }}",
+        "conformance_test_ref": "${{ inputs.conformance_test_ref || 'main' }}",
+        "checkout_sdk": False,
+        "contract_test_command": (
+            "hatch run test:all "
+            "packages/aws-durable-execution-conformance-tests-otel/"
+            "tests/test_python_examples.py"
+        ),
+        "adot_release_repository": (
+            "aws-observability/aws-otel-python-instrumentation"
+        ),
+        "collector_compatible_runtime": "python3.13",
+        "collector_otlp_endpoint": "http://localhost:4318",
+        "suite_timeout_minutes": 30,
+        "phase": "${{ inputs.phase || 'short' }}",
+        "delay_seconds": "${{ inputs.delay_seconds || '82800' }}",
+        "aws_region": "${{ inputs.aws_region || 'us-west-2' }}",
+        "otlp_endpoint": "${{ inputs.otlp_endpoint || '' }}",
+    }
+    assert job["secrets"] == {
+        "CONFORMANCE_TEST_ROLE_ARN": "${{ secrets.TEST_ROLE_ARN }}",
+        "CONFORMANCE_TEST_ACCOUNT_ID": "${{ secrets.TEST_ACCOUNT_ID }}",
+        "CONFORMANCE_TEST_LAMBDA_EXECUTION_ROLE_ARN": (
+            "${{ secrets.TEST_LAMBDA_EXECUTION_ROLE_ARN }}"
+        ),
+        "DASH0_AUTH_TOKEN": "${{ secrets.DASH0_AUTH_TOKEN }}",
+        "DD_API_KEY": "${{ secrets.DD_API_KEY }}",
+        "DD_APPLICATION_KEY": "${{ secrets.DD_APPLICATION_KEY }}",
+        "DATADOG_OTLP_HEADERS": "${{ secrets.DATADOG_OTLP_HEADERS }}",
+    }

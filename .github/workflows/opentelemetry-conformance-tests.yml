@@ -52,14 +52,25 @@ jobs:
       actions: write
       contents: read
       id-token: write
-    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/python-opentelemetry.yml@4fd176f7ddf696fd57c31ca6a9b23d0ccbbbdc19
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@4fd176f7ddf696fd57c31ca6a9b23d0ccbbbdc19
     with:
+      language: python
+      resource_prefix: p
+      sdk_repository: aws/aws-durable-execution-sdk-python
+      sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      conformance_test_ref: ${{ inputs.conformance_test_ref || 'main' }}
+      checkout_sdk: false
+      contract_test_command: >-
+        hatch run test:all
+        packages/aws-durable-execution-conformance-tests-otel/tests/test_python_examples.py
+      adot_release_repository: aws-observability/aws-otel-python-instrumentation
+      collector_compatible_runtime: python3.13
+      collector_otlp_endpoint: http://localhost:4318
+      suite_timeout_minutes: 30
       phase: ${{ inputs.phase || 'short' }}
       delay_seconds: ${{ inputs.delay_seconds || '82800' }}
       aws_region: ${{ inputs.aws_region || 'us-west-2' }}
       otlp_endpoint: ${{ inputs.otlp_endpoint || '' }}
-      conformance_test_ref: ${{ inputs.conformance_test_ref || 'main' }}
-      python_sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}
     secrets:
       CONFORMANCE_TEST_ROLE_ARN: ${{ secrets.TEST_ROLE_ARN }}
       CONFORMANCE_TEST_ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
