@@ -14,9 +14,26 @@ OpenTelemetry instrumentation plugin for the [AWS Durable Execution SDK for Pyth
 
 ## Installation
 
+When using an ADOT or community OpenTelemetry Lambda layer:
+
 ```bash
 pip install aws-durable-execution-sdk-python-otel
 ```
+
+The base package intentionally does not install OpenTelemetry libraries. The
+Lambda layer supplies a version-aligned API, SDK, exporter, and propagators,
+preventing packages in the function artifact from shadowing parts of the layer.
+
+For an application that configures its own OpenTelemetry provider instead of
+using a Lambda layer:
+
+```bash
+pip install "aws-durable-execution-sdk-python-otel[standalone]"
+```
+
+The `standalone` extra installs the OpenTelemetry API, SDK, and AWS X-Ray
+propagator. The application remains responsible for configuring its provider,
+processors, and exporter.
 
 ## Quick Start using X-Ray/CloudWatch Tracing
 
@@ -306,8 +323,7 @@ setups.
 
 - Python >= 3.11
 - `aws-durable-execution-sdk-python` >= 1.8.0
-- `opentelemetry-api` >= 1.20.0
-- `opentelemetry-sdk` >= 1.20.0
+- An ADOT/community OpenTelemetry Lambda layer, or the `standalone` extra
 
 ## License
 

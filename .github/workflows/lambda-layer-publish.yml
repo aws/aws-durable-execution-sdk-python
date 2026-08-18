@@ -120,6 +120,12 @@ jobs:
         working-directory: packages/aws-durable-execution-sdk-python-otel
         run: hatch build
 
+      - name: Verify OTel wheel dependency contract
+        run: |
+          OTEL_WHEEL=$(find packages/aws-durable-execution-sdk-python-otel/dist \
+            -name 'aws_durable_execution_sdk_python_otel-*.whl' -print -quit)
+          python .github/scripts/check_otel_wheel_dependencies.py "$OTEL_WHEEL"
+
       - name: Verify legal files
         run: |
           python .github/scripts/check_dist_legal_files.py \
