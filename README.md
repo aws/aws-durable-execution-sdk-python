@@ -1,6 +1,8 @@
 # AWS Durable Execution SDK for Python
 
 [![Build](https://github.com/aws/aws-durable-execution-sdk-python/actions/workflows/ci.yml/badge.svg)](https://github.com/aws/aws-durable-execution-sdk-python/actions/workflows/ci.yml)
+[![Core Conformance](https://github.com/aws/aws-durable-execution-sdk-python/actions/workflows/conformance-tests.yml/badge.svg)](https://github.com/aws/aws-durable-execution-sdk-python/actions/workflows/conformance-tests.yml)
+[![OpenTelemetry Conformance](https://github.com/aws/aws-durable-execution-sdk-python/actions/workflows/opentelemetry-conformance-tests.yml/badge.svg)](https://github.com/aws/aws-durable-execution-sdk-python/actions/workflows/opentelemetry-conformance-tests.yml)
 [![PyPI - Version](https://img.shields.io/pypi/v/aws-durable-execution-sdk-python.svg)](https://pypi.org/project/aws-durable-execution-sdk-python)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/aws-durable-execution-sdk-python.svg)](https://pypi.org/project/aws-durable-execution-sdk-python)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/aws/aws-durable-execution-sdk-python/badge)](https://scorecard.dev/viewer/?uri=github.com/aws/aws-durable-execution-sdk-python)
