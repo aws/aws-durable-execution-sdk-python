@@ -1165,9 +1165,15 @@ class ExecutionState:
             start_info = self._plugin_executor.on_user_function_start(
                 operation_identifier, is_replay_children, attempt
             )
+            # Set once an outcome has been reported, so the finally below can
+            # tell an unreported exit from a reported one. Suspension is the
+            # common case, but OrphanedChildException, BackgroundThreadError and
+            # SystemExit all subclass BaseException and bypass the handlers too.
+            outcome_reported = False
             try:
                 result = user_function(*args, **kwargs)
                 self._plugin_executor.on_user_function_end(start_info, None)
+                outcome_reported = True
                 return result
             except SuspendExecution:
                 raise
@@ -1175,6 +1181,12 @@ class ExecutionState:
                 self._plugin_executor.on_user_function_end(
                     start_info, ErrorObject.from_exception(e)
                 )
+                outcome_reported = True
                 raise
+            finally:
+                # Runs on the thread that executed the user function, which is
+                # the only thread that can release state bound to it.
+                if not outcome_reported:
+                    self._plugin_executor.on_user_function_incomplete(start_info)
 
         return wrapper

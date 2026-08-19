@@ -40,6 +40,7 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationStartInfo,
     OperationType,
     UserFunctionEndInfo,
+    UserFunctionIncompleteInfo,
     UserFunctionOutcome,
     UserFunctionStartInfo,
 )
@@ -167,8 +168,24 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             return self._operation_spans.pop(key, None)
 
     @staticmethod
-    def _attempt_key(info: UserFunctionStartInfo | UserFunctionEndInfo) -> str:
+    def _attempt_key(
+        info: UserFunctionStartInfo | UserFunctionEndInfo | UserFunctionIncompleteInfo,
+    ) -> str:
         return f"{info.operation_id}:attempt:{info.attempt or 1}"
+
+    @classmethod
+    def _user_function_key(
+        cls,
+        info: UserFunctionStartInfo | UserFunctionEndInfo | UserFunctionIncompleteInfo,
+    ) -> str:
+        """Return the registry key a user function's span and scope are stored under.
+
+        STEP user functions are attempts, so each attempt gets its own key; a
+        CONTEXT is entered once per invocation and uses the operation id.
+        """
+        if info.operation_type is OperationType.STEP:
+            return cls._attempt_key(info)
+        return info.operation_id
 
     # ------------------------------------------------------------------
     # Context scope helpers
@@ -544,11 +561,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             raise RuntimeError(
                 "on_user_function_end only supports CONTEXT and STEP operations"
             )
-        key = (
-            self._attempt_key(info)
-            if info.operation_type is OperationType.STEP
-            else info.operation_id
-        )
+        key = self._user_function_key(info)
         span = self._get_span(key)
         if span is None:
             raise RuntimeError(
@@ -582,6 +595,24 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # context that was active before the operation) becomes current again
         # without stacking another scope.
         self._detach_context(key)
+
+    def on_user_function_incomplete(self, info: UserFunctionIncompleteInfo) -> None:
+        """Release the scope of a user function that reported no outcome.
+
+        A suspended, orphaned or interrupted user function never reaches
+        ``on_user_function_end``, so its scope is released here instead, on the
+        thread that attached it. Nested scopes unwind in reverse order because
+        this fires as the exception propagates outward: the inner operation is
+        released before its enclosing one.
+
+        The span is left open and registered. The operation is not finished --
+        a suspended one resumes and ends later -- so ending it here would export
+        a span for work that is still in flight.
+        """
+        logger.debug("Durable user function incomplete: %s", info)
+        if not self._tracing_enabled:
+            return
+        self._detach_context(self._user_function_key(info))
 
     # ------------------------------------------------------------------
     # Attributes

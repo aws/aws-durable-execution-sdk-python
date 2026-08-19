@@ -23,6 +23,7 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationStartInfo,
     OperationType,
     UserFunctionEndInfo,
+    UserFunctionIncompleteInfo,
     UserFunctionOutcome,
     UserFunctionStartInfo,
 )
@@ -144,6 +145,27 @@ def _user_function_end_info(
         outcome=outcome,
         end_time=END_TIME,
         error=None,
+    )
+
+
+def _user_function_incomplete_info(
+    operation_id: str,
+    attempt: int = 1,
+    parent_id: str | None = None,
+    operation_type: OperationType = OperationType.STEP,
+) -> UserFunctionIncompleteInfo:
+    """Create user function incomplete info (suspended, orphaned, interrupted)."""
+    return UserFunctionIncompleteInfo(
+        operation_id=operation_id,
+        operation_type=operation_type,
+        sub_type=None,
+        name=f"step-{operation_id}",
+        parent_id=parent_id,
+        start_time=START_TIME,
+        is_replayed=False,
+        status=OperationStatus.STARTED,
+        is_replay_children=False,
+        attempt=attempt,
     )
 
 
@@ -1382,80 +1404,98 @@ def test_reentered_step_attempt_releases_the_previous_scope():
     plugin.on_invocation_end(_invocation_end_info())
 
 
-def test_reentry_on_another_thread_leaves_the_originating_worker_dirty():
-    """Pin what re-entry can and cannot clean up across threads.
+def test_suspension_releases_the_scope_on_the_originating_worker():
+    """Verify the suspending worker releases its own scope.
 
-    A resumed branch can land on a different pool thread than the one that
-    suspended. Re-entry drops the foreign token instead of resetting it, because
-    a context token can only be reset on its own thread, and it unwinds cleanly
-    on the thread that re-entered. The worker that suspended keeps the abandoned
-    span current: releasing it needs a hook invoked on that thread when the user
-    function fails to complete, which the SDK does not provide. The worker is
-    kept alive here so this limitation is asserted rather than hidden by pool
-    shutdown; the assertion flips once such a hook exists.
+    A suspended user function reports no outcome, so the SDK fires
+    on_user_function_incomplete on the thread that ran it -- the only thread that
+    can reset its context token. The worker is kept alive and probed to prove it
+    is left clean even though the resume lands on a different thread.
     """
-    plugin, _ = _create_plugin()
+    plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     before_context = otel_context.get_current()
     operation_id = "step-1"
     span_key = "step-1:attempt:1"
 
     with ThreadPoolExecutor(max_workers=1) as worker:
-        # The suspending run happens on the worker and never reports an end.
-        worker.submit(
-            plugin.on_user_function_start, _user_function_start_info(operation_id)
-        ).result()
-        abandoned_span = plugin._get_span(span_key)
-        assert abandoned_span is not None
-        foreign_thread_ident, _foreign_token = plugin._context_tokens[span_key]
-        assert foreign_thread_ident != threading.get_ident()
 
-        # The timed resume lands on this thread instead.
+        def suspend_on_worker() -> tuple[int, bool]:
+            plugin.on_user_function_start(_user_function_start_info(operation_id))
+            attached_span_id = trace.get_current_span().get_span_context().span_id
+            plugin.on_user_function_incomplete(
+                _user_function_incomplete_info(operation_id)
+            )
+            return (
+                attached_span_id,
+                trace.get_current_span().get_span_context().is_valid,
+            )
+
+        attached_span_id, span_still_current = worker.submit(suspend_on_worker).result()
+        suspended_span = plugin._get_span(span_key)
+
+        # The scope was released on the worker, and its span is left open.
+        assert attached_span_id != 0
+        assert span_still_current is False
+        assert span_key not in plugin._context_tokens
+        assert suspended_span is not None
+        assert not exporter.get_finished_spans()
+
+        # The timed resume lands on this thread, with nothing stale to unwind.
         plugin.on_user_function_start(_user_function_start_info(operation_id))
         assert plugin._context_tokens[span_key][0] == threading.get_ident()
         plugin.on_user_function_end(_user_function_end_info(operation_id))
-
-        # This thread unwound to where it started.
         assert otel_context.get_current() == before_context
 
-        # The originating worker is still carrying the abandoned span.
-        worker_span_id = worker.submit(
-            lambda: trace.get_current_span().get_span_context().span_id
+        # The originating worker is still clean.
+        worker_span_valid = worker.submit(
+            lambda: trace.get_current_span().get_span_context().is_valid
         ).result()
-        assert worker_span_id == abandoned_span.get_span_context().span_id
+        assert worker_span_valid is False
 
     plugin.on_invocation_end(_invocation_end_info())
 
 
-def test_nested_reentry_restores_the_abandoned_outer_scope():
-    """Pin nested re-entry: correct ids, but the abandoned outer span object.
+def test_nested_suspension_unwinds_scopes_in_reverse_order():
+    """Verify nested suspends release inner-first and resume without stale scopes.
 
-    When an outer child context and an inner one both suspend, re-entry releases
-    each scope in the order the operations are replayed, which is not the reverse
-    of the order they were attached. Ending the inner operation therefore
-    restores the scope captured for the abandoned outer span rather than the
-    resumed one. Deterministic CONTEXT span ids make the two indistinguishable
-    downstream -- same trace id and span id, so parenting and log correlation are
-    unaffected -- but the current span object is one that is never exported, so
-    anything an instrumentation library records on it is lost. Reverse-order
-    unwinding needs the SDK to report the suspension; this test documents the
-    current behaviour and flips when that lands.
+    The incomplete hook fires as the exception propagates outward, so the inner
+    context's scope is released before its enclosing one. On resume, ending the
+    inner operation restores the resumed outer scope rather than the one captured
+    for the suspended run.
     """
-    plugin, _ = _create_plugin()
+    plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     before_context = otel_context.get_current()
 
-    # Both contexts suspend, so neither reports an end.
     plugin.on_user_function_start(
         _user_function_start_info("ctx-outer", operation_type=OperationType.CONTEXT)
     )
-    abandoned_outer = plugin._get_span("ctx-outer")
+    suspended_outer = plugin._get_span("ctx-outer")
     plugin.on_user_function_start(
         _user_function_start_info(
             "ctx-inner", parent_id="ctx-outer", operation_type=OperationType.CONTEXT
         )
     )
-    assert abandoned_outer is not None
+    assert suspended_outer is not None
+
+    # Both contexts suspend: the inner one unwinds first.
+    plugin.on_user_function_incomplete(
+        _user_function_incomplete_info(
+            "ctx-inner", parent_id="ctx-outer", operation_type=OperationType.CONTEXT
+        )
+    )
+    assert trace.get_current_span() is suspended_outer
+
+    plugin.on_user_function_incomplete(
+        _user_function_incomplete_info(
+            "ctx-outer", operation_type=OperationType.CONTEXT
+        )
+    )
+    assert otel_context.get_current() == before_context
+    assert plugin._context_tokens == {}
+    # Neither span is ended: both operations are still in flight.
+    assert not exporter.get_finished_spans()
 
     # The timed in-process resume replays both contexts, outer first.
     plugin.on_user_function_start(
@@ -1469,10 +1509,7 @@ def test_nested_reentry_restores_the_abandoned_outer_scope():
     )
     resumed_inner = plugin._get_span("ctx-inner")
     assert resumed_outer is not None
-    assert resumed_inner is not None
-    assert resumed_outer is not abandoned_outer
-
-    # Resumed inner code runs under the resumed inner span.
+    assert resumed_outer is not suspended_outer
     assert trace.get_current_span() is resumed_inner
 
     plugin.on_user_function_end(
@@ -1481,19 +1518,9 @@ def test_nested_reentry_restores_the_abandoned_outer_scope():
         )
     )
 
-    # The restored scope carries the abandoned outer span, whose ids match the
-    # resumed one because CONTEXT span ids are derived from the operation id.
-    assert trace.get_current_span() is abandoned_outer
-    assert (
-        abandoned_outer.get_span_context().span_id
-        == resumed_outer.get_span_context().span_id
-    )
-    assert (
-        abandoned_outer.get_span_context().trace_id
-        == resumed_outer.get_span_context().trace_id
-    )
+    # The resumed outer scope is restored, not the one from the suspended run.
+    assert trace.get_current_span() is resumed_outer
 
-    # Leaving the outer context still unwinds to where the invocation started.
     plugin.on_user_function_end(
         _user_function_end_info("ctx-outer", operation_type=OperationType.CONTEXT)
     )

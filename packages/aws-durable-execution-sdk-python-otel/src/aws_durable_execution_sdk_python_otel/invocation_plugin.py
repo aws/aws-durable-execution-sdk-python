@@ -16,6 +16,7 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationStartInfo,
     OperationType,
     UserFunctionEndInfo,
+    UserFunctionIncompleteInfo,
     UserFunctionOutcome,
     UserFunctionStartInfo,
 )
@@ -168,9 +169,25 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             return self._operation_spans.get(operation_id)
 
     @staticmethod
-    def _attempt_span_key(info: UserFunctionStartInfo | UserFunctionEndInfo) -> str:
+    def _attempt_span_key(
+        info: UserFunctionStartInfo | UserFunctionEndInfo | UserFunctionIncompleteInfo,
+    ) -> str:
         """Return the registry key for a STEP attempt span."""
         return f"{info.operation_id}:attempt:{info.attempt or 1}"
+
+    @classmethod
+    def _user_function_span_key(
+        cls,
+        info: UserFunctionStartInfo | UserFunctionEndInfo | UserFunctionIncompleteInfo,
+    ) -> str:
+        """Return the registry key a user function's span and scope are stored under.
+
+        STEP user functions are attempts, so each attempt gets its own key; a
+        CONTEXT is entered once per invocation and uses the operation id.
+        """
+        if info.operation_type is OperationType.STEP:
+            return cls._attempt_span_key(info)
+        return info.operation_id
 
     # ------------------------------------------------------------------
     # Context scope helpers
@@ -642,12 +659,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             raise RuntimeError(
                 "on_user_function_end should only be called for CONTEXT and STEP operations"
             )
-        # key = f"{info.operation_id}-{int(info.start_time.timestamp())}"
-        span_key = (
-            self._attempt_span_key(info)
-            if info.operation_type is OperationType.STEP
-            else info.operation_id
-        )
+        span_key = self._user_function_span_key(info)
         span = self._get_span(span_key)
         if not span:
             raise RuntimeError(
@@ -681,6 +693,25 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         # context active before the operation for a top-level one, where
         # get_current_span_context falls back to the invocation span.
         self._detach_context(span_key)
+
+    def on_user_function_incomplete(self, info: UserFunctionIncompleteInfo) -> None:
+        """Release the scope of a user function that reported no outcome.
+
+        A suspended, orphaned or interrupted user function never reaches
+        ``on_user_function_end``, so its scope is released here instead, on the
+        thread that attached it. Nested scopes unwind in reverse order because
+        this fires as the exception propagates outward: the inner operation is
+        released before its enclosing one.
+
+        The span is left open and registered. The operation is not finished --
+        a suspended one resumes and ends later -- so ending it here would export
+        a span for work that is still in flight. Spans still open at invocation
+        end are closed by ``on_invocation_end``.
+        """
+        logger.debug("Durable user function incomplete: %s", info)
+        if not self._tracing_enabled:
+            return
+        self._detach_context(self._user_function_span_key(info))
 
     def _extract_attributes(self, info: Any) -> _SpanAttributes:
         """Extract durable execution fields as OpenTelemetry span attributes.

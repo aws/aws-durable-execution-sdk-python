@@ -235,6 +235,44 @@ class UserFunctionEndInfo(OperationInfo):
 
 
 @dataclass(frozen=True)
+class UserFunctionIncompleteInfo(OperationInfo):
+    """Reports a user function that ended without reporting an outcome.
+
+    Emitted when the user function neither returns nor raises an ordinary
+    ``Exception`` -- it suspended, was orphaned by its parent, was cut short by a
+    background failure, or the interpreter is exiting. The operation is not
+    finished: a suspended operation resumes later, in this invocation or a
+    subsequent one, and reports a real end then.
+
+    Plugins receive this on the thread that ran the user function, which is the
+    only thread that can release state bound to it (a thread-local scope, for
+    example). Release such state here, but do not treat the operation as
+    finished.
+    """
+
+    is_replay_children: (
+        bool  # True if user function is called to replay children (MAP/PARALLEL)
+    )
+
+    @classmethod
+    def from_start_info(
+        cls, start_info: UserFunctionStartInfo
+    ) -> UserFunctionIncompleteInfo:
+        return UserFunctionIncompleteInfo(
+            operation_id=start_info.operation_id,
+            operation_type=start_info.operation_type,
+            sub_type=start_info.sub_type,
+            name=start_info.name,
+            parent_id=start_info.parent_id,
+            start_time=start_info.start_time,
+            is_replayed=start_info.is_replayed,
+            status=start_info.status,
+            is_replay_children=start_info.is_replay_children,
+            attempt=start_info.attempt,
+        )
+
+
+@dataclass(frozen=True)
 class InvocationInfo:
     request_id: str | None
     execution_arn: str | None
@@ -441,6 +479,25 @@ class DurableInstrumentationPlugin:
         """
         pass
 
+    def on_user_function_incomplete(self, info: UserFunctionIncompleteInfo) -> None:
+        """Called when a user function ends without reporting an outcome.
+
+        Fires instead of ``on_user_function_end`` when the user function
+        suspends, is orphaned by its parent, is cut short by a background
+        failure, or the interpreter is exiting. Exactly one of the two is called
+        for every ``on_user_function_start``. This is called within the thread
+        that runs the user provided function, so it is the only opportunity to
+        release state bound to that thread.
+
+        The operation is not finished: a suspended operation resumes later and
+        reports a real end then. Release scoped state here, but do not record the
+        operation as complete.
+
+        Args:
+            info: Information about the operation attempt.
+        """
+        pass
+
 
 @dataclass(frozen=True)
 class DurableInstrumentationPluginProvider:
@@ -493,6 +550,8 @@ class PluginExecutor:
                     plugin.on_user_function_start(info)
                 case UserFunctionEndInfo():
                     plugin.on_user_function_end(info)
+                case UserFunctionIncompleteInfo():
+                    plugin.on_user_function_incomplete(info)
                 case _:
                     raise RuntimeError(f"Unknown info type: {type(info)}")
         except Exception:
@@ -654,6 +713,17 @@ class PluginExecutor:
         """Execute any registered plugins for the operation when its user function finishes execution."""
         self.execute_plugins(
             UserFunctionEndInfo.from_start_info(start_info, error), sync=True
+        )
+
+    def on_user_function_incomplete(self, start_info: UserFunctionStartInfo) -> None:
+        """Execute plugins for a user function that reported no outcome.
+
+        Dispatched synchronously, like the start and end hooks, so plugins run on
+        the thread that executed the user function and can release state bound to
+        it.
+        """
+        self.execute_plugins(
+            UserFunctionIncompleteInfo.from_start_info(start_info), sync=True
         )
 
     def on_operation_action(
