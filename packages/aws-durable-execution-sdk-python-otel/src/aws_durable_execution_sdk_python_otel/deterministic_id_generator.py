@@ -7,7 +7,7 @@ import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from opentelemetry.sdk.trace import IdGenerator, RandomIdGenerator
@@ -23,14 +23,19 @@ class _IdOverride:
     span_id: int | None
 
 
-def _to_otel_trace_id(execution_arn: str, start_timestamp: datetime | None) -> int:
+def _to_otel_trace_id(execution_arn: str, start_timestamp: datetime) -> int:
     """Build a deterministic OTel-compatible execution trace ID (128 bits).
 
     The ID is independent of ambient Lambda or X-Ray trace context so the
     parentless Workflow span remains the only root of the durable execution
     trace. Invocation spans inherit ambient context separately.
+
+    Raises:
+        ValueError: If the execution start timestamp is missing.
     """
-    time_part = format(int((start_timestamp or datetime.now(UTC)).timestamp()), "08x")
+    if start_timestamp is None:
+        raise ValueError("execution start time is required to derive a trace ID")
+    time_part = format(int(start_timestamp.timestamp()), "08x")
     hash_part = hashlib.blake2b(execution_arn.encode()).hexdigest()[:24]  # noqa: S324
     return int(f"{time_part}{hash_part}", 16)
 

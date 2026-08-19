@@ -273,6 +273,13 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         logger.debug("Durable invocation started: %s", info)
         self._reset_state()
+        if info.execution_start_time is None:
+            logger.warning(
+                "ExecutionOtelPlugin requires InvocationStartInfo.execution_start_time "
+                "to derive a deterministic trace ID; telemetry is disabled for this "
+                "invocation."
+            )
+            return
         self._tracing_enabled = self._bind_sdk_tracer()
         if not self._tracing_enabled:
             logger.warning(
@@ -307,9 +314,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         if not self._execution_arn:
             logger.warning("No execution ARN; skipping Workflow span creation")
             return
-        start_time = _to_otel_timestamp(
-            info.execution_start_time
-        ) or _to_otel_timestamp(datetime.datetime.now(datetime.UTC))
         # Empty context => root span with no parent.
         with self._id_generator.use_ids(
             trace_id=self._execution_trace_id,
@@ -319,7 +323,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 name=self._workflow_span_name,
                 kind=SpanKind.INTERNAL,
                 attributes={"durable.execution.arn": self._execution_arn},
-                start_time=start_time,
+                start_time=_to_otel_timestamp(info.execution_start_time),
                 context=Context(),
             )
 

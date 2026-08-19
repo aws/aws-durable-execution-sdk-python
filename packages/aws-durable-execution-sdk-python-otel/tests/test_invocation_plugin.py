@@ -203,6 +203,24 @@ def test_invocation_start_and_end_emit_invocation_span():
     assert plugin._get_span(None) is None
 
 
+def test_invocation_start_without_execution_start_time_disables_tracing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    plugin, exporter = _create_plugin()
+    info = InvocationStartInfo(
+        request_id="request-1",
+        execution_arn=EXECUTION_ARN,
+        execution_start_time=None,
+        is_first_invocation=True,
+    )
+
+    plugin.on_invocation_start(info)
+    plugin.on_invocation_end(_invocation_end_info())
+
+    assert "requires InvocationStartInfo.execution_start_time" in caplog.text
+    assert exporter.get_finished_spans() == ()
+
+
 def test_invocation_span_parents_to_ambient_span():
     plugin, exporter = _create_plugin()
 

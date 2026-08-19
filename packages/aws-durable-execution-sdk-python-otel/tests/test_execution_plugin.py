@@ -175,6 +175,24 @@ def test_workflow_and_invocation_are_separate_roots_without_ambient_parent():
     assert invocation.context.trace_id != workflow.context.trace_id
 
 
+def test_invocation_start_without_execution_start_time_disables_tracing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    plugin, exporter = _create_plugin()
+    info = InvocationStartInfo(
+        request_id="request-1",
+        execution_arn=EXECUTION_ARN,
+        execution_start_time=None,
+        is_first_invocation=True,
+    )
+
+    plugin.on_invocation_start(info)
+    plugin.on_invocation_end(_invocation_end_info())
+
+    assert "requires InvocationStartInfo.execution_start_time" in caplog.text
+    assert exporter.get_finished_spans() == ()
+
+
 def test_explicit_mode_invocation_span_parented_to_ambient_span():
     plugin, exporter = _create_plugin()
 
