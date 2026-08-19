@@ -168,9 +168,25 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             return self._operation_spans.get(operation_id)
 
     @staticmethod
-    def _attempt_span_key(info: UserFunctionStartInfo | UserFunctionEndInfo) -> str:
+    def _attempt_span_key(
+        info: UserFunctionStartInfo | UserFunctionEndInfo,
+    ) -> str:
         """Return the registry key for a STEP attempt span."""
         return f"{info.operation_id}:attempt:{info.attempt or 1}"
+
+    @classmethod
+    def _user_function_span_key(
+        cls,
+        info: UserFunctionStartInfo | UserFunctionEndInfo,
+    ) -> str:
+        """Return the registry key a user function's span and scope are stored under.
+
+        STEP user functions are attempts, so each attempt gets its own key; a
+        CONTEXT is entered once per invocation and uses the operation id.
+        """
+        if info.operation_type is OperationType.STEP:
+            return cls._attempt_span_key(info)
+        return info.operation_id
 
     # ------------------------------------------------------------------
     # Context scope helpers
@@ -613,11 +629,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         span_name = info.name or info.operation_id
         if info.operation_type is OperationType.STEP:
             span_name = f"{span_name} attempt {info.attempt or 1}"
-        span_key = (
-            self._attempt_span_key(info)
-            if info.operation_type is OperationType.STEP
-            else info.operation_id
-        )
+        span_key = self._user_function_span_key(info)
         span = self._start_span(
             operation_id=info.operation_id,
             name=span_name,
@@ -648,19 +660,17 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             raise RuntimeError(
                 "on_user_function_end should only be called for CONTEXT and STEP operations"
             )
-        # key = f"{info.operation_id}-{int(info.start_time.timestamp())}"
-        span_key = (
-            self._attempt_span_key(info)
-            if info.operation_type is OperationType.STEP
-            else info.operation_id
-        )
+        span_key = self._user_function_span_key(info)
         span = self._get_span(span_key)
         if not span:
             raise RuntimeError(
                 "on_user_function_end called without matching on_user_function_start"
             )
 
-        if info.operation_type is OperationType.STEP:
+        if (
+            info.operation_type is OperationType.STEP
+            and info.outcome is not UserFunctionOutcome.INCOMPLETE
+        ):
             span.set_attributes(self._extract_attributes(info))
             if info.outcome is UserFunctionOutcome.FAILED:
                 span.set_status(

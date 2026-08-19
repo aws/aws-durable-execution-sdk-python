@@ -167,8 +167,24 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             return self._operation_spans.pop(key, None)
 
     @staticmethod
-    def _attempt_key(info: UserFunctionStartInfo | UserFunctionEndInfo) -> str:
+    def _attempt_key(
+        info: UserFunctionStartInfo | UserFunctionEndInfo,
+    ) -> str:
         return f"{info.operation_id}:attempt:{info.attempt or 1}"
+
+    @classmethod
+    def _user_function_key(
+        cls,
+        info: UserFunctionStartInfo | UserFunctionEndInfo,
+    ) -> str:
+        """Return the registry key a user function's span and scope are stored under.
+
+        STEP user functions are attempts, so each attempt gets its own key; a
+        CONTEXT is entered once per invocation and uses the operation id.
+        """
+        if info.operation_type is OperationType.STEP:
+            return cls._attempt_key(info)
+        return info.operation_id
 
     # ------------------------------------------------------------------
     # Context scope helpers
@@ -511,12 +527,12 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             raise RuntimeError(
                 "on_user_function_start only supports CONTEXT and STEP operations"
             )
+        key = self._user_function_key(info)
         if info.operation_type is OperationType.STEP:
             parent = self._get_span(info.operation_id) or self._resolve_parent(
                 info.parent_id
             )
             name = f"{info.name or info.operation_id} attempt {info.attempt or 1}"
-            key = self._attempt_key(info)
             span = self._start_span(
                 operation_id=info.operation_id,
                 name=name,
@@ -528,7 +544,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             )
         else:  # CONTEXT
             parent = self._resolve_parent(info.parent_id)
-            key = info.operation_id
             span = self._start_span(
                 operation_id=info.operation_id,
                 name=info.name or info.operation_id,
@@ -548,17 +563,16 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             raise RuntimeError(
                 "on_user_function_end only supports CONTEXT and STEP operations"
             )
-        key = (
-            self._attempt_key(info)
-            if info.operation_type is OperationType.STEP
-            else info.operation_id
-        )
+        key = self._user_function_key(info)
         span = self._get_span(key)
         if span is None:
             raise RuntimeError(
                 "on_user_function_end without matching on_user_function_start"
             )
-        if info.operation_type is OperationType.STEP:
+        if (
+            info.operation_type is OperationType.STEP
+            and info.outcome is not UserFunctionOutcome.INCOMPLETE
+        ):
             span.set_attributes(self._operation_attributes(info))
             if info.outcome is UserFunctionOutcome.FAILED:
                 span.set_status(

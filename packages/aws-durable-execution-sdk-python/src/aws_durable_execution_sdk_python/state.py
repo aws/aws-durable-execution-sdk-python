@@ -21,7 +21,6 @@ from aws_durable_execution_sdk_python.exceptions import (
     DurableOperationError,
     GetExecutionStateError,
     OrphanedChildException,
-    SuspendExecution,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -37,6 +36,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.plugin import (
     PluginExecutor,
+    UserFunctionOutcome,
 )
 from aws_durable_execution_sdk_python.threading import CompletionEvent
 
@@ -1165,16 +1165,22 @@ class ExecutionState:
             start_info = self._plugin_executor.on_user_function_start(
                 operation_identifier, is_replay_children, attempt
             )
+            outcome = UserFunctionOutcome.INCOMPLETE
+            error = None
             try:
                 result = user_function(*args, **kwargs)
-                self._plugin_executor.on_user_function_end(start_info, None)
+            except Exception as exception:
+                outcome = UserFunctionOutcome.FAILED
+                error = ErrorObject.from_exception(exception)
+                raise
+            else:
+                outcome = UserFunctionOutcome.SUCCEEDED
                 return result
-            except SuspendExecution:
-                raise
-            except Exception as e:
+            finally:
+                # Runs on the thread that executed the user function, which is
+                # the only thread that can release state bound to it.
                 self._plugin_executor.on_user_function_end(
-                    start_info, ErrorObject.from_exception(e)
+                    start_info, error, outcome=outcome
                 )
-                raise
 
         return wrapper
