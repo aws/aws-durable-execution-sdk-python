@@ -1,17 +1,25 @@
 name: OpenTelemetry Conformance Tests
 
+# Per-PR OpenTelemetry conformance run. Calls the shared orchestrator in
+# aws-durable-execution-conformance-tests and points it at this repo's own handlers and
+# templates (packages/aws-durable-execution-sdk-python-conformance-tests-otel/) through
+# examples_dir, so the handlers run from the commit under test while the orchestration
+# (backend matrix, ADOT layer, collector build, long-running cycle) stays centralized.
+
 on:
   pull_request:
     branches: ["main"]
     paths:
       - "packages/aws-durable-execution-sdk-python/**"
       - "packages/aws-durable-execution-sdk-python-otel/**"
+      - "packages/aws-durable-execution-sdk-python-conformance-tests-otel/**"
       - ".github/workflows/opentelemetry-conformance-tests.yml"
   push:
     branches: ["main"]
     paths:
       - "packages/aws-durable-execution-sdk-python/**"
       - "packages/aws-durable-execution-sdk-python-otel/**"
+      - "packages/aws-durable-execution-sdk-python-conformance-tests-otel/**"
       - ".github/workflows/opentelemetry-conformance-tests.yml"
   workflow_dispatch:
     inputs:
@@ -48,17 +56,19 @@ jobs:
       actions: write
       contents: read
       id-token: write
-    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@397d523d01bdf97ff8461ab749ddaa445bbf67ca
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@8de1bbfdccfeb36d5f9ccee99f21533f0bcb1d72
     with:
       language: python
       resource_prefix: p
       sdk_repository: aws/aws-durable-execution-sdk-python
       sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}
       conformance_test_ref: ${{ inputs.conformance_test_ref || 'main' }}
-      checkout_sdk: false
-      contract_test_command: >-
-        hatch run test:all
-        packages/aws-durable-execution-conformance-tests-otel/tests/test_python_examples.py
+      # Check the SDK out so the handlers and templates below are on disk. The handlers
+      # themselves are installed from sdk_ref by src/requirements.txt during the SAM build.
+      checkout_sdk: true
+      # Path is relative to the conformance workspace, where the SDK is checked out at
+      # .build/durable-sdk.
+      examples_dir: .build/durable-sdk/packages/aws-durable-execution-sdk-python-conformance-tests-otel
       adot_release_repository: aws-observability/aws-otel-python-instrumentation
       collector_compatible_runtime: python3.13
       collector_otlp_endpoint: http://localhost:4318

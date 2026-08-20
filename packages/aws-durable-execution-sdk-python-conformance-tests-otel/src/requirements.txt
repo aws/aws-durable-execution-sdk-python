@@ -1,0 +1,2 @@
+aws-durable-execution-sdk-python @ git+https://github.com/aws/aws-durable-execution-sdk-python.git@${PYTHON_SDK_REF}#subdirectory=packages/aws-durable-execution-sdk-python
+aws-durable-execution-sdk-python-otel @ git+https://github.com/aws/aws-durable-execution-sdk-python.git@${PYTHON_SDK_REF}#subdirectory=packages/aws-durable-execution-sdk-python-otel
