@@ -194,9 +194,22 @@ def _construct_cfn_tag(loader: CfnLoader, _suffix: str, node: yaml.Node) -> CfnT
 CfnLoader.add_multi_constructor("!", _construct_cfn_tag)
 
 
+def _safe_load_cfn(stream: object) -> Any:
+    """Safely load a CloudFormation template with short-form tags.
+
+    Equivalent to yaml.safe_load (CfnLoader extends yaml.SafeLoader) while
+    additionally preserving CloudFormation short-form tags.
+    """
+    loader = CfnLoader(stream)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
+
+
 def load_template(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as stream:
-        template: dict[str, Any] = yaml.load(stream, Loader=CfnLoader)
+        template: dict[str, Any] = _safe_load_cfn(stream)
     return template
 
 
