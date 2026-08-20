@@ -5,6 +5,8 @@ name: Conformance Tests
 # as its own parallel matrix job with the pinned language-agnostic runner.
 
 on:
+  push:
+    branches: ["main"]
   pull_request:
     branches: ["main"]
     paths:
