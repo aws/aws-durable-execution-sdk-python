@@ -59,6 +59,11 @@ def test_to_otel_trace_id_uses_timestamp_and_execution_arn():
     )
 
 
+def test_to_otel_trace_id_requires_execution_start_time() -> None:
+    with pytest.raises(ValueError, match="execution start time is required"):
+        _to_otel_trace_id("execution-arn", None)  # type: ignore[arg-type]
+
+
 def test_operation_id_to_span_id_returns_deterministic_64_bit_id():
     """Verify execution and operation IDs map to stable 64-bit span IDs."""
     execution_arn = "arn:aws:lambda:us-west-2:123456789012:function:workflow:$LATEST"
