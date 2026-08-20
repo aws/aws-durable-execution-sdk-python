@@ -73,22 +73,6 @@ example_audit = "example_audit:AUDIT_PLUGIN_PROVIDER"
 Set `plugin_api_version` to the literal API version the provider implements.
 Update it only after verifying the provider against that API version.
 
-### User-function hooks and thread-bound state
-
-`on_user_function_start` and `on_user_function_end` run on the thread that
-executes the user function, so a plugin can bind state to that thread. Every
-start is followed by exactly one end callback with a `UserFunctionOutcome`:
-
-- `SUCCEEDED` means the function returned normally.
-- `FAILED` means the function raised an ordinary exception.
-- `INCOMPLETE` means the function left without an outcome because the operation
-  suspended, a map or parallel branch was orphaned by its parent, a background
-  checkpoint failure cut the invocation short, or the interpreter is exiting.
-
-An incomplete user function is not a finished operation: a suspended one resumes
-later, in this invocation or a subsequent one, and reports another start/end
-pair with its eventual outcome. Plugins should release thread-bound state for
-`INCOMPLETE`, but must not record the operation as succeeded, failed, or complete.
 
 Provider names must be unique across installed distributions. Missing,
 ambiguous, incompatible, or invalid providers raise `PluginLoadError` during
