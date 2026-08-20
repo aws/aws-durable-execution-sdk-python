@@ -20,6 +20,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     GetExecutionStateError,
     OrphanedChildException,
     StepError,
+    SuspendExecution,
     TimedSuspendExecution,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -45,6 +46,7 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationStartInfo,
     PluginExecutor,
     UserFunctionEndInfo,
+    UserFunctionOutcome,
 )
 from aws_durable_execution_sdk_python.state import (
     CheckpointBatcherConfig,
@@ -4302,6 +4304,7 @@ class _RecordingPlugin(DurableInstrumentationPlugin):
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.operation_starts: list[OperationStartInfo] = []
+        self.user_function_ends: list[UserFunctionEndInfo] = []
 
     def on_execution_start(self, info):
         self.calls.append("execution_start")
@@ -4332,6 +4335,7 @@ class _RecordingPlugin(DurableInstrumentationPlugin):
 
     def on_user_function_end(self, info):
         self.calls.append(f"user_function_end:{info.operation_id}")
+        self.user_function_ends.append(info)
 
 
 def test_execution_state_accepts_plugin_executor_parameter():
@@ -4821,15 +4825,12 @@ def test_plugin_executor_exception_does_not_break_checkpointing():
             executor.shutdown(wait=True)
 
 
-def test_wrap_user_function_suspend_does_not_fire_end_hook():
-    """A user function that suspends does not fire the end hook.
+def test_wrap_user_function_suspend_fires_incomplete_end_hook():
+    """A timed suspend reports an incomplete outcome through the end hook.
 
-    Regression: a timed suspend (TimedSuspendExecution) raised inside a wrapped
-    user function (e.g. a child context that waits) must not be surfaced to
-    plugins as a FAILED outcome. The suspend is normal durable control flow,
-    and the plugin observes it by absence (no end hook fires), with the
-    instrumentation plugin's own per-invocation span sweep closing any open
-    spans cleanly at invocation end.
+    Suspension is normal durable control flow rather than a user failure. The
+    callback still runs so plugins can release state bound to the user-function
+    thread, but it carries no error and must not be interpreted as completion.
     """
     captured: list[UserFunctionEndInfo] = []
 
@@ -4858,7 +4859,9 @@ def test_wrap_user_function_suspend_does_not_fire_end_hook():
         with pytest.raises(TimedSuspendExecution):
             wrapped(None)
 
-    assert captured == []
+    assert len(captured) == 1
+    assert captured[0].outcome is UserFunctionOutcome.INCOMPLETE
+    assert captured[0].error is None
 
 
 def test_plugin_executor_not_called_for_pending_operations():
@@ -5124,3 +5127,134 @@ def test_has_prior_operations_iteration_safe_under_concurrent_update():
     writer_t.join(timeout=5)
 
     assert not errors, f"has_prior_operations raced with concurrent update: {errors}"
+
+
+# region wrap_user_function incomplete notification
+
+
+def _wrapping_state(plugin: _RecordingPlugin) -> ExecutionState:
+    """Build an ExecutionState whose plugin executor is running."""
+    return ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=Mock(spec=LambdaClient),
+        plugin_executor=PluginExecutor(plugins=[plugin]),
+    )
+
+
+def _wrapped(state: ExecutionState, user_function):
+    return state.wrap_user_function(
+        user_function,
+        OperationIdentifier(
+            operation_id="step-1",
+            sub_type=OperationSubType.STEP,
+            name="fetch-user",
+        ),
+        attempt=1,
+    )
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        SuspendExecution("suspended"),
+        TimedSuspendExecution("suspended until", 1.0),
+        OrphanedChildException("parent already completed", "step-1"),
+        BackgroundThreadError("checkpoint failed", RuntimeError("boom")),
+        SystemExit(1),
+    ],
+)
+def test_wrap_user_function_reports_incomplete_when_no_outcome(raised):
+    """A user function that reports no outcome notifies plugins instead."""
+    plugin = _RecordingPlugin()
+    state = _wrapping_state(plugin)
+
+    def user_function():
+        raise raised
+
+    with state._plugin_executor.run(), pytest.raises(type(raised)):
+        _wrapped(state, user_function)()
+
+    assert plugin.calls == [
+        "user_function_start:step-1",
+        "user_function_end:step-1",
+    ]
+    assert [info.outcome for info in plugin.user_function_ends] == [
+        UserFunctionOutcome.INCOMPLETE
+    ]
+    assert plugin.user_function_ends[0].error is None
+
+
+def test_wrap_user_function_does_not_report_incomplete_on_success():
+    """A returning user function reports an end and nothing else."""
+    plugin = _RecordingPlugin()
+    state = _wrapping_state(plugin)
+
+    with state._plugin_executor.run():
+        assert _wrapped(state, lambda: "done")() == "done"
+
+    assert plugin.calls == [
+        "user_function_start:step-1",
+        "user_function_end:step-1",
+    ]
+    assert [info.outcome for info in plugin.user_function_ends] == [
+        UserFunctionOutcome.SUCCEEDED
+    ]
+
+
+def test_wrap_user_function_does_not_report_incomplete_on_failure():
+    """An ordinary exception reports an end, not an incomplete."""
+    plugin = _RecordingPlugin()
+    state = _wrapping_state(plugin)
+
+    def user_function():
+        raise ValueError("boom")
+
+    with state._plugin_executor.run(), pytest.raises(ValueError, match="boom"):
+        _wrapped(state, user_function)()
+
+    assert plugin.calls == [
+        "user_function_start:step-1",
+        "user_function_end:step-1",
+    ]
+    assert [info.outcome for info in plugin.user_function_ends] == [
+        UserFunctionOutcome.FAILED
+    ]
+
+
+def test_wrap_user_function_incomplete_runs_on_the_user_function_thread():
+    """The notification must arrive on the thread that ran the user function."""
+    hook_threads: list[int] = []
+
+    class _ThreadRecordingPlugin(DurableInstrumentationPlugin):
+        def on_user_function_end(self, info) -> None:
+            if info.outcome is UserFunctionOutcome.INCOMPLETE:
+                hook_threads.append(threading.get_ident())
+
+    plugin = _ThreadRecordingPlugin()
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=Mock(spec=LambdaClient),
+        plugin_executor=PluginExecutor(plugins=[plugin]),
+    )
+
+    def user_function():
+        raise SuspendExecution("suspended")
+
+    worker_threads: list[int] = []
+
+    def run_on_worker() -> None:
+        worker_threads.append(threading.get_ident())
+        with contextlib.suppress(SuspendExecution):
+            _wrapped(state, user_function)()
+
+    with state._plugin_executor.run(), ThreadPoolExecutor(max_workers=1) as worker:
+        worker.submit(run_on_worker).result()
+
+    assert hook_threads == worker_threads
+
+
+# endregion

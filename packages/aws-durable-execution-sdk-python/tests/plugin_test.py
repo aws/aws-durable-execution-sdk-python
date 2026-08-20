@@ -1841,7 +1841,7 @@ class TestUserFunctionOutcomeValues(unittest.TestCase):
     def test_outcome_values(self):
         self.assertEqual(
             {o.value for o in UserFunctionOutcome},
-            {"SUCCEEDED", "FAILED"},
+            {"SUCCEEDED", "FAILED", "INCOMPLETE"},
         )
 
 
@@ -1855,6 +1855,16 @@ class TestUserFunctionOutcomeFromError(unittest.TestCase):
         self.assertEqual(
             UserFunctionOutcome.from_error(ERROR), UserFunctionOutcome.FAILED
         )
+
+    def test_explicit_incomplete_outcome_is_preserved(self):
+        info = UserFunctionEndInfo.from_start_info(
+            USER_FUNCTION_START_INFO,
+            None,
+            outcome=UserFunctionOutcome.INCOMPLETE,
+        )
+
+        self.assertEqual(info.outcome, UserFunctionOutcome.INCOMPLETE)
+        self.assertIsNone(info.error)
 
 
 # endregion Suspend Outcome Tests
