@@ -21,6 +21,8 @@ on:
       - "packages/aws-durable-execution-sdk-python-otel/**"
       - "packages/aws-durable-execution-sdk-python-conformance-tests-otel/**"
       - ".github/workflows/opentelemetry-conformance-tests.yml"
+  schedule:
+    - cron: "0 7 * * *"
   workflow_dispatch:
     inputs:
       phase:
