@@ -49,6 +49,7 @@ class OperationType(Enum):
     WAIT = "WAIT"
     CALLBACK = "CALLBACK"
     CHAINED_INVOKE = "CHAINED_INVOKE"
+    DISTRIBUTED_MAP = "DISTRIBUTED_MAP"
 
 
 def _to_invocation_status(status: ServiceInvocationStatus) -> InvocationStatus:

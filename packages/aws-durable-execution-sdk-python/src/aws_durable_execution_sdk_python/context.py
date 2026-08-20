@@ -20,12 +20,17 @@ from aws_durable_execution_sdk_python.config import (
     Duration,
     InvokeConfig,
     MapConfig,
+    DistributedMapConfig,
+    DistributedMapProcessor,
+    DistributedMapSource,
     ParallelBranch,
     ParallelConfig,
     StepConfig,
     WaitForCallbackConfig,
 )
 from aws_durable_execution_sdk_python.concurrency.models import (
+    DistributedMapResult,
+    DistributedMapSummary,
     envelope_summary_generator,
 )
 from aws_durable_execution_sdk_python.exceptions import (
@@ -54,6 +59,9 @@ from aws_durable_execution_sdk_python.operation.callback import (
 from aws_durable_execution_sdk_python.operation.child import child_handler
 from aws_durable_execution_sdk_python.operation.invoke import InvokeOperationExecutor
 from aws_durable_execution_sdk_python.operation.map import map_handler
+from aws_durable_execution_sdk_python.operation.distributed_map import (
+    DistributedMapOperationExecutor,
+)
 from aws_durable_execution_sdk_python.operation.parallel import parallel_handler
 from aws_durable_execution_sdk_python.operation.step import StepOperationExecutor
 from aws_durable_execution_sdk_python.operation.wait import WaitOperationExecutor
@@ -651,6 +659,51 @@ class DurableContext(DurableContextProtocol):
                 operation_identifier=OperationIdentifier(
                     operation_id=operation_id,
                     sub_type=OperationSubType.CHAINED_INVOKE,
+                    parent_id=self._parent_id,
+                    name=name,
+                ),
+                config=config,
+            )
+            return executor.process()
+
+    def distributed_map(
+        self,
+        source: DistributedMapSource | Sequence[Any],
+        processor: DistributedMapProcessor,
+        max_concurrency: int,
+        name: str | None = None,
+        config: DistributedMapConfig | None = None,
+    ) -> DistributedMapSummary | DistributedMapResult:
+        """Start a distributed map run and resolve with its summary.
+
+        Args:
+            source: The items to process (a typed source or a plain-list shorthand)
+            processor: The processor configuration built via a DistributedMapProcessor factory
+            max_concurrency: Maximum concurrent processor invocations
+            name: Optional name for the operation
+            config: Optional run-level configuration
+
+        Returns:
+            The map run's summary, or a DistributedMapResult when config.collect_results is set
+        """
+        if not isinstance(source, (DistributedMapSource, list, tuple)):
+            msg = "source must be a DistributedMapSource or a list/tuple of items"
+            raise ValidationError(msg)
+        if max_concurrency <= 0:
+            msg = "max_concurrency must be greater than zero"
+            raise ValidationError(msg)
+        if not config:
+            config = DistributedMapConfig()
+        with self._replay_aware():
+            operation_id = self._create_step_id()
+            executor: DistributedMapOperationExecutor = DistributedMapOperationExecutor(
+                source=source,
+                processor=processor,
+                max_concurrency=max_concurrency,
+                state=self.state,
+                operation_identifier=OperationIdentifier(
+                    operation_id=operation_id,
+                    sub_type=OperationSubType.DISTRIBUTED_MAP,
                     parent_id=self._parent_id,
                     name=name,
                 ),

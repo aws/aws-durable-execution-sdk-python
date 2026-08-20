@@ -6,8 +6,27 @@ from aws_durable_execution_sdk_python.__about__ import __version__
 # Main context - used in every durable function
 # Helper decorators - commonly used for step functions
 # Concurrency
-from aws_durable_execution_sdk_python.concurrency.models import BatchResult
-from aws_durable_execution_sdk_python.config import ParallelBranch
+from aws_durable_execution_sdk_python.concurrency.models import (
+    BatchResult,
+    DistributedMapCompletionReason,
+    DistributedMapItemError,
+    DistributedMapResult,
+    DistributedMapResultItem,
+    DistributedMapStatus,
+    DistributedMapSummary,
+)
+from aws_durable_execution_sdk_python.config import (
+    FailureDestination,
+    DistributedMapCompletionConfig,
+    DistributedMapConfig,
+    DistributedMapDestination,
+    DistributedMapDestinationConfig,
+    DistributedMapProcessor,
+    DistributedMapSource,
+    ParallelBranch,
+    ProcessorRetryConfig,
+    SuccessDestination,
+)
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
     durable_parallel_branch,
@@ -28,6 +47,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     ExecutionError,
     InvocationError,
     InvokeError,
+    DistributedMapError,
     PluginLoadError,
     RetryableSerDesError,
     SerDesError,
@@ -55,14 +75,30 @@ __all__ = [
     "DurableExecutionsError",
     "DurableOperationError",
     "ExecutionError",
+    "FailureDestination",
     "InvocationError",
     "InvokeError",
+    "DistributedMapCompletionConfig",
+    "DistributedMapCompletionReason",
+    "DistributedMapConfig",
+    "DistributedMapDestination",
+    "DistributedMapDestinationConfig",
+    "DistributedMapError",
+    "DistributedMapItemError",
+    "DistributedMapProcessor",
+    "DistributedMapResult",
+    "DistributedMapResultItem",
+    "DistributedMapSource",
+    "DistributedMapStatus",
+    "DistributedMapSummary",
     "ParallelBranch",
     "PluginLoadError",
+    "ProcessorRetryConfig",
     "RetryableSerDesError",
     "SerDesError",
     "StepContext",
     "StepError",
+    "SuccessDestination",
     "ValidationError",
     "WaitForConditionError",
     "WithRetryConfig",

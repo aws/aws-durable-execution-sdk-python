@@ -15,6 +15,7 @@ from aws_durable_execution_sdk_python.config import (
     Duration,
     InvokeConfig,
     MapConfig,
+    DistributedMapProcessor,
     ParallelBranch,
     ParallelConfig,
     StepConfig,
@@ -1019,6 +1020,41 @@ def test_wait_with_time_less_than_one(mock_executor_class):
 
 
 # endregion wait
+
+
+# region distributed_map
+@pytest.mark.parametrize("max_concurrency", [0, -1])
+def test_map_run_rejects_non_positive_max_concurrency(max_concurrency: int):
+    """Test distributed_map raises ValidationError when max_concurrency is not positive."""
+    context = create_test_context()
+
+    with pytest.raises(
+        ValidationError, match="max_concurrency must be greater than zero"
+    ):
+        context.distributed_map(
+            ["a"],
+            DistributedMapProcessor.report_batch_outcome("test_processor"),
+            max_concurrency=max_concurrency,
+        )
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["s3://bucket", b"bytes", bytearray(b"ba"), {"a": 1}, {"a", "b"}],
+)
+def test_distributed_map_rejects_non_list_source(source):
+    """Test distributed_map rejects sources that are not a DistributedMapSource or list/tuple."""
+    context = create_test_context()
+
+    with pytest.raises(ValidationError, match="list/tuple"):
+        context.distributed_map(
+            source,
+            DistributedMapProcessor.report_batch_outcome("test_processor"),
+            max_concurrency=1,
+        )
+
+
+# endregion distributed_map
 
 
 # region run_in_child_context

@@ -134,6 +134,9 @@ class CheckpointedResult:
                 result = context_details.result if context_details else None
                 error = context_details.error if context_details else None
 
+            # OperationType.DISTRIBUTED_MAP has no operation-level result/error.
+            # The operation itself carries the map run's outcome.
+
         return cls(
             operation=operation, status=operation.status, result=result, error=error
         )
