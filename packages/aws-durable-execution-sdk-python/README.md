@@ -73,7 +73,6 @@ example_audit = "example_audit:AUDIT_PLUGIN_PROVIDER"
 Set `plugin_api_version` to the literal API version the provider implements.
 Update it only after verifying the provider against that API version.
 
-
 Provider names must be unique across installed distributions. Missing,
 ambiguous, incompatible, or invalid providers raise `PluginLoadError` during
 handler initialization with the provider and distribution details.
