@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aws-durable-execution-sdk-python-conformance-tests-otel"
+version = "0.0.0"
+description = "OpenTelemetry conformance test handlers for the AWS Durable Execution SDK for Python, exercised by the aws-durable-execution-conformance-tests OTel suites."
+requires-python = ">=3.11"
+dependencies = [
+  "aws-durable-execution-sdk-python==1.8.0",
+  "aws-durable-execution-sdk-python-otel==0.4.0",
+]
+
+[tool.hatch.build.targets.wheel]
+# The handlers are flat Lambda modules deployed by SAM from src/, not an
+# importable package, so there is nothing to ship in a wheel.
+bypass-selection = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+preview = true
+select = ["E4", "E7", "E9", "F", "TID252"]  # pycodestyle (E4/E7/E9) + Pyflakes + absolute imports
+
+[tool.ruff.lint.isort]
+known-first-party = [
+  "aws_durable_execution_sdk_python",
+  "aws_durable_execution_sdk_python_otel",
+]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+  "ARG001",
+  "ARG002",
+  "ARG005",
+  "E402",
+  "S101",
+  "PLR2004",
+  "SIM117",
+  "TRY301",
+]

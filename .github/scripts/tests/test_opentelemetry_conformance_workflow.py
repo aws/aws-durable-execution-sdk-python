@@ -4,7 +4,10 @@ from pathlib import Path
 WORKFLOW_PATH = (
     Path(__file__).parents[2] / "workflows" / "opentelemetry-conformance-tests.yml"
 )
-ORCHESTRATOR_REVISION = "397d523d01bdf97ff8461ab749ddaa445bbf67ca"
+ORCHESTRATOR_REVISION = "8de1bbfdccfeb36d5f9ccee99f21533f0bcb1d72"
+EXAMPLES_DIR = (
+    ".build/durable-sdk/packages/aws-durable-execution-sdk-python-conformance-tests-otel"
+)
 
 
 def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> None:
@@ -24,9 +27,8 @@ def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> No
         "sdk_repository: aws/aws-durable-execution-sdk-python",
         "sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}",
         "conformance_test_ref: ${{ inputs.conformance_test_ref || 'main' }}",
-        "checkout_sdk: false",
-        "packages/aws-durable-execution-conformance-tests-otel/"
-        "tests/test_python_examples.py",
+        "checkout_sdk: true",
+        f"examples_dir: {EXAMPLES_DIR}",
         "adot_release_repository: aws-observability/aws-otel-python-instrumentation",
         "collector_compatible_runtime: python3.13",
         "collector_otlp_endpoint: http://localhost:4318",
@@ -48,3 +50,23 @@ def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> No
         "DATADOG_OTLP_HEADERS",
     ):
         assert f"{obsolete_secret_name}:" not in workflow
+
+
+def test_opentelemetry_conformance_handlers_come_from_this_repository() -> None:
+    workflow = WORKFLOW_PATH.read_text()
+
+    # The handlers live here now, so the conformance repository's bundled Python
+    # example project and its contract test no longer take part in the run.
+    assert "contract_test_command" not in workflow
+    assert "packages/aws-durable-execution-conformance-tests-otel/" not in workflow
+
+
+def test_opentelemetry_conformance_runs_when_the_handlers_change() -> None:
+    workflow = WORKFLOW_PATH.read_text()
+
+    trigger_path = (
+        "      - "
+        '"packages/aws-durable-execution-sdk-python-conformance-tests-otel/**"'
+    )
+    # Once for pull_request, once for push.
+    assert workflow.count(trigger_path) == 2
