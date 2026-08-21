@@ -54,6 +54,23 @@ again on every replay. This implies four rules:
 See [Determinism and Replay](https://docs.aws.amazon.com/durable-execution/patterns/best-practices/determinism/)
 for worked examples.
 
+## Security-sensitive parsing
+
+- Do not use `yaml.load()` or `yaml.load_all()`, including with `Loader=`
+  arguments or suppression comments. CodeQL and security scanners flag the
+  unsafe call form even when the loader subclasses `yaml.SafeLoader`.
+- Use `yaml.safe_load()` or `yaml.safe_load_all()` for plain YAML.
+- For CloudFormation or SAM templates with short-form tags such as `!Ref`,
+  `!Sub`, `!GetAtt`, or `!If`, use a `yaml.SafeLoader` subclass with explicit
+  tag constructors so the tags are preserved.
+- For custom safe loaders, instantiate the loader directly, call
+  `get_single_data()` or the equivalent multi-document API, and call
+  `dispose()` in a `finally` block. This matches what `yaml.safe_load()` does
+  internally while preserving custom tag support.
+- Before finishing YAML-related changes, check Python code for unsafe call
+  forms:
+  `rg -n --glob '*.py' "yaml\\.load\\b|yaml\\.load_all\\b|from yaml import load\\b|from yaml import load_all\\b" .`
+
 ## Testing Requirements
 
 All changes MUST include related tests. At minimum, include **unit tests**. Include **e2e integration tests** (in the `tests/e2e/` directory) when the change affects cross-component behavior, public API surfaces, or end-to-end workflows. For isolated bug fixes where a unit test alone sufficiently covers the fix, integration tests are not required.
