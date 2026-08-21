@@ -4,7 +4,7 @@ from pathlib import Path
 WORKFLOW_PATH = (
     Path(__file__).parents[2] / "workflows" / "opentelemetry-conformance-tests.yml"
 )
-ORCHESTRATOR_REVISION = "8de1bbfdccfeb36d5f9ccee99f21533f0bcb1d72"
+ORCHESTRATOR_REVISION = "91740c98b496409fa9f1bb8e8e6c329ca8b0185f"
 EXAMPLES_DIR = (
     ".build/durable-sdk/packages/aws-durable-execution-sdk-python-conformance-tests-otel"
 )
@@ -12,6 +12,8 @@ EXAMPLES_DIR = (
 
 def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> None:
     workflow = WORKFLOW_PATH.read_text()
+
+    assert '  schedule:\n    - cron: "0 7 * * *"' in workflow
 
     orchestrator = (
         "uses: aws/aws-durable-execution-conformance-tests/.github/workflows/"
