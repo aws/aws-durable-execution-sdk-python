@@ -4,7 +4,7 @@ from pathlib import Path
 WORKFLOW_PATH = (
     Path(__file__).parents[2] / "workflows" / "opentelemetry-conformance-tests.yml"
 )
-ORCHESTRATOR_REVISION = "8de1bbfdccfeb36d5f9ccee99f21533f0bcb1d72"
+ORCHESTRATOR_REVISION = "91740c98b496409fa9f1bb8e8e6c329ca8b0185f"
 EXAMPLES_DIR = (
     ".build/durable-sdk/packages/aws-durable-execution-sdk-python-conformance-tests-otel"
 )
