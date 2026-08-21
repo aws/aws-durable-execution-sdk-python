@@ -1151,7 +1151,11 @@ def test_workflow_span_exported_on_terminal(status, expected_code):
 
 @pytest.mark.parametrize("status", [InvocationStatus.PENDING, InvocationStatus.RETRY])
 def test_workflow_span_not_exported_on_non_terminal(status):
-    """Non-terminal invocations do not export (end) the Workflow span."""
+    """Non-terminal invocations do not materialize (export) the Workflow span.
+
+    The Workflow span is a non-recording placeholder during the invocation, so a
+    non-terminal status leaves nothing to export and no recording span to abandon.
+    """
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_invocation_end(_invocation_end_info(status))
@@ -1159,6 +1163,57 @@ def test_workflow_span_not_exported_on_non_terminal(status):
     names = [s.name for s in exporter.get_finished_spans()]
     assert "Workflow" not in names
     assert "Invocation" in names
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        InvocationStatus.PENDING,
+        InvocationStatus.RETRY,
+        InvocationStatus.SUCCEEDED,
+        InvocationStatus.FAILED,
+    ],
+)
+def test_workflow_reference_is_non_recording_after_cleanup(status):
+    """The retained Workflow span reference is never a recording span.
+
+    During the invocation it is a non-recording deterministic placeholder, so
+    invocation cleanup on any status leaves no recording span abandoned.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    workflow_reference = plugin._workflow_span
+    assert workflow_reference is not None
+    assert not workflow_reference.is_recording()
+
+    plugin.on_invocation_end(_invocation_end_info(status))
+
+    assert not workflow_reference.is_recording()
+
+
+@pytest.mark.parametrize("status", [InvocationStatus.PENDING, InvocationStatus.RETRY])
+def test_open_operation_reference_is_non_recording_after_non_terminal(status):
+    """A suspended operation's retained span reference is ended, not abandoned."""
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id="wait-1",
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="wait-for-signal",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    operation_reference = plugin._get_span("wait-1")
+    assert operation_reference is not None
+
+    plugin.on_invocation_end(_invocation_end_info(status))
+
+    assert not operation_reference.is_recording()
 
 
 def test_operation_span_links_to_workflow_span():

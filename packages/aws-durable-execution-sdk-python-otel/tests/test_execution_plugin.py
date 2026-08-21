@@ -214,17 +214,94 @@ def test_explicit_mode_invocation_span_parented_to_ambient_span():
     assert workflow.context.trace_id != ambient.get_span_context().trace_id
 
 
-def test_workflow_span_dropped_on_non_terminal_status():
+def test_workflow_span_not_exported_on_non_terminal_status():
     plugin, exporter = _create_plugin()
 
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
 
     names = [s.name for s in exporter.get_finished_spans()]
-    # Invocation span is always ended/exported; the Workflow span is dropped
-    # (not ended) on a non-terminal status, so it must not be exported.
+    # Invocation span is always ended/exported. The Workflow span is a
+    # non-recording placeholder during the invocation and is only materialized
+    # (created + ended) on a terminal status, so it is not exported here.
     assert "Invocation" in names
     assert "Workflow" not in names
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [
+        (InvocationStatus.SUCCEEDED, trace.StatusCode.OK),
+        (InvocationStatus.FAILED, trace.StatusCode.ERROR),
+    ],
+)
+def test_workflow_span_exported_once_on_terminal(status, expected_code):
+    """A terminal invocation materializes and ends the Workflow span exactly once."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_invocation_end(_invocation_end_info(status=status))
+
+    workflows = [s for s in exporter.get_finished_spans() if s.name == "Workflow"]
+    assert len(workflows) == 1
+    workflow = workflows[0]
+    assert workflow.parent is None
+    assert workflow.kind is trace.SpanKind.INTERNAL
+    assert workflow.context.span_id == derive_workflow_span_id(EXECUTION_ARN)
+    assert workflow.attributes["durable.execution.status"] == status.value
+    assert workflow.status.status_code is expected_code
+    # Anchored to the execution start time.
+    assert workflow.start_time == int(START_TIME.timestamp() * 1_000_000_000)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        InvocationStatus.PENDING,
+        InvocationStatus.RETRY,
+        InvocationStatus.SUCCEEDED,
+        InvocationStatus.FAILED,
+    ],
+)
+def test_workflow_reference_is_non_recording_after_cleanup(status):
+    """The retained Workflow span reference is never a recording span.
+
+    During the invocation it is a non-recording deterministic placeholder, so
+    invocation cleanup on any status leaves no recording span abandoned.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    workflow_reference = plugin._workflow_span
+    assert workflow_reference is not None
+    assert not workflow_reference.is_recording()
+
+    plugin.on_invocation_end(_invocation_end_info(status=status))
+
+    assert not workflow_reference.is_recording()
+
+
+@pytest.mark.parametrize("status", [InvocationStatus.PENDING, InvocationStatus.RETRY])
+def test_open_operation_reference_is_non_recording_after_non_terminal(status):
+    """A suspended operation's retained span reference is ended, not abandoned."""
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id="wait-1",
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="wait-for-signal",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    operation_reference = plugin._get_span("wait-1")
+    assert operation_reference is not None
+
+    plugin.on_invocation_end(_invocation_end_info(status=status))
+
+    assert not operation_reference.is_recording()
 
 
 def test_operation_parented_under_workflow_and_linked_to_invocation():
@@ -515,11 +592,12 @@ def test_default_mode_invocation_span_parented_to_ambient_span(monkeypatch):
     assert invocation.context.trace_id == ambient.get_span_context().trace_id
 
 
-def test_open_operation_span_not_exported_at_invocation_end():
-    """A suspended operation (started, not ended) must not be exported.
+def test_open_operation_span_ended_at_invocation_end():
+    """A suspended operation span is ended at invocation end, not abandoned.
 
-    on_invocation_end drops the reference without ending it; the
-    span is ended only when on_operation_end fires in a later invocation.
+    on_invocation_end ends the still-open operation span so no recording span
+    leaks across a non-terminal boundary; the authoritative span for an
+    operation that resumes later is created when on_operation_end fires.
     """
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
@@ -536,12 +614,17 @@ def test_open_operation_span_not_exported_at_invocation_end():
             status=OperationStatus.STARTED,
         )
     )
+    open_span = plugin._get_span("wait-1")
+    assert open_span is not None
+    assert open_span.is_recording()
+
     # No on_operation_end: the operation suspended.
     plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
 
+    # The open operation span is ended (exported), not abandoned recording.
+    assert not open_span.is_recording()
     exported = {s.name for s in exporter.get_finished_spans()}
-    # The open operation span is NOT exported (never ended).
-    assert "wait-for-signal" not in exported
+    assert "wait-for-signal" in exported
 
 
 @pytest.mark.parametrize(

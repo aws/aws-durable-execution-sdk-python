@@ -49,11 +49,13 @@ from opentelemetry.context import Context
 from opentelemetry.sdk.trace import Tracer as SdkTracer
 from opentelemetry.trace import (
     Link,
+    NonRecordingSpan,
     Span,
     SpanContext,
     SpanKind,
     StatusCode,
     Tracer,
+    TraceFlags,
 )
 
 from aws_durable_execution_sdk_python_otel.context_extractors import (
@@ -118,6 +120,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # Per-invocation state.
         self._execution_arn = ""
         self._execution_trace_id: int | None = None
+        self._execution_start_time: datetime.datetime | None = None
         self._extracted_context: Context | None = None
         self._workflow_span: Span | None = None
         self._invocation_span: Span | None = None
@@ -165,6 +168,22 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     def _pop_span(self, key: str) -> Span | None:
         with self._lock:
             return self._operation_spans.pop(key, None)
+
+    def _end_open_operation_spans(self) -> None:
+        """End every operation span still open at invocation end (except invocation).
+
+        Spans are registered parent-first, so ending them in reverse keeps each
+        child contained within its parent. The invocation span is ended
+        separately by the caller.
+        """
+        with self._lock:
+            keys = list(reversed(self._operation_spans))
+        for key in keys:
+            if key == _INVOCATION_KEY:
+                continue
+            popped = self._pop_span(key)
+            if popped is not None:
+                popped.end()
 
     @staticmethod
     def _attempt_key(
@@ -310,6 +329,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._execution_trace_id = _to_otel_trace_id(
             self._execution_arn, info.execution_start_time
         )
+        self._execution_start_time = info.execution_start_time
         self._extracted_context = self._context_extractor(info)
 
         self._start_workflow_span(info)
@@ -327,21 +347,60 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             )
 
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
+        """Install a non-recording placeholder for the execution-scoped Workflow span.
+
+        The Workflow span spans the whole durable execution and is exported once,
+        on the terminal invocation. During every invocation the plugin only needs
+        its deterministic SpanContext -- to parent operation spans, to keep the
+        Workflow current so auto-instrumented spans join the execution trace, and
+        for log correlation. Using a non-recording span for that role means a
+        non-terminal invocation never abandons a recording span. The recording
+        span is created and ended once by :meth:`_export_workflow_span`.
+        """
         if not self._execution_arn:
             logger.warning("No execution ARN; skipping Workflow span creation")
+            return
+        workflow_span_context = SpanContext(
+            trace_id=self._execution_trace_id or 0,
+            span_id=derive_workflow_span_id(self._execution_arn),
+            is_remote=False,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        )
+        self._workflow_span = NonRecordingSpan(workflow_span_context)
+
+    def _export_workflow_span(self, info: InvocationEndInfo) -> None:
+        """Create and end the recording Workflow span once, on a terminal status.
+
+        Uses the same deterministic trace and span IDs as the placeholder so the
+        exported root correlates with every operation span across all
+        invocations, and anchors the span at the execution start time.
+        """
+        if not self._execution_arn:
             return
         # Empty context => root span with no parent.
         with self._id_generator.use_ids(
             trace_id=self._execution_trace_id,
             span_id=derive_workflow_span_id(self._execution_arn),
         ):
-            self._workflow_span = self._tracer.start_span(
+            workflow_span = self._tracer.start_span(
                 name=self._workflow_span_name,
                 kind=SpanKind.INTERNAL,
-                attributes={"durable.execution.arn": self._execution_arn},
-                start_time=_to_otel_timestamp(info.execution_start_time),
+                attributes={
+                    "durable.execution.arn": self._execution_arn,
+                    "durable.execution.status": (
+                        info.status.value if info.status else ""
+                    ),
+                },
+                start_time=_to_otel_timestamp(self._execution_start_time),
                 context=Context(),
             )
+        if info.status is InvocationStatus.FAILED:
+            workflow_span.set_status(
+                StatusCode.ERROR, info.error.message if info.error else ""
+            )
+        elif info.status is InvocationStatus.SUCCEEDED:
+            workflow_span.set_status(StatusCode.OK)
+        workflow_span.end()
 
     def _start_invocation_span(self, info: InvocationStartInfo) -> None:
         self._invocation_span = self._tracer.start_span(
@@ -360,12 +419,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         if not self._tracing_enabled:
             self._reset_state()
             return
-
-        # Operation spans still open here belong to operations that suspended
-        # (e.g. PENDING/RETRYING) rather than completed this invocation. They are
-        # ended only by on_operation_end; drop the references without ending them
-        # so they are not exported as if completed. _reset_state
-        # clears the span map below.
 
         # End the invocation span regardless of terminal status. Record the
         # invocation status and map it to a span status:
@@ -389,23 +442,20 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 )
             self._invocation_span.end()
 
-        # The Workflow span (execution view) is exported only on a terminal
-        # status; otherwise its reference is dropped without ending it. Its span
-        # status reflects the execution outcome: SUCCEEDED -> OK, FAILED -> ERROR
-        # (RETRY/PENDING are non-terminal and never reach here -> UNSET).
-        if self._workflow_span is not None:
-            if info.status in _TERMINAL_INVOCATION_STATUSES:
-                self._workflow_span.set_attribute(
-                    "durable.execution.status",
-                    info.status.value if info.status else "",
-                )
-                if info.status is InvocationStatus.FAILED:
-                    self._workflow_span.set_status(
-                        StatusCode.ERROR, info.error.message if info.error else ""
-                    )
-                elif info.status is InvocationStatus.SUCCEEDED:
-                    self._workflow_span.set_status(StatusCode.OK)
-                self._workflow_span.end()
+        # Operation spans still open here belong to operations that suspended
+        # (e.g. PENDING/RETRYING) rather than completed this invocation. End them
+        # so no recording span is abandoned; the authoritative span for an
+        # operation that resumes in a later invocation is created and ended by
+        # on_operation_end at that time.
+        self._end_open_operation_spans()
+
+        # The Workflow span (execution view) is a non-recording placeholder
+        # during the invocation, so only a terminal status materializes and ends
+        # the recording span. Its span status reflects the execution outcome:
+        # SUCCEEDED -> OK, FAILED -> ERROR (RETRY/PENDING are non-terminal and
+        # leave the Workflow span unexported until a later terminal invocation).
+        if info.status in _TERMINAL_INVOCATION_STATUSES:
+            self._export_workflow_span(info)
 
         self._reset_state()
 
@@ -419,6 +469,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._detach_remaining_contexts()
         self._execution_arn = ""
         self._execution_trace_id = None
+        self._execution_start_time = None
         self._extracted_context = None
         self._workflow_span = None
         self._invocation_span = None
