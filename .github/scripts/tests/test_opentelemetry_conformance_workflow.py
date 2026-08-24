@@ -4,7 +4,6 @@ from pathlib import Path
 WORKFLOW_PATH = (
     Path(__file__).parents[2] / "workflows" / "opentelemetry-conformance-tests.yml"
 )
-ORCHESTRATOR_REVISION = "91740c98b496409fa9f1bb8e8e6c329ca8b0185f"
 EXAMPLES_DIR = (
     ".build/durable-sdk/packages/aws-durable-execution-sdk-python-conformance-tests-otel"
 )
@@ -17,7 +16,7 @@ def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> No
 
     orchestrator = (
         "uses: aws/aws-durable-execution-conformance-tests/.github/workflows/"
-        f"opentelemetry-orchestrator.yml@{ORCHESTRATOR_REVISION}"
+        "opentelemetry-orchestrator.yml@"
     )
     assert orchestrator in workflow
     assert "python-opentelemetry.yml@" not in workflow
