@@ -1,56 +1,16 @@
 # SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""First-party Workflow Insight exporters.
-
-Ports of the JS ``S3Exporter`` and ``LambdaLogExporter``. Both serialize the
-curated record with JS-compatible compact JSON (no whitespace) so the wire bytes
-match across SDKs. Records are written verbatim — no synthetic emission.
-"""
+"""S3 Workflow Insight exporter."""
 
 from __future__ import annotations
 
-import json
-import re
 from typing import Any
 
-from aws_durable_execution_sdk_python_insight.operations_index import (
-    with_operations_by_name,
+from aws_durable_execution_sdk_python_insight.exporters._common import (
+    compact_dumps,
+    sanitize,
 )
-
-
-def _dumps(value: Any) -> str:
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
-
-
-def _sanitize(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9._-]", "_", value)
-
-
-class LambdaLogExporter:
-    """Writes ``operationsByName`` records to the function's own log group via ``print``.
-
-    Port of the JS ``LambdaLogExporter``: ``console.log(JSON.stringify(
-    withOperationsByName(record)))``. Requires no extra IAM. Emits the name-keyed
-    summary map (``OPERATIONS_BY_NAME``).
-    """
-
-    def __init__(self, max_record_size_bytes: int | None = None) -> None:
-        self.max_record_size_bytes = (
-            256_000 if max_record_size_bytes is None else max_record_size_bytes
-        )
-
-    def render(self, record: dict[str, Any]) -> dict[str, Any]:
-        return with_operations_by_name(record)
-
-    def export(self, record: dict[str, Any]) -> None:
-        # Raw JSON line to stdout -> the function's CloudWatch log group. The
-        # conformance CloudWatch sink json.loads each line (and unwraps the
-        # Lambda structured-log envelope when present).
-        print(_dumps(self.render(record)), flush=True)  # noqa: T201
-
-    def flush(self) -> None:
-        return None
 
 
 class S3Exporter:
@@ -93,7 +53,7 @@ class S3Exporter:
         self._client.put_object(
             Bucket=self.bucket,
             Key=key,
-            Body=_dumps(record).encode("utf-8"),
+            Body=compact_dumps(record).encode("utf-8"),
             ContentType="application/json",
         )
 
@@ -102,7 +62,7 @@ class S3Exporter:
 
     def _build_key(self, record: dict[str, Any]) -> str:
         file_name = (
-            _sanitize(
+            sanitize(
                 record.get("executionName") or record.get("executionArn") or "record"
             )
             + ".json"
@@ -111,7 +71,7 @@ class S3Exporter:
 
     def _partition(self, record: dict[str, Any]) -> str:
         if self.partitioning == "function-name":
-            return f"function={_sanitize(record.get('functionName', ''))}/"
+            return f"function={sanitize(record.get('functionName', ''))}/"
         if self.partitioning == "date":
             start = str(record.get("startTime", ""))
             # YYYY-MM-DD... -> year=YYYY/month=MM/day=DD/
