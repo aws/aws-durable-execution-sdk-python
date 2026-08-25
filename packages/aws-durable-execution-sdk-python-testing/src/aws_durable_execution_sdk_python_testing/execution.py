@@ -406,7 +406,9 @@ class Execution:
         self.close_status = ExecutionStatus.SUCCEEDED
         self._end_execution(OperationStatus.SUCCEEDED, now)
 
-    def complete_fail(self, error: ErrorObject, now: datetime | None = None) -> None:
+    def complete_fail(
+        self, error: ErrorObject | None, now: datetime | None = None
+    ) -> None:
         """Complete execution with failure (DecisionType.FAIL_WORKFLOW_EXECUTION)."""
         self.result = DurableExecutionInvocationOutput(
             status=InvocationStatus.FAILED, error=error

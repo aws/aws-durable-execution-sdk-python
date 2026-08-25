@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from aws_durable_execution_sdk_python.lambda_service import (
-    ErrorObject,
     Operation,
     OperationAction,
     OperationUpdate,
@@ -41,15 +40,8 @@ class ExecutionProcessor(OperationProcessor):
                 )
             case _:
                 # intentional. actual service will fail any EXECUTION update that is not SUCCEED.
-                error = (
-                    update.error
-                    if update.error
-                    else ErrorObject.from_message(
-                        "There is no error details but EXECUTION checkpoint action is not SUCCEED."
-                    )
-                )
                 # All EXECUTION failures go through normal fail path
                 # Timeout/Stop status is set by executor based on the operation that caused it
-                notifier.notify_failed(execution_arn=execution_arn, error=error)
+                notifier.notify_failed(execution_arn=execution_arn, error=update.error)
         # TODO: Svc doesn't actually create checkpoint for EXECUTION. might have to for localrunner though.
         return None

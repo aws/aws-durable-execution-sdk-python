@@ -23,11 +23,14 @@ from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
     ResourceNotFoundException,
 )
-from aws_durable_execution_sdk_python_testing.execution import Execution
+from aws_durable_execution_sdk_python_testing.execution import (
+    Execution,
+    ExecutionStatus,
+)
 from aws_durable_execution_sdk_python_testing.model import (
+    GetDurableExecutionHistoryResponse,
     StartDurableExecutionInput,
     StartDurableExecutionOutput,
-    GetDurableExecutionHistoryResponse,
 )
 from aws_durable_execution_sdk_python_testing.runner import (
     OPERATION_FACTORIES,
@@ -541,13 +544,40 @@ def test_durable_function_test_result_create():
     execution.result.status = InvocationStatus.SUCCEEDED
     execution.result.result = json.dumps("test-result")
     execution.result.error = None
+    execution.close_status = ExecutionStatus.SUCCEEDED
 
     result = DurableFunctionTestResult.create(execution)
 
     assert result.status is InvocationStatus.SUCCEEDED
     assert result.result == json.dumps("test-result")
     assert result.error is None
+    assert result.execution_status is ExecutionStatus.SUCCEEDED
     assert len(result.operations) == 1  # EXECUTION operation filtered out
+
+
+def test_durable_function_test_result_direct_construction_defaults_execution_status():
+    result = DurableFunctionTestResult(
+        status=InvocationStatus.SUCCEEDED,
+        operations=[],
+    )
+
+    assert result.execution_status is None
+
+
+def test_durable_function_test_result_create_requires_close_status():
+    execution = Mock(spec=Execution)
+    execution.operations = []
+    execution.result = Mock()
+    execution.result.status = InvocationStatus.SUCCEEDED
+    execution.result.result = json.dumps("test-result")
+    execution.result.error = None
+    execution.close_status = None
+
+    with pytest.raises(
+        DurableFunctionsTestError,
+        match="Execution close status must exist to create test result.",
+    ):
+        DurableFunctionTestResult.create(execution)
 
 
 def test_durable_function_test_result_get_operation_by_name():
@@ -784,6 +814,7 @@ def test_durable_function_test_runner_run(mock_store_class, mock_executor_class)
     mock_execution.result.status = InvocationStatus.SUCCEEDED
     mock_execution.result.result = json.dumps("test-result")
     mock_execution.result.error = None
+    mock_execution.close_status = ExecutionStatus.SUCCEEDED
     mock_store.load.return_value = mock_execution
 
     runner = DurableFunctionTestRunner(handler)
@@ -807,6 +838,7 @@ def test_durable_function_test_runner_run(mock_store_class, mock_executor_class)
     # Verify result
     assert isinstance(result, DurableFunctionTestResult)
     assert result.status is InvocationStatus.SUCCEEDED
+    assert result.execution_status is ExecutionStatus.SUCCEEDED
 
 
 @patch("aws_durable_execution_sdk_python_testing.runner.Executor")
@@ -835,6 +867,7 @@ def test_durable_function_test_runner_run_with_custom_params(
     mock_execution.result.status = InvocationStatus.SUCCEEDED
     mock_execution.result.result = json.dumps("test-result")
     mock_execution.result.error = None
+    mock_execution.close_status = ExecutionStatus.SUCCEEDED
     mock_store.load.return_value = mock_execution
 
     runner = DurableFunctionTestRunner(handler)
@@ -858,6 +891,7 @@ def test_durable_function_test_runner_run_with_custom_params(
     mock_executor.wait_until_complete.assert_called_once_with("test-arn", 1800)
 
     assert result.status is InvocationStatus.SUCCEEDED
+    assert result.execution_status is ExecutionStatus.SUCCEEDED
 
 
 @patch("aws_durable_execution_sdk_python_testing.runner.Executor")
@@ -960,6 +994,7 @@ def test_durable_function_test_result_create_with_parent_operations():
     execution.result.status = InvocationStatus.SUCCEEDED
     execution.result.result = json.dumps("test-result")
     execution.result.error = None
+    execution.close_status = ExecutionStatus.SUCCEEDED
 
     result = DurableFunctionTestResult.create(execution)
 
@@ -1135,6 +1170,7 @@ def test_durable_function_test_result_from_execution_history():
     )
 
     assert result.status == InvocationStatus.SUCCEEDED
+    assert result.execution_status is ExecutionStatus.SUCCEEDED
     assert result.result == "test-result"
     assert result.error is None
     assert len(result.operations) == 1
@@ -1552,6 +1588,7 @@ def test_durable_function_test_result_from_execution_history_unknown_status():
     )
 
     assert result.status == InvocationStatus.FAILED
+    assert result.execution_status is ExecutionStatus.FAILED
 
 
 def test_durable_function_test_result_from_execution_history_with_parent_operations():
@@ -1639,6 +1676,7 @@ def test_durable_function_test_result_from_execution_history_failed():
     )
 
     assert result.status == InvocationStatus.FAILED
+    assert result.execution_status is ExecutionStatus.FAILED
     assert result.error.message == "execution failed"
 
 
@@ -1668,8 +1706,8 @@ def test_cloud_runner_wait_for_completion_timed_out_status(mock_boto3):
 
 
 @patch("aws_durable_execution_sdk_python_testing.runner.boto3")
-def test_cloud_runner_wait_for_completion_aborted_status(mock_boto3):
-    """Test DurableFunctionCloudTestRunner._wait_for_completion with ABORTED status."""
+def test_cloud_runner_wait_for_completion_stopped_status(mock_boto3):
+    """Test DurableFunctionCloudTestRunner._wait_for_completion with STOPPED status."""
     from aws_durable_execution_sdk_python_testing.runner import (
         DurableFunctionCloudTestRunner,
     )
@@ -1681,7 +1719,7 @@ def test_cloud_runner_wait_for_completion_aborted_status(mock_boto3):
         "DurableExecutionArn": "arn:aws:lambda:us-east-1:123456789012:function:test:execution:exec-1",
         "DurableExecutionName": "test-execution",
         "FunctionArn": "arn:aws:lambda:us-east-1:123456789012:function:test",
-        "Status": "ABORTED",
+        "Status": "STOPPED",
         "StartTimestamp": "2023-01-01T00:00:00Z",
         "EndTimestamp": "2023-01-01T00:01:00Z",
     }
@@ -1689,7 +1727,7 @@ def test_cloud_runner_wait_for_completion_aborted_status(mock_boto3):
     runner = DurableFunctionCloudTestRunner(function_name="test-function")
     result = runner._wait_for_completion("test-arn", timeout=10)
 
-    assert result.status == "ABORTED"
+    assert result.status == "STOPPED"
 
 
 @patch("aws_durable_execution_sdk_python_testing.runner.boto3")

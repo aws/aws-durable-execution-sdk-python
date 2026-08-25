@@ -507,6 +507,26 @@ def test_complete_fail():
     assert execution.result.error == error
 
 
+def test_complete_fail_without_error():
+    """Test complete_fail preserves a missing error payload."""
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="test-invocation-id",
+    )
+    execution = Execution("test-arn", start_input, [Mock()])
+
+    execution.complete_fail(None)
+
+    assert execution.is_complete is True
+    assert execution.result.status is InvocationStatus.FAILED
+    assert execution.result.error is None
+
+
 def test_find_operation_exists():
     """Test find_operation method when operation exists."""
     start_input = StartDurableExecutionInput(

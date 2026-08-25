@@ -31,7 +31,7 @@ class MockExecutionObserver(ExecutionObserver):
     def on_completed(self, execution_arn: str, result: str | None = None) -> None:
         self.on_completed_calls.append((execution_arn, result))
 
-    def on_failed(self, execution_arn: str, error: ErrorObject) -> None:
+    def on_failed(self, execution_arn: str, error: ErrorObject | None) -> None:
         self.on_failed_calls.append((execution_arn, error))
 
     def on_timed_out(self, execution_arn: str, error: ErrorObject) -> None:
@@ -78,6 +78,12 @@ def test_notify_failed_records_failed_effect():
     error = ErrorObject("TestError", "Test error message", "test-data", ["trace"])
     notifier.notify_failed("test-arn", error)
     assert notifier.effects == [Failed(execution_arn="test-arn", error=error)]
+
+
+def test_notify_failed_records_none_error_effect():
+    notifier = ExecutionNotifier()
+    notifier.notify_failed("test-arn", None)
+    assert notifier.effects == [Failed(execution_arn="test-arn", error=None)]
 
 
 def test_notify_callback_created_records_callback_effect():
@@ -127,6 +133,12 @@ def test_apply_effects_dispatches_failed():
     error = ErrorObject.from_message("nope")
     apply_effects([Failed(execution_arn="arn", error=error)], observer)
     assert observer.on_failed_calls == [("arn", error)]
+
+
+def test_apply_effects_dispatches_failed_with_none_error():
+    observer = MockExecutionObserver()
+    apply_effects([Failed(execution_arn="arn", error=None)], observer)
+    assert observer.on_failed_calls == [("arn", None)]
 
 
 def test_apply_effects_dispatches_callback_created():
