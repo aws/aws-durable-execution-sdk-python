@@ -298,3 +298,78 @@ Resources:
       DurableConfig:
         RetentionPeriodInDays: 7
         ExecutionTimeout: 300
+  PluginInvocationInfoShape:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-19"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: plugin.plugin_invocation_info_shape.handler
+      Description: Invocation hooks expose the full invocation info shape
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  PluginOperationInfoShape:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-20"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: plugin.plugin_operation_info_shape.handler
+      Description: Operation hooks expose the full operation info shape
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  PluginAttemptInfoShape:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-21"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: plugin.plugin_attempt_info_shape.handler
+      Description: Attempt hooks expose the full attempt info shape
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  PluginOperationChangeShape:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-22"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: plugin.plugin_operation_change_shape.handler
+      Description: Operation-change hooks expose full delta operation items
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
+  PluginContextInfoShape:
+    Type: AWS::Serverless::Function
+    TestingMetadata:
+      TestDescription: ["10-23"]
+    Properties:
+      CodeUri: lambda-build/
+      Handler: plugin.plugin_context_info_shape.handler
+      Description: Context hooks expose subtype and children-replay fields
+      Role:
+        Fn::GetAtt:
+        - DurableFunctionRole
+        - Arn
+      DurableConfig:
+        RetentionPeriodInDays: 7
+        ExecutionTimeout: 300
