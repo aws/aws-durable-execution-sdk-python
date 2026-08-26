@@ -1870,5 +1870,361 @@ class TestUserFunctionOutcomeFromError(unittest.TestCase):
 # endregion Suspend Outcome Tests
 
 
+# region Execution ARN Tests
+
+
+class _AllHookCapturingPlugin(DurableInstrumentationPlugin):
+    """Records every hook info object it receives, in order."""
+
+    def __init__(self) -> None:
+        self.infos: list[object] = []
+
+    def on_invocation_start(self, info: InvocationStartInfo) -> None:
+        self.infos.append(info)
+
+    def on_invocation_end(self, info: InvocationEndInfo) -> None:
+        self.infos.append(info)
+
+    def on_operation_start(self, info: OperationStartInfo) -> None:
+        self.infos.append(info)
+
+    def on_operation_end(self, info: OperationEndInfo) -> None:
+        self.infos.append(info)
+
+    def on_operation_change(self, info: OperationChangeInfo) -> None:
+        self.infos.append(info)
+
+    def on_user_function_start(self, info: UserFunctionStartInfo) -> None:
+        self.infos.append(info)
+
+    def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
+        self.infos.append(info)
+
+
+class TestOperationInfoExecutionArnField(unittest.TestCase):
+    """The execution_arn field on OperationInfo is additive and experimental."""
+
+    def test_defaults_to_none_for_legacy_constructors(self):
+        # A caller constructing OperationInfo without an ARN keeps working.
+        self.assertIsNone(OPERATION_START_INFO.execution_arn)
+        self.assertIsNone(OPERATION_END_INFO.execution_arn)
+        info = OperationInfo(
+            operation_id="op-1",
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="n",
+            parent_id="p",
+            start_time=START_TS,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+        self.assertIsNone(info.execution_arn)
+
+    def test_is_keyword_only(self):
+        with self.assertRaises(TypeError):
+            # Positional passing must not be accepted for the additive field.
+            OperationInfo(
+                "op-1",
+                OperationType.STEP,
+                OperationSubType.STEP,
+                "n",
+                "p",
+                START_TS,
+                False,
+                OperationStatus.STARTED,
+                None,  # end_time is kw_only too; this proves no positional slot
+            )
+
+    def test_field_is_experimental_and_excluded_from_generated_methods(self):
+        arn_field = {f.name: f for f in fields(OperationInfo)}["execution_arn"]
+        self.assertIs(arn_field.metadata.get("experimental"), True)
+        self.assertFalse(arn_field.repr)
+        self.assertFalse(arn_field.compare)
+        self.assertIs(arn_field.hash, False)
+        # Inherited unchanged by every OperationInfo subclass.
+        for info_type in (
+            OperationStartInfo,
+            OperationEndInfo,
+            UserFunctionStartInfo,
+            UserFunctionEndInfo,
+        ):
+            sub_field = {f.name: f for f in fields(info_type)}["execution_arn"]
+            self.assertFalse(sub_field.compare, info_type.__name__)
+            self.assertIs(sub_field.hash, False, info_type.__name__)
+
+    def test_repr_equality_and_hash_are_unchanged_by_the_arn(self):
+        without = OperationStartInfo(
+            operation_id="op-1",
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="n",
+            parent_id="p",
+            start_time=START_TS,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+        with_arn = OperationStartInfo(
+            operation_id="op-1",
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="n",
+            parent_id="p",
+            start_time=START_TS,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+            execution_arn="arn:exec",
+        )
+        self.assertEqual(without, with_arn)
+        self.assertEqual(hash(without), hash(with_arn))
+        self.assertNotIn("arn:exec", repr(with_arn))
+
+    def test_from_operation_accepts_and_propagates_the_arn(self):
+        operation = Operation(
+            operation_id="op-1",
+            operation_type=ServiceOperationType.STEP,
+            status=OperationStatus.SUCCEEDED,
+        )
+        self.assertIsNone(OperationInfo.from_operation(operation).execution_arn)
+        self.assertEqual(
+            OperationInfo.from_operation(
+                operation, execution_arn="arn:exec"
+            ).execution_arn,
+            "arn:exec",
+        )
+
+
+class TestPluginExecutorStampsExecutionArn(unittest.TestCase):
+    """Every direct operation/user-function hook carries the active ARN."""
+
+    ARN = "arn:aws:lambda:us-east-1:123:durable:exec-1"
+
+    def setUp(self):
+        self.plugin = _AllHookCapturingPlugin()
+        self.executor = PluginExecutor(plugins=[self.plugin])
+
+    def _start(self, operations_provider=None, updated_operation_ids=None):
+        self.executor.on_invocation_start(
+            execution_arn=self.ARN,
+            lambda_context=LAMBDA_CTX,
+            execution_start_time=START_TS,
+            is_first_invocation=False,
+            operations_provider=operations_provider,
+            updated_operation_ids=updated_operation_ids,
+        )
+
+    def test_on_user_function_start_and_end_carry_the_arn(self):
+        identifier = OperationIdentifier(
+            operation_id="step-1", sub_type=OperationSubType.STEP
+        )
+        with self.executor.run():
+            self._start()
+            start_info = self.executor.on_user_function_start(identifier)
+            self.executor.on_user_function_end(start_info, None)
+
+        self.assertEqual(start_info.execution_arn, self.ARN)
+        uf_end = [i for i in self.plugin.infos if isinstance(i, UserFunctionEndInfo)]
+        self.assertEqual(len(uf_end), 1)
+        # from_start_info preserves the ARN captured at start.
+        self.assertEqual(uf_end[0].execution_arn, self.ARN)
+
+    def test_on_operation_action_start_carries_the_arn(self):
+        update = MagicMock()
+        update.action = OperationAction.START
+        update.operation_id = "op-1"
+        update.operation_type = ServiceOperationType.STEP
+        update.sub_type = OperationSubType.STEP
+        update.name = "my-step"
+        update.parent_id = "parent-1"
+
+        with self.executor.run():
+            self._start()
+            self.executor.on_operation_action(update)
+
+        starts = [i for i in self.plugin.infos if isinstance(i, OperationStartInfo)]
+        self.assertEqual([s.execution_arn for s in starts], [self.ARN])
+
+    def test_on_operation_replay_carries_the_arn(self):
+        operation = Operation(
+            operation_id="op-1",
+            operation_type=ServiceOperationType.WAIT,
+            status=OperationStatus.STARTED,
+        )
+        with self.executor.run():
+            self._start()
+            self.executor.on_operation_replay(operation)
+
+        starts = [i for i in self.plugin.infos if isinstance(i, OperationStartInfo)]
+        self.assertEqual([s.execution_arn for s in starts], [self.ARN])
+
+    def test_on_operation_update_terminal_end_carries_the_arn(self):
+        op = Operation(
+            operation_id="op-1",
+            operation_type=ServiceOperationType.STEP,
+            status=OperationStatus.SUCCEEDED,
+            sub_type=OperationSubType.STEP,
+            step_details=StepDetails(attempt=1, result='"ok"'),
+        )
+        with self.executor.run():
+            self._start()
+            self.executor.on_operation_update(op)
+
+        ends = [i for i in self.plugin.infos if isinstance(i, OperationEndInfo)]
+        self.assertEqual([e.execution_arn for e in ends], [self.ARN])
+
+    def test_on_child_context_end_carries_the_arn(self):
+        identifier = OperationIdentifier(
+            operation_id="context-1",
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            parent_id="parent-1",
+            name="book-trip",
+        )
+        with self.executor.run():
+            self._start()
+            self.executor.on_child_context_end(identifier, OperationStatus.SUCCEEDED)
+
+        ends = [i for i in self.plugin.infos if isinstance(i, OperationEndInfo)]
+        self.assertEqual([e.execution_arn for e in ends], [self.ARN])
+
+    def test_arn_is_none_before_invocation_start(self):
+        # A hook fired without a captured invocation status has no ARN to stamp.
+        update = MagicMock()
+        update.action = OperationAction.START
+        update.operation_id = "op-1"
+        update.operation_type = ServiceOperationType.STEP
+        update.sub_type = OperationSubType.STEP
+        update.name = "my-step"
+        update.parent_id = "parent-1"
+
+        with self.executor.run():
+            self.executor.on_operation_action(update)
+
+        starts = [i for i in self.plugin.infos if isinstance(i, OperationStartInfo)]
+        self.assertEqual([s.execution_arn for s in starts], [None])
+
+    def test_operation_hooks_track_the_active_invocation_arn(self):
+        # A/B/A style regression: the ARN stamped follows whichever invocation
+        # is currently active, not the first one ever seen.
+        identifier = OperationIdentifier(
+            operation_id="step-1", sub_type=OperationSubType.STEP
+        )
+        second_arn = "arn:aws:lambda:us-east-1:123:durable:exec-2"
+        with self.executor.run():
+            self._start()
+            first = self.executor.on_user_function_start(identifier)
+            self.executor.on_invocation_start(
+                execution_arn=second_arn,
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=False,
+            )
+            second = self.executor.on_user_function_start(identifier)
+
+        self.assertEqual(first.execution_arn, self.ARN)
+        self.assertEqual(second.execution_arn, second_arn)
+
+
+class TestExecutionArnOnOperationMaps(unittest.TestCase):
+    """Operation maps/snapshots on the invocation and change hooks carry the ARN."""
+
+    ARN = "arn:aws:lambda:us-east-1:123:durable:exec-1"
+
+    def setUp(self):
+        self.captured: list[object] = []
+
+        class _CapturingPlugin(DurableInstrumentationPlugin):
+            def on_invocation_start(_self, info):  # noqa: N805
+                self.captured.append(info)
+
+            def on_invocation_end(_self, info):  # noqa: N805
+                self.captured.append(info)
+
+            def on_operation_change(_self, info):  # noqa: N805
+                self.captured.append(info)
+
+        self.executor = PluginExecutor(plugins=[_CapturingPlugin()])
+
+    @staticmethod
+    def _operation(operation_id, status=OperationStatus.SUCCEEDED):
+        return Operation(
+            operation_id=operation_id,
+            operation_type=ServiceOperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name=f"name-{operation_id}",
+            parent_id="root",
+            status=status,
+            start_timestamp=START_TS,
+            end_timestamp=END_TS,
+            step_details=StepDetails(attempt=1),
+        )
+
+    def test_invocation_start_and_end_map_entries_carry_the_arn(self):
+        operations = {
+            "op-1": self._operation("op-1"),
+            "op-2": self._operation("op-2"),
+        }
+        with self.executor.run():
+            self.executor.on_invocation_start(
+                execution_arn=self.ARN,
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=False,
+                operations_provider=lambda: operations,
+                updated_operation_ids=["op-2"],
+            )
+            self.executor.on_invocation_end(
+                output=DurableExecutionInvocationOutput(
+                    status=InvocationStatus.SUCCEEDED, result=None, error=None
+                )
+            )
+
+        start_info, end_info = self.captured
+        self.assertTrue(
+            all(v.execution_arn == self.ARN for v in start_info.operations.values())
+        )
+        self.assertTrue(
+            all(
+                v.execution_arn == self.ARN
+                for v in start_info.updated_operations.values()
+            )
+        )
+        self.assertTrue(
+            all(v.execution_arn == self.ARN for v in end_info.operations.values())
+        )
+
+    def test_operation_change_map_entries_carry_the_arn(self):
+        updated = self._operation("op-1")
+        other = Operation(
+            operation_id="op-2",
+            operation_type=ServiceOperationType.WAIT,
+            status=OperationStatus.STARTED,
+            sub_type=OperationSubType.WAIT,
+        )
+        with self.executor.run():
+            self.executor.on_invocation_start(
+                execution_arn=self.ARN,
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=False,
+            )
+            self.executor.on_operation_update(
+                [updated],
+                {"op-1": updated, "op-2": other},
+                previous_operations={},
+            )
+
+        change = self.captured[-1]
+        self.assertIsInstance(change, OperationChangeInfo)
+        self.assertEqual(change.execution_arn, self.ARN)
+        self.assertTrue(
+            all(v.execution_arn == self.ARN for v in change.operations.values())
+        )
+        self.assertTrue(
+            all(v.execution_arn == self.ARN for v in change.updated_operations.values())
+        )
+
+
+# endregion Execution ARN Tests
+
+
 if __name__ == "__main__":
     unittest.main()

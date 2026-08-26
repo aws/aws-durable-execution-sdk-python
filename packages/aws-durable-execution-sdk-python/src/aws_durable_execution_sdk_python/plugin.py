@@ -110,12 +110,39 @@ class OperationInfo:
     )
     """EXPERIMENTAL: The operation error, when available."""
     attempt: int | None = field(default=None, kw_only=True)
+    execution_arn: str | None = field(
+        default=None,
+        kw_only=True,
+        repr=False,
+        compare=False,
+        hash=False,
+        metadata={"experimental": True},
+    )
+    """EXPERIMENTAL: ARN of the durable execution this operation belongs to.
+
+    Populated on every operation and user-function lifecycle hook emitted by
+    :class:`PluginExecutor` from the active invocation's
+    :attr:`InvocationStartInfo.execution_arn`, and on the ``OperationInfo``
+    entries of the operation maps/snapshots exposed by
+    :attr:`InvocationInfo.operations`,
+    :attr:`InvocationStartInfo.updated_operations`, and
+    :class:`OperationChangeInfo`. Lets a plugin attribute an operation to its
+    enclosing execution without relying on map insertion order.
+
+    ``None`` when an ``OperationInfo`` is constructed without an enclosing
+    execution context (for example a hook info built directly in a test).
+
+    Excluded from ``repr``, ``__eq__`` and ``__hash__`` so adding it stays
+    additive: existing infos built from the earlier field set keep comparing and
+    hashing exactly as before.
+    """
 
     @staticmethod
     def from_operation(
         operation: Operation,
         *,
         is_replayed: bool = False,
+        execution_arn: str | None = None,
     ) -> OperationInfo:
         return OperationInfo(
             operation_id=operation.operation_id,
@@ -132,6 +159,7 @@ class OperationInfo:
             ),
             is_replayed=is_replayed,
             status=operation.status,
+            execution_arn=execution_arn,
         )
 
 
@@ -158,15 +186,23 @@ def _copy_error(error: ErrorObject | None) -> ErrorObject | None:
 
 def _to_operation_info_map(
     operations: Mapping[str, Operation],
+    *,
+    execution_arn: str | None = None,
 ) -> dict[str, OperationInfo]:
     """Convert a map of checkpointed operations to the plugin ``OperationInfo`` view.
 
     ``is_replayed`` is left at its default ``False``: these entries describe the
     stored state of an operation, not a replay event for it. Replay is signalled
     through the dedicated operation hooks.
+
+    ``execution_arn`` is stamped onto every entry so a plugin can attribute the
+    operation to its enclosing execution without relying on map insertion order.
+    Passed by the executor, which knows the active invocation's ARN.
     """
     return {
-        operation_id: OperationInfo.from_operation(operation)
+        operation_id: OperationInfo.from_operation(
+            operation, execution_arn=execution_arn
+        )
         for operation_id, operation in operations.items()
     }
 
@@ -240,6 +276,7 @@ class UserFunctionEndInfo(OperationInfo):
             ),
             end_time=datetime.datetime.now(datetime.UTC),
             error=error,
+            execution_arn=start_info.execution_arn,
         )
 
 
@@ -467,6 +504,20 @@ class PluginExecutor:
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
 
+    @property
+    def _active_execution_arn(self) -> str | None:
+        """ARN of the invocation currently in flight, or ``None`` before start.
+
+        The single source of truth for stamping ``execution_arn`` onto the
+        operation and user-function hooks, taken from the ``InvocationStartInfo``
+        captured in :meth:`on_invocation_start`.
+        """
+        return (
+            self._invocation_status.execution_arn
+            if self._invocation_status is not None
+            else None
+        )
+
     @contextlib.contextmanager
     def run(self):
         if self._plugins:
@@ -522,6 +573,8 @@ class PluginExecutor:
     def _snapshot_operation_infos(
         self,
         operations_provider: Callable[[], Mapping[str, Operation]] | None,
+        *,
+        execution_arn: str | None = None,
     ) -> dict[str, OperationInfo]:
         """Build the plugin ``OperationInfo`` view of the current operation map.
 
@@ -542,7 +595,9 @@ class PluginExecutor:
         if not self._plugins or operations_provider is None:
             return {}
         try:
-            return _to_operation_info_map(operations_provider())
+            return _to_operation_info_map(
+                operations_provider(), execution_arn=execution_arn
+            )
         except Exception:
             # A plugin-facing view must never break the execution.
             logger.exception("Failed to snapshot operations for plugin hook")
@@ -573,7 +628,9 @@ class PluginExecutor:
         """
         aws_request_id = lambda_context.aws_request_id if lambda_context else None
         self._operations_provider = operations_provider if self._plugins else None
-        operations = self._snapshot_operation_infos(operations_provider)
+        operations = self._snapshot_operation_infos(
+            operations_provider, execution_arn=execution_arn
+        )
         self._invocation_status = InvocationStartInfo(
             execution_arn=execution_arn,
             request_id=aws_request_id,
@@ -632,7 +689,10 @@ class PluginExecutor:
             InvocationEndInfo.from_durable_execution_invocation_output(
                 self._invocation_status,
                 output,
-                operations=self._snapshot_operation_infos(self._operations_provider),
+                operations=self._snapshot_operation_infos(
+                    self._operations_provider,
+                    execution_arn=self._active_execution_arn,
+                ),
             )
         )
         self.execute_plugins(invocation_end_info, sync=True)
@@ -655,6 +715,7 @@ class PluginExecutor:
             status=OperationStatus.STARTED,
             is_replay_children=is_replay_children,
             attempt=attempt,
+            execution_arn=self._active_execution_arn,
         )
         self.execute_plugins(start_info, sync=True)
         return start_info
@@ -698,6 +759,7 @@ class PluginExecutor:
                     start_time=operation.start_timestamp if operation else None,
                     is_replayed=previous_operation is not None,
                     status=OperationStatus.STARTED,
+                    execution_arn=self._active_execution_arn,
                 ),
                 sync=True,
             )
@@ -716,6 +778,7 @@ class PluginExecutor:
             start_time=operation.start_timestamp,
             is_replayed=True,
             status=operation.status,
+            execution_arn=self._active_execution_arn,
         )
         self.execute_plugins(start_info, sync=True)
 
@@ -741,6 +804,7 @@ class PluginExecutor:
                 status=status,
                 error=error,
                 is_replayed=is_replayed,
+                execution_arn=self._active_execution_arn,
             ),
             sync=True,
         )
@@ -791,6 +855,7 @@ class PluginExecutor:
                             else None
                         ),
                         is_replayed=False,
+                        execution_arn=self._active_execution_arn,
                     ),
                     sync=True,
                 )
@@ -815,10 +880,16 @@ class PluginExecutor:
             OperationChangeInfo(
                 execution_arn=self._invocation_status.execution_arn,
                 updated_operations={
-                    operation.operation_id: OperationInfo.from_operation(operation)
+                    operation.operation_id: OperationInfo.from_operation(
+                        operation,
+                        execution_arn=self._invocation_status.execution_arn,
+                    )
                     for operation in changed_operations
                 },
-                operations=_to_operation_info_map(operations),
+                operations=_to_operation_info_map(
+                    operations,
+                    execution_arn=self._invocation_status.execution_arn,
+                ),
             ),
             sync=True,
         )
