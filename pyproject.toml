@@ -30,6 +30,7 @@ examples-integration = "pytest --runner-mode=cloud -m example packages/aws-durab
 addopts = "-v --strict-markers --import-mode=importlib"
 testpaths = [
     "packages/aws-durable-execution-sdk-python/tests",
+    "packages/aws-durable-execution-sdk-python-insight/tests",
     "packages/aws-durable-execution-sdk-python-otel/tests",
     "packages/aws-durable-execution-sdk-python-testing/tests",
     "packages/aws-durable-execution-sdk-python-examples/test",
