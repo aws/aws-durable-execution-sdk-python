@@ -8,6 +8,8 @@ from aws_durable_execution_sdk_python.config import (
     CallbackConfig,
     ChildConfig,
     CompletionConfig,
+    CompletionDecision,
+    CompletionOutcome,
     Duration,
     InvokeConfig,
     MapConfig,
@@ -260,6 +262,20 @@ def test_parallel_config_rejects_max_concurrency_below_one():
 def test_configs_accept_none_max_concurrency_as_unlimited():
     assert MapConfig().max_concurrency is None
     assert ParallelConfig(max_concurrency=1).max_concurrency == 1
+
+
+def test_completion_decision_rejects_complete_without_outcome():
+    with pytest.raises(
+        ValidationError, match="outcome is required when complete is True"
+    ):
+        CompletionDecision(complete=True)
+
+
+def test_completion_decision_rejects_outcome_when_not_complete():
+    with pytest.raises(
+        ValidationError, match="outcome must be None when complete is False"
+    ):
+        CompletionDecision(complete=False, outcome=CompletionOutcome.SUCCEEDED)
 
 
 # endregion Config validation

@@ -99,6 +99,109 @@ class NestingType(Enum):
     """
 
 
+class BatchItemStatus(Enum):
+    """The status of a batch item in map/parallel operations."""
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    STARTED = "STARTED"
+
+
+class CompletionOutcome(Enum):
+    """Outcome of a custom completion decision.
+
+    Declares whether completing the batch now represents an overall success
+    or failure. This is a batch-level outcome, distinct from BatchItemStatus
+    which describes individual items.
+    """
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True)
+class CompletionDecision:
+    """Decision returned by a should_complete predicate.
+
+    Use the factory functions :func:`continue_batch` and
+    :func:`complete_batch` to construct instances.
+
+    Attributes:
+        complete: Whether to complete the batch now.
+        outcome: When complete is True, whether this completion represents
+            overall success or failure. None when complete is False.
+    """
+
+    complete: bool
+    outcome: CompletionOutcome | None = None
+
+    def __post_init__(self) -> None:
+        if self.complete and self.outcome is None:
+            msg = "outcome is required when complete is True"
+            raise ValidationError(msg)
+        if not self.complete and self.outcome is not None:
+            msg = "outcome must be None when complete is False"
+            raise ValidationError(msg)
+
+
+def continue_batch() -> CompletionDecision:
+    """Continue the batch - do not complete early."""
+    return CompletionDecision(complete=False)
+
+
+def complete_batch(
+    outcome: CompletionOutcome = CompletionOutcome.SUCCEEDED,
+) -> CompletionDecision:
+    """Complete the batch now with the given outcome (default SUCCEEDED)."""
+    return CompletionDecision(complete=True, outcome=outcome)
+
+
+@dataclass(frozen=True)
+class CompletionItemStatus:
+    """Status snapshot of a single branch/item in a batch operation.
+
+    Provided within :class:`CompletionStatus` so custom predicates can
+    inspect individual branch outcomes for quorum-style decisions.
+
+    Attributes:
+        index: The branch/item index (stable across replay).
+        name: Optional custom name of the branch/item, when one was provided.
+        status: Current status as a BatchItemStatus enum value, or None if
+            the branch has not been scheduled yet (common when max_concurrency
+            limits in-flight branches).
+    """
+
+    index: int
+    name: str | None = None
+    status: BatchItemStatus | None = None
+
+
+@dataclass(frozen=True)
+class CompletionStatus:
+    """Progress snapshot passed to a custom completion predicate.
+
+    Provided to the ``should_complete`` callable on each branch terminal
+    event so the predicate can decide whether the batch should finish early.
+
+    Attributes:
+        success_count: Number of branches that have completed successfully.
+        failure_count: Number of branches that have failed.
+        completed_count: Total terminal branches (success_count + failure_count).
+        total_count: Total number of branches in the batch.
+        items: Per-branch status snapshot ordered by original index. items[i]
+            is always the branch defined at position i, regardless of
+            completion order. Enables index-based quorum rules such as
+            "complete when branch 0 succeeds OR branches 1 and 2 both
+            succeed".
+    """
+
+    success_count: int
+    failure_count: int
+    completed_count: int
+    total_count: int
+    items: tuple[CompletionItemStatus, ...] = ()
+
+
 @dataclass(frozen=True)
 class CompletionConfig:
     """Configuration for determining when parallel/map operations complete.
@@ -119,8 +222,46 @@ class CompletionConfig:
             (0.0 to 100.0). If None, no percentage limit is enforced.
             Use this to implement "fail if more than X% fail" semantics.
 
+        should_complete: Optional predicate for custom completion logic.
+            Cannot be combined with threshold fields (min_successful,
+            tolerated_failure_count, tolerated_failure_percentage).
+
+            The predicate receives a CompletionStatus snapshot and returns a
+            CompletionDecision: either continue_batch() to keep going, or
+            complete_batch(outcome) to stop the batch now. The outcome
+            determines whether this completion represents overall success
+            (CUSTOM_COMPLETION_SUCCEEDED) or failure
+            (CUSTOM_COMPLETION_FAILED). A FAILED outcome marks the whole
+            batch as failed even when no individual item failed.
+
+            The predicate is evaluated during live execution: once before
+            any branch is scheduled (with completed_count == 0) and again
+            whenever branch state changes, including terminal and suspension
+            events. It must therefore handle the initial zero-progress
+            snapshot and never assume any item has completed. When a resumed
+            invocation finds the batch already completed, the recorded
+            completion outcome is replayed and the predicate is not called
+            again; otherwise the batch runs live and the predicate is
+            evaluated as described.
+
+            The predicate must be deterministic, side-effect-free, and depend
+            only on the CompletionStatus provided, never on external state. It
+            must also be monotonic: once a level of progress would complete
+            the batch, more progress must not flip the decision back to
+            continue (for example success_count >= n). Non-monotonic
+            predicates are not supported. On a mid-run resume the batch
+            re-runs live and already-completed branches replay in an
+            unspecified order, so the predicate may be evaluated on an
+            intermediate subset of the final progress; monotonicity is what
+            guarantees a subset cannot reach a different decision than the
+            full terminal set. The same race-condition caveat as the
+            threshold fields applies: when several items finish at once the
+            batch may end with slightly more completed items than the
+            predicate first observed.
+
     Note:
         The operation completes when any of the completion criteria are met:
+        - Custom predicate returns complete_batch() (when should_complete is provided)
         - Enough successes (min_successful reached)
         - Too many failures (tolerated limits exceeded)
         - All items/branches completed
@@ -131,11 +272,20 @@ class CompletionConfig:
             min_successful=3,
             tolerated_failure_count=2
         )
+
+        # Custom predicate: stop once 2 successes are observed
+        config = CompletionConfig(
+            should_complete=lambda status: (
+                complete_batch() if status.success_count >= 2
+                else continue_batch()
+            )
+        )
     """
 
     min_successful: int | None = None
     tolerated_failure_count: int | None = None
     tolerated_failure_percentage: int | float | None = None
+    should_complete: Callable[[CompletionStatus], CompletionDecision] | None = None
 
     def __post_init__(self) -> None:
         if self.min_successful is not None and self.min_successful < 1:
@@ -156,6 +306,19 @@ class CompletionConfig:
             msg = (
                 "tolerated_failure_percentage must be between 0 and 100, got: "
                 f"{self.tolerated_failure_percentage}"
+            )
+            raise ValidationError(msg)
+        if self.should_complete is not None and not callable(self.should_complete):
+            msg = "should_complete must be callable"
+            raise ValidationError(msg)
+        if self.should_complete is not None and (
+            self.min_successful is not None
+            or self.tolerated_failure_count is not None
+            or self.tolerated_failure_percentage is not None
+        ):
+            msg = (
+                "should_complete cannot be combined with min_successful, "
+                "tolerated_failure_count, or tolerated_failure_percentage"
             )
             raise ValidationError(msg)
 

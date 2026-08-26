@@ -17,8 +17,12 @@ from aws_durable_execution_sdk_python.concurrency.models import (
 from aws_durable_execution_sdk_python.identifier import OperationIdNamespace
 from aws_durable_execution_sdk_python.config import (
     CompletionConfig,
+    CompletionDecision,
+    CompletionStatus,
     MapConfig,
     NestingType,
+    complete_batch,
+    continue_batch,
 )
 from aws_durable_execution_sdk_python.context import DurableContext, ExecutionContext
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -1514,3 +1518,94 @@ def test_map_handler_defaults_summary_generator_for_user_config():
     assert captured_configs[0].summary_generator is None
     assert captured_configs[0].max_concurrency == 5
     assert result.total_count == 0
+
+
+# region Custom completion predicate (should_complete) tests
+
+
+def test_map_handler_with_should_complete_predicate():
+    """Test map_handler passes should_complete through to executor."""
+    items: list[str] = ["a", "b", "c", "d", "e"]
+
+    def callable_func(ctx, item, idx, items):
+        return f"result_{item}"
+
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return complete_batch() if s.success_count >= 2 else continue_batch()
+
+    config: MapConfig = MapConfig(
+        max_concurrency=1,
+        completion_config=CompletionConfig(should_complete=predicate),
+    )
+
+    mock_batch_result: BatchResult = BatchResult(
+        all=[
+            BatchItem(index=0, status=BatchItemStatus.SUCCEEDED, result="result_a"),
+            BatchItem(index=1, status=BatchItemStatus.SUCCEEDED, result="result_b"),
+            BatchItem(index=2, status=BatchItemStatus.STARTED),
+            BatchItem(index=3, status=BatchItemStatus.STARTED),
+            BatchItem(index=4, status=BatchItemStatus.STARTED),
+        ],
+        completion_reason=CompletionReason.CUSTOM_COMPLETION_SUCCEEDED,
+    )
+
+    executor_context = Mock()
+
+    with patch.object(
+        MapExecutor, "execute", return_value=mock_batch_result
+    ) as mock_execute:
+
+        class MockExecutionState:
+            def register_branch_pool(self, pool):
+                pass
+
+            def get_checkpoint_result(self, operation_id):
+                mock_result = Mock()
+                mock_result.is_succeeded.return_value = False
+                return mock_result
+
+        execution_state = MockExecutionState()
+        operation_identifier: OperationIdentifier = OperationIdentifier(
+            "test_op", OperationSubType.MAP, "parent", "test_map"
+        )
+
+        result: BatchResult = map_handler(
+            items,
+            callable_func,
+            config,
+            execution_state,
+            executor_context,
+            operation_identifier,
+            operation_id_namespace=_StubNamespace(),
+        )
+
+        mock_execute.assert_called_once()
+        assert result.completion_reason is CompletionReason.CUSTOM_COMPLETION_SUCCEEDED
+        assert result.success_count == 2
+
+
+def test_map_executor_from_items_preserves_should_complete():
+    """Test MapExecutor.from_items passes should_complete to the policy."""
+    items: list[str] = ["a", "b", "c"]
+
+    def predicate(s: CompletionStatus) -> CompletionDecision:
+        return complete_batch() if s.success_count >= 1 else continue_batch()
+
+    def callable_func(ctx, item, idx, items):
+        return item.upper()
+
+    config: MapConfig = MapConfig(
+        completion_config=CompletionConfig(should_complete=predicate),
+    )
+
+    executor: MapExecutor = MapExecutor.from_items(
+        items,
+        callable_func,
+        config,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+    assert executor.policy.should_complete is predicate
+
+
+# endregion Custom completion predicate (should_complete) tests
