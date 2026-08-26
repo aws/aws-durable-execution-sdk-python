@@ -9,17 +9,23 @@ index.ts``). It listens to the SDK's instrumentation hooks and emits one curated
 record keeps the JS camelCase field names so records read identically across
 SDKs.
 
-Capability notes vs. the JS plugin (recorded, not hidden):
-  * The JS hooks carry ``executionInput`` / ``executionResult`` and the full
-    ``operations`` map on the invocation hooks. The Python SDK's
-    ``InvocationStartInfo`` / ``InvocationEndInfo`` did not, so this package
-    ships a minimal SDK extension surfacing ``execution_input`` /
-    ``execution_result``; the operations map is reconstructed by accumulating
-    the per-operation ``on_operation_end`` / ``on_operation_change`` hooks into
-    per-execution state (see ``ExecutionState``).
-  * The Python SDK has no ``pluginsConfig.childOperationsDepth`` equivalent, so
-    ``full-tree`` records rely on the child operations being live in the
-    emitting invocation (true for single-invocation and warm-resume cases).
+Operation-map sourcing:
+  The Python SDK invocation hooks now carry the full operation map directly:
+  ``InvocationStartInfo.operations`` (a point-in-time snapshot at invocation
+  start), ``InvocationEndInfo.operations`` (a fresh snapshot at invocation end),
+  and ``OperationChangeInfo.operations`` (the full map at the change). Alongside
+  them the invocation hooks carry ``execution_arn``, ``execution_start_time``,
+  ``execution_input`` and ``execution_result``. This plugin reads those
+  snapshots as the authoritative operation state -- it does NOT reconstruct the
+  map by accumulating per-operation ``on_operation_end`` events. Because every
+  invocation start re-seeds the map from the snapshot, a cold resume in a fresh
+  Lambda environment (a brand-new plugin instance) still reports the prior
+  terminal operations.
+
+  The Python SDK has no ``pluginsConfig.childOperationsDepth`` equivalent, so
+  ``full-tree`` records rely on the child operations being present in the
+  emitting invocation's snapshot (true for single-invocation and warm-resume
+  cases).
 """
 
 from __future__ import annotations
@@ -30,20 +36,19 @@ import sys
 import threading
 from typing import Any, Callable
 
-from aws_durable_execution_sdk_python.lambda_service import (
-    InvocationStatus,
-    OperationStatus,
-    OperationType,
-)
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationEndInfo,
     InvocationStartInfo,
+    InvocationStatus,
     OperationChangeInfo,
-    OperationEndInfo,
     OperationInfo,
+    OperationType,
 )
 
+from aws_durable_execution_sdk_python_insight.exporters.lambda_log_exporter import (
+    LambdaLogExporter,
+)
 from aws_durable_execution_sdk_python_insight.truncation import truncate_record
 from aws_durable_execution_sdk_python_insight.types import (
     ContentConfig,
@@ -53,20 +58,10 @@ from aws_durable_execution_sdk_python_insight.types import (
 )
 
 
-_TERMINAL_OP_STATUSES = frozenset(
-    {
-        OperationStatus.SUCCEEDED,
-        OperationStatus.FAILED,
-        OperationStatus.TIMED_OUT,
-        OperationStatus.CANCELLED,
-        OperationStatus.STOPPED,
-    }
-)
-
 # Maps the SDK invocation status onto the record status. A durable execution
 # suspends (PENDING) while waiting; from the execution's point of view it is
 # still in flight, so surface it as RUNNING (mirrors the JS STATUS_MAP).
-_STATUS_MAP = {
+_STATUS_MAP: dict[InvocationStatus, str] = {
     InvocationStatus.SUCCEEDED: "SUCCEEDED",
     InvocationStatus.FAILED: "FAILED",
     InvocationStatus.PENDING: "RUNNING",
@@ -156,17 +151,14 @@ def _apply_result_override(
 
 
 class _ExecutionState:
-    __slots__ = ("start_time", "parsed_arn", "sampled_in", "cached_input", "operations")
+    __slots__ = ("start_time", "parsed_arn", "cached_input", "operations")
 
-    def __init__(
-        self, start_time: Any, parsed_arn: dict[str, str], sampled_in: bool
-    ) -> None:
+    def __init__(self, start_time: Any, parsed_arn: dict[str, str]) -> None:
         self.start_time = start_time
         self.parsed_arn = parsed_arn
-        self.sampled_in = sampled_in
         self.cached_input: Any = None
-        # Insertion-ordered map operation_id -> OperationInfo (creation order,
-        # since on_operation_start/end fire in order).
+        # operation_id -> OperationInfo, adopted verbatim from the SDK's
+        # authoritative snapshot (invocation start/end and operation-change).
         self.operations: dict[str, OperationInfo] = {}
 
 
@@ -185,77 +177,104 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         if ops is not None:
             for override in ops.overrides:
                 self._overrides_by_name[override.operation_name] = override
-        self._exporters: list[InsightExporter] = list(config.exporters)
+        # Default-exporter parity with the JS plugin: an omitted OR an explicitly
+        # empty exporter list falls back to the Lambda log exporter, so the
+        # plugin is never a silent no-op. A non-empty list is used verbatim.
+        self._exporters: list[InsightExporter] = (
+            list(config.exporters) if config.exporters else [LambdaLogExporter()]
+        )
         self._state: dict[str, _ExecutionState] = {}
         self._lock = threading.Lock()
 
-    # -- state ----------------------------------------------------------------
+    # -- sampling / state -----------------------------------------------------
 
-    def _get_state(self, execution_arn: str) -> _ExecutionState:
+    def _sampled_in(self, execution_arn: str) -> bool:
+        # Deterministic per-ARN, so every hook for one execution agrees without
+        # needing to persist the decision in state.
+        return _should_sample(execution_arn, self._sampling_rate)
+
+    def _ensure_state(self, execution_arn: str) -> _ExecutionState:
         with self._lock:
             state = self._state.get(execution_arn)
             if state is None:
                 state = _ExecutionState(
                     start_time=datetime.datetime.now(datetime.UTC),
                     parsed_arn=_parse_execution_arn(execution_arn),
-                    sampled_in=_should_sample(execution_arn, self._sampling_rate),
                 )
                 self._state[execution_arn] = state
             return state
 
-    def _accumulate(self, execution_arn: str | None, op: OperationInfo) -> None:
-        if not execution_arn:
-            return
-        state = self._get_state(execution_arn)
+    def _discard_state(self, execution_arn: str) -> None:
         with self._lock:
-            existing = state.operations.get(op.operation_id)
-            # Never downgrade a terminal operation with a later non-terminal event.
-            if (
-                existing is not None
-                and existing.status in _TERMINAL_OP_STATUSES
-                and op.status not in _TERMINAL_OP_STATUSES
-            ):
-                return
-            state.operations[op.operation_id] = op
+            self._state.pop(execution_arn, None)
+
+    def _adopt_operations(
+        self, state: _ExecutionState, operations: dict[str, OperationInfo]
+    ) -> None:
+        # Adopt the authoritative point-in-time snapshot. Copy so plugin state
+        # never aliases the SDK-owned map, and rebind the attribute so a
+        # concurrent reader holding the prior reference iterates a stable dict.
+        with self._lock:
+            state.operations = dict(operations)
 
     # -- hooks ----------------------------------------------------------------
 
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
-        if not info.execution_arn:
+        arn = info.execution_arn
+        if not arn or not self._sampled_in(arn):
             return
-        state = self._get_state(info.execution_arn)
-        if not state.sampled_in:
-            return
-        if info.is_first_invocation and info.execution_start_time is not None:
-            state.start_time = info.execution_start_time
-        elif info.execution_start_time is not None and state.start_time is None:
+        state = self._ensure_state(arn)
+        # Always adopt the service-provided execution start time when present,
+        # including a cold resume in a fresh environment (never the resume time,
+        # which would corrupt duration and the date partition).
+        if info.execution_start_time is not None:
             state.start_time = info.execution_start_time
         state.cached_input = info.execution_input
+        # Seed the operation map from the full snapshot on every invocation. On a
+        # cold resume this rebuilds prior (terminal) operations that a fresh
+        # plugin instance never saw via per-operation hooks.
+        self._adopt_operations(state, info.operations)
         if self._emit_mode == "on-change":
             self._emit(
-                info.execution_arn,
+                arn,
+                state,
                 status="RUNNING",
                 end_time=None,
                 output_raw=None,
                 error=None,
             )
 
-    def on_operation_end(self, info: OperationEndInfo) -> None:
-        # OperationEndInfo has no execution_arn field; accumulate under every
-        # tracked execution's state is wrong. It is safe to key by the single
-        # in-flight execution: the SDK runs one execution per invocation, so the
-        # most-recently started execution owns this operation.
-        arn = self._current_execution_arn()
-        self._accumulate(arn, info)
-
     def on_operation_change(self, info: OperationChangeInfo) -> None:
-        for op in info.operations.values():
-            self._accumulate(info.execution_arn, op)
+        arn = info.execution_arn
+        if not arn or not self._sampled_in(arn):
+            return
+        state = self._ensure_state(arn)
+        # Replace state with the full operations snapshot carried by the hook.
+        self._adopt_operations(state, info.operations)
+        # on-change mode exports an updated RUNNING record on each change so
+        # mid-invocation progress is observable, not only at start/end.
+        if self._emit_mode == "on-change":
+            self._emit(
+                arn,
+                state,
+                status="RUNNING",
+                end_time=None,
+                output_raw=None,
+                error=None,
+            )
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
-        if not info.execution_arn:
+        arn = info.execution_arn
+        if not arn:
             return
-        state = self._get_state(info.execution_arn)
+        if not self._sampled_in(arn):
+            # Sampled-out executions process no operations and retain no state.
+            self._discard_state(arn)
+            return
+        state = self._ensure_state(arn)
+        # Refresh from the fresh end-of-invocation snapshot before emitting so
+        # the terminal record reflects the final operation map.
+        self._adopt_operations(state, info.operations)
         status = _STATUS_MAP.get(info.status, "RUNNING")
         is_terminal = status in ("SUCCEEDED", "FAILED")
         is_failure = status == "FAILED"
@@ -267,31 +286,29 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         else:  # on-complete
             should_emit = is_terminal
 
-        if state.sampled_in and should_emit:
+        if should_emit:
             self._emit(
-                info.execution_arn,
+                arn,
+                state,
                 status=status,
                 end_time=datetime.datetime.now(datetime.UTC),
                 output_raw=info.execution_result,
                 error=info.error,
             )
 
-        if is_terminal:
-            with self._lock:
-                self._state.pop(info.execution_arn, None)
+        # Clear state after EVERY invocation end, including PENDING/RETRY. The
+        # next invocation rebuilds it from InvocationStartInfo.operations, so a
+        # suspended execution that never resumes in this environment (or that was
+        # sampled out) leaks nothing and state stays bounded.
+        self._discard_state(arn)
 
     # -- emission -------------------------------------------------------------
 
-    def _current_execution_arn(self) -> str | None:
-        with self._lock:
-            # The most-recently created state is the in-flight execution.
-            if not self._state:
-                return None
-            return next(reversed(self._state))
-
-    def _build_operations(self, state: _ExecutionState) -> list[dict[str, Any]]:
+    def _build_operations(
+        self, operations: dict[str, OperationInfo]
+    ) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
-        for op in state.operations.values():
+        for op in operations.values():
             if op.operation_type == OperationType.EXECUTION:
                 continue
             if not op.name:
@@ -332,16 +349,19 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
     def _emit(
         self,
         execution_arn: str,
+        state: _ExecutionState,
         *,
         status: str,
         end_time: Any,
         output_raw: str | None,
         error: Any,
     ) -> None:
-        state = self._get_state(execution_arn)
         arn = state.parsed_arn
         start_time = state.start_time
         duration = _duration_ms(start_time, end_time)
+        # Snapshot the operations reference once so a concurrent adopt() rebind
+        # cannot change the map mid-build.
+        operations = state.operations
 
         content = self._content
         record: dict[str, Any] = {
@@ -386,7 +406,7 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
             record["output"] = output_value
         if error is not None:
             record["error"] = {"name": error.type, "message": error.message}
-        record["operations"] = self._build_operations(state)
+        record["operations"] = self._build_operations(operations)
 
         for exporter in self._exporters:
             try:

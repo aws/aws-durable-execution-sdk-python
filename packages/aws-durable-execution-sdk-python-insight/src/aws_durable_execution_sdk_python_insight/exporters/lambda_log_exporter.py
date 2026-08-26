@@ -22,7 +22,7 @@ class LambdaLogExporter:
     """
 
     def __init__(self, max_record_size_bytes: int | None = None) -> None:
-        self.max_record_size_bytes = (
+        self.max_record_size_bytes: int | None = (
             256_000 if max_record_size_bytes is None else max_record_size_bytes
         )
 
