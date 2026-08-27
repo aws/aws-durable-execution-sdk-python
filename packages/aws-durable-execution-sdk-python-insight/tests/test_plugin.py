@@ -501,3 +501,70 @@ def test_default_exporter_actually_emits_to_stdout(capsys):
     out = capsys.readouterr().out
     assert '"recordType":"WorkflowInsight"' in out  # compact JSON via LambdaLogExporter
     assert '"operationsByName"' in out
+
+
+# -- terminal timestamps: end time only for SUCCEEDED/FAILED (comment 3) ------
+
+
+def _last_record_for_end_status(status, *, emit_mode="on-change", result=None):
+    """Drive one invocation to the given end status and return the last record.
+
+    Runs in on-change mode by default so a non-terminal (PENDING/RETRY) end still
+    emits a RUNNING record whose timestamps we can assert on -- on-complete would
+    emit nothing for a non-terminal end.
+    """
+    exporter = CaptureExporter()
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], emit_mode=emit_mode)
+    )
+    op = _step("s", op_id="1")
+    plugin.on_invocation_start(_start(operations={}))
+    plugin.on_invocation_end(_end(operations=_ops(op), status=status, result=result))
+    return exporter.records[-1]
+
+
+def test_pending_end_maps_to_running_and_omits_end_time():
+    rec = _last_record_for_end_status(InvocationStatus.PENDING)
+    assert rec["status"] == "RUNNING"
+    assert "endTime" not in rec
+    assert "durationMs" not in rec
+
+
+def test_retry_end_maps_to_running_and_omits_end_time():
+    rec = _last_record_for_end_status(InvocationStatus.RETRY)
+    assert rec["status"] == "RUNNING"
+    assert "endTime" not in rec
+    assert "durationMs" not in rec
+
+
+def test_succeeded_end_is_terminal_with_end_time_and_duration():
+    rec = _last_record_for_end_status(
+        InvocationStatus.SUCCEEDED, result='"Hello, World!"'
+    )
+    assert rec["status"] == "SUCCEEDED"
+    assert rec["endTime"] is not None
+    assert rec["durationMs"] is not None
+    assert rec["output"] == "Hello, World!"
+
+
+def test_failed_end_is_terminal_with_end_time_and_duration():
+    err = ErrorObject(message="boom", type="StepError", data=None, stack_trace=None)
+    exporter = CaptureExporter()
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
+    )
+    op = _step("s", op_id="1", status=OperationStatus.FAILED)
+    plugin.on_invocation_start(_start(operations={}))
+    plugin.on_invocation_end(
+        _end(
+            operations=_ops(op),
+            status=InvocationStatus.FAILED,
+            result=None,
+            error=err,
+        )
+    )
+    rec = exporter.records[-1]
+    assert rec["status"] == "FAILED"
+    assert rec["endTime"] is not None
+    assert rec["durationMs"] is not None
+    assert rec["error"]["name"] == "StepError"

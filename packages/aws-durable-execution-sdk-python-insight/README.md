@@ -21,13 +21,20 @@ pip install "aws-durable-execution-sdk-python-insight[s3]"
 
 ```python
 from aws_durable_execution_sdk_python import durable_execution
-from aws_durable_execution_sdk_python_insight import workflow_insight
+from aws_durable_execution_sdk_python_insight import (
+    WorkflowInsightConfig,
+    workflow_insight,
+)
 from aws_durable_execution_sdk_python_insight.exporters import S3Exporter
 
 @durable_execution(
     plugins=[
         workflow_insight(
-            exporters=[S3Exporter(bucket="my-bucket", prefix="workflow-insight/")],
+            WorkflowInsightConfig(
+                exporters=[
+                    S3Exporter(bucket="my-bucket", prefix="workflow-insight/")
+                ],
+            )
         )
     ]
 )
