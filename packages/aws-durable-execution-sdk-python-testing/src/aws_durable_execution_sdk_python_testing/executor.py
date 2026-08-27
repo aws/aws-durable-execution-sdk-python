@@ -1285,9 +1285,7 @@ class Executor(ExecutionObserver):
                     )
                     raise InvalidParameterValueException(msg_failed_result)
                 logger.info("[%s] Execution failed", execution_arn)
-                self._complete_workflow(
-                    execution_arn, result=None, error=response.error
-                )
+                self._fail_workflow(execution_arn, response.error)
 
             case InvocationStatus.SUCCEEDED:
                 if response.error is not None:
@@ -1591,7 +1589,7 @@ class Executor(ExecutionObserver):
         else:
             self.complete_execution(execution_arn, result)
 
-    def _fail_workflow(self, execution_arn: str, error: ErrorObject):
+    def _fail_workflow(self, execution_arn: str, error: ErrorObject | None):
         """Fail workflow with terminal state validation."""
         execution = self._store.load(execution_arn)
 
@@ -1671,8 +1669,8 @@ class Executor(ExecutionObserver):
             raise IllegalStateException(msg)
         self._complete_events(execution_arn=execution_arn)
 
-    def fail_execution(self, execution_arn: str, error: ErrorObject) -> None:
-        """Fail execution with error (FAIL_WORKFLOW_EXECUTION decision)."""
+    def fail_execution(self, execution_arn: str, error: ErrorObject | None) -> None:
+        """Fail execution with optional error (FAIL_WORKFLOW_EXECUTION decision)."""
         logger.error("[%s] Completing execution with error: %s", execution_arn, error)
         execution: Execution = self._store.load(execution_arn=execution_arn)
         execution.complete_fail(error=error, now=self._clock.now())
@@ -1688,7 +1686,7 @@ class Executor(ExecutionObserver):
         """Complete execution successfully. Observer method triggered by notifier."""
         self.complete_execution(execution_arn, result)
 
-    def on_failed(self, execution_arn: str, error: ErrorObject) -> None:
+    def on_failed(self, execution_arn: str, error: ErrorObject | None) -> None:
         """Fail execution. Observer method triggered by notifier."""
         self.fail_execution(execution_arn, error)
 

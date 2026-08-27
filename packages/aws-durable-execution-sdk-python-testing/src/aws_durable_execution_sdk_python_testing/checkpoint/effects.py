@@ -34,7 +34,7 @@ class Failed:
     """The execution failed with ``error``."""
 
     execution_arn: str
-    error: ErrorObject
+    error: ErrorObject | None
 
 
 @dataclass(frozen=True)

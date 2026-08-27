@@ -45,6 +45,7 @@ from aws_durable_execution_sdk_python_testing.exceptions import (
     ResourceNotFoundException,
 )
 from aws_durable_execution_sdk_python_testing.executor import Executor
+from aws_durable_execution_sdk_python_testing.execution import ExecutionStatus
 from aws_durable_execution_sdk_python_testing.invoker import (
     InProcessInvoker,
     LambdaInvoker,
@@ -498,6 +499,7 @@ class DurableFunctionTestResult:
     operations: list[Operation]
     result: OperationPayload | None = None
     error: ErrorObject | None = None
+    execution_status: ExecutionStatus | None = None
 
     @classmethod
     def create(cls, execution: Execution) -> DurableFunctionTestResult:
@@ -513,12 +515,16 @@ class DurableFunctionTestResult:
         if execution.result is None:
             msg: str = "Execution result must exist to create test result."
             raise DurableFunctionsTestError(msg)
+        if execution.close_status is None:
+            msg_status: str = "Execution close status must exist to create test result."
+            raise DurableFunctionsTestError(msg_status)
 
         return cls(
             status=execution.result.status,
             operations=operations,
             result=execution.result.result,
             error=execution.result.error,
+            execution_status=execution.close_status,
         )
 
     @classmethod
@@ -541,6 +547,16 @@ class DurableFunctionTestResult:
             )
             status = InvocationStatus.FAILED
 
+        # Map overall execution status string separately from invocation status.
+        try:
+            execution_status = ExecutionStatus[execution_response.status]
+        except KeyError:
+            logger.warning(
+                "Unknown execution status: %s, defaulting to FAILED",
+                execution_response.status,
+            )
+            execution_status = ExecutionStatus.FAILED
+
         # Convert Events to Operations - group by operation_id and merge
         try:
             svc_operations = events_to_operations(history_response.events)
@@ -561,6 +577,7 @@ class DurableFunctionTestResult:
             operations=operations,
             result=execution_response.result,
             error=execution_response.error,
+            execution_status=execution_status,
         )
 
     def get_operation_by_name(self, name: str) -> Operation:
@@ -1185,7 +1202,7 @@ class DurableFunctionCloudTestRunner:
             if execution.status == "FAILED":
                 logger.warning("Execution failed")
                 return execution
-            if execution.status in ["TIMED_OUT", "ABORTED"]:
+            if execution.status in ["TIMED_OUT", "STOPPED"]:
                 logger.warning("Execution terminated: %s", execution.status)
                 return execution
 

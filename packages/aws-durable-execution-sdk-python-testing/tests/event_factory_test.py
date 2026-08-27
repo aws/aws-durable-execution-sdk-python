@@ -158,6 +158,41 @@ def test_create_execution_failed():
     assert event.execution_failed_details.error.payload.message == "Execution failed"
 
 
+def test_create_execution_failed_without_error_payload():
+    from aws_durable_execution_sdk_python.execution import (
+        DurableExecutionInvocationOutput,
+        InvocationStatus,
+    )
+
+    operation = create_mock_operation("op-1", status=OperationStatus.FAILED)
+    operation.end_timestamp = datetime.now(UTC)
+
+    error_result = DurableExecutionInvocationOutput(
+        status=InvocationStatus.FAILED,
+        error=None,
+    )
+    context = EventCreationContext.create(
+        operation=operation,
+        event_id=3,
+        durable_execution_arn="arn:test",
+        start_input=StartDurableExecutionInput(
+            account_id="123",
+            function_name="test",
+            function_qualifier="$LATEST",
+            execution_name="test",
+            execution_timeout_seconds=300,
+            execution_retention_period_days=7,
+        ),
+        result=error_result,
+        include_execution_data=True,
+    )
+    event = Event.create_execution_event(context)
+
+    assert event.event_type == "ExecutionFailed"
+    assert event.execution_failed_details.error is not None
+    assert event.execution_failed_details.error.payload is None
+
+
 def test_create_execution_timed_out():
     from aws_durable_execution_sdk_python.execution import (
         DurableExecutionInvocationOutput,

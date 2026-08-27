@@ -136,13 +136,7 @@ def test_process_fail_action_without_error():
 
     assert result is None
     assert len(notifier.failed_calls) == 1
-    execution_arn_arg, error_arg = notifier.failed_calls[0]
-    assert execution_arn_arg == execution_arn
-    assert isinstance(error_arg, ErrorObject)
-    assert (
-        "There is no error details but EXECUTION checkpoint action is not SUCCEED"
-        in str(error_arg)
-    )
+    assert notifier.failed_calls[0] == (execution_arn, None)
 
 
 def test_process_start_action():
@@ -160,9 +154,7 @@ def test_process_start_action():
 
     assert result is None
     assert len(notifier.failed_calls) == 1
-    execution_arn_arg, error_arg = notifier.failed_calls[0]
-    assert execution_arn_arg == execution_arn
-    assert isinstance(error_arg, ErrorObject)
+    assert notifier.failed_calls[0] == (execution_arn, None)
 
 
 def test_process_retry_action():
@@ -180,9 +172,7 @@ def test_process_retry_action():
 
     assert result is None
     assert len(notifier.failed_calls) == 1
-    execution_arn_arg, error_arg = notifier.failed_calls[0]
-    assert execution_arn_arg == execution_arn
-    assert isinstance(error_arg, ErrorObject)
+    assert notifier.failed_calls[0] == (execution_arn, None)
 
 
 def test_process_cancel_action():
@@ -200,9 +190,7 @@ def test_process_cancel_action():
 
     assert result is None
     assert len(notifier.failed_calls) == 1
-    execution_arn_arg, error_arg = notifier.failed_calls[0]
-    assert execution_arn_arg == execution_arn
-    assert isinstance(error_arg, ErrorObject)
+    assert notifier.failed_calls[0] == (execution_arn, None)
 
 
 def test_process_with_current_operation_and_error():

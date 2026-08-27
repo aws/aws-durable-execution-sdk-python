@@ -68,7 +68,7 @@ class MockExecutionObserver(ExecutionObserver):
         """Capture completion events."""
         self.completed_executions[execution_arn] = result
 
-    def on_failed(self, execution_arn: str, error: ErrorObject) -> None:
+    def on_failed(self, execution_arn: str, error: ErrorObject | None) -> None:
         """Capture failure events."""
         self.failed_executions[execution_arn] = error
 
@@ -308,6 +308,42 @@ def test_should_complete_workflow_with_error_when_invocation_fails(
 
         # Assert - verify workflow was completed with error
         mock_fail.assert_called_once_with("test-arn", failed_response.error)
+
+
+def test_validate_invocation_response_failed_without_error_still_fails():
+    """FAILED without an error must fail (not succeed), preserving the null error."""
+
+    store = InMemoryExecutionStore()
+    executor = Executor(store, Mock(), Mock(), Mock())
+
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="test-invocation-id",
+    )
+    execution = Execution.new(start_input)
+    execution.start()
+    store.save(execution)
+
+    response = DurableExecutionInvocationOutput(
+        status=InvocationStatus.FAILED, error=None
+    )
+
+    executor._validate_invocation_response_and_store(  # noqa: SLF001
+        execution.durable_execution_arn, response, execution
+    )
+
+    stored = store.load(execution.durable_execution_arn)
+    assert stored.is_complete is True
+    assert stored.close_status is not None
+    assert stored.close_status is ExecutionStatus.FAILED
+    assert stored.result is not None
+    assert stored.result.status is InvocationStatus.FAILED
+    assert stored.result.error is None
 
 
 def test_should_complete_workflow_with_result_when_invocation_succeeds(

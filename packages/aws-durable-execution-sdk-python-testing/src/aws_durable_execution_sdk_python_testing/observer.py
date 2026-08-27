@@ -41,7 +41,7 @@ class ExecutionObserver(ABC):
         """Called when execution completes successfully."""
 
     @abstractmethod
-    def on_failed(self, execution_arn: str, error: ErrorObject) -> None:
+    def on_failed(self, execution_arn: str, error: ErrorObject | None) -> None:
         """Called when execution fails."""
 
     @abstractmethod
@@ -77,7 +77,7 @@ class ExecutionNotifier:
         """Record that the execution completed successfully."""
         self.effects.append(Completed(execution_arn=execution_arn, result=result))
 
-    def notify_failed(self, execution_arn: str, error: ErrorObject) -> None:
+    def notify_failed(self, execution_arn: str, error: ErrorObject | None) -> None:
         """Record that the execution failed."""
         self.effects.append(Failed(execution_arn=execution_arn, error=error))
 
