@@ -5,12 +5,32 @@
 
 from __future__ import annotations
 
-from typing import Any
+from enum import StrEnum
+from typing import Any, Literal
 
 from aws_durable_execution_sdk_python_insight.exporters._common import (
     compact_dumps,
     sanitize,
 )
+
+
+class S3Partitioning(StrEnum):
+    """S3 key partitioning scheme. The values match the JS S3 exporter's options."""
+
+    # year=YYYY/month=MM/day=DD/ derived from the record startTime (default)
+    DATE = "date"
+    # function=<functionName>/
+    FUNCTION_NAME = "function-name"
+    # no partition prefix
+    NONE = "none"
+
+
+# Accepted string inputs, kept in lockstep with the enum values above. The
+# constructor is typed as this ``Literal`` union (never bare ``str``) so a typoed
+# scheme fails a static type check, while ``S3Partitioning(partitioning)`` in
+# ``__init__`` normalizes any accepted value to the matching enum member and
+# raises ``ValueError`` for an invalid dynamic string.
+S3PartitioningInput = Literal["date", "function-name", "none"]
 
 
 class S3Exporter:
@@ -25,14 +45,18 @@ class S3Exporter:
         self,
         bucket: str,
         prefix: str = "workflow-insight/",
-        partitioning: str = "date",
+        partitioning: S3Partitioning | S3PartitioningInput = S3Partitioning.DATE,
         region: str | None = None,
         max_record_size_bytes: int | None = None,
         client: Any = None,
     ) -> None:
         self.bucket = bucket
         self.prefix = prefix
-        self.partitioning = partitioning
+        # ``S3Partitioning(x)`` is idempotent for members, accepts the exact
+        # JS-style strings, and raises ``ValueError`` for an unrecognized dynamic
+        # string so an invalid scheme fails at construction rather than silently
+        # falling through to no partitioning.
+        self.partitioning = S3Partitioning(partitioning)
         self.max_record_size_bytes = (
             5_000_000 if max_record_size_bytes is None else max_record_size_bytes
         )
@@ -70,9 +94,9 @@ class S3Exporter:
         return f"{self.prefix}{self._partition(record)}{file_name}"
 
     def _partition(self, record: dict[str, Any]) -> str:
-        if self.partitioning == "function-name":
+        if self.partitioning == S3Partitioning.FUNCTION_NAME:
             return f"function={sanitize(record.get('functionName', ''))}/"
-        if self.partitioning == "date":
+        if self.partitioning == S3Partitioning.DATE:
             start = str(record.get("startTime", ""))
             # YYYY-MM-DD... -> year=YYYY/month=MM/day=DD/
             if len(start) >= 10 and start[4] == "-" and start[7] == "-":

@@ -7,6 +7,7 @@ from aws_durable_execution_sdk_python_insight.__about__ import __version__
 from aws_durable_execution_sdk_python_insight.exporters import (
     LambdaLogExporter,
     S3Exporter,
+    S3Partitioning,
 )
 from aws_durable_execution_sdk_python_insight.operations_index import (
     build_operations_by_name,
@@ -38,6 +39,7 @@ __all__ = [
     "OperationDetail",
     "OperationOverride",
     "S3Exporter",
+    "S3Partitioning",
     "WorkflowInsightConfig",
     "WorkflowInsightPlugin",
     "build_operations_by_name",
