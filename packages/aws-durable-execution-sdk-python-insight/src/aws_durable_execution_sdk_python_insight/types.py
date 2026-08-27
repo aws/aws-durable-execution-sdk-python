@@ -12,17 +12,37 @@ config field names; the *emitted wire record* keeps the JS camelCase field names
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from enum import StrEnum
+from typing import Any, Callable, Literal, Protocol
 
 
-# on-complete (default): emit once at terminal SUCCEEDED/FAILED.
-# on-failure: emit once only at terminal FAILED.
-# on-change: emit on every operation change and at end (nondeterministic count).
-EmitMode = str  # "on-complete" | "on-failure" | "on-change"
+class EmitMode(StrEnum):
+    """When the plugin emits a record. The values match the JS plugin's modes."""
 
-# top-level (default): drop any operation with a parentId.
-# full-tree: include children of contexts too.
-OperationDetail = str  # "top-level" | "full-tree"
+    # emit once at terminal SUCCEEDED/FAILED (default)
+    ON_COMPLETE = "on-complete"
+    # emit once only at terminal FAILED
+    ON_FAILURE = "on-failure"
+    # emit on every operation change and at end (nondeterministic count)
+    ON_CHANGE = "on-change"
+
+
+class OperationDetail(StrEnum):
+    """How much of the operation tree a record carries. Values match the JS plugin."""
+
+    # drop any operation with a parentId (default)
+    TOP_LEVEL = "top-level"
+    # include children of contexts too
+    FULL_TREE = "full-tree"
+
+
+# Accepted string inputs, kept in lockstep with the enum values above. Config
+# fields are typed as these ``Literal`` unions (never bare ``str``) so a typoed
+# mode fails a static type check, while ``WorkflowInsightConfig.__post_init__``
+# normalizes any accepted value to the matching enum member and raises
+# ``ValueError`` for an invalid dynamic string.
+EmitModeInput = Literal["on-complete", "on-failure", "on-change"]
+OperationDetailInput = Literal["top-level", "full-tree"]
 
 
 class InsightExporter(Protocol):
@@ -83,6 +103,19 @@ class WorkflowInsightConfig:
 
     exporters: list[InsightExporter] = field(default_factory=list)
     sampling_rate: float | None = None
-    emit_mode: EmitMode | None = None
-    operation_detail: OperationDetail | None = None
+    emit_mode: EmitMode | EmitModeInput | None = None
+    operation_detail: OperationDetail | OperationDetailInput | None = None
     content: ContentConfig | None = None
+
+    def __post_init__(self) -> None:
+        # Normalize accepted string inputs to enum members so the plugin always
+        # compares against ``EmitMode`` / ``OperationDetail`` members. ``EmitMode(x)``
+        # is idempotent for members, accepts the exact JS-style strings, and raises
+        # ``ValueError`` for an unrecognized dynamic string. Frozen dataclass, so use
+        # ``object.__setattr__`` to rebind the normalized value.
+        if self.emit_mode is not None:
+            object.__setattr__(self, "emit_mode", EmitMode(self.emit_mode))
+        if self.operation_detail is not None:
+            object.__setattr__(
+                self, "operation_detail", OperationDetail(self.operation_detail)
+            )

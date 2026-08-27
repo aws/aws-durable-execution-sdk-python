@@ -20,7 +20,9 @@ from aws_durable_execution_sdk_python_insight.truncation import truncate_record
 from aws_durable_execution_sdk_python_insight.types import (
     ContentConfig,
     ContentOperations,
+    EmitMode,
     InsightExporter,
+    OperationDetail,
     OperationOverride,
     WorkflowInsightConfig,
 )
@@ -30,8 +32,10 @@ __all__ = [
     "__version__",
     "ContentConfig",
     "ContentOperations",
+    "EmitMode",
     "InsightExporter",
     "LambdaLogExporter",
+    "OperationDetail",
     "OperationOverride",
     "S3Exporter",
     "WorkflowInsightConfig",

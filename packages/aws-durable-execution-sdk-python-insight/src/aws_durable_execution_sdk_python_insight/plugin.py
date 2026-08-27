@@ -52,7 +52,9 @@ from aws_durable_execution_sdk_python_insight.exporters.lambda_log_exporter impo
 from aws_durable_execution_sdk_python_insight.truncation import truncate_record
 from aws_durable_execution_sdk_python_insight.types import (
     ContentConfig,
+    EmitMode,
     InsightExporter,
+    OperationDetail,
     OperationOverride,
     WorkflowInsightConfig,
 )
@@ -165,8 +167,20 @@ class _ExecutionState:
 class WorkflowInsightPlugin(DurableInstrumentationPlugin):
     def __init__(self, config: WorkflowInsightConfig) -> None:
         self._sampling_rate = _resolve_sampling_rate(config.sampling_rate)
-        self._emit_mode = config.emit_mode or "on-complete"
-        self._top_level_only = (config.operation_detail or "top-level") != "full-tree"
+        # config.emit_mode / operation_detail are already normalized to enum
+        # members (or None) by WorkflowInsightConfig.__post_init__; re-wrap to
+        # satisfy the static type of the union-typed config fields.
+        self._emit_mode: EmitMode = (
+            EmitMode(config.emit_mode)
+            if config.emit_mode is not None
+            else EmitMode.ON_COMPLETE
+        )
+        detail = (
+            OperationDetail(config.operation_detail)
+            if config.operation_detail is not None
+            else OperationDetail.TOP_LEVEL
+        )
+        self._top_level_only = detail != OperationDetail.FULL_TREE
         content: ContentConfig | None = config.content
         self._content = content
         ops = content.operations if content and content.operations else None
@@ -234,7 +248,7 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         # cold resume this rebuilds prior (terminal) operations that a fresh
         # plugin instance never saw via per-operation hooks.
         self._adopt_operations(state, info.operations)
-        if self._emit_mode == "on-change":
+        if self._emit_mode == EmitMode.ON_CHANGE:
             self._emit(
                 arn,
                 state,
@@ -253,7 +267,7 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         self._adopt_operations(state, info.operations)
         # on-change mode exports an updated RUNNING record on each change so
         # mid-invocation progress is observable, not only at start/end.
-        if self._emit_mode == "on-change":
+        if self._emit_mode == EmitMode.ON_CHANGE:
             self._emit(
                 arn,
                 state,
@@ -279,21 +293,26 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         is_terminal = status in ("SUCCEEDED", "FAILED")
         is_failure = status == "FAILED"
 
-        if self._emit_mode == "on-change":
+        if self._emit_mode == EmitMode.ON_CHANGE:
             should_emit = True
-        elif self._emit_mode == "on-failure":
+        elif self._emit_mode == EmitMode.ON_FAILURE:
             should_emit = is_failure
         else:  # on-complete
             should_emit = is_terminal
 
         if should_emit:
+            # Only terminal (SUCCEEDED/FAILED) records carry an end time; a
+            # PENDING/RETRY invocation end maps to RUNNING (still in flight) and
+            # must omit endTime/durationMs. Passing end_time=None makes _emit
+            # drop both fields. Output and error likewise belong only to a
+            # terminal record.
             self._emit(
                 arn,
                 state,
                 status=status,
-                end_time=datetime.datetime.now(datetime.UTC),
-                output_raw=info.execution_result,
-                error=info.error,
+                end_time=datetime.datetime.now(datetime.UTC) if is_terminal else None,
+                output_raw=info.execution_result if is_terminal else None,
+                error=info.error if is_terminal else None,
             )
 
         # Clear state after EVERY invocation end, including PENDING/RETRY. The
