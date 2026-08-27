@@ -13,12 +13,24 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from aws_durable_execution_sdk_python_insight import LambdaLogExporter, S3Exporter
+import pytest
+
+from aws_durable_execution_sdk_python_insight import (
+    LambdaLogExporter,
+    S3Exporter,
+    S3Partitioning,
+)
 from aws_durable_execution_sdk_python_insight.exporters import (
     LambdaLogExporter as LambdaLogExporterFromPkg,
 )
+from aws_durable_execution_sdk_python_insight.exporters import (
+    S3Partitioning as S3PartitioningFromPkg,
+)
 from aws_durable_execution_sdk_python_insight.exporters.s3_exporter import (
     S3Exporter as S3ExporterFromModule,
+)
+from aws_durable_execution_sdk_python_insight.exporters.s3_exporter import (
+    S3Partitioning as S3PartitioningFromModule,
 )
 
 
@@ -59,6 +71,8 @@ class FakeS3Client:
 def test_public_import_paths_resolve_same_classes():
     assert LambdaLogExporter is LambdaLogExporterFromPkg
     assert S3Exporter is S3ExporterFromModule
+    assert S3Partitioning is S3PartitioningFromPkg
+    assert S3Partitioning is S3PartitioningFromModule
 
 
 # -- LambdaLogExporter --------------------------------------------------------
@@ -133,3 +147,72 @@ def test_s3_key_falls_back_to_arn_then_record():
     # falls back to the (sanitized) executionArn
     assert client.puts[0]["Key"].endswith(".json")
     assert "arn_aws_lambda" in client.puts[0]["Key"]
+
+
+# -- S3Partitioning -----------------------------------------------------------
+
+
+def test_s3_partitioning_enum_values():
+    # values are the exact JS-compatible strings, and StrEnum members compare
+    # equal to those strings
+    assert S3Partitioning.DATE == "date"
+    assert S3Partitioning.FUNCTION_NAME == "function-name"
+    assert S3Partitioning.NONE == "none"
+    assert {p.value for p in S3Partitioning} == {"date", "function-name", "none"}
+
+
+def test_s3_partitioning_accepts_enum_member_input():
+    client = FakeS3Client()
+    exporter = S3Exporter(
+        bucket="b", partitioning=S3Partitioning.FUNCTION_NAME, client=client
+    )
+    assert exporter.partitioning is S3Partitioning.FUNCTION_NAME
+    exporter.export(_record())
+    assert client.puts[0]["Key"] == "workflow-insight/function=my-fn/exec-1.json"
+
+
+def test_s3_partitioning_normalizes_valid_string_inputs():
+    # existing API-compatible string inputs still work and normalize to members
+    for value, member in (
+        ("date", S3Partitioning.DATE),
+        ("function-name", S3Partitioning.FUNCTION_NAME),
+        ("none", S3Partitioning.NONE),
+    ):
+        exporter = S3Exporter(bucket="b", partitioning=value, client=FakeS3Client())
+        assert exporter.partitioning is member
+
+
+def test_s3_partitioning_default_is_date():
+    exporter = S3Exporter(bucket="b", client=FakeS3Client())
+    assert exporter.partitioning is S3Partitioning.DATE
+
+
+def test_s3_partitioning_date_key_layout():
+    client = FakeS3Client()
+    S3Exporter(bucket="b", partitioning="date", client=client).export(_record())
+    assert (
+        client.puts[0]["Key"]
+        == "workflow-insight/year=2026/month=01/day=01/exec-1.json"
+    )
+
+
+def test_s3_partitioning_function_name_key_layout():
+    client = FakeS3Client()
+    S3Exporter(
+        bucket="b", partitioning="function-name", prefix="wi/", client=client
+    ).export(_record(functionName="fn/weird name", executionName="exec/1"))
+    assert client.puts[0]["Key"] == "wi/function=fn_weird_name/exec_1.json"
+
+
+def test_s3_partitioning_none_key_layout_has_no_prefix_segment():
+    client = FakeS3Client()
+    S3Exporter(bucket="b", partitioning="none", client=client).export(_record())
+    assert client.puts[0]["Key"] == "workflow-insight/exec-1.json"
+
+
+def test_s3_partitioning_invalid_string_raises_value_error():
+    # a dynamic invalid value (e.g. underscore variant) fails at construction
+    with pytest.raises(ValueError):
+        S3Exporter(bucket="b", partitioning="function_name", client=FakeS3Client())
+    with pytest.raises(ValueError):
+        S3Exporter(bucket="b", partitioning="bogus", client=FakeS3Client())

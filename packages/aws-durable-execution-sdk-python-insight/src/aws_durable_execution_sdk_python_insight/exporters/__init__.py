@@ -27,10 +27,12 @@ from aws_durable_execution_sdk_python_insight.exporters.lambda_log_exporter impo
 )
 from aws_durable_execution_sdk_python_insight.exporters.s3_exporter import (
     S3Exporter,
+    S3Partitioning,
 )
 
 
 __all__ = [
     "LambdaLogExporter",
     "S3Exporter",
+    "S3Partitioning",
 ]
