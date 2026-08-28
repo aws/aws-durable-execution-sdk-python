@@ -26,9 +26,9 @@ class _IdOverride:
 def _to_otel_trace_id(execution_arn: str, start_timestamp: datetime) -> int:
     """Build a deterministic OTel-compatible execution trace ID (128 bits).
 
-    The ID is independent of ambient Lambda or X-Ray trace context so the
-    parentless Workflow span remains the only root of the durable execution
-    trace. Invocation spans inherit ambient context separately.
+    The ID is used when the backend does not provide a valid trace ID. In that
+    case a deterministic synthetic execution root anchors the durable execution
+    trace across reinvocations.
 
     Raises:
         ValueError: If the execution start timestamp is missing.
@@ -75,6 +75,22 @@ def derive_workflow_span_id(durable_execution_arn: str) -> int:
     if not durable_execution_arn:
         raise ValueError("execution ARN is required to derive a workflow span ID")
     plain_value = f"workflow:{durable_execution_arn}"
+    hashed = hashlib.blake2b(plain_value.encode()).hexdigest()[:16]
+    span_id = int(hashed, 16)
+    return span_id or 1
+
+
+def derive_execution_root_span_id(durable_execution_arn: str) -> int:
+    """Derive the deterministic synthetic execution-root span ID.
+
+    The synthetic root is a non-recording parent context used when the backend
+    does not provide a complete remote parent. Its ID is stable across
+    reinvocations and uses a namespace distinct from Workflow and operation
+    span IDs.
+    """
+    if not durable_execution_arn:
+        raise ValueError("execution ARN is required to derive an execution root ID")
+    plain_value = f"execution-root:{durable_execution_arn}"
     hashed = hashlib.blake2b(plain_value.encode()).hexdigest()[:16]
     span_id = int(hashed, 16)
     return span_id or 1
