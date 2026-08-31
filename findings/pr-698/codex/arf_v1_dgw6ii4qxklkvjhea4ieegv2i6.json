@@ -1,0 +1,1 @@
+{"finding_digest":"19ade42390ba96aaa4e40710421aba47acef81603c5824f230c06245e08acbb5","finding_id":"arf_v1_dgw6ii4qxklkvjhea4ieegv2i6","identity_key":"concurrency/executor.py::_branch_worker::nondeterminism-must-propagate","pull_request_number":698,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
