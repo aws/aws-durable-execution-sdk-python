@@ -1426,6 +1426,87 @@ def test_rejection_of_operations_from_completed_parents():
     assert exc_info.value.operation_id == "child_1"
 
 
+def test_parent_done_recheck_rejects_checkpoint_racing_parent_completion():
+    """A checkpoint that passed validation is rejected if its parent completes.
+
+    The child pauses in the operation hook after releasing _parent_done_lock and
+    before acquiring _completion_lock. Completing the parent during that pause
+    deterministically reproduces the validation-to-enqueue race without sleeps.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    mock_plugin_executor = Mock(spec=PluginExecutor)
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=mock_plugin_executor,
+    )
+
+    child_reached_hook = threading.Event()
+    release_child_hook = threading.Event()
+
+    def block_child_completion(operation_update: OperationUpdate, **_: object) -> None:
+        if (
+            operation_update.operation_id == "child_1"
+            and operation_update.action == OperationAction.SUCCEED
+        ):
+            child_reached_hook.set()
+            assert release_child_hook.wait(timeout=2.0), (
+                "child checkpoint was not released"
+            )
+
+    mock_plugin_executor.on_operation_action.side_effect = block_child_completion
+
+    state.create_checkpoint(
+        OperationUpdate(
+            operation_id="parent_1",
+            operation_type=OperationType.CONTEXT,
+            action=OperationAction.START,
+        ),
+        is_sync=False,
+    )
+    state.create_checkpoint(
+        OperationUpdate(
+            operation_id="child_1",
+            operation_type=OperationType.CONTEXT,
+            action=OperationAction.START,
+            parent_id="parent_1",
+        ),
+        is_sync=False,
+    )
+    child_complete = OperationUpdate(
+        operation_id="child_1",
+        operation_type=OperationType.CONTEXT,
+        action=OperationAction.SUCCEED,
+        parent_id="parent_1",
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        child_future = executor.submit(state.create_checkpoint, child_complete, False)
+        assert child_reached_hook.wait(timeout=2.0), (
+            "child checkpoint did not reach the hook"
+        )
+
+        try:
+            state.create_checkpoint(
+                OperationUpdate(
+                    operation_id="parent_1",
+                    operation_type=OperationType.CONTEXT,
+                    action=OperationAction.SUCCEED,
+                ),
+                is_sync=False,
+            )
+            assert "child_1" in state._parent_done
+        finally:
+            release_child_hook.set()
+
+        with pytest.raises(OrphanedChildException) as exc_info:
+            child_future.result(timeout=2.0)
+
+    assert exc_info.value.operation_id == "child_1"
+
+
 def test_nested_parallel_operations_deep_hierarchy():
     """Test that nested parallel operations handle deep hierarchies correctly."""
     mock_lambda_client = Mock(spec=LambdaClient)
