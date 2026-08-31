@@ -7,6 +7,7 @@ on:
       - '.github/scripts/check_otel_wheel_dependencies.py'
       - '.github/scripts/parse_sdk_branch.py'
       - '.github/scripts/tests/**'
+      - '.github/workflows/ai-pr-review.yml'
       - '.github/workflows/opentelemetry-conformance-tests.yml'
       - 'packages/aws-durable-execution-sdk-python-otel/pyproject.toml'
   push:
@@ -16,6 +17,7 @@ on:
       - '.github/scripts/check_otel_wheel_dependencies.py'
       - '.github/scripts/parse_sdk_branch.py'
       - '.github/scripts/tests/**'
+      - '.github/workflows/ai-pr-review.yml'
       - '.github/workflows/opentelemetry-conformance-tests.yml'
       - 'packages/aws-durable-execution-sdk-python-otel/pyproject.toml'
 
@@ -34,6 +36,7 @@ jobs:
     - name: Run script tests
       run: |
         python -m pytest \
+          .github/scripts/tests/test_ai_pr_review_workflow.py \
           .github/scripts/tests/test_build_lambda_layer.py \
           .github/scripts/tests/test_check_otel_wheel_dependencies.py \
           .github/scripts/tests/test_opentelemetry_conformance_workflow.py \
