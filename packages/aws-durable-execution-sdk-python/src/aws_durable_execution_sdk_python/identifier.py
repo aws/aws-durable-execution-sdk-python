@@ -5,7 +5,11 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
+from aws_durable_execution_sdk_python.exceptions import (
+    NonDeterministicExecutionError,
+)
 from aws_durable_execution_sdk_python.lambda_service import (
+    Operation,
     OperationType,
     OperationSubType,
 )
@@ -40,3 +44,36 @@ class OperationIdentifier:
     @property
     def type(self) -> OperationType:
         return OperationType.from_sub_type(self.sub_type)
+
+    def validate_checkpoint(self, checkpoint: Operation | None) -> None:
+        """Ensure replay history belongs to this operation before it is consumed."""
+        if not isinstance(checkpoint, Operation):
+            return
+
+        expected_name = self.name or None
+        checkpoint_name = checkpoint.name or None
+        mismatches: list[str] = []
+
+        if checkpoint.operation_type is not self.type:
+            mismatches.append(
+                f"type checkpoint={checkpoint.operation_type.value!r} current={self.type.value!r}"
+            )
+        if checkpoint.sub_type is not self.sub_type:
+            checkpoint_sub_type = (
+                checkpoint.sub_type.value if checkpoint.sub_type is not None else None
+            )
+            mismatches.append(
+                f"subtype checkpoint={checkpoint_sub_type!r} current={self.sub_type.value!r}"
+            )
+        if checkpoint_name != expected_name:
+            mismatches.append(
+                f"name checkpoint={checkpoint_name!r} current={expected_name!r}"
+            )
+
+        if mismatches:
+            mismatch_details = ", ".join(mismatches)
+            msg = (
+                "Non-deterministic operation identity at "
+                f"id={self.operation_id!r}: {mismatch_details}"
+            )
+            raise NonDeterministicExecutionError(msg, step_id=self.operation_id)

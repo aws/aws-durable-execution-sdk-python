@@ -96,6 +96,7 @@ class StepOperationExecutor(OperationExecutor[T]):
         checkpointed_result: CheckpointedResult = self.state.get_checkpoint_result(
             self.operation_identifier.operation_id
         )
+        self.operation_identifier.validate_checkpoint(checkpointed_result.operation)
 
         # Terminal success - deserialize and return
         if checkpointed_result.is_succeeded():
@@ -177,6 +178,9 @@ class StepOperationExecutor(OperationExecutor[T]):
                 # Refresh checkpoint result to check for immediate response
                 refreshed_result: CheckpointedResult = self.state.get_checkpoint_result(
                     self.operation_identifier.operation_id
+                )
+                self.operation_identifier.validate_checkpoint(
+                    refreshed_result.operation
                 )
 
                 # START checkpoint only returns STARTED status

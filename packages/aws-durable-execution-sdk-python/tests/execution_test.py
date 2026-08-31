@@ -29,6 +29,7 @@ from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
     durable_execution,
 )
+from aws_durable_execution_sdk_python.identifier import OperationIdNamespace
 
 # LambdaContext no longer needed - using duck typing
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -43,6 +44,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
     OperationAction,
     OperationStatus,
+    OperationSubType,
     OperationType,
     OperationUpdate,
     StateOutput,
@@ -2758,6 +2760,83 @@ def test_durable_execution_replays_when_paginated_state_has_prior_operations():
         checkpoint_token="token123",
         next_marker="page2",
     )
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_type", "checkpoint_sub_type", "checkpoint_name", "mismatch"),
+    [
+        (
+            OperationType.WAIT,
+            OperationSubType.WAIT,
+            "current-name",
+            "type",
+        ),
+        (
+            OperationType.STEP,
+            OperationSubType.WAIT_FOR_CONDITION,
+            "current-name",
+            "subtype",
+        ),
+        (
+            OperationType.STEP,
+            OperationSubType.STEP,
+            "checkpoint-name",
+            "name",
+        ),
+    ],
+)
+def test_durable_execution_fails_replay_operation_identity_mismatch(
+    checkpoint_type: OperationType,
+    checkpoint_sub_type: OperationSubType,
+    checkpoint_name: str,
+    mismatch: str,
+):
+    """Mismatched replay history must fail instead of skipping current work."""
+    mock_client = Mock(spec=DurableServiceClient)
+    operation_id = OperationIdNamespace().create_id_for_step(1)
+    execution_operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+    checkpoint_operation = Operation(
+        operation_id=operation_id,
+        operation_type=checkpoint_type,
+        status=OperationStatus.SUCCEEDED,
+        sub_type=checkpoint_sub_type,
+        name=checkpoint_name,
+        step_details=StepDetails(result=json.dumps("checkpoint-result")),
+    )
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution/exec1",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=InitialExecutionState(
+            operations=[execution_operation, checkpoint_operation],
+            next_marker="",
+        ),
+        service_client=mock_client,
+    )
+    step_body_calls: list[bool] = []
+
+    def step_body(_step_context) -> str:
+        step_body_calls.append(True)
+        return "executed"
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> str:
+        return context.step(step_body, name="current-name")
+
+    result = test_handler(invocation_input, _make_lambda_context())
+
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.NonDeterministicExecutionError"
+    )
+    assert mismatch in result["Error"]["ErrorMessage"]
+    assert step_body_calls == []
+    mock_client.checkpoint.assert_not_called()
 
 
 def test_durable_execution_non_retryable_invocation_error_returns_failed():

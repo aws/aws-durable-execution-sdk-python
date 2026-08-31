@@ -87,6 +87,7 @@ class InvokeOperationExecutor(OperationExecutor[R]):
         checkpointed_result: CheckpointedResult = self.state.get_checkpoint_result(
             self.operation_identifier.operation_id
         )
+        self.operation_identifier.validate_checkpoint(checkpointed_result.operation)
 
         # Terminal success - deserialize and return
         if checkpointed_result.is_succeeded():

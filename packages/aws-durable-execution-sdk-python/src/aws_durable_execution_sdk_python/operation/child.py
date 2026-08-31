@@ -85,6 +85,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
         checkpointed_result: CheckpointedResult = self.state.get_checkpoint_result(
             self.operation_identifier.operation_id
         )
+        self.operation_identifier.validate_checkpoint(checkpointed_result.operation)
 
         # Terminal success without replay_children - deserialize and return
         if (

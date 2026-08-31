@@ -145,6 +145,8 @@ def test_wait_for_condition_already_succeeded():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.SUCCEEDED,
         step_details=StepDetails(result=json.dumps(42)),
     )
@@ -185,6 +187,8 @@ def test_wait_for_condition_already_succeeded_none_result():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.SUCCEEDED,
         step_details=StepDetails(result=None),
     )
@@ -224,6 +228,8 @@ def test_wait_for_condition_already_failed():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.FAILED,
         step_details=StepDetails(
             error=ErrorObject("Test error", "TestError", None, None)
@@ -264,6 +270,8 @@ def test_wait_for_condition_retry_with_state():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.STARTED,
         step_details=StepDetails(result=json.dumps(10), attempt=2),
     )
@@ -310,6 +318,8 @@ def test_wait_for_condition_retry_restores_none_state():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.STARTED,
         step_details=StepDetails(result=json.dumps(None), attempt=2),
     )
@@ -356,6 +366,8 @@ def test_wait_for_condition_retry_without_state():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.STARTED,
         step_details=StepDetails(result=None, attempt=2),
     )
@@ -397,6 +409,8 @@ def test_wait_for_condition_retry_invalid_json_state_fails():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.STARTED,
         step_details=StepDetails(result="invalid json", attempt=2),
     )
@@ -751,6 +765,8 @@ def test_wait_for_condition_operation_no_step_details():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.STARTED,
         step_details=None,
     )
@@ -839,6 +855,8 @@ def test_wait_for_condition_attempt_number_passed_to_strategy():
     operation: Operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.STARTED,
         step_details=StepDetails(result=json.dumps(10), attempt=3),
     )
@@ -884,6 +902,8 @@ def test_wait_for_condition_context_exposes_current_attempt():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.STARTED,
         step_details=StepDetails(result=json.dumps(10), attempt=3),
     )
@@ -973,6 +993,8 @@ def test_wait_for_condition_attempt_sequence_is_monotonic():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.STARTED,
         step_details=StepDetails(result=json.dumps(10), attempt=1),
     )
@@ -995,6 +1017,8 @@ def test_wait_for_condition_attempt_sequence_is_monotonic():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.STARTED,
         step_details=StepDetails(result=json.dumps(10), attempt=2),
     )
@@ -1017,6 +1041,8 @@ def test_wait_for_condition_attempt_sequence_is_monotonic():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.STARTED,
         step_details=StepDetails(result=json.dumps(10), attempt=3),
     )
@@ -1209,6 +1235,8 @@ def test_wait_for_condition_custom_serdes_already_succeeded():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.SUCCEEDED,
         step_details=StepDetails(
             result='{"key": "VALUE", "number": "84", "list": [1, 2, 3]}'
@@ -1248,6 +1276,8 @@ def test_wait_for_condition_pending():
     operation = Operation(
         operation_id="XXX",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.PENDING,
         step_details=StepDetails(
             result='{"key": "VALUE", "number": "84", "list": [1, 2, 3]}',
@@ -1294,6 +1324,8 @@ def test_wait_for_condition_pending_without_next_attempt():
     operation = Operation(
         operation_id="XXX",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.PENDING,
         step_details=StepDetails(
             result='{"key": "VALUE", "number": "84", "list": [1, 2, 3]}',
@@ -1384,6 +1416,8 @@ def test_wait_for_condition_immediate_success_without_executing_check():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.SUCCEEDED,
         step_details=StepDetails(result=json.dumps(42)),
     )
@@ -1426,6 +1460,8 @@ def test_wait_for_condition_immediate_failure_without_executing_check():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.FAILED,
         step_details=StepDetails(
             error=ErrorObject("Test error", "TestError", None, None)
@@ -1470,6 +1506,8 @@ def test_wait_for_condition_pending_suspends_without_executing_check():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.PENDING,
         step_details=StepDetails(
             result=json.dumps(10),
@@ -1566,6 +1604,8 @@ def test_wait_for_condition_already_completed_no_checkpoint_created():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.SUCCEEDED,
         step_details=StepDetails(result=json.dumps(42)),
     )
@@ -1703,6 +1743,8 @@ def test_wait_for_condition_exhaustion_surfaces_on_replay():
     operation = Operation(
         operation_id="op1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.FAILED,
         step_details=StepDetails(
             error=ErrorObject(
@@ -1854,6 +1896,8 @@ def test_wait_for_condition_first_run_returns_round_tripped_result():
     succeeded_op = Operation(
         operation_id="wfc_rt",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.WAIT_FOR_CONDITION,
+        name="test_wait",
         status=OperationStatus.SUCCEEDED,
         step_details=StepDetails(result=checkpointed_payload),
     )

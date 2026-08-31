@@ -85,6 +85,7 @@ class CallbackOperationExecutor(OperationExecutor[str]):
         checkpointed_result: CheckpointedResult = self.state.get_checkpoint_result(
             self.operation_identifier.operation_id
         )
+        self.operation_identifier.validate_checkpoint(checkpointed_result.operation)
 
         # CRITICAL: Do NOT raise on FAILED - defer error to Callback.result()
         # If checkpoint exists (any status including FAILED), return ready to execute

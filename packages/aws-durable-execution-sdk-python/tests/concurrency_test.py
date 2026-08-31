@@ -862,7 +862,7 @@ def test_execute_item_replayed_branch_emits_replay_hook():
             tolerated_failure_percentage=None,
         ),
         sub_type_top="TOP",
-        sub_type_iteration="ITER",
+        sub_type_iteration=OperationSubType.PARALLEL_BRANCH,
         name_prefix="test_",
         serdes=None,
         nesting_type=NestingType.NESTED,
@@ -880,6 +880,7 @@ def test_execute_item_replayed_branch_emits_replay_hook():
         operation_type=OperationType.CONTEXT,
         status=OperationStatus.SUCCEEDED,
         sub_type=OperationSubType.PARALLEL_BRANCH,
+        name="test_0",
     )
     existing = CheckpointedResult.create_from_operation(branch_op)
     child_context = Mock()

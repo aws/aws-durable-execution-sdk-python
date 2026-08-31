@@ -112,6 +112,7 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
         checkpointed_result = self.state.get_checkpoint_result(
             self.operation_identifier.operation_id
         )
+        self.operation_identifier.validate_checkpoint(checkpointed_result.operation)
 
         # Check if already completed
         if checkpointed_result.is_succeeded():

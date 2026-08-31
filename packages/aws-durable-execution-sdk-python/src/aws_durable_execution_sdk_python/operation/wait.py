@@ -61,6 +61,7 @@ class WaitOperationExecutor(OperationExecutor[None]):
         checkpointed_result: CheckpointedResult = self.state.get_checkpoint_result(
             self.operation_identifier.operation_id
         )
+        self.operation_identifier.validate_checkpoint(checkpointed_result.operation)
 
         # Terminal success - wait completed
         if checkpointed_result.is_succeeded():

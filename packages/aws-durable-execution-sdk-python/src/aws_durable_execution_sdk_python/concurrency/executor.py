@@ -154,6 +154,21 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         name: str | None = self.executables[index].name
         return name if name is not None else f"{self.name_prefix}{index}"
 
+    def _get_iteration_operation_identifier(
+        self,
+        executor_context: DurableContext,
+        executable: Executable[CallableType],
+    ) -> OperationIdentifier:
+        """Build the stable operation identity for one branch or iteration."""
+        return OperationIdentifier(
+            operation_id=self.operation_id_namespace.create_id_for_step(
+                executable.index
+            ),
+            sub_type=self.sub_type_iteration,
+            parent_id=executor_context._parent_id,  # noqa: SLF001
+            name=self.get_iteration_name(executable.index),
+        )
+
     def _build_items_snapshot(self) -> tuple[CompletionItemStatus, ...]:
         """Build the per-branch status snapshot for the custom predicate.
 
@@ -542,10 +557,10 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         and execution-order invariant.
         """
 
-        operation_id: str = self.operation_id_namespace.create_id_for_step(
-            executable.index
+        operation_identifier = self._get_iteration_operation_identifier(
+            executor_context, executable
         )
-        name: str = self.get_iteration_name(executable.index)
+        operation_id = operation_identifier.operation_id
         is_virtual: bool = self.nesting_type is NestingType.FLAT
 
         child_context: DurableContext = executor_context.create_child_context(
@@ -554,13 +569,6 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         # For NESTED this is for branch's START/SUCCEED/FAIL checkpoints (not the children of the branch).
         # For FLAT `child_handler` skips checkpoints, so not used.
         # Construct it unconditionally to keep the call simple.
-        operation_identifier = OperationIdentifier(
-            operation_id=operation_id,
-            sub_type=self.sub_type_iteration,
-            parent_id=executor_context._parent_id,  # noqa: SLF001
-            name=name,
-        )
-
         # The branch/iteration container op is resolved here via child_handler,
         # bypassing context.run_in_child_context and therefore the parent's
         # `_replay_aware`. Replicate the two things `_replay_aware` would have
@@ -574,7 +582,10 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         # Virtual (FLAT) branches do not checkpoint themselves, so neither
         # applies; their inner operations still self-correct via `_replay_aware`.
         if not is_virtual and child_context.is_replaying():
-            branch_checkpoint = child_context.state.get_checkpoint_result(operation_id)
+            branch_checkpoint = child_context.state.get_checkpoint_result(
+                operation_identifier.operation_id
+            )
+            operation_identifier.validate_checkpoint(branch_checkpoint.operation)
             if not branch_checkpoint.is_existent():
                 child_context._set_replay_status_new()  # noqa: SLF001
             elif branch_checkpoint.operation is not None:
@@ -650,12 +661,13 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         themselves, so re-executing the branch body over its inner
         operations' checkpoints discriminates success from failure.
         """
-        operation_id: str = self.operation_id_namespace.create_id_for_step(
-            executable.index
+        operation_identifier = self._get_iteration_operation_identifier(
+            executor_context, executable
         )
         checkpoint: CheckpointedResult = execution_state.get_checkpoint_result(
-            operation_id
+            operation_identifier.operation_id
         )
+        operation_identifier.validate_checkpoint(checkpoint.operation)
         if checkpoint.is_succeeded():
             result: ResultType = self._execute_item_in_child_context(
                 executor_context, executable
@@ -694,10 +706,13 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         """
         items: list[BatchItem[ResultType]] = []
         for executable in self.executables:
-            operation_id = self.operation_id_namespace.create_id_for_step(
-                executable.index
+            operation_identifier = self._get_iteration_operation_identifier(
+                executor_context, executable
             )
-            checkpoint = execution_state.get_checkpoint_result(operation_id)
+            checkpoint = execution_state.get_checkpoint_result(
+                operation_identifier.operation_id
+            )
+            operation_identifier.validate_checkpoint(checkpoint.operation)
 
             result: ResultType | None = None
             error = None
