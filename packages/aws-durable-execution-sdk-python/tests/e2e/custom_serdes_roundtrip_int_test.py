@@ -183,7 +183,6 @@ def test_step_first_run_matches_replay_with_non_identity_serdes():
                     "SubType": "Step",
                     "Name": "process_order",
                     "Status": "SUCCEEDED",
-                    "ParentId": "execution-1",
                     "StepDetails": {"Result": step_payload},
                 }
             ]
@@ -255,7 +254,6 @@ def test_child_first_run_matches_replay_with_non_identity_serdes():
                     "SubType": "RunInChildContext",
                     "Name": "process_order",
                     "Status": "SUCCEEDED",
-                    "ParentId": "execution-1",
                     "ContextDetails": {"Result": child_payload},
                 }
             ]
@@ -332,7 +330,6 @@ def test_wait_for_condition_first_run_matches_replay_with_non_identity_serdes():
                     "SubType": "WaitForCondition",
                     "Name": "process_order",
                     "Status": "SUCCEEDED",
-                    "ParentId": "execution-1",
                     "StepDetails": {"Result": wfc_payload},
                 }
             ]
@@ -435,7 +432,6 @@ def test_large_child_first_run_matches_replay_with_non_identity_serdes():
                     "SubType": "RunInChildContext",
                     "Name": "process_order",
                     "Status": "SUCCEEDED",
-                    "ParentId": "execution-1",
                     "ContextDetails": {"Result": "", "ReplayChildren": True},
                 }
             ]

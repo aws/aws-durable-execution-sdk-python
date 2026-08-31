@@ -652,6 +652,23 @@ def test_get_checkpoint_result_operation_not_found():
             OperationIdentifier("op1", OperationSubType.STEP, name="current-name"),
             "name",
         ),
+        (
+            Operation(
+                operation_id="op1",
+                operation_type=OperationType.STEP,
+                status=OperationStatus.SUCCEEDED,
+                parent_id="old-parent",
+                sub_type=OperationSubType.STEP,
+                name="current-name",
+            ),
+            OperationIdentifier(
+                "op1",
+                OperationSubType.STEP,
+                parent_id="current-parent",
+                name="current-name",
+            ),
+            "parent_id",
+        ),
     ],
 )
 def test_operation_identifier_rejects_mismatched_checkpoint_identity(

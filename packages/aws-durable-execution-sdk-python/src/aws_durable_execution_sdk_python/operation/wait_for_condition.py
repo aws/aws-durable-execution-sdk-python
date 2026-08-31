@@ -109,10 +109,7 @@ class WaitForConditionOperationExecutor(OperationExecutor[T]):
             WaitForConditionError: For FAILED operations
             SuspendExecution: For PENDING operations waiting for retry
         """
-        checkpointed_result = self.state.get_checkpoint_result(
-            self.operation_identifier.operation_id
-        )
-        self.operation_identifier.validate_checkpoint(checkpointed_result.operation)
+        checkpointed_result = self._get_checkpoint_result()
 
         # Check if already completed
         if checkpointed_result.is_succeeded():

@@ -84,10 +84,7 @@ class InvokeOperationExecutor(OperationExecutor[R]):
             InvokeError: For FAILED, TIMED_OUT, or STOPPED operations
             SuspendExecution: For STARTED operations waiting for completion
         """
-        checkpointed_result: CheckpointedResult = self.state.get_checkpoint_result(
-            self.operation_identifier.operation_id
-        )
-        self.operation_identifier.validate_checkpoint(checkpointed_result.operation)
+        checkpointed_result = self._get_checkpoint_result()
 
         # Terminal success - deserialize and return
         if checkpointed_result.is_succeeded():

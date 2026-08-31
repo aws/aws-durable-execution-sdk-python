@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 from aws_durable_execution_sdk_python.exceptions import InvalidStateError
 
 if TYPE_CHECKING:
-    from aws_durable_execution_sdk_python.state import CheckpointedResult
+    from aws_durable_execution_sdk_python.identifier import OperationIdentifier
+    from aws_durable_execution_sdk_python.state import (
+        CheckpointedResult,
+        ExecutionState,
+    )
 
 T = TypeVar("T")
 
@@ -102,6 +106,17 @@ class OperationExecutor(ABC, Generic[T]):
     - check_result_status(): Check status, create checkpoint if needed, return next action
     - execute(): Execute the operation logic with checkpoint data
     """
+
+    state: ExecutionState
+    operation_identifier: OperationIdentifier
+
+    def _get_checkpoint_result(self) -> CheckpointedResult:
+        """Return this operation's checkpoint after validating replay identity."""
+        checkpointed_result = self.state.get_checkpoint_result(
+            self.operation_identifier.operation_id
+        )
+        self.operation_identifier.validate_checkpoint(checkpointed_result.operation)
+        return checkpointed_result
 
     @abstractmethod
     def check_result_status(self) -> CheckResult[T]:

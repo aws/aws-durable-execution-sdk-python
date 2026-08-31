@@ -55,6 +55,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     SerDesError,
     ValidationError,
     InvalidStateError,
+    NonDeterministicExecutionError,
     OrphanedChildException,
     SuspendExecution,
     TimedSuspendExecution,
@@ -879,6 +880,7 @@ def test_execute_item_replayed_branch_emits_replay_hook():
         operation_id="branch-1",
         operation_type=OperationType.CONTEXT,
         status=OperationStatus.SUCCEEDED,
+        parent_id="parent",
         sub_type=OperationSubType.PARALLEL_BRANCH,
         name="test_0",
     )
@@ -1583,6 +1585,37 @@ def test_replay_flat_branch_retryable_serdes_error_escapes_batch():
     executor_context: Mock = Mock()
 
     with pytest.raises(RetryableSerDesError):
+        executor._replay_terminal_item(
+            execution_state, executor_context, Executable(0, lambda: "x")
+        )
+
+
+def test_replay_flat_branch_nondeterminism_escapes_batch():
+    """FLAT replay must not convert nondeterminism into a failed batch item."""
+    executor = _RecordingExecutor(
+        executables=[Executable(0, lambda: "x")],
+        max_concurrency=1,
+        completion_config=CompletionConfig(tolerated_failure_count=1),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        nesting_type=NestingType.FLAT,
+        operation_id_namespace=_StubNamespace(),
+    )
+    executor._execute_item_in_child_context = Mock(
+        side_effect=NonDeterministicExecutionError("branch history drift")
+    )
+
+    checkpoint: Mock = Mock()
+    checkpoint.operation = None
+    checkpoint.is_succeeded.return_value = False
+    checkpoint.is_failed.return_value = False
+    execution_state: Mock = Mock()
+    execution_state.get_checkpoint_result.return_value = checkpoint
+    executor_context: Mock = Mock()
+
+    with pytest.raises(NonDeterministicExecutionError, match="branch history drift"):
         executor._replay_terminal_item(
             execution_state, executor_context, Executable(0, lambda: "x")
         )
@@ -3718,6 +3751,31 @@ def test_background_thread_error_propagates_to_caller():
     execution_state, executor_context = _make_executor_mocks()
 
     with pytest.raises(BackgroundThreadError):
+        executor.execute(execution_state, executor_context)
+
+
+@pytest.mark.parametrize("nesting_type", [NestingType.NESTED, NestingType.FLAT])
+def test_nondeterminism_in_branch_escapes_batch(nesting_type):
+    """Branch completion policies cannot downgrade nondeterminism to failure."""
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            raise NonDeterministicExecutionError("branch history drift")
+
+    executor = TestExecutor(
+        executables=[Executable(0, lambda: "x")],
+        max_concurrency=1,
+        completion_config=CompletionConfig(tolerated_failure_count=1),
+        sub_type_top="TOP",
+        sub_type_iteration=OperationSubType.PARALLEL_BRANCH,
+        name_prefix="test_",
+        serdes=None,
+        nesting_type=nesting_type,
+        operation_id_namespace=_StubNamespace(),
+    )
+    execution_state, executor_context = _serdes_branch_test_context()
+
+    with pytest.raises(NonDeterministicExecutionError, match="branch history drift"):
         executor.execute(execution_state, executor_context)
 
 

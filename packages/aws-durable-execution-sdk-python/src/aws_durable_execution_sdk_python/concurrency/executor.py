@@ -31,6 +31,7 @@ from aws_durable_execution_sdk_python.config import (
 )
 from aws_durable_execution_sdk_python.exceptions import (
     DurableOperationError,
+    ExecutionError,
     InvalidStateError,
     InvocationError,
     OrphanedChildException,
@@ -500,9 +501,10 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
     ) -> None:
         """Worker-thread body: run one branch and report its outcome.
 
-        Converts every outcome into a :class:`BranchEvent` on the queue and
-        never raises into the pool. The coordinator loop is the sole
-        consumer of the events.
+        Converts every outcome into a :class:`BranchEvent` on the queue. Fatal
+        errors are also re-raised into the pool after posting their event; the
+        coordinator loop consumes the event and propagates the error on the
+        calling thread.
         """
         try:
             result: ResultType = self._execute_item_in_child_context(
@@ -522,6 +524,11 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 executable.index,
             )
             events.put(BranchEvent.orphaned(executable.index))
+        except ExecutionError as e:
+            # Execution-terminal SDK errors (including nondeterminism) must
+            # bypass branch failure tolerance and custom completion policies.
+            events.put(BranchEvent.fatal(executable.index, e))
+            raise
         except Exception as e:  # noqa: BLE001
             # A retryable error (e.g. RetryableSerDesError) escapes the batch:
             # the coordinator re-raises it so the invocation fails and the
@@ -682,6 +689,10 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 flat_result: ResultType = self._execute_item_in_child_context(
                     executor_context, executable
                 )
+            except ExecutionError:
+                # Nondeterminism and other execution-terminal SDK errors must
+                # not be downgraded to a failed FLAT item.
+                raise
             except Exception as e:  # noqa: BLE001
                 if isinstance(e, InvocationError) and e.is_retryable():
                     # Escape the batch so the invocation fails and the backend

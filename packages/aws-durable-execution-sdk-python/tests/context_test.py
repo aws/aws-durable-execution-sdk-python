@@ -32,6 +32,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     CallbackTimeoutError,
     ChildContextError,
     InvokeError,
+    NonDeterministicExecutionError,
     StepError,
     SuspendExecution,
     ValidationError,
@@ -44,6 +45,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationStatus,
     OperationSubType,
     OperationType,
+    StepDetails,
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -2378,6 +2380,36 @@ def test_should_propagate_outer_parent_id_when_virtual_is_nested_in_virtual():
     # step-id namespace.
     expected = hashlib.blake2b(b"inner-branch-op-1").hexdigest()[:64]
     assert inner_branch._create_step_id_for_logical_step(1) == expected
+
+
+def test_flat_branch_rejects_nested_inner_checkpoint_parent():
+    """Changing NESTED to FLAT keeps the inner id but changes its parent."""
+    branch_id = "branch-op"
+    inner_id = hashlib.blake2b(f"{branch_id}-1".encode()).hexdigest()[:64]
+    checkpoint = Operation(
+        operation_id=inner_id,
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        parent_id=branch_id,
+        sub_type=OperationSubType.STEP,
+        name="inner-step",
+        step_details=StepDetails(result=json.dumps("cached")),
+    )
+    state = _replay_state({inner_id: checkpoint})
+    executor_context = DurableContext(
+        state=state,
+        execution_context=ExecutionContext(
+            durable_execution_arn=state.durable_execution_arn
+        ),
+        parent_id="parallel-op",
+        replay_status=ReplayStatus.REPLAY,
+    )
+    flat_branch = executor_context.create_child_context(branch_id, is_virtual=True)
+
+    with pytest.raises(NonDeterministicExecutionError, match="parent_id"):
+        flat_branch.step(lambda _ctx: "must-not-run", name="inner-step")
+
+    state.close()
 
 
 # endregion Virtual-context identity tests

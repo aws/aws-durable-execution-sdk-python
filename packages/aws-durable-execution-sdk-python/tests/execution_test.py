@@ -2839,6 +2839,69 @@ def test_durable_execution_fails_replay_operation_identity_mismatch(
     mock_client.checkpoint.assert_not_called()
 
 
+def test_durable_execution_preserves_nested_nondeterminism_error():
+    """A nested mismatch fails directly without checkpointing child failure."""
+    mock_client = Mock(spec=DurableServiceClient)
+    outer_id = OperationIdNamespace().create_id_for_step(1)
+    inner_id = OperationIdNamespace(outer_id).create_id_for_step(1)
+    execution_operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+    outer_operation = Operation(
+        operation_id=outer_id,
+        operation_type=OperationType.CONTEXT,
+        status=OperationStatus.STARTED,
+        sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+        name="outer",
+    )
+    mismatched_inner_operation = Operation(
+        operation_id=inner_id,
+        operation_type=OperationType.WAIT,
+        status=OperationStatus.SUCCEEDED,
+        parent_id=outer_id,
+        sub_type=OperationSubType.WAIT,
+        name="inner-step",
+    )
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution/exec1",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=InitialExecutionState(
+            operations=[
+                execution_operation,
+                outer_operation,
+                mismatched_inner_operation,
+            ],
+            next_marker="",
+        ),
+        service_client=mock_client,
+    )
+    step_body_calls: list[bool] = []
+
+    def step_body(_step_context) -> str:
+        step_body_calls.append(True)
+        return "executed"
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> str:
+        return context.run_in_child_context(
+            lambda child: child.step(step_body, name="inner-step"),
+            name="outer",
+        )
+
+    result = test_handler(invocation_input, _make_lambda_context())
+
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.NonDeterministicExecutionError"
+    )
+    assert step_body_calls == []
+    mock_client.checkpoint.assert_not_called()
+
+
 def test_durable_execution_non_retryable_invocation_error_returns_failed():
     """Test that non-retryable InvocationError returns FAILED instead of retrying."""
     mock_client = Mock(spec=DurableServiceClient)

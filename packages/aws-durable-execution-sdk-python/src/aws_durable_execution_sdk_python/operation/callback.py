@@ -82,10 +82,7 @@ class CallbackOperationExecutor(OperationExecutor[str]):
         Raises:
             CallbackError: If callback_details are missing from checkpoint
         """
-        checkpointed_result: CheckpointedResult = self.state.get_checkpoint_result(
-            self.operation_identifier.operation_id
-        )
-        self.operation_identifier.validate_checkpoint(checkpointed_result.operation)
+        checkpointed_result = self._get_checkpoint_result()
 
         # CRITICAL: Do NOT raise on FAILED - defer error to Callback.result()
         # If checkpoint exists (any status including FAILED), return ready to execute

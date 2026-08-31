@@ -52,6 +52,8 @@ class OperationIdentifier:
 
         expected_name = self.name or None
         checkpoint_name = checkpoint.name or None
+        expected_parent_id = self.parent_id or None
+        checkpoint_parent_id = checkpoint.parent_id or None
         mismatches: list[str] = []
 
         if checkpoint.operation_type is not self.type:
@@ -68,6 +70,10 @@ class OperationIdentifier:
         if checkpoint_name != expected_name:
             mismatches.append(
                 f"name checkpoint={checkpoint_name!r} current={expected_name!r}"
+            )
+        if checkpoint_parent_id != expected_parent_id:
+            mismatches.append(
+                f"parent_id checkpoint={checkpoint_parent_id!r} current={expected_parent_id!r}"
             )
 
         if mismatches:
