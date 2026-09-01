@@ -38,6 +38,7 @@ from aws_durable_execution_sdk_python_insight import (
     WorkflowInsightConfig,
     workflow_insight,
 )
+from aws_durable_execution_sdk_python_insight.plugin import _resolve_sampling_rate
 
 ARN = "arn:aws:lambda:us-west-2:123456789012:function:my-fn:$LATEST/durable-execution/exec-1/inv-1"
 ARN_B = "arn:aws:lambda:us-west-2:123456789012:function:my-fn:$LATEST/durable-execution/exec-2/inv-1"
@@ -194,6 +195,25 @@ def test_sampling_zero_emits_nothing():
     )
     _run(plugin, ops=[_step("greet")])
     assert exporter.records == []
+
+
+def test_resolve_sampling_rate_nan_fails_open_to_one():
+    # NaN compares False to everything; without the guard this would sample OUT
+    # every execution. It must fail open to full sampling (JS parity).
+    assert _resolve_sampling_rate(float("nan")) == 1.0
+
+
+def test_nan_sampling_rate_emits_instead_of_silently_disabling(capsys):
+    exporter = CaptureExporter()
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], sampling_rate=float("nan"))
+    )
+    _run(plugin, ops=[_step("greet")])
+    # A NaN rate must not disable instrumentation: the record is still emitted.
+    assert len(exporter.records) == 1
+    # And a one-time warning is surfaced on stderr (library uses print/stderr,
+    # not the logging module).
+    assert "sampling_rate is NaN" in capsys.readouterr().err
 
 
 def test_content_omit_input_output_without_drop_flags():

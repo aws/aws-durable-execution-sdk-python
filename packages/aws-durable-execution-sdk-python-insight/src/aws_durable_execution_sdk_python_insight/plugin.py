@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import sys
 import threading
 from typing import Any, Callable
@@ -106,6 +107,18 @@ def _resolve_sampling_rate(rate: float | None) -> float:
     if rate is None:
         return 1.0
     if not isinstance(rate, (int, float)):
+        return 1.0
+    if isinstance(rate, float) and math.isnan(rate):
+        # Fail open. NaN compares False to everything, so without this guard it
+        # would flow through _should_sample (rate >= 1 -> False, rate <= 0 ->
+        # False, x < NaN -> False) and silently sample OUT every execution,
+        # disabling all instrumentation. Coerce to full sampling instead, which
+        # matches the JS plugin's treatment of non-finite/invalid rates.
+        print(
+            "[workflow-insight] sampling_rate is NaN; falling back to 1.0 "
+            "(full sampling)",
+            file=sys.stderr,
+        )  # noqa: T201
         return 1.0
     if rate < 0 or rate > 1:
         return max(0.0, min(1.0, float(rate)))
