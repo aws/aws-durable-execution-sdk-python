@@ -4,13 +4,20 @@ import datetime
 import json
 import time
 import warnings
+from collections.abc import Sequence
 from copy import deepcopy
 from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
 
-from aws_durable_execution_sdk_python.config import StepConfig, StepSemantics
+from aws_durable_execution_sdk_python.config import (
+    MapConfig,
+    NestingType,
+    ParallelConfig,
+    StepConfig,
+    StepSemantics,
+)
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     BotoClientError,
@@ -2899,6 +2906,117 @@ def test_durable_execution_preserves_nested_nondeterminism_error():
         == "aws_durable_execution_sdk_python.exceptions.NonDeterministicExecutionError"
     )
     assert step_body_calls == []
+    mock_client.checkpoint.assert_not_called()
+
+
+@pytest.mark.parametrize("operation_kind", ["map", "parallel"])
+@pytest.mark.parametrize("parent_replay_children", [False, True])
+def test_durable_execution_rejects_nested_branch_checkpoint_in_flat_replay(
+    operation_kind: str,
+    parent_replay_children: bool,
+):
+    """Real STARTED and ReplayChildren replays reject NESTED-to-FLAT drift."""
+    mock_client = Mock(spec=DurableServiceClient)
+    parent_id = OperationIdNamespace().create_id_for_step(1)
+    branch_id = OperationIdNamespace(parent_id).create_id_for_step(0)
+    is_map = operation_kind == "map"
+    parent_sub_type = OperationSubType.MAP if is_map else OperationSubType.PARALLEL
+    branch_sub_type = (
+        OperationSubType.MAP_ITERATION if is_map else OperationSubType.PARALLEL_BRANCH
+    )
+    branch_name = "map-item-0" if is_map else "parallel-branch-0"
+    execution_operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+    parent_operation = Operation(
+        operation_id=parent_id,
+        operation_type=OperationType.CONTEXT,
+        status=(
+            OperationStatus.SUCCEEDED
+            if parent_replay_children
+            else OperationStatus.STARTED
+        ),
+        sub_type=parent_sub_type,
+        name="batch",
+        context_details=(
+            ContextDetails(
+                replay_children=True,
+                result=json.dumps(
+                    {
+                        "totalCount": 1,
+                        "completionReason": "ALL_COMPLETED",
+                        "startedIndexes": [],
+                    }
+                ),
+            )
+            if parent_replay_children
+            else None
+        ),
+    )
+    nested_branch_operation = Operation(
+        operation_id=branch_id,
+        operation_type=OperationType.CONTEXT,
+        status=OperationStatus.SUCCEEDED,
+        parent_id=parent_id,
+        sub_type=branch_sub_type,
+        name=branch_name,
+        context_details=ContextDetails(result=json.dumps("cached")),
+    )
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution/exec1",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=InitialExecutionState(
+            operations=[
+                execution_operation,
+                parent_operation,
+                nested_branch_operation,
+            ],
+            next_marker="",
+        ),
+        service_client=mock_client,
+    )
+    branch_body_calls: list[bool] = []
+
+    def map_body(
+        _child: DurableContext,
+        _item: int,
+        _index: int,
+        _items: Sequence[int],
+    ) -> str:
+        branch_body_calls.append(True)
+        return "executed"
+
+    def parallel_body(_child: DurableContext) -> str:
+        branch_body_calls.append(True)
+        return "executed"
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> Any:
+        if is_map:
+            return context.map(
+                [1],
+                map_body,
+                name="batch",
+                config=MapConfig(nesting_type=NestingType.FLAT),
+            )
+        return context.parallel(
+            [parallel_body],
+            name="batch",
+            config=ParallelConfig(nesting_type=NestingType.FLAT),
+        )
+
+    result = test_handler(invocation_input, _make_lambda_context())
+
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.NonDeterministicExecutionError"
+    )
+    assert "nesting is FLAT" in result["Error"]["ErrorMessage"]
+    assert branch_body_calls == []
     mock_client.checkpoint.assert_not_called()
 
 

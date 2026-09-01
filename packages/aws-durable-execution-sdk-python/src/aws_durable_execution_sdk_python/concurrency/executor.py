@@ -34,6 +34,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     ExecutionError,
     InvalidStateError,
     InvocationError,
+    NonDeterministicExecutionError,
     OrphanedChildException,
     SuspendExecution,
     TimedSuspendExecution,
@@ -255,7 +256,11 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         def submit(branch: Branch[CallableType, ResultType]) -> None:
             branch.start()
             pool.submit(
-                self._branch_worker, executor_context, events, branch.executable
+                self._branch_worker,
+                execution_state,
+                executor_context,
+                events,
+                branch.executable,
             )
 
         try:
@@ -495,6 +500,7 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
 
     def _branch_worker(
         self,
+        execution_state: ExecutionState,
         executor_context: DurableContext,
         events: queue.Queue[BranchEvent[ResultType]],
         executable: Executable[CallableType],
@@ -527,6 +533,17 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         except ExecutionError as e:
             # Execution-terminal SDK errors (including nondeterminism) must
             # bypass branch failure tolerance and custom completion policies.
+            parent_operation_id: str | None = executor_context._parent_id  # noqa: SLF001
+            if (
+                parent_operation_id is not None
+                and execution_state.record_branch_fatal_error(parent_operation_id, e)
+                is False
+            ):
+                logger.debug(
+                    "Ignoring fatal error from orphaned branch %s",
+                    executable.index,
+                )
+                return
             events.put(BranchEvent.fatal(executable.index, e))
             raise
         except Exception as e:  # noqa: BLE001
@@ -540,6 +557,17 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             # Post a fatal event so the coordinator re-raises it on the
             # calling thread instead of blocking forever on the queue, then
             # let the exception propagate to the worker thread.
+            parent_operation_id = executor_context._parent_id  # noqa: SLF001
+            if (
+                parent_operation_id is not None
+                and execution_state.record_branch_fatal_error(parent_operation_id, e)
+                is False
+            ):
+                logger.debug(
+                    "Ignoring fatal error from orphaned branch %s",
+                    executable.index,
+                )
+                return
             events.put(BranchEvent.fatal(executable.index, e))
             raise
         else:
@@ -586,16 +614,31 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         #      de-duplicated during a map/parallel replay.
         #   2. Replay hook: a branch that already has a checkpoint was observed
         #      in a prior invocation, so emit the plugin replay hook (once).
-        # Virtual (FLAT) branches do not checkpoint themselves, so neither
-        # applies; their inner operations still self-correct via `_replay_aware`.
-        if not is_virtual and child_context.is_replaying():
+        # Virtual (FLAT) branches do not checkpoint themselves. Therefore an
+        # existing branch-container checkpoint proves that replay changed from
+        # NESTED and must be rejected before child_handler can consume it.
+        if child_context.is_replaying():
             branch_checkpoint = child_context.state.get_checkpoint_result(
                 operation_identifier.operation_id
             )
-            operation_identifier.validate_checkpoint(branch_checkpoint.operation)
-            if not branch_checkpoint.is_existent():
+            if is_virtual:
+                if branch_checkpoint.is_existent():
+                    operation_identifier.validate_checkpoint(
+                        branch_checkpoint.operation
+                    )
+                    msg = (
+                        "Non-deterministic branch nesting at "
+                        f"id={operation_identifier.operation_id!r}: "
+                        "checkpoint contains a NESTED branch context but current "
+                        "nesting is FLAT"
+                    )
+                    raise NonDeterministicExecutionError(
+                        msg, step_id=operation_identifier.operation_id
+                    )
+            elif not branch_checkpoint.is_existent():
                 child_context._set_replay_status_new()  # noqa: SLF001
             elif branch_checkpoint.operation is not None:
+                operation_identifier.validate_checkpoint(branch_checkpoint.operation)
                 child_context.state.emit_operation_replay_hook(
                     branch_checkpoint.operation
                 )

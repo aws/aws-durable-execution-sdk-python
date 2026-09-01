@@ -61,20 +61,27 @@ from aws_durable_execution_sdk_python.exceptions import (
     TimedSuspendExecution,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
+    DurableServiceClient,
     ErrorObject,
     Operation,
     OperationStatus,
     OperationSubType,
     OperationType,
 )
-from aws_durable_execution_sdk_python.identifier import OperationIdNamespace
-
-
+from aws_durable_execution_sdk_python.identifier import (
+    OperationIdentifier,
+    OperationIdNamespace,
+)
+from aws_durable_execution_sdk_python.operation.child import child_handler
 from aws_durable_execution_sdk_python.operation.map import MapExecutor
 from aws_durable_execution_sdk_python.operation.parallel import (
     ParallelExecutor,
 )
-from aws_durable_execution_sdk_python.state import CheckpointedResult
+from aws_durable_execution_sdk_python.plugin import PluginExecutor
+from aws_durable_execution_sdk_python.state import (
+    CheckpointedResult,
+    ExecutionState,
+)
 
 
 class _StubNamespace(OperationIdNamespace):
@@ -897,7 +904,7 @@ def test_execute_item_replayed_branch_emits_replay_hook():
 
 
 def test_execute_item_virtual_branch_skips_replay_status_handling():
-    """FLAT (virtual) branches don't checkpoint, so no flip or hook is attempted."""
+    """A normal FLAT replay verifies branch-container checkpoint absence."""
 
     class TestExecutor(ConcurrentExecutor):
         def execute_item(self, child_context, executable):
@@ -926,13 +933,59 @@ def test_execute_item_virtual_branch_skips_replay_status_handling():
     executor_context._parent_id = "parent"  # noqa: SLF001
 
     child_context = Mock()
+    child_context.is_replaying.return_value = True
+    child_context.state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     executor._execute_item_in_child_context(executor_context, executables[0])  # noqa: SLF001
 
+    assert child_context.state.get_checkpoint_result.call_count == 2
+    child_context.state.get_checkpoint_result.assert_called_with("op_0")
     child_context.state.emit_operation_replay_hook.assert_not_called()
     child_context._set_replay_status_new.assert_not_called()  # noqa: SLF001
+
+
+def test_execute_item_flat_branch_rejects_nested_container_checkpoint():
+    """FLAT replay rejects a branch container left by NESTED history."""
+
+    executor = _RecordingExecutor(
+        executables=[Executable(0, lambda: "must-not-run")],
+        max_concurrency=1,
+        completion_config=CompletionConfig(min_successful=1),
+        sub_type_top=OperationSubType.PARALLEL,
+        sub_type_iteration=OperationSubType.PARALLEL_BRANCH,
+        name_prefix="parallel-branch-",
+        serdes=None,
+        nesting_type=NestingType.FLAT,
+        operation_id_namespace=_StubNamespace(),
+    )
+    executor_context = Mock()
+    executor_context._parent_id = "parallel-op"  # noqa: SLF001
+    child_context = Mock()
+    child_context.is_replaying.return_value = True
+    child_context.state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_from_operation(
+            Operation(
+                operation_id="op_0",
+                operation_type=OperationType.CONTEXT,
+                status=OperationStatus.SUCCEEDED,
+                parent_id="parallel-op",
+                sub_type=OperationSubType.PARALLEL_BRANCH,
+                name="parallel-branch-0",
+            )
+        )
+    )
+    executor_context.create_child_context.return_value = child_context
+
+    with pytest.raises(NonDeterministicExecutionError, match="nesting is FLAT"):
+        executor._execute_item_in_child_context(  # noqa: SLF001
+            executor_context, executor.executables[0]
+        )
+
+    child_context.state.wrap_user_function.assert_not_called()
 
 
 def test_concurrent_executor_create_result_failure_tolerance_exceeded():
@@ -1473,6 +1526,7 @@ def _serdes_branch_test_context() -> tuple[Mock, Mock]:
     execution_state: Mock = Mock()
     execution_state.create_checkpoint = Mock()
     child_context: Mock = Mock()
+    child_context.is_replaying.return_value = False
     child_context.state.wrap_user_function = lambda func, *a, **k: func
     executor_context: Mock = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"
@@ -1873,6 +1927,7 @@ def test_operation_id_determinism_across_shuffles():
 
         def create_child_context(operation_id, *, is_virtual=False):
             child_ctx = Mock()
+            child_ctx.is_replaying.return_value = False
             child_ctx.state = execution_state
             return child_ctx
 
@@ -3097,9 +3152,13 @@ def _make_executor_mocks():
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda idx: f"step_{idx}"
     executor_context._parent_id = "parent"  # noqa: SLF001
-    executor_context.create_child_context = lambda op_id, *, is_virtual=False: Mock(
-        state=execution_state
-    )
+
+    def create_child_context(op_id, *, is_virtual=False):
+        child_context = Mock(state=execution_state)
+        child_context.is_replaying.return_value = False
+        return child_context
+
+    executor_context.create_child_context = create_child_context
     return execution_state, executor_context
 
 
@@ -3377,7 +3436,9 @@ def test_branch_worker_maps_outcomes_to_events():
 
     events: queue.Queue = queue.Queue()
     for executable in executables:
-        executor._branch_worker(executor_context, events, executable)  # noqa: SLF001
+        executor._branch_worker(  # noqa: SLF001
+            execution_state, executor_context, events, executable
+        )
 
     collected = {}
     while not events.empty():
@@ -3777,6 +3838,95 @@ def test_nondeterminism_in_branch_escapes_batch(nesting_type):
 
     with pytest.raises(NonDeterministicExecutionError, match="branch history drift"):
         executor.execute(execution_state, executor_context)
+
+
+def test_late_nondeterminism_blocks_early_completion_checkpoint():
+    """A fatal branch race is retained until the parent terminal checkpoint."""
+    barrier = threading.Barrier(2, timeout=5.0)
+    release_fatal = threading.Event()
+    fatal_recorded = threading.Event()
+
+    def fast_branch() -> str:
+        barrier.wait()
+        return "fast"
+
+    def late_fatal_branch() -> str:
+        barrier.wait()
+        assert release_fatal.wait(timeout=5.0)
+        raise NonDeterministicExecutionError("late branch history drift")
+
+    class LateFatalExecutor(_RecordingExecutor):
+        def _create_result(
+            self, completion_reason: CompletionReason | None = None
+        ) -> BatchResult:
+            # execute() has already made its early-completion decision and
+            # drained the event queue. Let the straggler report afterward.
+            release_fatal.set()
+            assert fatal_recorded.wait(timeout=5.0)
+            return super()._create_result(completion_reason)
+
+    parent_id = "parallel-op"
+    state = ExecutionState(
+        durable_execution_arn="arn:test:execution/exec1",
+        initial_checkpoint_token="token",  # noqa: S106
+        operations={},
+        service_client=Mock(spec=DurableServiceClient),
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+    executor_context = DurableContext(
+        state=state,
+        execution_context=ExecutionContext(
+            durable_execution_arn=state.durable_execution_arn
+        ),
+        parent_id=parent_id,
+    )
+    executor = LateFatalExecutor(
+        executables=[
+            Executable(0, fast_branch),
+            Executable(1, late_fatal_branch),
+        ],
+        max_concurrency=2,
+        completion_config=CompletionConfig(min_successful=1),
+        sub_type_top=OperationSubType.PARALLEL,
+        sub_type_iteration=OperationSubType.PARALLEL_BRANCH,
+        name_prefix="parallel-branch-",
+        serdes=None,
+        nesting_type=NestingType.FLAT,
+        operation_id_namespace=_StubNamespace(),
+    )
+    original_record = state.record_branch_fatal_error
+
+    def record_fatal(parent_operation_id: str, error: BaseException) -> bool:
+        accepted = original_record(parent_operation_id, error)
+        fatal_recorded.set()
+        return accepted
+
+    try:
+        with (
+            patch.object(
+                state,
+                "record_branch_fatal_error",
+                side_effect=record_fatal,
+            ),
+            pytest.raises(
+                NonDeterministicExecutionError,
+                match="late branch history drift",
+            ),
+        ):
+            child_handler(
+                lambda: executor.execute(state, executor_context),
+                state,
+                OperationIdentifier(
+                    operation_id=parent_id,
+                    sub_type=OperationSubType.PARALLEL,
+                    name="parallel",
+                ),
+                ChildConfig(sub_type=OperationSubType.PARALLEL),
+            )
+    finally:
+        state.close()
+
+    state._service_client.checkpoint.assert_not_called()  # noqa: SLF001
 
 
 def test_unlimited_concurrency_starts_all_items():
