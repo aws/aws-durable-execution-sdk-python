@@ -25,13 +25,13 @@ from aws_durable_execution_sdk_python.plugin import (
     UserFunctionOutcome,
     UserFunctionStartInfo,
 )
-from opentelemetry import trace
-from opentelemetry.context import Context
+from opentelemetry import baggage, trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
+    derive_execution_root_span_id,
     derive_workflow_span_id,
     operation_id_to_span_id,
 )
@@ -59,7 +59,9 @@ def _assert_otel_context_balanced():
     )
 
 
-def _create_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
+def _create_plugin(
+    context_extractor=lambda _: None,
+) -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
     """Create an ExecutionOtelPlugin wired to an in-memory exporter."""
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
@@ -67,7 +69,7 @@ def _create_plugin() -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
             tracer_provider=provider,
-            context_extractor=lambda _: Context(),
+            context_extractor=context_extractor,
             enrich_logger=False,
         )
     )
@@ -148,7 +150,7 @@ def test_derive_workflow_span_id_rejects_empty_arn():
 # ---------------------------------------------------------------------------
 # Workflow + invocation span hierarchy
 # ---------------------------------------------------------------------------
-def test_workflow_and_invocation_are_separate_roots_without_ambient_parent():
+def test_workflow_and_invocation_share_execution_trace_without_ambient_parent():
     plugin, exporter = _create_plugin()
 
     plugin.on_invocation_start(_invocation_start_info())
@@ -161,18 +163,21 @@ def test_workflow_and_invocation_are_separate_roots_without_ambient_parent():
     workflow = spans["Workflow"]
     invocation = spans["Invocation"]
 
-    # Workflow is a root span (no parent) with the deterministic span ID.
-    assert workflow.parent is None
+    # Workflow is parented to the synthetic execution root with a deterministic
+    # Workflow span ID.
+    assert workflow.parent is not None
     assert workflow.context.span_id == derive_workflow_span_id(EXECUTION_ARN)
+    assert workflow.parent.span_id == derive_execution_root_span_id(EXECUTION_ARN)
     assert workflow.attributes["durable.execution.arn"] == EXECUTION_ARN
     assert (
         workflow.attributes["durable.execution.status"]
         == InvocationStatus.SUCCEEDED.value
     )
 
-    # Without ambient context, Invocation starts a separate provider trace.
-    assert invocation.parent is None
-    assert invocation.context.trace_id != workflow.context.trace_id
+    # Without extracted context, Invocation shares the synthetic execution root.
+    assert invocation.parent is not None
+    assert invocation.context.trace_id == workflow.context.trace_id
+    assert invocation.parent.span_id == workflow.parent.span_id
 
 
 def test_invocation_start_without_execution_start_time_disables_tracing(
@@ -193,7 +198,68 @@ def test_invocation_start_without_execution_start_time_disables_tracing(
     assert exporter.get_finished_spans() == ()
 
 
-def test_explicit_mode_invocation_span_parented_to_ambient_span():
+def test_invocation_start_without_execution_arn_disables_tracing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    plugin, exporter = _create_plugin()
+    info = InvocationStartInfo(
+        request_id="request-1",
+        execution_arn=None,
+        execution_start_time=START_TIME,
+        is_first_invocation=True,
+    )
+
+    plugin.on_invocation_start(info)
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id="after-rejected-start",
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="after rejected start",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
+    assert "requires InvocationStartInfo.execution_arn" in caplog.text
+    assert exporter.get_finished_spans() == ()
+
+
+def test_invocation_start_without_sampler_disables_tracing(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin, exporter = _create_plugin()
+
+    def bind_without_sampler() -> bool:
+        plugin._sampling_delegate = None
+        return True
+
+    monkeypatch.setattr(plugin, "_bind_sdk_tracer", bind_without_sampler)
+
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id="after-rejected-start",
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="after rejected start",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
+    assert "No sampler available" in caplog.text
+    assert exporter.get_finished_spans() == ()
+
+
+def test_explicit_mode_invocation_span_ignores_different_trace_ambient_span():
     plugin, exporter = _create_plugin()
 
     ambient = plugin._provider.get_tracer("ambient").start_span("lambda-invocation")
@@ -209,9 +275,11 @@ def test_explicit_mode_invocation_span_parented_to_ambient_span():
     workflow = spans["Workflow"]
     invocation = spans["Invocation"]
     assert invocation.parent is not None
-    assert invocation.parent.span_id == ambient.get_span_context().span_id
-    assert invocation.context.trace_id == ambient.get_span_context().trace_id
-    assert workflow.context.trace_id != ambient.get_span_context().trace_id
+    assert workflow.parent is not None
+    assert invocation.parent.span_id != ambient.get_span_context().span_id
+    assert invocation.context.trace_id != ambient.get_span_context().trace_id
+    assert invocation.context.trace_id == workflow.context.trace_id
+    assert invocation.parent.span_id == workflow.parent.span_id
 
 
 def test_workflow_span_dropped_on_non_terminal_status():
@@ -473,7 +541,7 @@ def _create_default_mode_plugin(
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            context_extractor=lambda _: Context(),
+            context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
@@ -492,11 +560,13 @@ def test_default_mode_creates_invocation_span(monkeypatch):
     invocation = spans["Invocation"]
     assert invocation.attributes["durable.execution.arn"] == EXECUTION_ARN
     assert invocation.attributes["durable.invocation.first"] is True
-    assert invocation.parent is None
-    assert invocation.context.trace_id != spans["Workflow"].context.trace_id
+    assert invocation.parent is not None
+    assert spans["Workflow"].parent is not None
+    assert invocation.context.trace_id == spans["Workflow"].context.trace_id
+    assert invocation.parent.span_id == spans["Workflow"].parent.span_id
 
 
-def test_default_mode_invocation_span_parented_to_ambient_span(monkeypatch):
+def test_default_mode_invocation_span_ignores_different_trace_ambient_span(monkeypatch):
     plugin, exporter = _create_default_mode_plugin(monkeypatch)
 
     # Simulate the ambient Lambda invocation span from the ADOT layer.
@@ -511,8 +581,8 @@ def test_default_mode_invocation_span_parented_to_ambient_span(monkeypatch):
 
     invocation = {s.name: s for s in exporter.get_finished_spans()}["Invocation"]
     assert invocation.parent is not None
-    assert invocation.parent.span_id == ambient.get_span_context().span_id
-    assert invocation.context.trace_id == ambient.get_span_context().trace_id
+    assert invocation.parent.span_id != ambient.get_span_context().span_id
+    assert invocation.context.trace_id != ambient.get_span_context().trace_id
 
 
 def test_open_operation_span_not_exported_at_invocation_end():
@@ -751,6 +821,24 @@ def test_step_scope_is_released_at_user_function_end(outcome):
 
     plugin.on_invocation_end(_invocation_end_info())
     assert plugin._context_tokens == {}
+
+
+def test_user_function_start_preserves_baggage_in_current_context():
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    baggage_context = baggage.set_baggage(
+        "durable-test-key", "durable-test-value", otel_context.get_current()
+    )
+    token = otel_context.attach(baggage_context)
+    try:
+        plugin.on_user_function_start(_step_start_info("step-baggage"))
+
+        assert baggage.get_baggage("durable-test-key") == "durable-test-value"
+
+        plugin.on_user_function_end(_step_end_info("step-baggage"))
+    finally:
+        otel_context.detach(token)
+        plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_sequential_steps_do_not_accumulate_scopes():

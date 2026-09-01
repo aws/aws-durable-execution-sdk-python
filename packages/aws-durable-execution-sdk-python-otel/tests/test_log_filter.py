@@ -13,7 +13,6 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationType,
     UserFunctionStartInfo,
 )
-from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -40,7 +39,7 @@ def _create_plugin(
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
             tracer_provider=trace_provider,
-            context_extractor=lambda _: Context(),
+            context_extractor=lambda _: None,
             enrich_logger=enrich_logger,
         )
     )
