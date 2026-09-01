@@ -58,22 +58,22 @@ class OperationIdentifier:
 
         if checkpoint.operation_type is not self.type:
             mismatches.append(
-                f"type checkpoint={checkpoint.operation_type.value!r} current={self.type.value!r}"
+                f"type expected={checkpoint.operation_type.value!r} current={self.type.value!r}"
             )
         if checkpoint.sub_type is not self.sub_type:
             checkpoint_sub_type = (
                 checkpoint.sub_type.value if checkpoint.sub_type is not None else None
             )
             mismatches.append(
-                f"subtype checkpoint={checkpoint_sub_type!r} current={self.sub_type.value!r}"
+                f"subtype expected={checkpoint_sub_type!r} current={self.sub_type.value!r}"
             )
         if checkpoint_name != expected_name:
             mismatches.append(
-                f"name checkpoint={checkpoint_name!r} current={expected_name!r}"
+                f"name expected={checkpoint_name!r} current={expected_name!r}"
             )
         if checkpoint_parent_id != expected_parent_id:
             mismatches.append(
-                f"parent_id checkpoint={checkpoint_parent_id!r} current={expected_parent_id!r}"
+                f"parent_id expected={checkpoint_parent_id!r} current={expected_parent_id!r}"
             )
 
         if mismatches:

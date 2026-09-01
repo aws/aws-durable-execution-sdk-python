@@ -695,6 +695,8 @@ def test_operation_identifier_rejects_mismatched_checkpoint_identity(
         error_info.value.termination_reason
         is TerminationReason.NON_DETERMINISTIC_EXECUTION
     )
+    if mismatch == "type":
+        assert "expected='WAIT' current='STEP'" in str(error_info.value)
 
 
 def test_operation_identifier_normalizes_empty_name_to_wire_identity():
