@@ -1,0 +1,1 @@
+{"finding_digest":"ac8c8b24dec757ca995401ad711ddedf98d20ad0e1b0ef4afb0af5824f2a447b","finding_id":"arf_v1_vsgiwjg6y5l4vgkuagwxcho636","identity_key":"otel/execution_plugin.py::_end_open_operation_spans::deterministic-span-uniqueness","pull_request_number":696,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
