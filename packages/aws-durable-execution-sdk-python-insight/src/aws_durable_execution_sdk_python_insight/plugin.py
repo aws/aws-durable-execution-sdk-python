@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import math
 import sys
 import threading
@@ -59,6 +60,9 @@ from aws_durable_execution_sdk_python_insight.types import (
     OperationOverride,
     WorkflowInsightConfig,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # Maps the SDK invocation status onto the record status. A durable execution
@@ -114,11 +118,7 @@ def _resolve_sampling_rate(rate: float | None) -> float:
         # False, x < NaN -> False) and silently sample OUT every execution,
         # disabling all instrumentation. Coerce to full sampling instead, which
         # matches the JS plugin's treatment of non-finite/invalid rates.
-        print(
-            "[workflow-insight] sampling_rate is NaN; falling back to 1.0 "
-            "(full sampling)",
-            file=sys.stderr,
-        )  # noqa: T201
+        logger.warning("sampling_rate is NaN; falling back to 1.0 (full sampling)")
         return 1.0
     if rate < 0 or rate > 1:
         return max(0.0, min(1.0, float(rate)))
