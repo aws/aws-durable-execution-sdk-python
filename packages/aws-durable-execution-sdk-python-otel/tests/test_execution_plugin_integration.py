@@ -3,11 +3,11 @@
 Drives the full plugin lifecycle against a real TracerProvider +
 InMemorySpanExporter for the two deployment shapes:
 
-* Community collector layer: the caller supplies a provider; the Workflow and
-  Invocation spans root separate traces when no ambient parent exists.
-* ADOT layer: the ADOT Lambda layer supplies the global provider and the ambient
-  Lambda invocation span; the plugin's Invocation span parents to that ambient
-  span.
+* Community collector layer: the caller supplies a provider.
+* ADOT layer: the ADOT Lambda layer supplies the global provider.
+
+Both paths keep Workflow and Invocation on one execution trace, parented to a
+shared execution ancestor.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ from opentelemetry.trace import (
 
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     DeterministicIdGenerator,
+    derive_execution_root_span_id,
     derive_workflow_span_id,
     operation_id_to_span_id,
 )
@@ -171,7 +172,7 @@ def _config_for_provider(
         monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     return OtelPluginConfig(
         tracer_provider=None if uses_global_provider else provider,
-        context_extractor=lambda _: Context(),
+        context_extractor=lambda _: None,
         enrich_logger=False,
     )
 
@@ -225,7 +226,7 @@ def test_global_proxy_binds_sdk_provider_before_first_invocation(
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: current_provider[0])
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            context_extractor=lambda _: Context(),
+            context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
@@ -250,7 +251,7 @@ def test_global_proxy_disables_entire_invocation_until_sdk_provider_is_ready(
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: current_provider[0])
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            context_extractor=lambda _: Context(),
+            context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
@@ -283,7 +284,7 @@ def test_community_layer_full_lifecycle_is_workflow_rooted():
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
             tracer_provider=provider,
-            context_extractor=lambda _: Context(),
+            context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
@@ -299,17 +300,20 @@ def test_community_layer_full_lifecycle_is_workflow_rooted():
     operation = spans[OP_NAME]
     attempt = spans[f"{OP_NAME} attempt 1"]
 
-    # Workflow is the trace root with the deterministic workflow span id.
-    assert workflow.parent is None
+    # Workflow is parented to the synthetic execution ancestor with the
+    # deterministic workflow span id.
+    assert workflow.parent is not None
+    assert workflow.parent.span_id == derive_execution_root_span_id(EXECUTION_ARN)
     assert workflow.context.span_id == derive_workflow_span_id(EXECUTION_ARN)
     assert (
         workflow.attributes["durable.execution.status"]
         == InvocationStatus.SUCCEEDED.value
     )
 
-    # Without ambient context, Invocation roots a separate provider trace.
-    assert invocation.parent is None
-    assert invocation.context.trace_id != workflow.context.trace_id
+    # Without extracted context, Invocation shares the synthetic execution root.
+    assert invocation.parent is not None
+    assert invocation.context.trace_id == workflow.context.trace_id
+    assert invocation.parent.span_id == workflow.parent.span_id
 
     # Operation span: deterministic id, parented under Workflow, linked to invocation.
     assert operation.context.span_id == operation_id_to_span_id(EXECUTION_ARN, OP_ID)
@@ -328,13 +332,13 @@ def test_community_layer_full_lifecycle_is_workflow_rooted():
 # ---------------------------------------------------------------------------
 # ADOT layer (default provider; ambient invocation span)
 # ---------------------------------------------------------------------------
-def test_adot_layer_full_lifecycle_parents_to_ambient_span(monkeypatch):
+def test_adot_layer_full_lifecycle_ignores_different_trace_ambient_span(monkeypatch):
     provider, exporter = _provider()
     # Simulate the ADOT layer having configured the global TracerProvider.
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     plugin = ExecutionOtelPlugin(
         OtelPluginConfig(
-            context_extractor=lambda _: Context(),
+            context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
@@ -356,11 +360,14 @@ def test_adot_layer_full_lifecycle_parents_to_ambient_span(monkeypatch):
     invocation = spans["Invocation"]
     operation = spans[OP_NAME]
 
-    # Invocation span parents to the ambient ADOT span and carries the first flag.
+    # Invocation ignores the different-trace ambient ADOT span and stays on the
+    # execution trace.
     assert invocation.parent is not None
-    assert invocation.parent.span_id == ambient.get_span_context().span_id
-    assert invocation.context.trace_id == ambient.get_span_context().trace_id
-    assert workflow.context.trace_id != ambient.get_span_context().trace_id
+    assert workflow.parent is not None
+    assert invocation.parent.span_id != ambient.get_span_context().span_id
+    assert invocation.context.trace_id != ambient.get_span_context().trace_id
+    assert invocation.context.trace_id == workflow.context.trace_id
+    assert invocation.parent.span_id == workflow.parent.span_id
     assert invocation.attributes["durable.invocation.first"] is True
 
     # Operation span still uses the deterministic id and links to the durable
@@ -379,7 +386,7 @@ def test_second_plugin_uses_execution_trace_id_independent_of_xray(monkeypatch):
     provider, exporter = _provider()
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     config = OtelPluginConfig(
-        context_extractor=lambda _: Context(),
+        context_extractor=lambda _: None,
         enrich_logger=False,
     )
     first_plugin = ExecutionOtelPlugin(config)
