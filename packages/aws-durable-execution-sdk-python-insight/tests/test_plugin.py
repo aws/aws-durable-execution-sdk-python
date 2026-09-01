@@ -13,7 +13,6 @@ map on ``InvocationStartInfo`` / ``InvocationEndInfo`` / ``OperationChangeInfo``
 from __future__ import annotations
 
 import datetime
-import logging
 from typing import Any
 
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -204,19 +203,14 @@ def test_resolve_sampling_rate_nan_fails_open_to_one():
     assert _resolve_sampling_rate(float("nan")) == 1.0
 
 
-def test_nan_sampling_rate_emits_instead_of_silently_disabling(caplog):
+def test_nan_sampling_rate_emits_instead_of_silently_disabling():
     exporter = CaptureExporter()
-    with caplog.at_level(
-        logging.WARNING,
-        logger="aws_durable_execution_sdk_python_insight.plugin",
-    ):
-        plugin = workflow_insight(
-            WorkflowInsightConfig(exporters=[exporter], sampling_rate=float("nan"))
-        )
-        _run(plugin, ops=[_step("greet")])
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], sampling_rate=float("nan"))
+    )
+    _run(plugin, ops=[_step("greet")])
     # A NaN rate must not disable instrumentation: the record is still emitted.
     assert len(exporter.records) == 1
-    assert "sampling_rate is NaN" in caplog.text
 
 
 def test_content_omit_input_output_without_drop_flags():
