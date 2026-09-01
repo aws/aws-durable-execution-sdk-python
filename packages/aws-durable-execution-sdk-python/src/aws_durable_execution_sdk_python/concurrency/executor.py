@@ -718,6 +718,19 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             operation_identifier.operation_id
         )
         operation_identifier.validate_checkpoint(checkpoint.operation)
+        if self.nesting_type is NestingType.NESTED and not checkpoint.is_terminal():
+            checkpoint_status = (
+                checkpoint.status.value if checkpoint.status is not None else None
+            )
+            msg = (
+                "Non-deterministic branch nesting at "
+                f"id={operation_identifier.operation_id!r}: "
+                "recorded terminal branch requires a terminal NESTED branch "
+                f"context checkpoint, got status={checkpoint_status!r}"
+            )
+            raise NonDeterministicExecutionError(
+                msg, step_id=operation_identifier.operation_id
+            )
         if checkpoint.is_succeeded():
             result: ResultType = self._execute_item_in_child_context(
                 executor_context, executable

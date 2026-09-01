@@ -3020,6 +3020,105 @@ def test_durable_execution_rejects_nested_branch_checkpoint_in_flat_replay(
     mock_client.checkpoint.assert_not_called()
 
 
+@pytest.mark.parametrize("operation_kind", ["map", "parallel"])
+def test_durable_execution_rejects_flat_terminal_branch_in_nested_replay(
+    operation_kind: str,
+):
+    """ReplayChildren reconstruction rejects FLAT-to-NESTED branch drift."""
+    mock_client = Mock(spec=DurableServiceClient)
+    parent_id = OperationIdNamespace().create_id_for_step(1)
+    branch_id = OperationIdNamespace(parent_id).create_id_for_step(0)
+    inner_step_id = OperationIdNamespace(branch_id).create_id_for_step(1)
+    is_map = operation_kind == "map"
+    parent_sub_type = OperationSubType.MAP if is_map else OperationSubType.PARALLEL
+    execution_operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+    parent_operation = Operation(
+        operation_id=parent_id,
+        operation_type=OperationType.CONTEXT,
+        status=OperationStatus.SUCCEEDED,
+        sub_type=parent_sub_type,
+        name="batch",
+        context_details=ContextDetails(
+            replay_children=True,
+            result=json.dumps(
+                {
+                    "totalCount": 1,
+                    "completionReason": "ALL_COMPLETED",
+                    "startedIndexes": [],
+                }
+            ),
+        ),
+    )
+    flat_inner_step = Operation(
+        operation_id=inner_step_id,
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        parent_id=parent_id,
+        sub_type=OperationSubType.STEP,
+        name="inner-step",
+        step_details=StepDetails(result=json.dumps("cached")),
+    )
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution/exec1",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=InitialExecutionState(
+            operations=[
+                execution_operation,
+                parent_operation,
+                flat_inner_step,
+            ],
+            next_marker="",
+        ),
+        service_client=mock_client,
+    )
+    branch_body_calls: list[bool] = []
+
+    def branch_result(child: DurableContext) -> str:
+        branch_body_calls.append(True)
+        return child.step(lambda _step_context: "executed", name="inner-step")
+
+    def map_body(
+        child: DurableContext,
+        _item: int,
+        _index: int,
+        _items: Sequence[int],
+    ) -> str:
+        return branch_result(child)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> Any:
+        if is_map:
+            return context.map(
+                [1],
+                map_body,
+                name="batch",
+                config=MapConfig(nesting_type=NestingType.NESTED),
+            )
+        return context.parallel(
+            [branch_result],
+            name="batch",
+            config=ParallelConfig(nesting_type=NestingType.NESTED),
+        )
+
+    result = test_handler(invocation_input, _make_lambda_context())
+
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.NonDeterministicExecutionError"
+    )
+    assert (
+        "terminal NESTED branch context checkpoint" in result["Error"]["ErrorMessage"]
+    )
+    assert branch_body_calls == []
+    mock_client.checkpoint.assert_not_called()
+
+
 def test_durable_execution_non_retryable_invocation_error_returns_failed():
     """Test that non-retryable InvocationError returns FAILED instead of retrying."""
     mock_client = Mock(spec=DurableServiceClient)

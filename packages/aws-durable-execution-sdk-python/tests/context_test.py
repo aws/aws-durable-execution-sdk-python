@@ -2903,6 +2903,64 @@ def test_replay_aware_does_not_emit_replay_hook_when_not_replaying():
     assert emitted == []
 
 
+@pytest.mark.parametrize(
+    ("checkpoint_status", "updated"),
+    [
+        (OperationStatus.STARTED, False),
+        (OperationStatus.SUCCEEDED, True),
+    ],
+)
+def test_operation_identity_is_validated_before_replay_hooks(
+    checkpoint_status: OperationStatus,
+    updated: bool,
+):
+    """Mismatched history fails before replay/update plugin hooks are dispatched."""
+    captured: list[str] = []
+
+    class _CapturingPlugin(DurableInstrumentationPlugin):
+        def on_operation_start(self, info):
+            captured.append(f"start:{info.operation_id}")
+
+        def on_operation_end(self, info):
+            captured.append(f"end:{info.operation_id}")
+
+    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
+    step_body_calls: list[bool] = []
+    with plugin_executor.run():
+        state = ExecutionState(
+            durable_execution_arn="arn",
+            initial_checkpoint_token="token",  # noqa: S106
+            operations={},
+            service_client=Mock(),
+            plugin_executor=plugin_executor,
+            updated_operation_ids=[],
+        )
+        ctx = DurableContext(
+            state=state,
+            execution_context=ExecutionContext(durable_execution_arn="arn"),
+            replay_status=ReplayStatus.REPLAY,
+        )
+        next_id = ctx._peek_next_operation_id()  # noqa: SLF001
+        state._operations[next_id] = Operation(  # noqa: SLF001
+            operation_id=next_id,
+            operation_type=OperationType.WAIT,
+            status=checkpoint_status,
+            sub_type=OperationSubType.WAIT,
+            name="stale-wait",
+        )
+        if updated:
+            state._updated_operation_ids.add(next_id)  # noqa: SLF001
+
+        with pytest.raises(NonDeterministicExecutionError):
+            ctx.step(
+                lambda _step_context: step_body_calls.append(True),
+                name="current-step",
+            )
+
+    assert captured == []
+    assert step_body_calls == []
+
+
 def test_replay_aware_emits_update_hook_for_operation_updated_since_last_invocation():
     """Updated terminal operations emit operation_end, not replay start+end."""
     captured: list[tuple[str, str, bool, OperationStatus]] = []
