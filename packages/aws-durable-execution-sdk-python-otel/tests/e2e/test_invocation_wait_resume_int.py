@@ -226,7 +226,10 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
     after_resume = next(span for span in spans if span.name == "otel-after-resume")
 
     assert len(invocations) >= 2
-    assert len(waits) >= 2
+    if plugin_type is InvocationOtelPlugin:
+        assert len(waits) >= 2  # one segment per invocation
+    else:
+        assert len(waits) == 1  # one span per operation
     assert workflow.context.span_id == derive_workflow_span_id(EXECUTION_ARN)
     assert workflow.parent is not None
     assert workflow.parent.span_id == XRAY_PARENT_SPAN_ID

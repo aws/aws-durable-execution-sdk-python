@@ -26,11 +26,19 @@ from aws_durable_execution_sdk_python.plugin import (
     UserFunctionStartInfo,
 )
 from opentelemetry import baggage, trace
+from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import (
+    NonRecordingSpan,
+    SpanContext,
+    TraceFlags,
+    TraceState,
+)
 
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
+    _to_otel_trace_id,
     derive_execution_root_span_id,
     derive_workflow_span_id,
     operation_id_to_span_id,
@@ -282,15 +290,16 @@ def test_explicit_mode_invocation_span_ignores_different_trace_ambient_span():
     assert invocation.parent.span_id == workflow.parent.span_id
 
 
-def test_workflow_span_dropped_on_non_terminal_status():
+def test_workflow_span_not_exported_on_non_terminal_status():
     plugin, exporter = _create_plugin()
 
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
 
     names = [s.name for s in exporter.get_finished_spans()]
-    # Invocation span is always ended/exported; the Workflow span is dropped
-    # (not ended) on a non-terminal status, so it must not be exported.
+    # Invocation span is always ended/exported. The Workflow span is a
+    # non-recording placeholder during the invocation and is only materialized
+    # (created + ended) on a terminal status, so it is not exported here.
     assert "Invocation" in names
     assert "Workflow" not in names
 
@@ -343,6 +352,7 @@ def test_operation_parented_under_workflow_and_linked_to_invocation():
 
 
 def test_cross_invocation_operation_end_uses_deterministic_span_id():
+    """An operation completing in a later invocation exports one deterministic span."""
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
 
@@ -364,8 +374,7 @@ def test_cross_invocation_operation_end_uses_deterministic_span_id():
     plugin.on_invocation_end(_invocation_end_info())
 
     matching = [s for s in exporter.get_finished_spans() if s.name == "earlier-step"]
-    # Exported exactly once, using the deterministic logical-operation span ID
-    # (no separate continuation span).
+    # Exported once, using the deterministic operation span ID.
     assert len(matching) == 1
     assert matching[0].context.span_id == operation_id_to_span_id(
         EXECUTION_ARN, "step-earlier"
@@ -418,12 +427,11 @@ def test_context_span_waits_for_terminal_operation_status(
             attempt=1,
         )
     )
+    # The open child context is held as a non-recording placeholder until
+    # on_operation_end materializes its recording span.
     active_span = plugin._get_span(operation_id)
     assert active_span is not None
-    assert (
-        active_span.attributes["durable.operation.status"]
-        == OperationStatus.STARTED.value
-    )
+    assert not active_span.is_recording()
 
     plugin.on_user_function_end(
         UserFunctionEndInfo(
@@ -443,11 +451,9 @@ def test_context_span_waits_for_terminal_operation_status(
         )
     )
 
+    # Still a placeholder, still not exported, until the terminal operation end.
     assert plugin._get_span(operation_id) is active_span
-    assert (
-        active_span.attributes["durable.operation.status"]
-        == OperationStatus.STARTED.value
-    )
+    assert not active_span.is_recording()
     assert not exporter.get_finished_spans()
 
     plugin.on_operation_end(
@@ -585,12 +591,8 @@ def test_default_mode_invocation_span_ignores_different_trace_ambient_span(monke
     assert invocation.context.trace_id != ambient.get_span_context().trace_id
 
 
-def test_open_operation_span_not_exported_at_invocation_end():
-    """A suspended operation (started, not ended) must not be exported.
-
-    on_invocation_end drops the reference without ending it; the
-    span is ended only when on_operation_end fires in a later invocation.
-    """
+def test_suspended_operation_held_as_non_recording_placeholder():
+    """A suspended operation is a non-recording placeholder, not exported."""
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
 
@@ -606,12 +608,272 @@ def test_open_operation_span_not_exported_at_invocation_end():
             status=OperationStatus.STARTED,
         )
     )
+    # The registered span is a non-recording placeholder on the deterministic ID.
+    placeholder = plugin._get_span("wait-1")
+    assert placeholder is not None
+    assert not placeholder.is_recording()
+    assert placeholder.get_span_context().span_id == operation_id_to_span_id(
+        EXECUTION_ARN, "wait-1"
+    )
+
     # No on_operation_end: the operation suspended.
     plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
 
+    # Nothing is exported for the suspended operation.
     exported = {s.name for s in exporter.get_finished_spans()}
-    # The open operation span is NOT exported (never ended).
     assert "wait-for-signal" not in exported
+
+
+def test_suspend_then_resume_operation_exports_one_deterministic_span():
+    """An operation spanning invocations exports one deterministic span."""
+    plugin, exporter = _create_plugin()
+    operation_id = "wait-across-invocations"
+
+    # Invocation N: operation starts and suspends (non-terminal invocation end).
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="long-wait",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+
+    # Nothing exported for the operation at the non-terminal boundary.
+    assert not [s for s in exporter.get_finished_spans() if s.name == "long-wait"]
+
+    # Invocation N+1: the still-open operation is replayed, then completes.
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="long-wait",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=True,
+            status=OperationStatus.STARTED,
+        )
+    )
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="long-wait",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.SUCCEEDED))
+
+    operation_spans = [
+        s for s in exporter.get_finished_spans() if s.name == "long-wait"
+    ]
+    # Exported exactly once, using the deterministic operation span ID.
+    assert len(operation_spans) == 1
+    assert operation_spans[0].context.span_id == operation_id_to_span_id(
+        EXECUTION_ARN, operation_id
+    )
+
+
+def test_suspended_child_context_exports_one_span_on_replay():
+    """A child context that suspends then replays exports a single span."""
+    plugin, exporter = _create_plugin()
+    context_id = "ctx-1"
+
+    # Invocation 1: the child context starts and suspends (no end hook).
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_user_function_start(_context_start_info(context_id))
+    placeholder = plugin._get_span(context_id)
+    assert placeholder is not None
+    assert not placeholder.is_recording()
+    plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+
+    # Nothing exported for the suspended context.
+    assert not [s for s in exporter.get_finished_spans() if s.name == context_id]
+
+    # Invocation 2: the context replays and completes.
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_user_function_start(_context_start_info(context_id))
+    plugin.on_user_function_end(_context_end_info(context_id))
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id=context_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name=context_id,
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
+    contexts = [s for s in exporter.get_finished_spans() if s.name == context_id]
+    assert len(contexts) == 1
+    assert contexts[0].context.span_id == operation_id_to_span_id(
+        EXECUTION_ARN, context_id
+    )
+
+
+def test_duplicate_operation_end_exports_span_once():
+    """A repeated on_operation_end for one operation exports a single span."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+
+    end_info = OperationEndInfo(
+        operation_id="wait-1",
+        operation_type=OperationType.WAIT,
+        sub_type=OperationSubType.WAIT,
+        name="otel-long-wait",
+        parent_id=None,
+        start_time=START_TIME,
+        is_replayed=False,
+        status=OperationStatus.SUCCEEDED,
+        end_time=END_TIME,
+        error=None,
+    )
+    plugin.on_operation_end(end_info)
+    plugin.on_operation_end(end_info)
+    plugin.on_invocation_end(_invocation_end_info())
+
+    waits = [s for s in exporter.get_finished_spans() if s.name == "otel-long-wait"]
+    assert len(waits) == 1
+    assert waits[0].context.span_id == operation_id_to_span_id(EXECUTION_ARN, "wait-1")
+
+
+def test_pre_terminal_placeholder_preserves_same_trace_tracestate():
+    """Placeholder and operation spans carry a same-trace ambient tracestate."""
+    plugin, exporter = _create_plugin()
+    canonical = _to_otel_trace_id(EXECUTION_ARN, START_TIME)
+    trace_state = TraceState([("vendor", "opaque")])
+    ambient_context = SpanContext(
+        trace_id=canonical,
+        span_id=int("1234567890abcdef", 16),
+        is_remote=False,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        trace_state=trace_state,
+    )
+    ambient = NonRecordingSpan(ambient_context)
+    token = otel_context.attach(trace.set_span_in_context(ambient, Context()))
+    try:
+        plugin.on_invocation_start(_invocation_start_info())
+        assert plugin._workflow_span is not None
+        assert plugin._workflow_span.get_span_context().trace_state == trace_state
+        plugin.on_operation_end(
+            OperationEndInfo(
+                operation_id="wait-existing",
+                operation_type=OperationType.WAIT,
+                sub_type=OperationSubType.WAIT,
+                name="existing-wait",
+                parent_id=None,
+                start_time=START_TIME,
+                is_replayed=False,
+                status=OperationStatus.SUCCEEDED,
+                end_time=END_TIME,
+                error=None,
+            )
+        )
+        plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+    finally:
+        otel_context.detach(token)
+
+    span = next(s for s in exporter.get_finished_spans() if s.name == "existing-wait")
+    assert span.context.trace_state == trace_state
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [
+        (InvocationStatus.SUCCEEDED, trace.StatusCode.OK),
+        (InvocationStatus.FAILED, trace.StatusCode.ERROR),
+    ],
+)
+def test_workflow_span_exported_once_on_terminal(status, expected_code):
+    """A terminal invocation materializes and ends the Workflow span exactly once."""
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_invocation_end(_invocation_end_info(status=status))
+
+    workflows = [s for s in exporter.get_finished_spans() if s.name == "Workflow"]
+    assert len(workflows) == 1
+    workflow = workflows[0]
+    # Shared execution trace: the Workflow span is parented to the synthetic
+    # execution root, not a parentless root.
+    assert workflow.parent is not None
+    assert workflow.parent.span_id == derive_execution_root_span_id(EXECUTION_ARN)
+    assert workflow.kind is trace.SpanKind.INTERNAL
+    assert workflow.context.span_id == derive_workflow_span_id(EXECUTION_ARN)
+    assert workflow.attributes["durable.execution.status"] == status.value
+    assert workflow.status.status_code is expected_code
+    # Anchored to the execution start time.
+    assert workflow.start_time == int(START_TIME.timestamp() * 1_000_000_000)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        InvocationStatus.PENDING,
+        InvocationStatus.RETRY,
+        InvocationStatus.SUCCEEDED,
+        InvocationStatus.FAILED,
+    ],
+)
+def test_workflow_reference_is_non_recording_after_cleanup(status):
+    """The retained Workflow span reference is never a recording span.
+
+    During the invocation it is a non-recording deterministic placeholder, so
+    invocation cleanup on any status leaves no recording span abandoned.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    workflow_reference = plugin._workflow_span
+    assert workflow_reference is not None
+    assert not workflow_reference.is_recording()
+
+    plugin.on_invocation_end(_invocation_end_info(status=status))
+
+    assert not workflow_reference.is_recording()
+
+
+@pytest.mark.parametrize("status", [InvocationStatus.PENDING, InvocationStatus.RETRY])
+def test_open_operation_reference_is_non_recording_after_non_terminal(status):
+    """A suspended operation's retained span reference is a non-recording placeholder."""
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id="wait-1",
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="wait-for-signal",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    operation_reference = plugin._get_span("wait-1")
+    assert operation_reference is not None
+
+    plugin.on_invocation_end(_invocation_end_info(status=status))
+
+    assert not operation_reference.is_recording()
 
 
 @pytest.mark.parametrize(
