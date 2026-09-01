@@ -46,6 +46,17 @@ def _insight_thread_count() -> int:
     )
 
 
+def _lane_worker_count(lane) -> int:
+    """Count live worker threads that belong to *this* lane by identity.
+
+    Each lane names its worker ``workflow-insight-export-{id(lane)}``, so this is
+    scoped to the given lane and is unaffected by daemon workers other tests may
+    still be winding down -- unlike a process-global thread-count delta.
+    """
+    name = f"workflow-insight-export-{id(lane)}"
+    return sum(1 for t in threading.enumerate() if t.name == name and t.is_alive())
+
+
 class RecordingExporter:
     """Records every export/flush in call order (fast, non-blocking)."""
 
@@ -350,6 +361,7 @@ def test_export_and_flush_exceptions_are_isolated():
 def test_shared_timeout_bounds_invocation_end_delay():
     exporter = BlockingExporter()
     scheduler = _ExportScheduler([exporter])
+    lane = scheduler._lanes[0]
     scheduler.schedule(ARN_A, _rec(ARN_A, "a1"))
     assert _wait_until(exporter.started.is_set)
     start = time.monotonic()
@@ -358,6 +370,9 @@ def test_shared_timeout_bounds_invocation_end_delay():
     assert ok is False  # degraded to best-effort
     assert elapsed < 2.0  # bounded by the shared deadline, not the blocked export
     exporter.release()  # let the daemon drain and exit
+    # Wait for the released worker to actually stop so it cannot leak into a
+    # later test's baseline thread count.
+    assert _wait_until(lambda: not lane._worker_alive())
 
 
 def test_shared_timeout_across_multiple_lanes_is_not_additive():
@@ -373,26 +388,38 @@ def test_shared_timeout_across_multiple_lanes_is_not_additive():
     assert elapsed < 0.9
     e1.release()
     e2.release()
+    # Wait for both released workers to actually stop so neither leaks into a
+    # later test's baseline thread count.
+    assert _wait_until(
+        lambda: not any(lane._worker_alive() for lane in scheduler._lanes)
+    )
 
 
 # -- worker lifecycle ---------------------------------------------------------
 
 
 def test_blocked_worker_is_not_replaced():
-    base = _insight_thread_count()
     exporter = BlockingExporter()
     scheduler = _ExportScheduler([exporter])
     lane = scheduler._lanes[0]
     scheduler.schedule(ARN_A, _rec(ARN_A, "a1"))
     assert _wait_until(exporter.started.is_set)
     worker = lane._worker
+    assert worker is not None and worker.is_alive()
+    # The blocked lane already has exactly one live worker of its own.
+    assert _lane_worker_count(lane) == 1
     # More scheduling and an invocation-end (which enqueues a flush + requests
     # stop) must not spawn a replacement while the worker is blocked.
     scheduler.schedule(ARN_A, _rec(ARN_A, "a2"))
     scheduler.schedule(ARN_B, _rec(ARN_B, "b1"))
     scheduler.end_invocation(0.1)
+    # Identity: the lane still holds the SAME blocked worker -- no replacement
+    # thread was swapped in -- and it is still the only live worker for this
+    # lane. Both checks are scoped to this lane, so they cannot flake on daemon
+    # workers other tests are winding down.
     assert lane._worker is worker
-    assert _insight_thread_count() - base == 1
+    assert worker.is_alive()
+    assert _lane_worker_count(lane) == 1
     exporter.release()
 
 
