@@ -55,6 +55,11 @@ and `top-level` vs `full-tree` operation detail all mirror the JS plugin.
 Behavior is validated cross-SDK by the `insight` conformance suite
 (`aws-durable-execution-conformance-tests-insight`).
 
+> **Note (`on-change` emission).** In `on-change` mode, exporter calls currently
+> run synchronously on the SDK checkpoint path, so a slow exporter can delay
+> workflow progress. Asynchronous scheduling/coalescing is deferred and tracked
+> in [issue #687](https://github.com/aws/aws-durable-execution-sdk-python/issues/687).
+
 ## Requirements
 
 - `aws-durable-execution-sdk-python` with the plugin invocation hooks that
