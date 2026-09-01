@@ -38,6 +38,8 @@ from aws_durable_execution_sdk_python_insight import (
 
 
 ARN = "arn:aws:lambda:us-west-2:123456789012:function:my-fn:$LATEST/durable-execution/exec-1/inv-1"
+ARN_A = "arn:aws:lambda:us-west-2:123456789012:function:my-fn:$LATEST/durable-execution/exec-a/inv-1"
+ARN_B = "arn:aws:lambda:us-west-2:123456789012:function:my-fn:$LATEST/durable-execution/exec-b/inv-1"
 T0 = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
 T1 = datetime.datetime(2026, 1, 1, 0, 0, 1, tzinfo=datetime.UTC)
 
@@ -87,6 +89,30 @@ def _end(operations: dict[str, OperationInfo]) -> InvocationEndInfo:
     return InvocationEndInfo(
         request_id=None,
         execution_arn=ARN,
+        is_first_invocation=True,
+        execution_start_time=T0,
+        status=InvocationStatus.SUCCEEDED,
+        error=None,
+        execution_result='"Hello, World!"',
+        operations=operations,
+    )
+
+
+def _start_arn(arn: str, operations: dict[str, OperationInfo]) -> InvocationStartInfo:
+    return InvocationStartInfo(
+        request_id=None,
+        execution_arn=arn,
+        is_first_invocation=True,
+        execution_start_time=T0,
+        execution_input="World",
+        operations=operations,
+    )
+
+
+def _end_arn(arn: str, operations: dict[str, OperationInfo]) -> InvocationEndInfo:
+    return InvocationEndInfo(
+        request_id=None,
+        execution_arn=arn,
         is_first_invocation=True,
         execution_start_time=T0,
         status=InvocationStatus.SUCCEEDED,
@@ -210,3 +236,79 @@ def test_buffered_exporter_publishes_after_flush():
     plugin.on_invocation_end(_end(_ops(op)))  # drains + flushes before returning
     assert len(exporter.published) == 1
     assert exporter.published[0]["status"] == "SUCCEEDED"
+
+
+# -- warm-container cross-invocation isolation --------------------------------
+
+
+class _OrderedBlockingExporter:
+    """Blocks the first export until released; records export order and flushes.
+
+    Once released, subsequent exports return immediately (the release event stays
+    set), so a lane can drain a backlog without re-blocking.
+    """
+
+    def __init__(self) -> None:
+        self.max_record_size_bytes: int | None = None
+        self._release = threading.Event()
+        self.started = threading.Event()
+        self._lock = threading.Lock()
+        self.exported: list[str] = []
+        self.flush_calls = 0
+
+    def render(self, record: dict[str, Any]) -> dict[str, Any]:
+        return record
+
+    def export(self, record: dict[str, Any]) -> None:
+        self.started.set()
+        self._release.wait(5.0)
+        with self._lock:
+            self.exported.append(record.get("executionArn", ""))
+
+    def flush(self) -> None:
+        with self._lock:
+            self.flush_calls += 1
+
+    def release(self) -> None:
+        self._release.set()
+
+    def exported_arns(self) -> list[str]:
+        with self._lock:
+            return list(self.exported)
+
+
+def test_warm_container_cross_invocation_isolation_and_ordering():
+    # One warm plugin instance handles two executions on the same exporter lane.
+    # Execution A blocks the lane and times out at invocation end; execution B
+    # schedules behind it. Both invocation-end waits stay bounded, B is neither
+    # lost nor merged into A, and after unblock the lane drains FIFO and flushes.
+    exporter = _OrderedBlockingExporter()
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], export_timeout_seconds=0.2)
+    )
+    op = _step("s", "1")
+
+    # -- Execution A: terminal end schedules a record; the lane blocks on it. --
+    plugin.on_invocation_start(_start_arn(ARN_A, {}))
+    a_start = time.monotonic()
+    plugin.on_invocation_end(_end_arn(ARN_A, _ops(op)))  # blocks; times out
+    a_elapsed = time.monotonic() - a_start
+    assert a_elapsed < 2.0  # bounded by the shared 0.2s deadline, not the export
+    assert _wait_until(exporter.started.is_set)  # A is in flight
+    assert exporter.exported_arns() == []  # still blocked -> nothing delivered
+
+    # -- Execution B arrives on the warm container while A is blocked. --------
+    plugin.on_invocation_start(_start_arn(ARN_B, {}))
+    exporter.release()  # let the lane drain A first
+    assert _wait_until(lambda: exporter.exported_arns() == [ARN_A])
+
+    b_start = time.monotonic()
+    plugin.on_invocation_end(_end_arn(ARN_B, _ops(op)))  # bounded; drains + flush
+    b_elapsed = time.monotonic() - b_start
+    assert b_elapsed < 2.0
+
+    # B was delivered as its own record after A (FIFO), never merged into A.
+    assert _wait_until(lambda: exporter.exported_arns() == [ARN_A, ARN_B])
+    # B's invocation-end flush completed (its barrier was not cancelled).
+    assert _wait_until(lambda: exporter.flush_calls >= 1)
+    assert plugin._state == {}  # both executions cleared their state

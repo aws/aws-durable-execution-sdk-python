@@ -102,8 +102,6 @@ class _ExporterLane:
         # arn -> latest pending record (coalesced). Insertion order is the
         # fairness order; updating an arn moves it to the back.
         self._pending: OrderedDict[str, dict[str, Any]] = OrderedDict()
-        # The arn whose record was popped and is being exported right now.
-        self._inflight_arn: str | None = None
         self._stop_when_idle = False
         self._worker: threading.Thread | None = None
 
@@ -201,12 +199,9 @@ class _ExporterLane:
                     record = self._pending.pop(payload, None)
                     if record is None:
                         continue
-                    self._inflight_arn = payload
 
             if kind == _RECORD and record is not None:
                 self._export_one(record)
-                with self._cond:
-                    self._inflight_arn = None
             else:  # _FLUSH
                 barrier: _FlushBarrier = payload
                 if not barrier.canceled:
@@ -215,12 +210,23 @@ class _ExporterLane:
 
     def _export_one(self, record: dict[str, Any]) -> None:
         exporter = self._exporter
-        # Copy for exporter isolation: two lanes share the same canonical record,
-        # and truncation/export must never mutate what another lane sees.
+        # Copy for exporter isolation: every lane shares the same canonical
+        # record, and truncation/export must never mutate what another lane
+        # sees. If the copy fails we must NOT fall back to the shared record --
+        # exporting the alias would let this lane's truncation mutate the object
+        # other lanes still read, breaking workflow isolation. Treat a copy
+        # failure like a render/truncation failure: log and skip this record for
+        # this lane, then continue processing the lane's queue.
         try:
             local = copy.deepcopy(record)
-        except Exception:  # noqa: BLE001 - a non-copyable payload must not break export
-            local = record
+        except Exception as exc:  # noqa: BLE001 - a non-copyable payload must not alias the shared record or break the lane
+            _logger.warning(
+                "workflow-insight: record copy failed for exporter %s; "
+                "skipping export for this record: %s",
+                type(exporter).__name__,
+                exc,
+            )
+            return
         try:
             shaped = truncate_record(
                 local, exporter.max_record_size_bytes, exporter.render
