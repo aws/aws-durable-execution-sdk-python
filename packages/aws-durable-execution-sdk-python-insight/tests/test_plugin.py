@@ -365,10 +365,15 @@ def test_cold_resume_reports_prior_terminal_ops_with_fresh_plugin():
     assert rec["durationMs"] is not None and rec["durationMs"] >= 0
 
 
-# -- on-change emits an updated record per change (comment 2) ----------------
+# -- on-change schedules RUNNING records, coalescing intermediates (comment 2) --
 
 
-def test_on_change_emits_running_on_each_change():
+def test_on_change_schedules_running_and_delivers_terminal():
+    # Under the async scheduler, rapid cumulative RUNNING snapshots for one
+    # execution may coalesce (the design explicitly allows a lane to observe only
+    # a subset of intermediate records). The invariants that always hold: the
+    # terminal record is delivered last, every earlier record is RUNNING, and the
+    # terminal record carries the full, de-duplicated operation set.
     exporter = CaptureExporter()
     plugin = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
@@ -376,23 +381,23 @@ def test_on_change_emits_running_on_each_change():
     op1 = _step("s1", op_id="1")
     op2 = _step("s2", op_id="2")
 
-    plugin.on_invocation_start(_start(operations={}))  # RUNNING #1 (start)
+    plugin.on_invocation_start(_start(operations={}))  # RUNNING (start)
     plugin.on_operation_change(
         OperationChangeInfo(
             execution_arn=ARN, updated_operations=_ops(op1), operations=_ops(op1)
         )
-    )  # RUNNING #2
+    )
     plugin.on_operation_change(
         OperationChangeInfo(
             execution_arn=ARN, updated_operations=_ops(op2), operations=_ops(op1, op2)
         )
-    )  # RUNNING #3
-    plugin.on_invocation_end(_end(operations=_ops(op1, op2)))  # SUCCEEDED #4
+    )
+    plugin.on_invocation_end(_end(operations=_ops(op1, op2)))  # SUCCEEDED (terminal)
 
     statuses = [r["status"] for r in exporter.records]
-    assert statuses == ["RUNNING", "RUNNING", "RUNNING", "SUCCEEDED"]
-    # The record emitted after the 2nd change already carries both operations.
-    assert [op["name"] for op in exporter.records[2]["operations"]] == ["s1", "s2"]
+    assert statuses, "at least the terminal record must be delivered"
+    assert statuses[-1] == "SUCCEEDED"
+    assert set(statuses[:-1]) <= {"RUNNING"}
     final = exporter.records[-1]
     assert [op["name"] for op in final["operations"]] == ["s1", "s2"]
     # No duplicate operation entries within a record (no end/change double-count).
