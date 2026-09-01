@@ -5,6 +5,10 @@ Globals:
     Runtime: python3.13
     Timeout: 60
     MemorySize: 128
+    LoggingConfig:
+      LogFormat: JSON
+      ApplicationLogLevel: INFO
+      SystemLogLevel: INFO
 Resources:
   DurableFunctionRole:
     Type: AWS::IAM::Role
