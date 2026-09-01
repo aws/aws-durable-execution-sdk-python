@@ -11,6 +11,7 @@ invariants are asserted deterministically rather than by timing luck.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any
@@ -121,6 +122,13 @@ class FailingExporter:
         raise RuntimeError("flush boom")
 
 
+class _Uncopyable:
+    """A payload whose ``deepcopy`` raises, to force a per-record copy failure."""
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Any:
+        raise RuntimeError("uncopyable payload")
+
+
 # -- lazy worker creation / one worker per exporter --------------------------
 
 
@@ -208,6 +216,63 @@ def test_terminal_record_supersedes_pending_running():
     exporter.release()
     assert _wait_until(lambda: exporter.exported_values() == ["r1", "final"])
     scheduler.end_invocation(5.0)
+
+
+# -- copy failure isolation ---------------------------------------------------
+
+
+def test_deepcopy_failure_skips_record_and_lane_continues(caplog):
+    exporter = RecordingExporter()
+    scheduler = _ExportScheduler([exporter])
+    # A record whose deepcopy raises must be skipped for this lane -- never
+    # exported by aliasing the shared object -- and the lane must keep draining.
+    bad = _rec(ARN_A, "bad")
+    bad["payload"] = _Uncopyable()
+    good = _rec(ARN_B, "good")
+    with caplog.at_level(
+        logging.WARNING, logger="aws_durable_execution_sdk_python_insight"
+    ):
+        scheduler.schedule(ARN_A, bad)  # queued first: copy fails -> skipped
+        scheduler.schedule(ARN_B, good)  # queued behind it: must still export
+        # The good record delivering proves the lane continued past the failure;
+        # a single-lane worker drains FIFO, so "bad" was processed (and skipped)
+        # before "good" ran.
+        assert _wait_until(lambda: exporter.exported_values() == ["good"])
+        scheduler.end_invocation(5.0)
+    # The exporter was never called for the un-copyable record.
+    assert exporter.exported_values() == ["good"]
+    # The failure was logged through the module logger.
+    assert any(
+        "record copy failed" in record.getMessage()
+        for record in caplog.records
+        if record.name == "aws_durable_execution_sdk_python_insight"
+    )
+
+
+def test_deepcopy_failure_does_not_alias_shared_record():
+    # Before the fix a copy failure aliased the shared record and passed it to
+    # truncate_record -> render, which could mutate the canonical object other
+    # lanes still read. With the fix the record is skipped before render, so it
+    # is never aliased or mutated in place.
+    class MutatingRenderExporter(RecordingExporter):
+        def render(self, record: dict[str, Any]) -> Any:
+            record["mutated"] = True  # would corrupt an aliased shared record
+            return record
+
+    exporter = MutatingRenderExporter()
+    scheduler = _ExportScheduler([exporter])
+    bad = _rec(ARN_A, "bad")
+    bad["payload"] = _Uncopyable()
+    scheduler.schedule(ARN_A, bad)
+    # A good record behind it lets us deterministically wait for the lane to
+    # drain past the bad one (single lane drains FIFO).
+    scheduler.schedule(ARN_B, _rec(ARN_B, "good"))
+    assert _wait_until(lambda: exporter.exported_values() == ["good"])
+    scheduler.end_invocation(5.0)
+    # render never ran on the un-copyable record, so the canonical object was
+    # neither aliased into export nor mutated in place.
+    assert "mutated" not in bad
+    assert exporter.exported_values() == ["good"]
 
 
 # -- non-blocking hook return / fast-vs-slow isolation -----------------------
