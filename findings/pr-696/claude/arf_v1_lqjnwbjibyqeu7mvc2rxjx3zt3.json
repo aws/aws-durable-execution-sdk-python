@@ -1,0 +1,1 @@
+{"finding_digest":"5c12db05280e204a7d9516a374df799eef204c59366412760a208a13016d332e","finding_id":"arf_v1_lqjnwbjibyqeu7mvc2rxjx3zt3","identity_key":"execution_plugin.py::end_open_operation_spans::duplicate-deterministic-span-id","pull_request_number":696,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"claude","schema_version":1}
