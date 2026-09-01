@@ -1,16 +1,16 @@
 # AWS Durable Execution SDK - OpenTelemetry Plugin
 
-OpenTelemetry instrumentation plugin for the [AWS Durable Execution SDK for Python](https://github.com/aws/aws-durable-execution-sdk-python). Emits durable execution spans with deterministic workflow and operation IDs while keeping invocation spans in the ambient Lambda trace.
+OpenTelemetry instrumentation plugin for the [AWS Durable Execution SDK for Python](https://github.com/aws/aws-durable-execution-sdk-python). Emits durable execution spans on one execution trace, with deterministic workflow, synthetic-root, and operation span IDs.
 
 ## Features
 
-- **Deterministic Workflow Traces**: Durable operations use an execution-derived trace that is independent of the ambient Lambda/X-Ray trace
-- **Ambient Invocation Traces**: Invocation spans inherit the active Lambda or extracted upstream context
+- **Shared Execution Trace**: Workflow and Invocation spans share one trace, anchored to a propagated backend parent when available or a deterministic synthetic execution root otherwise
+- **Same-Trace Ambient Parenting**: Invocation spans use the active ambient span only when it already belongs to the execution trace
 - **Span-per-Operation**: Each durable operation (step, wait, invoke) gets its own span with accurate timing
 - **Continuation Spans**: Operations completing in another invocation produce a new correlated span without fabricating an unobserved prior span context
 - **Log Correlation**: Enrich application logs with trace ID and span ID for end-to-end observability
 - **Provider Integration**: Use the global ADOT provider or supply an explicit SDK `TracerProvider`
-- **Provider-Managed Sampling**: Use standard OpenTelemetry or ADOT sampling configuration
+- **Execution Sampling**: Resolve sampling once per invocation and apply it consistently to Workflow, Invocation, operation, and attempt spans
 
 ## Installation
 
@@ -124,7 +124,7 @@ fn = lambda_.Function(
 
 ### 2. AWS X-Ray Active Tracing
 
-Enable active tracing on your Lambda function so the `_X_AMZN_TRACE_ID` environment variable is populated at invocation time. The plugin uses this header to derive deterministic trace IDs that remain consistent across all invocations of the same durable execution.
+Enable active tracing on your Lambda function so the `_X_AMZN_TRACE_ID` environment variable is populated at invocation time. The plugin uses this header to anchor the execution trace on the propagated X-Ray `Root`/`Parent` when both are valid, and preserves `Sampled=1` or `Sampled=0` as the backend sampling decision.
 
 **AWS Console:** Lambda → Configuration → Monitoring and operations tools → Active tracing → Enable
 
@@ -191,7 +191,7 @@ The function's execution role needs the `AWSXRayDaemonWriteAccess` managed polic
 | `OTEL_TRACES_SAMPLER`         | Sampler to use (e.g., `traceidratio` for ratio-based sampling)                                | `always_on`       |
 | `OTEL_TRACES_SAMPLER_ARG`     | Argument for the sampler (e.g., `0.3` to sample 30% of traces)                                | —                 |
 
-See the [ADOT sampling configuration](https://aws-otel.github.io/docs/getting-started/lambda#sampling-configuration) for more details.
+See the [ADOT sampling configuration](https://aws-otel.github.io/docs/getting-started/lambda#sampling-configuration) for more details. When the backend header contains an explicit `Sampled` value, that backend decision takes precedence over local sampler configuration for durable spans.
 
 ## Configuration
 
@@ -220,7 +220,15 @@ plugin = InvocationOtelPlugin(
 
 ### Context Extractors
 
-The plugin supports multiple strategies for extracting upstream trace context:
+Context extractors return an `ExtractedContext` object, or `None` when no
+durable execution trace context is available. The object carries:
+
+- `trace_id`: 128-bit OpenTelemetry trace ID
+- `parent_span_id`: 64-bit OpenTelemetry parent span ID
+- `sampling`: `Sampling.SAMPLED`, `Sampling.NOT_SAMPLED`, or `Sampling.UNDECIDED`
+
+The plugin supports multiple strategies for extracting durable execution trace
+context:
 
 ```python
 from aws_durable_execution_sdk_python_otel import (
@@ -230,12 +238,64 @@ from aws_durable_execution_sdk_python_otel import (
     xray_context_extractor,
 )
 
-# Default: X-Ray trace header (recommended for most Lambda deployments)
+# Default: X-Ray trace header (recommended for most Lambda deployments).
 InvocationOtelPlugin(OtelPluginConfig(context_extractor=xray_context_extractor))
 
-# W3C Trace Context via clientContext (requires backend propagation support)
+# W3C Trace Context via clientContext (placeholder for backend propagation support).
 InvocationOtelPlugin(OtelPluginConfig(context_extractor=w3c_client_context_extractor))
 ```
+
+Custom extractors should return `ExtractedContext`, not an OpenTelemetry
+`Context`.
+
+### Trace Structure
+
+Both bundled plugins use the same execution ancestor:
+
+- a propagated backend parent when `_X_AMZN_TRACE_ID` contains a valid `Root`
+  and `Parent`
+- otherwise a deterministic, non-recording synthetic root derived from the
+  durable execution ARN
+
+`InvocationOtelPlugin` keeps durable operation spans under the Invocation span
+and links operations to Workflow:
+
+```text
+Execution ancestor
+├── Workflow
+└── Invocation
+    └── operation
+        └── operation attempt 1
+```
+
+`ExecutionOtelPlugin` keeps operation spans under Workflow and links operations
+to the current Invocation span:
+
+```text
+Execution ancestor
+├── Workflow
+│   └── operation
+│       └── operation attempt 1
+└── Invocation
+```
+
+If an ambient Lambda span is active and already has the execution trace ID, the
+Invocation span uses that ambient span as its parent. Ambient spans on a
+different trace are ignored for durable parenting so Invocation remains on the
+execution trace.
+
+### Sampling
+
+Sampling is resolved once per invocation and carried to every durable span in
+that invocation. Precedence is:
+
+1. `Sampled=1` or `Sampled=0` from `_X_AMZN_TRACE_ID`
+2. a same-trace ambient span's recording/sampled state
+3. the configured OpenTelemetry sampler
+
+The resolved decision is applied to Workflow, Invocation, operation, and attempt
+spans. This avoids independently querying stateful or ratio-based samplers for
+each durable span in the same invocation.
 
 ### Log Correlation
 
@@ -256,8 +316,9 @@ After deploying your function with the plugin configured:
 
 1. **Invoke your durable function** — trigger at least one execution that includes multiple steps or a wait/resume cycle.
 
-2. **Check the CloudWatch console** — Navigate to CloudWatch → Traces in the AWS Console. You should see a trace with:
-   - An "invocation" span per invocation
+2. **Check the CloudWatch console** — Navigate to CloudWatch → Traces in the AWS Console. You should see an execution trace with:
+   - A "Workflow" span exported on the terminal invocation
+   - An "Invocation" span per invocation
    - Child spans for each durable operation (named after your step names)
    - All invocations of the same execution grouped under one trace ID
 
@@ -272,7 +333,7 @@ After deploying your function with the plugin configured:
 | Symptom                           | Likely Cause                                                    |
 | --------------------------------- | --------------------------------------------------------------- |
 | No traces appear                  | ADOT layer not configured, or `AWS_LAMBDA_EXEC_WRAPPER` not set |
-| Traces appear but are fragmented  | X-Ray active tracing not enabled on the Lambda function         |
+| Traces appear but are fragmented  | Backend trace context is not propagated to every invocation     |
 | Missing spans for some operations | `OTEL_TRACES_SAMPLER_ARG` set below 1.0                         |
 | `_X_AMZN_TRACE_ID` not populated  | X-Ray active tracing not enabled                                |
 
@@ -280,7 +341,7 @@ After deploying your function with the plugin configured:
 
 ### `InvocationOtelPlugin`
 
-The main plugin class. Implements `DurableInstrumentationPlugin` from `aws_durable_execution_sdk_python`.
+Invocation-rooted view. Implements `DurableInstrumentationPlugin` from `aws_durable_execution_sdk_python`.
 
 ```python
 InvocationOtelPlugin(
@@ -297,21 +358,35 @@ InvocationOtelPlugin(
 Pass `tracer_provider=...` when the application owns the OpenTelemetry SDK
 provider. When omitted, the globally configured provider is used.
 
+### `ExecutionOtelPlugin`
+
+Execution-rooted view. Uses the same execution ancestor and sampling behavior as
+`InvocationOtelPlugin`, but parents operation spans under Workflow and links
+them to Invocation.
+
 ### `DeterministicIdGenerator`
 
 A custom OpenTelemetry `IdGenerator` that produces reproducible trace and span IDs from execution metadata. Exported for advanced use cases.
 
 ### `xray_context_extractor`
 
-Default context extractor. Reads the `_X_AMZN_TRACE_ID` environment variable to derive trace context.
+Default context extractor. Reads the `_X_AMZN_TRACE_ID` environment variable and
+returns `ExtractedContext` containing parsed `Root`, `Parent`, and `Sampled`
+fields when present.
 
 ### `w3c_client_context_extractor`
 
-Alternative context extractor. Reads W3C `traceparent` from `context.clientContext.custom.traceparent`. Requires backend `clientContext` propagation to be enabled.
+Alternative context extractor placeholder. Returns `None` until backend W3C
+`traceparent` propagation is supported.
 
 ### `ContextExtractor`
 
-Type alias for custom context extractor functions.
+Type alias for custom context extractor functions:
+`Callable[[InvocationStartInfo], ExtractedContext | None]`.
+
+### `ExtractedContext` / `Sampling`
+
+Structured trace context and sampling decision returned by context extractors.
 
 ### `OtelContextLogFilter` / `install_log_filter`
 
