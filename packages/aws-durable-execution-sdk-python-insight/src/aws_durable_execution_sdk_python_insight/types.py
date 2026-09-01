@@ -11,6 +11,7 @@ config field names; the *emitted wire record* keeps the JS camelCase field names
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Callable, Literal, Protocol
@@ -106,6 +107,11 @@ class WorkflowInsightConfig:
     emit_mode: EmitMode | EmitModeInput | None = None
     operation_detail: OperationDetail | OperationDetailInput | None = None
     content: ContentConfig | None = None
+    # Single shared deadline (seconds) for the invocation-end drain + flush of
+    # every touched exporter lane. Mirrors the JS plugin's best-effort bound: on
+    # timeout the workflow response is returned and delivery degrades to
+    # best-effort. Must be a finite number greater than zero.
+    export_timeout_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         # Normalize accepted string inputs to enum members so the plugin always
@@ -118,4 +124,21 @@ class WorkflowInsightConfig:
         if self.operation_detail is not None:
             object.__setattr__(
                 self, "operation_detail", OperationDetail(self.operation_detail)
+            )
+        self._validate_export_timeout()
+
+    def _validate_export_timeout(self) -> None:
+        # A finite, strictly-positive number. Reject ``bool`` (a subtype of
+        # ``int`` that would silently mean 1s / disallowed 0s), NaN, +/-inf, zero
+        # and negatives -- an invalid timeout must fail loudly at construction,
+        # not silently disable or unbound the invocation-end drain.
+        timeout = self.export_timeout_seconds
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise ValueError(
+                f"export_timeout_seconds must be a number, got {type(timeout).__name__}"
+            )
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError(
+                "export_timeout_seconds must be a finite number greater than "
+                f"zero, got {timeout!r}"
             )

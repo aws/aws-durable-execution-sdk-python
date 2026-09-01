@@ -120,3 +120,40 @@ def test_readme_usage_call_shape_constructs_plugin():
     )
     plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
     assert plugin._exporters == [exporter]
+
+
+# -- export_timeout_seconds validation ---------------------------------------
+
+
+def test_export_timeout_defaults_to_five_seconds():
+    config = WorkflowInsightConfig()
+    assert config.export_timeout_seconds == 5.0
+    assert workflow_insight(config)._export_timeout == 5.0
+
+
+@pytest.mark.parametrize("value", [0.1, 1, 2.5, 30])
+def test_export_timeout_accepts_finite_positive_numbers(value):
+    config = WorkflowInsightConfig(export_timeout_seconds=value)
+    assert config.export_timeout_seconds == value
+    assert workflow_insight(config)._export_timeout == float(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        0,
+        0.0,
+        -1,
+        -0.5,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        True,  # bool is an int subtype but must be rejected explicitly
+        False,
+        "5",  # non-numeric
+        None,
+    ],
+)
+def test_export_timeout_rejects_invalid_values(value):
+    with pytest.raises(ValueError):
+        WorkflowInsightConfig(export_timeout_seconds=value)
