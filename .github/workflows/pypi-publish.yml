@@ -28,6 +28,8 @@ jobs:
             path: packages/aws-durable-execution-sdk-python-otel
           - name: aws-durable-execution-sdk-python-testing
             path: packages/aws-durable-execution-sdk-python-testing
+          - name: aws-durable-execution-sdk-python-insight
+            path: packages/aws-durable-execution-sdk-python-insight
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -64,6 +66,7 @@ jobs:
           - name: aws-durable-execution-sdk-python
           - name: aws-durable-execution-sdk-python-otel
           - name: aws-durable-execution-sdk-python-testing
+          - name: aws-durable-execution-sdk-python-insight
     permissions:
       id-token: write
 
