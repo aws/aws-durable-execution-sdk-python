@@ -58,10 +58,15 @@ Behavior is validated cross-SDK by the `insight` conformance suite
 > **Note (asynchronous export).** Exporter work — per-exporter copy, rendering,
 > truncation, `export()` and `flush()` — runs on a background daemon worker per
 > exporter, never on the SDK checkpoint path, so a slow exporter does not delay
-> workflow progress. Rapid cumulative snapshots for one execution are coalesced,
-> so a lane may skip intermediate `on-change` records; the terminal record is
-> always delivered under normal completion. At invocation end the plugin drains
-> and flushes the touched exporters under a single shared deadline
+> workflow progress. Because each configured exporter is driven by its own
+> single background worker, every entry in `exporters` must be a **distinct
+> instance**: passing the same object twice raises `ValueError` at construction.
+> Two separate instances of the same exporter class (e.g. two `S3Exporter`s for
+> different buckets) are fine — each gets its own worker. Rapid cumulative
+> snapshots for one execution are coalesced, so a lane may skip intermediate
+> `on-change` records; the terminal record is always delivered under normal
+> completion. At invocation end the plugin drains and flushes the touched
+> exporters under a single shared deadline
 > (`WorkflowInsightConfig.export_timeout_seconds`, default `5.0`); on timeout the
 > workflow response is returned and record delivery degrades to best-effort.
 

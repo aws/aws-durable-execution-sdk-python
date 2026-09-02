@@ -312,3 +312,51 @@ def test_warm_container_cross_invocation_isolation_and_ordering():
     # B's invocation-end flush completed (its barrier was not cancelled).
     assert _wait_until(lambda: exporter.flush_calls >= 1)
     assert plugin._state == {}  # both executions cleared their state
+
+
+# -- scheduled flag is read/written under the plugin lock --------------------
+
+
+def test_scheduled_flag_lock_helpers_track_scheduling():
+    # The ``scheduled`` gate is now mutated/read through the plugin lock like
+    # every other _ExecutionState field. Pin the observable behavior: it starts
+    # False, flips True once a record is scheduled, and the lock-guarded read
+    # helper agrees with the raw attribute. The SDK serializes hooks, so this is
+    # a defensive/consistency check rather than a concurrency race test.
+    exporter = _BufferedExporter()
+    plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    op = _step("s", "1")
+
+    plugin.on_invocation_start(_start({}))  # on-complete: nothing scheduled yet
+    state = plugin._state[ARN]
+    assert state.scheduled is False
+    assert plugin._was_scheduled(state) is False
+
+    plugin.on_invocation_end(_end(_ops(op)))  # schedules the terminal record
+    # State is cleared at invocation end, but the local reference still reflects
+    # the flip performed via the lock helper before the drain.
+    assert state.scheduled is True
+    assert plugin._was_scheduled(state) is True
+    assert len(exporter.published) == 1
+
+
+def test_no_op_invocation_leaves_scheduled_false():
+    # on-complete + non-terminal (PENDING/RETRY) end schedules nothing, so the
+    # gate stays False and no flush/lane work is triggered.
+    exporter = _BufferedExporter()
+    plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    plugin.on_invocation_start(_start({}))
+    state = plugin._state[ARN]
+    pending_end = InvocationEndInfo(
+        request_id=None,
+        execution_arn=ARN,
+        is_first_invocation=True,
+        execution_start_time=T0,
+        status=InvocationStatus.PENDING,
+        error=None,
+        execution_result=None,
+        operations={},
+    )
+    plugin.on_invocation_end(pending_end)
+    assert state.scheduled is False
+    assert exporter.published == []
