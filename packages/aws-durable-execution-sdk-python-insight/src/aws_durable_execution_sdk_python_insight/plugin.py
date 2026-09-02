@@ -248,6 +248,21 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         with self._lock:
             state.operations = dict(operations)
 
+    def _mark_scheduled(self, state: _ExecutionState) -> None:
+        # Mutate ``scheduled`` under the same lock that guards every other field
+        # of the shared ``_ExecutionState``. The lock is released before any
+        # scheduler/exporter work runs (see ``_schedule_record``), so it never
+        # covers I/O and introduces no new lock ordering.
+        with self._lock:
+            state.scheduled = True
+
+    def _was_scheduled(self, state: _ExecutionState) -> bool:
+        # Read ``scheduled`` under the lock, then act on the returned snapshot
+        # outside it -- the invocation-end drain must not hold the plugin lock
+        # while calling the scheduler.
+        with self._lock:
+            return state.scheduled
+
     # -- hooks ----------------------------------------------------------------
 
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
@@ -343,7 +358,8 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         # this invocation actually scheduled something. A no-op invocation (e.g.
         # on-complete + non-terminal end) touches no lane and needs no flush,
         # which also avoids spinning up an idle worker just to flush nothing.
-        if state.scheduled:
+        # Read the flag under the lock, then call the scheduler outside it.
+        if self._was_scheduled(state):
             self._scheduler.end_invocation(self._export_timeout)
 
         # Clear state after EVERY invocation end, including PENDING/RETRY. The
@@ -417,7 +433,9 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         # Hand the canonical record to the scheduler; per-exporter copy, render,
         # truncation, export and flush all run on the lane workers, never here.
         self._scheduler.schedule(execution_arn, record)
-        state.scheduled = True
+        # Set the flag under the plugin lock AFTER the scheduler call so the lock
+        # never covers scheduler work.
+        self._mark_scheduled(state)
 
     def _build_record(
         self,

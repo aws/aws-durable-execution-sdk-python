@@ -125,7 +125,31 @@ class WorkflowInsightConfig:
             object.__setattr__(
                 self, "operation_detail", OperationDetail(self.operation_detail)
             )
+        self._validate_exporters()
         self._validate_export_timeout()
+
+    def _validate_exporters(self) -> None:
+        # One background worker (lane) is created per configured exporter, and
+        # each exporter is assumed to be driven from exactly one lane. Passing
+        # the SAME instance twice would give one object two lanes racing to
+        # render/export/flush it, producing duplicate, timing-dependent exports
+        # and breaking the one-thread-per-distinct-instance safety contract.
+        # Reject it loudly at construction. Compare by object IDENTITY (``is``),
+        # never equality/hash: exporters need not be hashable or comparable, and
+        # two DISTINCT instances of the same class (e.g. two S3Exporters for
+        # different buckets) are valid and each gets its own lane.
+        seen: list[InsightExporter] = []
+        for exporter in self.exporters:
+            if any(exporter is other for other in seen):
+                raise ValueError(
+                    "exporters must not contain the same exporter instance more "
+                    f"than once ({type(exporter).__name__} appears multiple "
+                    "times); each configured exporter runs on its own single "
+                    "background worker, so one instance shared across lanes "
+                    "would schedule duplicate, timing-dependent exports. Use "
+                    "two distinct instances if you need two destinations."
+                )
+            seen.append(exporter)
 
     def _validate_export_timeout(self) -> None:
         # A finite, strictly-positive number. Reject ``bool`` (a subtype of
