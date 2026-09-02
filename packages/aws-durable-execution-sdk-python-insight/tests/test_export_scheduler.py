@@ -113,6 +113,27 @@ class BlockingExporter:
             return list(self.exported)
 
 
+class BlockingFlushExporter(RecordingExporter):
+    """Exports normally but blocks inside ``flush`` until released.
+
+    Lets a test drive the worker until it has already popped a flush barrier and
+    is stuck mid-``flush`` -- the "already in flight" cancellation race.
+    """
+
+    def __init__(self, max_record_size_bytes: int | None = None) -> None:
+        super().__init__(max_record_size_bytes)
+        self.flush_started = threading.Event()
+        self._flush_release = threading.Event()
+
+    def flush(self) -> None:
+        self.flush_started.set()
+        self._flush_release.wait(5.0)
+        super().flush()
+
+    def release_flush(self) -> None:
+        self._flush_release.set()
+
+
 class FailingExporter:
     """Raises in both export and flush."""
 
@@ -478,3 +499,105 @@ def test_cancelled_barrier_is_cleaned_up_and_worker_exits():
     exporter.release()
     assert _wait_until(lambda: not lane._worker_alive())
     assert exporter.flushed == 0  # cancelled barrier did not flush
+
+
+def test_repeated_timeouts_behind_blocked_exporter_stay_bounded():
+    """A blocked exporter across many warm invocations must not accumulate
+    barriers or grow queue state, must keep the SAME worker (no replacement),
+    must not execute any cancelled flush, and must drain + exit after release.
+    """
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter])
+    lane = scheduler._lanes[0]
+
+    # First record puts the single worker into a blocked export.
+    scheduler.schedule(ARN_A, _rec(ARN_A, "a1"))
+    assert _wait_until(exporter.started.is_set)
+    worker = lane._worker
+    assert worker is not None and worker.is_alive()
+
+    # Many warm invocations. Each schedules a coalescing record for the same
+    # ARN then ends with a short timeout; the barrier always times out because
+    # the worker is still stuck in the first export.
+    for i in range(50):
+        scheduler.schedule(ARN_A, _rec(ARN_A, f"a{i + 2}"))
+        ok = scheduler.end_invocation(0.02)
+        assert ok is False  # degraded every time -- worker is blocked
+        # The cancelled barrier is pulled from the queue immediately, so no
+        # _FLUSH marker lingers behind the blocked worker.
+        assert lane._queued_flush_count() == 0
+        # Queue holds at most the single coalesced record token; it never grows.
+        assert lane._queue_len() <= 1
+
+    # Bounded state: one in-flight ARN coalesced to a single pending record, and
+    # no growing pile of barriers.
+    assert lane._queue_len() <= 1
+    assert lane._pending_count() <= 1
+    assert lane._queued_flush_count() == 0
+    # The blocked worker was never replaced.
+    assert lane._worker is worker
+    assert worker.is_alive()
+    assert _lane_worker_count(lane) == 1
+    # No cancelled flush ran while the worker was blocked.
+    assert exporter.flushed == 0
+
+    # Release: the worker drains the latest coalesced record, then exits idle.
+    exporter.release()
+    assert _wait_until(lambda: not lane._worker_alive())
+    exported = exporter.exported_values()
+    assert exported[0] == "a1"  # the in-flight record delivered first
+    assert len(exported) <= 2  # a1 plus at most one final coalesced record
+    # Cancelled barriers never triggered a flush, and the idle-stop path does
+    # not flush either.
+    assert exporter.flushed == 0
+
+
+def test_cancel_flush_removes_queued_barrier_immediately():
+    """Queued-barrier race: while the worker is blocked the barrier is still in
+    the queue, so cancel_flush pulls it out and completes it synchronously --
+    without waiting for the worker and without ever flushing."""
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter])
+    lane = scheduler._lanes[0]
+    scheduler.schedule(ARN_A, _rec(ARN_A, "a1"))
+    assert _wait_until(exporter.started.is_set)  # worker blocked in export
+    barrier = lane.enqueue_flush()
+    assert lane._queued_flush_count() == 1
+    lane.cancel_flush(barrier)
+    # Removed from the queue and completed here, without the worker.
+    assert lane._queued_flush_count() == 0
+    assert barrier.canceled is True
+    assert barrier.is_done()
+    # Finish the in-flight export and go idle; the pulled barrier never flushed.
+    exporter.release()
+    lane.request_stop_when_idle()
+    assert _wait_until(lambda: not lane._worker_alive())
+    assert exporter.flushed == 0
+    assert exporter.exported_values() == ["a1"]
+
+
+def test_cancel_flush_after_pop_lets_worker_complete_barrier():
+    """Already-popped race: the worker has taken the barrier and is mid-flush,
+    so cancel_flush only marks it cancelled and leaves completion to the worker.
+    The in-flight flush is not interrupted."""
+    exporter = BlockingFlushExporter()
+    scheduler = _ExportScheduler([exporter])
+    lane = scheduler._lanes[0]
+    scheduler.schedule(ARN_A, _rec(ARN_A, "a1"))
+    barrier = lane.enqueue_flush()
+    # Worker exports a1, pops the barrier, and enters flush (now in flight).
+    assert _wait_until(exporter.flush_started.is_set)
+    assert lane._queued_flush_count() == 0  # already popped from the queue
+    assert not barrier.is_done()  # worker still inside flush
+    # Cancelling now must NOT complete it here (the worker owns completion) and
+    # must NOT interrupt the in-flight flush.
+    lane.cancel_flush(barrier)
+    assert barrier.canceled is True
+    assert not barrier.is_done()
+    # Release the in-flight flush; the worker completes the barrier itself.
+    exporter.release_flush()
+    assert _wait_until(barrier.is_done)
+    # The flush already in flight ran to completion exactly once (not killed).
+    assert exporter.calls.count(("flush", None)) == 1
+    lane.request_stop_when_idle()
+    assert _wait_until(lambda: not lane._worker_alive())
