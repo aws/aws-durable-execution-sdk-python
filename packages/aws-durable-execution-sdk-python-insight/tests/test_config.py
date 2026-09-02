@@ -157,3 +157,62 @@ def test_export_timeout_accepts_finite_positive_numbers(value):
 def test_export_timeout_rejects_invalid_values(value):
     with pytest.raises(ValueError):
         WorkflowInsightConfig(export_timeout_seconds=value)
+
+
+# -- exporter-instance identity validation -----------------------------------
+
+
+class _StubExporter:
+    """Minimal exporter that is intentionally NOT hashable/comparable.
+
+    ``__eq__``/``__hash__`` are disabled so the identity check cannot lean on
+    equality or hashing -- it must compare object identity (``is``) only.
+    """
+
+    max_record_size_bytes: int | None = None
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __eq__(self, other):  # pragma: no cover - must never be called
+        raise AssertionError("identity validation must not use __eq__")
+
+    def render(self, record):  # pragma: no cover - not exercised here
+        return record
+
+    def export(self, record):  # pragma: no cover - not exercised here
+        return None
+
+    def flush(self):  # pragma: no cover - not exercised here
+        return None
+
+
+def test_same_exporter_instance_twice_raises_value_error():
+    exporter = _StubExporter()
+    with pytest.raises(ValueError, match="same exporter instance"):
+        WorkflowInsightConfig(exporters=[exporter, exporter])
+
+
+def test_same_exporter_instance_among_others_raises():
+    dup = _StubExporter()
+    with pytest.raises(ValueError, match="same exporter instance"):
+        WorkflowInsightConfig(exporters=[_StubExporter(), dup, _StubExporter(), dup])
+
+
+def test_two_distinct_same_class_instances_accepted_each_own_lane():
+    a = _StubExporter()
+    b = _StubExporter()
+    plugin = workflow_insight(WorkflowInsightConfig(exporters=[a, b]))
+    # Both distinct instances are kept verbatim, in order.
+    assert plugin._exporters == [a, b]
+    # Each distinct instance gets its own lane (one background worker each).
+    lanes = plugin._scheduler._lanes
+    assert len(lanes) == 2
+    assert [lane._exporter for lane in lanes] == [a, b]
+
+
+def test_default_exporter_unaffected_by_instance_check():
+    # No exporters configured -> single default LambdaLogExporter, one lane; the
+    # identity check never trips on the empty list.
+    plugin = workflow_insight(WorkflowInsightConfig())
+    assert len(plugin._exporters) == 1
+    assert len(plugin._scheduler._lanes) == 1
