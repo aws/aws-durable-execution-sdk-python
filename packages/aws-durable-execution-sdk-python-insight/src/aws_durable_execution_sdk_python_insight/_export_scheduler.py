@@ -24,9 +24,11 @@ Design (``workflow-insight-async-export-design.md``):
   cap is exceeded (only reachable behind a blocked/slow exporter).
 * Invocation end enqueues one flush barrier per touched lane after the latest
   record and waits for all barriers under a single shared timeout deadline. On
-  timeout the workflow response is returned, degradation is logged, stale
-  barriers are cancelled, and any blocked worker stays daemonized (a synchronous
-  Python ``export()`` cannot be safely killed).
+  timeout the workflow response is returned, degradation is logged, and each
+  stale barrier is cancelled and its still-queued ``_FLUSH`` marker pulled from
+  the lane so barriers cannot accumulate behind a blocked worker; any blocked
+  worker stays daemonized (a synchronous Python ``export()`` cannot be safely
+  killed) and completes an already-popped barrier itself.
 * Idle workers exit after the drain/flush request, so a normal invocation leaves
   no lingering thread.
 """
@@ -96,7 +98,13 @@ class _ExporterLane:
     ) -> None:
         self._exporter = exporter
         self._max_pending = max(1, max_pending_executions)
-        self._cond = threading.Condition()
+        # Explicit non-reentrant Lock rather than Condition()'s default RLock:
+        # the lane never re-acquires ``_cond`` while already holding it (worker
+        # I/O -- export/flush -- runs outside the lock and no locked helper
+        # re-enters), so recursion support is unnecessary. A plain Lock also
+        # makes any accidental recursive acquisition fail loudly instead of
+        # silently succeeding.
+        self._cond = threading.Condition(threading.Lock())
         # Ordered work list: entries are (_RECORD, arn) or (_FLUSH, barrier).
         self._queue: deque[tuple[str, Any]] = deque()
         # arn -> latest pending record (coalesced). Insertion order is the
@@ -135,6 +143,30 @@ class _ExporterLane:
         with self._cond:
             self._stop_when_idle = True
             self._cond.notify()
+
+    def cancel_flush(self, barrier: _FlushBarrier) -> None:
+        """Cancel a timed-out flush barrier so it cannot pile up behind a
+        blocked worker.
+
+        Under the lane lock: mark the barrier cancelled and, if its ``_FLUSH``
+        marker is still queued, remove that exact marker and complete the
+        barrier here. Removing it is what keeps queue/barrier state bounded
+        across many warm invocations behind a blocked exporter -- otherwise one
+        stale barrier per invocation would accumulate behind the stuck worker.
+
+        If the worker has already popped the marker (the flush is in flight or
+        about to run) the marker is no longer in the queue: we only set
+        ``canceled`` and leave completion to the worker, which skips the
+        now-pointless flush and completes the barrier itself. A synchronous
+        in-flight ``flush()`` is never interrupted.
+        """
+        with self._cond:
+            barrier.canceled = True
+            for index, (kind, payload) in enumerate(self._queue):
+                if kind == _FLUSH and payload is barrier:
+                    del self._queue[index]
+                    barrier.complete()
+                    return
 
     # -- queue bookkeeping (must hold ``_cond``) ------------------------------
 
@@ -267,6 +299,14 @@ class _ExporterLane:
         with self._cond:
             return len(self._pending)
 
+    def _queue_len(self) -> int:
+        with self._cond:
+            return len(self._queue)
+
+    def _queued_flush_count(self) -> int:
+        with self._cond:
+            return sum(1 for kind, _ in self._queue if kind == _FLUSH)
+
 
 class _ExportScheduler:
     """Owns one :class:`_ExporterLane` per exporter and fans records out to them."""
@@ -295,13 +335,16 @@ class _ExportScheduler:
         to stop once idle. Returns ``True`` if every barrier completed within the
         deadline, ``False`` if delivery degraded to best-effort on timeout.
         """
-        barriers = [lane.enqueue_flush() for lane in self._lanes]
+        barriers = [(lane, lane.enqueue_flush()) for lane in self._lanes]
         deadline = time.monotonic() + timeout_seconds
         degraded = False
-        for barrier in barriers:
+        for lane, barrier in barriers:
             remaining = deadline - time.monotonic()
             if not barrier.wait(remaining):
-                barrier.canceled = True
+                # Timed out: cancel this lane's barrier and pull its still-queued
+                # _FLUSH marker out now, so a stale barrier per invocation cannot
+                # accumulate behind a blocked worker.
+                lane.cancel_flush(barrier)
                 degraded = True
         for lane in self._lanes:
             lane.request_stop_when_idle()
