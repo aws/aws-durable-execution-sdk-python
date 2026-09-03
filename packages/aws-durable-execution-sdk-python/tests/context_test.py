@@ -3,6 +3,8 @@
 import hashlib
 import json
 import random
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 from unittest.mock import ANY, MagicMock, Mock, patch
 
@@ -601,6 +603,74 @@ def test_step_increments_counter(mock_executor_class):
 
 
 @patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
+def test_shared_context_allocates_operation_ids_atomically(mock_executor_class):
+    """Concurrent callers cannot retain the same operation ID."""
+    mock_executor_class.return_value.process.return_value = "result"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    context = create_test_context(state=mock_state)
+    peek_barrier = threading.Barrier(2, timeout=5.0)
+    original_peek = context._peek_next_operation_id  # noqa: SLF001
+
+    def synchronized_peek() -> str:
+        operation_id = original_peek()
+        peek_barrier.wait()
+        return operation_id
+
+    context._peek_next_operation_id = synchronized_peek  # type: ignore[method-assign]  # noqa: SLF001
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(context.step, lambda _step_context: "unused")
+            for _ in range(2)
+        ]
+        assert [future.result(timeout=5.0) for future in futures] == [
+            "result",
+            "result",
+        ]
+
+    operation_ids = [
+        call.kwargs["operation_identifier"].operation_id
+        for call in mock_executor_class.call_args_list
+    ]
+    assert len(operation_ids) == 2
+    assert len(set(operation_ids)) == 2
+
+
+def test_operation_replay_aware_looks_up_allocated_operation_id():
+    """Replay lookup uses the atomically reserved ID instead of peeking again."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    context = DurableContext(
+        state=mock_state,
+        execution_context=ExecutionContext(
+            durable_execution_arn=mock_state.durable_execution_arn
+        ),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    context._peek_next_checkpoint = Mock(  # type: ignore[method-assign]  # noqa: SLF001
+        side_effect=AssertionError("must look up the reserved operation ID")
+    )
+
+    with context._operation_replay_aware(  # noqa: SLF001
+        OperationSubType.STEP,
+        "current-step",
+    ) as operation_identifier:
+        assert context._step_counter.get_current() == 1  # noqa: SLF001
+
+    mock_state.get_checkpoint_result.assert_called_once_with(
+        operation_identifier.operation_id
+    )
+
+
+@patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
 def test_step_with_original_name(mock_executor_class):
     """Test step with callable that has _original_name attribute."""
     mock_executor = MagicMock()
@@ -1050,7 +1120,11 @@ def test_run_in_child_context_basic(mock_handler):
     call_args = mock_handler.call_args
     assert call_args[1]["state"] is mock_state
     assert call_args[1]["operation_identifier"] == OperationIdentifier(
-        expected_operation_id, OperationSubType.RUN_IN_CHILD_CONTEXT, None, None
+        expected_operation_id,
+        OperationSubType.RUN_IN_CHILD_CONTEXT,
+        None,
+        None,
+        operation_type=OperationType.CONTEXT,
     )
     assert call_args[1]["config"] is None
 
@@ -1066,7 +1140,7 @@ def test_run_in_child_context_with_name_and_config(mock_handler):
     mock_callable = Mock()
     mock_callable._original_name = "original_function"  # noqa: SLF001
 
-    config = ChildConfig()
+    config = ChildConfig(sub_type=OperationSubType.STEP)
 
     context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(3)]  # Set counter to 3 # noqa: SLF001
@@ -1080,7 +1154,11 @@ def test_run_in_child_context_with_name_and_config(mock_handler):
     assert result == "configured_child_result"
     call_args = mock_handler.call_args
     assert call_args[1]["operation_identifier"] == OperationIdentifier(
-        expected_id, OperationSubType.RUN_IN_CHILD_CONTEXT, None, "original_function"
+        expected_id,
+        OperationSubType.STEP,
+        None,
+        "original_function",
+        operation_type=OperationType.CONTEXT,
     )
     assert call_args[1]["config"] is config
 
@@ -1113,7 +1191,11 @@ def test_run_in_child_context_with_parent_id(mock_executor_class):
 
     call_args = mock_executor_class.call_args
     assert call_args[1]["operation_identifier"] == OperationIdentifier(
-        expected_id, OperationSubType.RUN_IN_CHILD_CONTEXT, "parent456", None
+        expected_id,
+        OperationSubType.RUN_IN_CHILD_CONTEXT,
+        "parent456",
+        None,
+        operation_type=OperationType.CONTEXT,
     )
 
 
@@ -1178,12 +1260,20 @@ def test_run_in_child_context_increments_counter(mock_executor_class):
     assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
     ] == OperationIdentifier(
-        expected_id1, OperationSubType.RUN_IN_CHILD_CONTEXT, None, None
+        expected_id1,
+        OperationSubType.RUN_IN_CHILD_CONTEXT,
+        None,
+        None,
+        operation_type=OperationType.CONTEXT,
     )
     assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
     ] == OperationIdentifier(
-        expected_id2, OperationSubType.RUN_IN_CHILD_CONTEXT, None, None
+        expected_id2,
+        OperationSubType.RUN_IN_CHILD_CONTEXT,
+        None,
+        None,
+        operation_type=OperationType.CONTEXT,
     )
 
 
@@ -2901,6 +2991,64 @@ def test_replay_aware_does_not_emit_replay_hook_when_not_replaying():
         ctx._create_step_id()  # noqa: SLF001
 
     assert emitted == []
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_status", "updated"),
+    [
+        (OperationStatus.STARTED, False),
+        (OperationStatus.SUCCEEDED, True),
+    ],
+)
+def test_operation_identity_is_validated_before_replay_hooks(
+    checkpoint_status: OperationStatus,
+    updated: bool,
+):
+    """Mismatched history fails before replay/update plugin hooks are dispatched."""
+    captured: list[str] = []
+
+    class _CapturingPlugin(DurableInstrumentationPlugin):
+        def on_operation_start(self, info):
+            captured.append(f"start:{info.operation_id}")
+
+        def on_operation_end(self, info):
+            captured.append(f"end:{info.operation_id}")
+
+    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
+    step_body_calls: list[bool] = []
+    with plugin_executor.run():
+        state = ExecutionState(
+            durable_execution_arn="arn",
+            initial_checkpoint_token="token",  # noqa: S106
+            operations={},
+            service_client=Mock(),
+            plugin_executor=plugin_executor,
+            updated_operation_ids=[],
+        )
+        ctx = DurableContext(
+            state=state,
+            execution_context=ExecutionContext(durable_execution_arn="arn"),
+            replay_status=ReplayStatus.REPLAY,
+        )
+        next_id = ctx._peek_next_operation_id()  # noqa: SLF001
+        state._operations[next_id] = Operation(  # noqa: SLF001
+            operation_id=next_id,
+            operation_type=OperationType.WAIT,
+            status=checkpoint_status,
+            sub_type=OperationSubType.WAIT,
+            name="stale-wait",
+        )
+        if updated:
+            state._updated_operation_ids.add(next_id)  # noqa: SLF001
+
+        with pytest.raises(NonDeterministicExecutionError):
+            ctx.step(
+                lambda _step_context: step_body_calls.append(True),
+                name="current-step",
+            )
+
+    assert captured == []
+    assert step_body_calls == []
 
 
 def test_replay_aware_emits_update_hook_for_operation_updated_since_last_invocation():

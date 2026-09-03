@@ -34,16 +34,17 @@ class OperationIdNamespace:
 
 @dataclass(frozen=True)
 class OperationIdentifier:
-    """Container for operation id, parent id, and name."""
+    """Container for operation id, type, subtype, hierarchy, and name."""
 
     operation_id: str
     sub_type: OperationSubType
     parent_id: str | None = None
     name: str | None = None
+    operation_type: OperationType | None = None
 
     @property
     def type(self) -> OperationType:
-        return OperationType.from_sub_type(self.sub_type)
+        return self.operation_type or OperationType.from_sub_type(self.sub_type)
 
     def validate_checkpoint(self, checkpoint: Operation | None) -> None:
         """Ensure replay history belongs to this operation before it is consumed."""
