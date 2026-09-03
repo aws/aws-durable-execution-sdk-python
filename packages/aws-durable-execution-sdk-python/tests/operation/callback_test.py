@@ -61,6 +61,8 @@ def test_create_callback_handler_new_operation_with_config():
     operation = Operation(
         operation_id="callback1",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
+        name="test_callback",
         status=OperationStatus.STARTED,
         callback_details=callback_details,
     )
@@ -107,6 +109,7 @@ def test_create_callback_handler_new_operation_without_config():
     operation = Operation(
         operation_id="callback2",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=callback_details,
     )
@@ -145,6 +148,7 @@ def test_create_callback_handler_existing_started_operation():
     operation = Operation(
         operation_id="callback3",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=callback_details,
     )
@@ -173,6 +177,7 @@ def test_create_callback_handler_existing_failed_operation():
     failed_op = Operation(
         operation_id="callback4",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.FAILED,
         callback_details=CallbackDetails(callback_id="failed_cb4"),
     )
@@ -198,6 +203,7 @@ def test_create_callback_handler_existing_started_missing_callback_details():
     operation = Operation(
         operation_id="callback5",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=None,
     )
@@ -220,6 +226,7 @@ def test_create_callback_handler_new_operation_missing_callback_details_after_ch
     operation = Operation(
         operation_id="callback6",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=None,
     )
@@ -245,6 +252,7 @@ def test_create_callback_handler_existing_timed_out_operation():
     operation = Operation(
         operation_id="callback_timed_out",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.TIMED_OUT,
         callback_details=callback_details,
     )
@@ -269,6 +277,7 @@ def test_create_callback_handler_existing_timed_out_missing_callback_details():
     operation = Operation(
         operation_id="callback_timed_out_no_details",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.TIMED_OUT,
         callback_details=None,
     )
@@ -483,6 +492,7 @@ def test_create_callback_handler_existing_succeeded_operation():
     operation = Operation(
         operation_id="callback_succeeded",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.SUCCEEDED,
         callback_details=callback_details,
     )
@@ -507,6 +517,7 @@ def test_create_callback_handler_existing_succeeded_missing_callback_details():
     operation = Operation(
         operation_id="callback_succeeded_no_details",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.SUCCEEDED,
         callback_details=None,
     )
@@ -530,6 +541,7 @@ def test_create_callback_handler_config_with_zero_timeouts():
     operation = Operation(
         operation_id="callback_zero",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=callback_details,
     )
@@ -574,6 +586,7 @@ def test_create_callback_handler_config_with_large_timeouts():
     operation = Operation(
         operation_id="callback_large",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=callback_details,
     )
@@ -619,6 +632,7 @@ def test_create_callback_handler_empty_operation_id():
     operation = Operation(
         operation_id="",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=callback_details,
     )
@@ -810,6 +824,7 @@ def test_callback_lifecycle_complete_flow():
     operation = Operation(
         operation_id="lifecycle_callback",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=callback_details,
     )
@@ -863,6 +878,7 @@ def test_callback_retry_scenario():
     operation = Operation(
         operation_id="retry_callback",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=callback_details,
     )
@@ -900,6 +916,7 @@ def test_callback_timeout_configuration():
         operation = Operation(
             operation_id=f"timeout_callback_{timeout_seconds}",
             operation_type=OperationType.CALLBACK,
+            sub_type=OperationSubType.CALLBACK,
             status=OperationStatus.STARTED,
             callback_details=callback_details,
         )
@@ -932,6 +949,7 @@ def test_callback_error_propagation():
     failed_op = Operation(
         operation_id="error_callback",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.FAILED,
         callback_details=CallbackDetails(callback_id="failed_cb"),
     )
@@ -996,12 +1014,14 @@ def test_callback_state_consistency():
     started_operation = Operation(
         operation_id="consistent_callback",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=callback_details,
     )
     succeeded_operation = Operation(
         operation_id="consistent_callback",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.SUCCEEDED,
         callback_details=callback_details,
     )
@@ -1074,6 +1094,7 @@ def test_callback_operation_update_creation(mock_operation_update):
     operation = Operation(
         operation_id="update_test",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=callback_details,
     )
@@ -1117,6 +1138,7 @@ def test_callback_immediate_response_get_checkpoint_result_called_twice():
     started_op = Operation(
         operation_id="callback_immediate_1",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=callback_details,
     )
@@ -1147,6 +1169,7 @@ def test_callback_immediate_response_create_checkpoint_with_is_sync_true():
     started_op = Operation(
         operation_id="callback_immediate_2",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=callback_details,
     )
@@ -1183,6 +1206,7 @@ def test_callback_immediate_response_immediate_success():
     succeeded_op = Operation(
         operation_id="callback_immediate_3",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.SUCCEEDED,
         callback_details=callback_details,
     )
@@ -1220,6 +1244,7 @@ def test_callback_immediate_response_immediate_failure_deferred():
     failed_op = Operation(
         operation_id="callback_immediate_4",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.FAILED,
         callback_details=callback_details,
     )
@@ -1263,6 +1288,7 @@ def test_callback_result_raises_error_for_failed_callbacks():
     failed_op = Operation(
         operation_id="callback_failed_result",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.FAILED,
         callback_details=callback_details,
     )
@@ -1300,6 +1326,7 @@ def test_callback_result_raises_error_for_timed_out_callbacks():
     timed_out_op = Operation(
         operation_id="callback_timed_out_result",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.TIMED_OUT,
         callback_details=callback_details,
     )
@@ -1333,6 +1360,7 @@ def test_callback_immediate_response_no_immediate_response():
     started_op = Operation(
         operation_id="callback_immediate_5",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.STARTED,
         callback_details=callback_details,
     )
@@ -1368,6 +1396,7 @@ def test_callback_immediate_response_already_completed():
     succeeded_op = Operation(
         operation_id="callback_immediate_6",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.SUCCEEDED,
         callback_details=callback_details,
     )
@@ -1403,6 +1432,7 @@ def test_callback_immediate_response_already_failed():
     failed_op = Operation(
         operation_id="callback_immediate_7",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.FAILED,
         callback_details=callback_details,
     )
@@ -1445,6 +1475,7 @@ def test_callback_deferred_error_handling_code_execution_between_create_and_resu
     failed_op = Operation(
         operation_id="callback_deferred_error",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.FAILED,
         callback_details=callback_details,
     )
@@ -1495,6 +1526,7 @@ def test_callback_immediate_response_with_config():
     succeeded_op = Operation(
         operation_id="callback_with_config",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
         status=OperationStatus.SUCCEEDED,
         callback_details=callback_details,
     )
@@ -1541,6 +1573,8 @@ def test_callback_returns_id_when_second_check_returns_started():
             Operation(
                 operation_id="callback-1",
                 operation_type=OperationType.CALLBACK,
+                sub_type=OperationSubType.CALLBACK,
+                name="test_callback",
                 status=OperationStatus.STARTED,
                 callback_details=CallbackDetails(callback_id="cb-123"),
             )
@@ -1575,6 +1609,8 @@ def test_callback_returns_id_when_second_check_returns_started_duplicate():
     started_op = Operation(
         operation_id="callback-1",
         operation_type=OperationType.CALLBACK,
+        sub_type=OperationSubType.CALLBACK,
+        name="test_callback",
         status=OperationStatus.STARTED,
         callback_details=CallbackDetails(callback_id="cb-123"),
     )

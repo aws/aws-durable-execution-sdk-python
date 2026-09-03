@@ -65,6 +65,8 @@ def create_mock_checkpoint_with_operations():
                 operation_type=update.operation_type,
                 status=OperationStatus.STARTED,
                 parent_id=update.parent_id,
+                name=update.name,
+                sub_type=update.sub_type,
             )
             operations.append(op)
 
@@ -369,6 +371,8 @@ def test_callback_deferred_error_handling_to_result():
                         operation_type=update.operation_type,
                         status=OperationStatus.STARTED,
                         parent_id=update.parent_id,
+                        name=update.name,
+                        sub_type=update.sub_type,
                         callback_details=CallbackDetails(
                             callback_id=f"cb-{update.operation_id[:8]}"
                         ),
@@ -379,6 +383,8 @@ def test_callback_deferred_error_handling_to_result():
                         operation_type=update.operation_type,
                         status=OperationStatus.STARTED,
                         parent_id=update.parent_id,
+                        name=update.name,
+                        sub_type=update.sub_type,
                     )
                 operations.append(op)
 
@@ -589,6 +595,8 @@ def test_end_to_end_child_context_replay_children_mode():
                     operation_type=update.operation_type,
                     status=OperationStatus.STARTED,
                     parent_id=update.parent_id,
+                    name=update.name,
+                    sub_type=update.sub_type,
                 )
                 operations.append(op)
 

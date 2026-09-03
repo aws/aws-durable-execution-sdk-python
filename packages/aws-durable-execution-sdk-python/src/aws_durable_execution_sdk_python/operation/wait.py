@@ -58,9 +58,7 @@ class WaitOperationExecutor(OperationExecutor[None]):
         Raises:
             SuspendExecution: When wait timer has not completed
         """
-        checkpointed_result: CheckpointedResult = self.state.get_checkpoint_result(
-            self.operation_identifier.operation_id
-        )
+        checkpointed_result = self._get_checkpoint_result()
 
         # Terminal success - wait completed
         if checkpointed_result.is_succeeded():
