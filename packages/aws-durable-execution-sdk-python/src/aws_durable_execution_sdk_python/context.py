@@ -536,10 +536,17 @@ class DurableContext(DurableContextProtocol):
           yet, we have reached the replay boundary.
         """
         was_replaying: bool = self.is_replaying()
-        # Only peek when replaying; avoids unnecessary checkpoint lookups (and
-        # any step-id side effects) on the common non-replay path.
+        # Only look up a checkpoint when replaying. Operation call sites pass
+        # their atomically allocated identifier so concurrent callers inspect
+        # the checkpoint for their own ID rather than peeking at shared state.
         next_checkpoint: CheckpointedResult | None = (
-            self._peek_next_checkpoint() if was_replaying else None
+            (
+                self.state.get_checkpoint_result(operation_identifier.operation_id)
+                if operation_identifier is not None
+                else self._peek_next_checkpoint()
+            )
+            if was_replaying
+            else None
         )
         next_operation = (
             next_checkpoint.operation if next_checkpoint is not None else None
@@ -593,13 +600,12 @@ class DurableContext(DurableContextProtocol):
     ) -> Iterator[OperationIdentifier]:
         """Allocate an operation and validate its replay identity before hooks."""
         operation_identifier = OperationIdentifier(
-            operation_id=self._peek_next_operation_id(),
+            operation_id=self._create_step_id(),
             sub_type=sub_type,
             parent_id=self._parent_id,
             name=name,
         )
         with self._replay_aware(operation_identifier):
-            self._create_step_id()
             yield operation_identifier
 
     # endregion replay status

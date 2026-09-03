@@ -3,6 +3,8 @@
 import hashlib
 import json
 import random
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 from unittest.mock import ANY, MagicMock, Mock, patch
 
@@ -598,6 +600,74 @@ def test_step_increments_counter(mock_executor_class):
     assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
     ] == OperationIdentifier(expected_id2, OperationSubType.STEP, None, None)
+
+
+@patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
+def test_shared_context_allocates_operation_ids_atomically(mock_executor_class):
+    """Concurrent callers cannot retain the same operation ID."""
+    mock_executor_class.return_value.process.return_value = "result"
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    context = create_test_context(state=mock_state)
+    peek_barrier = threading.Barrier(2, timeout=5.0)
+    original_peek = context._peek_next_operation_id  # noqa: SLF001
+
+    def synchronized_peek() -> str:
+        operation_id = original_peek()
+        peek_barrier.wait()
+        return operation_id
+
+    context._peek_next_operation_id = synchronized_peek  # type: ignore[method-assign]  # noqa: SLF001
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(context.step, lambda _step_context: "unused")
+            for _ in range(2)
+        ]
+        assert [future.result(timeout=5.0) for future in futures] == [
+            "result",
+            "result",
+        ]
+
+    operation_ids = [
+        call.kwargs["operation_identifier"].operation_id
+        for call in mock_executor_class.call_args_list
+    ]
+    assert len(operation_ids) == 2
+    assert len(set(operation_ids)) == 2
+
+
+def test_operation_replay_aware_looks_up_allocated_operation_id():
+    """Replay lookup uses the atomically reserved ID instead of peeking again."""
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = (
+        "arn:aws:durable:us-east-1:123456789012:execution/test"
+    )
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    context = DurableContext(
+        state=mock_state,
+        execution_context=ExecutionContext(
+            durable_execution_arn=mock_state.durable_execution_arn
+        ),
+        replay_status=ReplayStatus.REPLAY,
+    )
+    context._peek_next_checkpoint = Mock(  # type: ignore[method-assign]  # noqa: SLF001
+        side_effect=AssertionError("must look up the reserved operation ID")
+    )
+
+    with context._operation_replay_aware(  # noqa: SLF001
+        OperationSubType.STEP,
+        "current-step",
+    ) as operation_identifier:
+        assert context._step_counter.get_current() == 1  # noqa: SLF001
+
+    mock_state.get_checkpoint_result.assert_called_once_with(
+        operation_identifier.operation_id
+    )
 
 
 @patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
