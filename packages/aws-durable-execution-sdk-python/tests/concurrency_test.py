@@ -1101,7 +1101,6 @@ def test_replay_started_nested_branch_allows_missing_checkpoint():
     execution_state.get_checkpoint_result.return_value = (
         CheckpointedResult.create_not_found()
     )
-    execution_state.operations = {}
     parent_checkpoint = CheckpointedResult(
         result=json.dumps(
             {
@@ -1117,8 +1116,11 @@ def test_replay_started_nested_branch_allows_missing_checkpoint():
     assert result.all[0].status is BatchItemStatus.STARTED
 
 
-def test_replay_started_nested_branch_rejects_flat_child_history():
-    """A missing NESTED container cannot hide branch-namespaced FLAT children."""
+@pytest.mark.parametrize("history_shape", ["deep-virtual-child", "shifted-direct"])
+def test_replay_started_nested_branch_preserves_ambiguous_missing_container(
+    history_shape,
+):
+    """Ambiguous missing-container history stays STARTED without map scans."""
     executor = _RecordingExecutor(
         executables=[Executable(0, lambda: "must-not-run")],
         max_concurrency=1,
@@ -1132,21 +1134,40 @@ def test_replay_started_nested_branch_rejects_flat_child_history():
     )
     executor_context = Mock()
     executor_context._parent_id = "parallel-op"  # noqa: SLF001
-    execution_state = Mock()
-    execution_state.get_checkpoint_result.return_value = (
-        CheckpointedResult.create_not_found()
-    )
-    inner_operation_id = OperationIdNamespace("op_0").create_id_for_step(1)
-    execution_state.operations = {
-        inner_operation_id: Operation(
-            operation_id=inner_operation_id,
-            operation_type=OperationType.STEP,
-            status=OperationStatus.STARTED,
-            parent_id="parallel-op",
-            sub_type=OperationSubType.STEP,
-            name="inner-step",
+    branch_operation_id = "op_0"
+    if history_shape == "deep-virtual-child":
+        virtual_child_id = OperationIdNamespace(branch_operation_id).create_id_for_step(
+            1
         )
-    }
+        inner_operation_id = OperationIdNamespace(virtual_child_id).create_id_for_step(
+            1
+        )
+    else:
+        inner_operation_id = OperationIdNamespace(
+            branch_operation_id
+        ).create_id_for_step(10)
+
+    class AmbiguousState:
+        operations_reads = 0
+
+        def get_checkpoint_result(self, operation_id):  # noqa: ARG002
+            return CheckpointedResult.create_not_found()
+
+        @property
+        def operations(self):
+            self.operations_reads += 1
+            return {
+                inner_operation_id: Operation(
+                    operation_id=inner_operation_id,
+                    operation_type=OperationType.STEP,
+                    status=OperationStatus.STARTED,
+                    parent_id="parallel-op",
+                    sub_type=OperationSubType.STEP,
+                    name="inner-step",
+                )
+            }
+
+    execution_state = AmbiguousState()
     parent_checkpoint = CheckpointedResult(
         result=json.dumps(
             {
@@ -1157,8 +1178,10 @@ def test_replay_started_nested_branch_rejects_flat_child_history():
         )
     )
 
-    with pytest.raises(NonDeterministicExecutionError, match="FLAT history"):
-        executor.replay(execution_state, executor_context, parent_checkpoint)
+    result = executor.replay(execution_state, executor_context, parent_checkpoint)
+
+    assert result.all[0].status is BatchItemStatus.STARTED
+    assert execution_state.operations_reads == 0
 
 
 def test_concurrent_executor_create_result_failure_tolerance_exceeded():
@@ -3716,7 +3739,6 @@ def _make_replay_mocks(branch_checkpoints: dict):
     execution_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
-    execution_state.operations = {}
 
     def get_checkpoint_result(operation_id: str):
         checkpoint = branch_checkpoints.get(operation_id)
