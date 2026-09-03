@@ -31,8 +31,10 @@ from aws_durable_execution_sdk_python.config import (
 )
 from aws_durable_execution_sdk_python.exceptions import (
     DurableOperationError,
+    ExecutionError,
     InvalidStateError,
     InvocationError,
+    NonDeterministicExecutionError,
     OrphanedChildException,
     SuspendExecution,
     TimedSuspendExecution,
@@ -154,6 +156,39 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         name: str | None = self.executables[index].name
         return name if name is not None else f"{self.name_prefix}{index}"
 
+    def _get_iteration_operation_identifier(
+        self,
+        executor_context: DurableContext,
+        executable: Executable[CallableType],
+    ) -> OperationIdentifier:
+        """Build the stable operation identity for one branch or iteration."""
+        return OperationIdentifier(
+            operation_id=self.operation_id_namespace.create_id_for_step(
+                executable.index
+            ),
+            sub_type=self.sub_type_iteration,
+            parent_id=executor_context._parent_id,  # noqa: SLF001
+            name=self.get_iteration_name(executable.index),
+        )
+
+    def _validate_branch_checkpoint_nesting(
+        self,
+        operation_identifier: OperationIdentifier,
+        checkpoint: CheckpointedResult,
+    ) -> None:
+        """Validate branch identity and reject NESTED history in FLAT mode."""
+        operation_identifier.validate_checkpoint(checkpoint.operation)
+        if self.nesting_type is NestingType.FLAT and checkpoint.is_existent():
+            msg = (
+                "Non-deterministic branch nesting at "
+                f"id={operation_identifier.operation_id!r}: "
+                "checkpoint contains a NESTED branch context but current "
+                "nesting is FLAT"
+            )
+            raise NonDeterministicExecutionError(
+                msg, step_id=operation_identifier.operation_id
+            )
+
     def _build_items_snapshot(self) -> tuple[CompletionItemStatus, ...]:
         """Build the per-branch status snapshot for the custom predicate.
 
@@ -239,7 +274,11 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         def submit(branch: Branch[CallableType, ResultType]) -> None:
             branch.start()
             pool.submit(
-                self._branch_worker, executor_context, events, branch.executable
+                self._branch_worker,
+                execution_state,
+                executor_context,
+                events,
+                branch.executable,
             )
 
         try:
@@ -479,15 +518,17 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
 
     def _branch_worker(
         self,
+        execution_state: ExecutionState,
         executor_context: DurableContext,
         events: queue.Queue[BranchEvent[ResultType]],
         executable: Executable[CallableType],
     ) -> None:
         """Worker-thread body: run one branch and report its outcome.
 
-        Converts every outcome into a :class:`BranchEvent` on the queue and
-        never raises into the pool. The coordinator loop is the sole
-        consumer of the events.
+        Converts every outcome into a :class:`BranchEvent` on the queue. Fatal
+        errors are also re-raised into the pool after posting their event; the
+        coordinator loop consumes the event and propagates the error on the
+        calling thread.
         """
         try:
             result: ResultType = self._execute_item_in_child_context(
@@ -507,6 +548,22 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 executable.index,
             )
             events.put(BranchEvent.orphaned(executable.index))
+        except ExecutionError as e:
+            # Execution-terminal SDK errors (including nondeterminism) must
+            # bypass branch failure tolerance and custom completion policies.
+            parent_operation_id: str | None = executor_context._parent_id  # noqa: SLF001
+            if (
+                parent_operation_id is not None
+                and execution_state.record_branch_fatal_error(parent_operation_id, e)
+                is False
+            ):
+                logger.debug(
+                    "Ignoring fatal error from orphaned branch %s",
+                    executable.index,
+                )
+                return
+            events.put(BranchEvent.fatal(executable.index, e))
+            raise
         except Exception as e:  # noqa: BLE001
             # A retryable error (e.g. RetryableSerDesError) escapes the batch:
             # the coordinator re-raises it so the invocation fails and the
@@ -518,6 +575,17 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             # Post a fatal event so the coordinator re-raises it on the
             # calling thread instead of blocking forever on the queue, then
             # let the exception propagate to the worker thread.
+            parent_operation_id = executor_context._parent_id  # noqa: SLF001
+            if (
+                parent_operation_id is not None
+                and execution_state.record_branch_fatal_error(parent_operation_id, e)
+                is False
+            ):
+                logger.debug(
+                    "Ignoring fatal error from orphaned branch %s",
+                    executable.index,
+                )
+                return
             events.put(BranchEvent.fatal(executable.index, e))
             raise
         else:
@@ -542,10 +610,10 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         and execution-order invariant.
         """
 
-        operation_id: str = self.operation_id_namespace.create_id_for_step(
-            executable.index
+        operation_identifier = self._get_iteration_operation_identifier(
+            executor_context, executable
         )
-        name: str = self.get_iteration_name(executable.index)
+        operation_id = operation_identifier.operation_id
         is_virtual: bool = self.nesting_type is NestingType.FLAT
 
         child_context: DurableContext = executor_context.create_child_context(
@@ -554,13 +622,6 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         # For NESTED this is for branch's START/SUCCEED/FAIL checkpoints (not the children of the branch).
         # For FLAT `child_handler` skips checkpoints, so not used.
         # Construct it unconditionally to keep the call simple.
-        operation_identifier = OperationIdentifier(
-            operation_id=operation_id,
-            sub_type=self.sub_type_iteration,
-            parent_id=executor_context._parent_id,  # noqa: SLF001
-            name=name,
-        )
-
         # The branch/iteration container op is resolved here via child_handler,
         # bypassing context.run_in_child_context and therefore the parent's
         # `_replay_aware`. Replicate the two things `_replay_aware` would have
@@ -571,13 +632,21 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         #      de-duplicated during a map/parallel replay.
         #   2. Replay hook: a branch that already has a checkpoint was observed
         #      in a prior invocation, so emit the plugin replay hook (once).
-        # Virtual (FLAT) branches do not checkpoint themselves, so neither
-        # applies; their inner operations still self-correct via `_replay_aware`.
-        if not is_virtual and child_context.is_replaying():
-            branch_checkpoint = child_context.state.get_checkpoint_result(operation_id)
-            if not branch_checkpoint.is_existent():
+        # Virtual (FLAT) branches do not checkpoint themselves. Therefore an
+        # existing branch-container checkpoint proves that replay changed from
+        # NESTED and must be rejected before child_handler can consume it.
+        if child_context.is_replaying():
+            branch_checkpoint = child_context.state.get_checkpoint_result(
+                operation_identifier.operation_id
+            )
+            if is_virtual:
+                self._validate_branch_checkpoint_nesting(
+                    operation_identifier, branch_checkpoint
+                )
+            elif not branch_checkpoint.is_existent():
                 child_context._set_replay_status_new()  # noqa: SLF001
             elif branch_checkpoint.operation is not None:
+                operation_identifier.validate_checkpoint(branch_checkpoint.operation)
                 child_context.state.emit_operation_replay_hook(
                     branch_checkpoint.operation
                 )
@@ -627,6 +696,15 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             if executable.index >= record.started_total:
                 continue
             if executable.index in record.started_indexes:
+                operation_identifier = self._get_iteration_operation_identifier(
+                    executor_context, executable
+                )
+                checkpoint = execution_state.get_checkpoint_result(
+                    operation_identifier.operation_id
+                )
+                self._validate_branch_checkpoint_nesting(
+                    operation_identifier, checkpoint
+                )
                 items.append(BatchItem(executable.index, BatchItemStatus.STARTED))
                 continue
             items.append(
@@ -650,12 +728,26 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         themselves, so re-executing the branch body over its inner
         operations' checkpoints discriminates success from failure.
         """
-        operation_id: str = self.operation_id_namespace.create_id_for_step(
-            executable.index
+        operation_identifier = self._get_iteration_operation_identifier(
+            executor_context, executable
         )
         checkpoint: CheckpointedResult = execution_state.get_checkpoint_result(
-            operation_id
+            operation_identifier.operation_id
         )
+        self._validate_branch_checkpoint_nesting(operation_identifier, checkpoint)
+        if self.nesting_type is NestingType.NESTED and not checkpoint.is_terminal():
+            checkpoint_status = (
+                checkpoint.status.value if checkpoint.status is not None else None
+            )
+            msg = (
+                "Non-deterministic branch nesting at "
+                f"id={operation_identifier.operation_id!r}: "
+                "recorded terminal branch requires a terminal NESTED branch "
+                f"context checkpoint, got status={checkpoint_status!r}"
+            )
+            raise NonDeterministicExecutionError(
+                msg, step_id=operation_identifier.operation_id
+            )
         if checkpoint.is_succeeded():
             result: ResultType = self._execute_item_in_child_context(
                 executor_context, executable
@@ -670,6 +762,10 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 flat_result: ResultType = self._execute_item_in_child_context(
                     executor_context, executable
                 )
+            except ExecutionError:
+                # Nondeterminism and other execution-terminal SDK errors must
+                # not be downgraded to a failed FLAT item.
+                raise
             except Exception as e:  # noqa: BLE001
                 if isinstance(e, InvocationError) and e.is_retryable():
                     # Escape the batch so the invocation fails and the backend
@@ -694,10 +790,13 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         """
         items: list[BatchItem[ResultType]] = []
         for executable in self.executables:
-            operation_id = self.operation_id_namespace.create_id_for_step(
-                executable.index
+            operation_identifier = self._get_iteration_operation_identifier(
+                executor_context, executable
             )
-            checkpoint = execution_state.get_checkpoint_result(operation_id)
+            checkpoint = execution_state.get_checkpoint_result(
+                operation_identifier.operation_id
+            )
+            self._validate_branch_checkpoint_nesting(operation_identifier, checkpoint)
 
             result: ResultType | None = None
             error = None

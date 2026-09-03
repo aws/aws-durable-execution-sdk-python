@@ -114,6 +114,7 @@ def parallel_handler(
     checkpoint = execution_state.get_checkpoint_result(
         operation_identifier.operation_id
     )
+    operation_identifier.validate_checkpoint(checkpoint.operation)
     if checkpoint.is_succeeded():
         return executor.replay(execution_state, parallel_context, checkpoint)
     return executor.execute(execution_state, executor_context=parallel_context)

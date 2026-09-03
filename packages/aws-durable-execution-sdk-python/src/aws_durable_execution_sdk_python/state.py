@@ -307,6 +307,11 @@ class ExecutionState:
 
         # Operations whose parent has completed
         self._parent_done: set[str] = set()
+        # Map/parallel contexts whose terminal checkpoint has started. Fatal
+        # branch errors race terminal parent checkpoints under
+        # _parent_done_lock so a detected replay mismatch cannot be lost.
+        self._terminal_contexts: set[str] = set()
+        self._branch_fatal_errors: dict[str, BaseException] = {}
 
         # Protects parent_to_children and parent_done. When both state locks are
         # required, acquire _completion_lock before _parent_done_lock.
@@ -646,6 +651,11 @@ class ExecutionState:
                     and operation_update.action
                     in {OperationAction.SUCCEED, OperationAction.FAIL}
                 ):
+                    if fatal_error := self._branch_fatal_errors.get(
+                        operation_update.operation_id
+                    ):
+                        raise fatal_error
+                    self._terminal_contexts.add(operation_update.operation_id)
                     self._mark_orphans(operation_update.operation_id)
 
                 # Check if this operation's parent is done
@@ -990,6 +1000,22 @@ class ExecutionState:
         """
         with self._branch_pools_lock:
             self._branch_pools.append(pool)
+
+    def record_branch_fatal_error(
+        self, parent_operation_id: str, error: BaseException
+    ) -> bool:
+        """Retain a fatal branch error until its parent context checkpoints.
+
+        Returns False when the parent terminal checkpoint already won the
+        race, making the reporting branch an orphan. Otherwise the first fatal
+        error is retained and raised before the parent can checkpoint a
+        terminal result.
+        """
+        with self._parent_done_lock:
+            if parent_operation_id in self._terminal_contexts:
+                return False
+            self._branch_fatal_errors.setdefault(parent_operation_id, error)
+            return True
 
     def _collect_checkpoint_batch(self) -> list[QueuedOperation]:
         """Collect multiple checkpoint operations into a batch for API efficiency.

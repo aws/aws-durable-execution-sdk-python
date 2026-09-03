@@ -96,6 +96,8 @@ def _tracking_checkpoint(initial_operations: list[Operation] | None = None):
                     operation_type=update.operation_type,
                     status=OperationStatus.STARTED,
                     parent_id=update.parent_id,
+                    name=update.name,
+                    sub_type=update.sub_type,
                 )
             )
         return CheckpointOutput(
@@ -187,6 +189,7 @@ def test_operation_maps_across_suspend_and_replay():
     completed_wait = {
         "Id": wait_id,
         "Type": OperationType.WAIT.value,
+        "SubType": "Wait",
         "Status": OperationStatus.SUCCEEDED.value,
     }
 

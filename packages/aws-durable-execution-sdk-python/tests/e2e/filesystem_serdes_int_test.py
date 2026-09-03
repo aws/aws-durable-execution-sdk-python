@@ -229,8 +229,9 @@ def test_filesystem_serdes_replay_from_checkpoint(tmp_path):
                 {
                     "Id": step_id,
                     "Type": "STEP",
+                    "SubType": "Step",
+                    "Name": "process_order",
                     "Status": "SUCCEEDED",
-                    "ParentId": "execution-1",
                     "StepDetails": {"Result": envelope},
                 }
             ]

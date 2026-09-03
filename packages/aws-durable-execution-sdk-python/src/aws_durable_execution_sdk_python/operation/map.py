@@ -124,6 +124,7 @@ def map_handler(
     checkpoint: CheckpointedResult = execution_state.get_checkpoint_result(
         operation_identifier.operation_id
     )
+    operation_identifier.validate_checkpoint(checkpoint.operation)
     if checkpoint.is_succeeded():
         # if we've reached this point, then not only is the step succeeded, but it is also `replay_children`.
         return executor.replay(execution_state, map_context, checkpoint)

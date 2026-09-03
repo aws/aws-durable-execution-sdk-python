@@ -18,9 +18,11 @@ from aws_durable_execution_sdk_python.exceptions import (
     CheckpointError,
     DurableApiErrorCategory,
     GetExecutionStateError,
+    NonDeterministicExecutionError,
     OrphanedChildException,
     StepError,
     SuspendExecution,
+    TerminationReason,
     TimedSuspendExecution,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -612,6 +614,112 @@ def test_get_checkpoint_result_operation_not_found():
     assert result.is_succeeded() is False
     assert result.result is None
     assert result.operation is None
+
+
+@pytest.mark.parametrize(
+    ("checkpoint", "operation_identifier", "mismatch"),
+    [
+        (
+            Operation(
+                operation_id="op1",
+                operation_type=OperationType.WAIT,
+                status=OperationStatus.SUCCEEDED,
+                sub_type=OperationSubType.WAIT,
+                name="current-name",
+            ),
+            OperationIdentifier("op1", OperationSubType.STEP, name="current-name"),
+            "type",
+        ),
+        (
+            Operation(
+                operation_id="op1",
+                operation_type=OperationType.STEP,
+                status=OperationStatus.SUCCEEDED,
+                sub_type=OperationSubType.WAIT_FOR_CONDITION,
+                name="current-name",
+            ),
+            OperationIdentifier("op1", OperationSubType.STEP, name="current-name"),
+            "subtype",
+        ),
+        (
+            Operation(
+                operation_id="op1",
+                operation_type=OperationType.STEP,
+                status=OperationStatus.SUCCEEDED,
+                sub_type=OperationSubType.STEP,
+                name="checkpoint-name",
+            ),
+            OperationIdentifier("op1", OperationSubType.STEP, name="current-name"),
+            "name",
+        ),
+        (
+            Operation(
+                operation_id="op1",
+                operation_type=OperationType.STEP,
+                status=OperationStatus.SUCCEEDED,
+                parent_id="old-parent",
+                sub_type=OperationSubType.STEP,
+                name="current-name",
+            ),
+            OperationIdentifier(
+                "op1",
+                OperationSubType.STEP,
+                parent_id="current-parent",
+                name="current-name",
+            ),
+            "parent_id",
+        ),
+    ],
+)
+def test_operation_identifier_rejects_mismatched_checkpoint_identity(
+    checkpoint: Operation,
+    operation_identifier: OperationIdentifier,
+    mismatch: str,
+):
+    """Replay checkpoints must match the current operation before use."""
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={"op1": checkpoint},
+        service_client=Mock(spec=LambdaClient),
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+
+    with pytest.raises(NonDeterministicExecutionError, match=mismatch) as error_info:
+        operation_identifier.validate_checkpoint(
+            state.get_checkpoint_result(operation_identifier.operation_id).operation
+        )
+
+    assert error_info.value.step_id == "op1"
+    assert (
+        error_info.value.termination_reason
+        is TerminationReason.NON_DETERMINISTIC_EXECUTION
+    )
+
+
+def test_operation_identifier_normalizes_empty_name_to_wire_identity():
+    """An empty emitted name is omitted on the wire and replays as None."""
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        sub_type=OperationSubType.STEP,
+        name=None,
+    )
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={"op1": operation},
+        service_client=Mock(spec=LambdaClient),
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+
+    result = state.get_checkpoint_result("op1")
+    OperationIdentifier("op1", OperationSubType.STEP, name="").validate_checkpoint(
+        result.operation
+    )
+
+    assert result.operation is operation
 
 
 def test_create_checkpoint():

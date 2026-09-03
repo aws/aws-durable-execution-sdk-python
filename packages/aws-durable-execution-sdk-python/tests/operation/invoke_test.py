@@ -51,6 +51,8 @@ def test_invoke_handler_already_succeeded():
     operation = Operation(
         operation_id="invoke1",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.SUCCEEDED,
         chained_invoke_details=ChainedInvokeDetails(result=json.dumps("test_result")),
     )
@@ -79,6 +81,8 @@ def test_invoke_handler_already_succeeded_none_result():
     operation = Operation(
         operation_id="invoke2",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.SUCCEEDED,
         chained_invoke_details=ChainedInvokeDetails(result=None),
     )
@@ -106,6 +110,8 @@ def test_invoke_handler_already_succeeded_no_chained_invoke_details():
     operation = Operation(
         operation_id="invoke3",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.SUCCEEDED,
         chained_invoke_details=None,
     )
@@ -139,6 +145,8 @@ def test_invoke_handler_already_terminated(kind: OperationStatus):
     operation = Operation(
         operation_id="invoke4",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=kind,
         chained_invoke_details=ChainedInvokeDetails(error=error),
     )
@@ -168,6 +176,8 @@ def test_invoke_handler_already_timed_out():
     operation = Operation(
         operation_id="invoke5",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.TIMED_OUT,
         chained_invoke_details=ChainedInvokeDetails(error=error),
     )
@@ -195,6 +205,8 @@ def test_invoke_handler_already_started(status):
     operation = Operation(
         operation_id="invoke6",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=status,
         chained_invoke_details=ChainedInvokeDetails(),
     )
@@ -224,6 +236,8 @@ def test_invoke_handler_already_started_suspends(status):
     operation = Operation(
         operation_id="invoke7",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=status,
         chained_invoke_details=ChainedInvokeDetails(),
     )
@@ -255,6 +269,8 @@ def test_invoke_handler_new_operation():
     started_op = Operation(
         operation_id="invoke8",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)
@@ -296,6 +312,8 @@ def test_invoke_handler_no_config():
     started_op = Operation(
         operation_id="invoke_test",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)
@@ -328,6 +346,8 @@ def test_invoke_handler_custom_serdes():
     operation = Operation(
         operation_id="invoke12",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.SUCCEEDED,
         chained_invoke_details=ChainedInvokeDetails(
             result='{"key": "VALUE", "number": "84", "list": [1, 2, 3]}',
@@ -363,6 +383,8 @@ def test_invoke_handler_custom_serdes_new_operation():
     started_op = Operation(
         operation_id="invoke_test",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)
@@ -399,6 +421,8 @@ def test_invoke_handler_with_operation_name(status: OperationStatus):
     operation = Operation(
         operation_id="invoke14",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="named_invoke",
         status=status,
         chained_invoke_details=ChainedInvokeDetails(),
     )
@@ -426,6 +450,8 @@ def test_invoke_handler_without_operation_name(status: OperationStatus):
     operation = Operation(
         operation_id="invoke15",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name=None,
         status=status,
         chained_invoke_details=ChainedInvokeDetails(),
     )
@@ -453,6 +479,8 @@ def test_invoke_handler_with_none_payload():
     started_op = Operation(
         operation_id="invoke_test",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)
@@ -483,6 +511,8 @@ def test_invoke_handler_already_succeeded_with_none_payload():
     operation = Operation(
         operation_id="invoke17",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.SUCCEEDED,
         chained_invoke_details=ChainedInvokeDetails(result=json.dumps("test_result")),
     )
@@ -516,6 +546,8 @@ def test_invoke_handler_suspend_does_not_raise(mock_suspend):
     started_op = Operation(
         operation_id="invoke_test",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)
@@ -550,6 +582,8 @@ def test_invoke_handler_with_tenant_id():
     started_op = Operation(
         operation_id="invoke1",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name=None,
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)
@@ -585,6 +619,8 @@ def test_invoke_handler_without_tenant_id():
     started_op = Operation(
         operation_id="invoke1",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name=None,
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)
@@ -620,6 +656,8 @@ def test_invoke_handler_default_config_no_tenant_id():
     started_op = Operation(
         operation_id="invoke1",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name=None,
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)
@@ -653,6 +691,8 @@ def test_invoke_handler_defaults_to_json_serdes():
     started_op = Operation(
         operation_id="invoke1",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name=None,
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)
@@ -686,6 +726,8 @@ def test_invoke_handler_result_defaults_to_json_serdes():
     operation = Operation(
         operation_id="invoke_result_json",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name=None,
         status=OperationStatus.SUCCEEDED,
         chained_invoke_details=ChainedInvokeDetails(result=json.dumps(result_data)),
     )
@@ -723,6 +765,8 @@ def test_invoke_immediate_response_get_checkpoint_result_called_twice():
     started_op = Operation(
         operation_id="invoke_immediate_1",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)
@@ -756,6 +800,8 @@ def test_invoke_immediate_response_create_checkpoint_with_is_sync_true():
     started_op = Operation(
         operation_id="invoke_immediate_2",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)
@@ -795,6 +841,8 @@ def test_invoke_immediate_response_immediate_success():
     succeeded_op = Operation(
         operation_id="invoke_immediate_3",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.SUCCEEDED,
         chained_invoke_details=ChainedInvokeDetails(
             result=json.dumps("immediate_result")
@@ -831,6 +879,8 @@ def test_invoke_immediate_response_immediate_success_with_none_result():
     succeeded_op = Operation(
         operation_id="invoke_immediate_4",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.SUCCEEDED,
         chained_invoke_details=ChainedInvokeDetails(result=None),
     )
@@ -873,6 +923,8 @@ def test_invoke_immediate_response_immediate_failure(status: OperationStatus):
     failed_op = Operation(
         operation_id="invoke_immediate_5",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=status,
         chained_invoke_details=ChainedInvokeDetails(error=error),
     )
@@ -913,6 +965,8 @@ def test_invoke_immediate_response_no_immediate_response():
     started_op = Operation(
         operation_id="invoke_immediate_6",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)
@@ -952,6 +1006,8 @@ def test_invoke_immediate_response_already_completed():
     succeeded_op = Operation(
         operation_id="invoke_immediate_7",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.SUCCEEDED,
         chained_invoke_details=ChainedInvokeDetails(
             result=json.dumps("existing_result")
@@ -988,6 +1044,8 @@ def test_invoke_immediate_response_with_custom_serdes():
     succeeded_op = Operation(
         operation_id="invoke_immediate_10",
         operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.SUCCEEDED,
         chained_invoke_details=ChainedInvokeDetails(
             result='{"key": "VALUE", "number": "84", "list": [1, 2, 3]}'
@@ -1031,7 +1089,9 @@ def test_invoke_suspends_when_second_check_returns_started():
         CheckpointedResult.create_from_operation(
             Operation(
                 operation_id="invoke-1",
-                operation_type=OperationType.STEP,
+                operation_type=OperationType.CHAINED_INVOKE,
+                sub_type=OperationSubType.CHAINED_INVOKE,
+                name="test_invoke",
                 status=OperationStatus.STARTED,
             )
         ),
@@ -1067,7 +1127,9 @@ def test_invoke_suspends_when_second_check_returns_started_duplicate():
     not_found = CheckpointedResult.create_not_found()
     started_op = Operation(
         operation_id="invoke-1",
-        operation_type=OperationType.STEP,
+        operation_type=OperationType.CHAINED_INVOKE,
+        sub_type=OperationSubType.CHAINED_INVOKE,
+        name="test_invoke",
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)

@@ -70,6 +70,8 @@ def test_step_handler_already_succeeded():
     operation = Operation(
         operation_id="step1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.SUCCEEDED,
         step_details=StepDetails(result=json.dumps("test_result")),
     )
@@ -99,6 +101,8 @@ def test_step_handler_already_succeeded_none_result():
     operation = Operation(
         operation_id="step2",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.SUCCEEDED,
         step_details=StepDetails(result=None),
     )
@@ -130,6 +134,8 @@ def test_step_handler_already_failed():
     operation = Operation(
         operation_id="step3",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.FAILED,
         step_details=StepDetails(error=error),
     )
@@ -158,6 +164,8 @@ def test_step_handler_started_at_most_once():
     operation = Operation(
         operation_id="step4",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.STARTED,
         step_details=StepDetails(attempt=0),
     )
@@ -188,6 +196,8 @@ def test_step_handler_started_at_least_once():
     operation = Operation(
         operation_id="step5",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.STARTED,
         step_details=StepDetails(error=error),
     )
@@ -267,6 +277,8 @@ def test_step_context_exposes_current_attempt(
         operation: Operation = Operation(
             operation_id="step-attempt",
             operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="test_step",
             status=OperationStatus.STARTED,
             step_details=StepDetails(attempt=checkpointed_attempts),
         )
@@ -307,6 +319,8 @@ def test_step_handler_success_at_most_once():
     started_op = Operation(
         operation_id="step7",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.STARTED,
         step_details=StepDetails(attempt=0),
     )
@@ -511,6 +525,8 @@ def test_step_handler_retry_with_existing_attempts():
     operation = Operation(
         operation_id="step12",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.PENDING,
         step_details=StepDetails(
             attempt=2,
@@ -552,6 +568,8 @@ def test_step_handler_pending_without_existing_attempts():
     operation = Operation(
         operation_id="step12",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.PENDING,
         step_details=StepDetails(attempt=2),
     )
@@ -593,6 +611,8 @@ def test_step_handler_retry_handler_no_exception(mock_retry_handler):
     started_op = Operation(
         operation_id="step13",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.STARTED,
         step_details=StepDetails(attempt=0),
     )
@@ -660,6 +680,8 @@ def test_step_handler_custom_serdes_already_succeeded():
     operation = Operation(
         operation_id="step1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.SUCCEEDED,
         step_details=StepDetails(
             result='{"key": "VALUE", "number": "84", "list": [1, 2, 3]}'
@@ -738,6 +760,8 @@ def test_step_handler_first_run_returns_round_tripped_result():
     succeeded_op = Operation(
         operation_id="step_rt",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.SUCCEEDED,
         step_details=StepDetails(result=checkpointed_payload),
     )
@@ -841,6 +865,8 @@ def test_step_handler_already_succeeded_empty_string_result():
     operation = Operation(
         operation_id="step1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.SUCCEEDED,
         step_details=StepDetails(result=""),
     )
@@ -876,6 +902,8 @@ def test_step_immediate_response_get_checkpoint_called_twice():
     started_op = Operation(
         operation_id="step_immediate_1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.STARTED,
         step_details=StepDetails(attempt=0),
     )
@@ -913,6 +941,8 @@ def test_step_immediate_response_create_checkpoint_sync_at_most_once():
     started_op = Operation(
         operation_id="step_immediate_2",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.STARTED,
         step_details=StepDetails(attempt=0),
     )
@@ -985,6 +1015,8 @@ def test_step_immediate_response_immediate_success():
     started_op = Operation(
         operation_id="step_immediate_4",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.STARTED,
         step_details=StepDetails(attempt=0),
     )
@@ -1025,6 +1057,8 @@ def test_step_immediate_response_immediate_failure():
     started_op = Operation(
         operation_id="step_immediate_5",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.STARTED,
         step_details=StepDetails(attempt=0),
     )
@@ -1075,6 +1109,8 @@ def test_step_immediate_response_no_immediate_response():
     started_op = Operation(
         operation_id="step_immediate_6",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.STARTED,
         step_details=StepDetails(attempt=0),
     )
@@ -1113,6 +1149,8 @@ def test_step_immediate_response_already_completed():
     succeeded_op = Operation(
         operation_id="step_immediate_7",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.SUCCEEDED,
         step_details=StepDetails(result=json.dumps("already_completed_result")),
     )
@@ -1154,6 +1192,8 @@ def test_step_executes_function_when_second_check_returns_started():
     started_op = Operation(
         operation_id="step-1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.STARTED,
         step_details=StepDetails(attempt=1),
     )
@@ -1194,6 +1234,8 @@ def test_step_creates_start_checkpoint_when_status_is_ready():
     ready_op = Operation(
         operation_id="step_ready_1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.READY,
         step_details=StepDetails(attempt=0),
     )
@@ -1203,6 +1245,8 @@ def test_step_creates_start_checkpoint_when_status_is_ready():
     started_op = Operation(
         operation_id="step_ready_1",
         operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="test_step",
         status=OperationStatus.STARTED,
         step_details=StepDetails(attempt=0),
     )

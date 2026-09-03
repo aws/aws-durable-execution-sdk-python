@@ -382,6 +382,8 @@ def test_wait_suspends_when_second_check_returns_started():
             Operation(
                 operation_id="wait-1",
                 operation_type=OperationType.WAIT,
+                sub_type=OperationSubType.WAIT,
+                name="test_wait",
                 status=OperationStatus.STARTED,
             )
         ),
@@ -416,6 +418,8 @@ def test_wait_suspends_when_second_check_returns_started_duplicate():
     started_op = Operation(
         operation_id="wait-1",
         operation_type=OperationType.WAIT,
+        sub_type=OperationSubType.WAIT,
+        name="test_wait",
         status=OperationStatus.STARTED,
     )
     started = CheckpointedResult.create_from_operation(started_op)

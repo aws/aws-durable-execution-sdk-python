@@ -156,7 +156,7 @@ def test_failed_step_reconstructs_step_error_on_replay():
                         "Type": "STEP",
                         "Status": "FAILED",
                         "SubType": "Step",
-                        "ParentId": "execution-1",
+                        "Name": "charge",
                         # A failed step records the raw escaping error type.
                         "StepDetails": {
                             "Error": {
@@ -244,7 +244,7 @@ def test_failed_callback_reconstructs_typed_error_on_replay(
                         "Type": "CONTEXT",
                         "Status": "FAILED",
                         "SubType": "WaitForCallback",
-                        "ParentId": "execution-1",
+                        "Name": "await-external",
                         "ContextDetails": {
                             "Error": {
                                 "ErrorType": checkpointed_type,
@@ -306,7 +306,7 @@ def test_failed_submitter_reconstructs_callback_submitter_error_on_replay():
                         "Type": "CONTEXT",
                         "Status": "FAILED",
                         "SubType": "WaitForCallback",
-                        "ParentId": "execution-1",
+                        "Name": "await-external",
                         "ContextDetails": {
                             "Error": {
                                 "ErrorType": "aws_durable_execution_sdk_python.exceptions.StepError",

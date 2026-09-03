@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 import pytest
 
-from aws_durable_execution_sdk_python.exceptions import InvalidStateError
+from aws_durable_execution_sdk_python.exceptions import (
+    InvalidStateError,
+    NonDeterministicExecutionError,
+)
+from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
     Operation,
     OperationStatus,
+    OperationSubType,
     OperationType,
 )
 from aws_durable_execution_sdk_python.operation.base import (
     CheckResult,
     OperationExecutor,
 )
-from aws_durable_execution_sdk_python.state import CheckpointedResult
+from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 
 # Test fixtures and helpers
 
@@ -50,6 +57,30 @@ def create_mock_checkpoint(status: OperationStatus) -> CheckpointedResult:
         status=status,
     )
     return CheckpointedResult.create_from_operation(operation)
+
+
+def test_get_checkpoint_result_validates_operation_identity():
+    """The base helper validates identity before returning checkpoint data."""
+    executor = ConcreteOperationExecutor()
+    executor.state = Mock(spec=ExecutionState)
+    executor.operation_identifier = OperationIdentifier(
+        "test_op", OperationSubType.STEP, name="current-step"
+    )
+    checkpoint = Operation(
+        operation_id="test_op",
+        operation_type=OperationType.WAIT,
+        status=OperationStatus.SUCCEEDED,
+        sub_type=OperationSubType.WAIT,
+        name="current-step",
+    )
+    executor.state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_from_operation(checkpoint)
+    )
+
+    with pytest.raises(NonDeterministicExecutionError, match="type"):
+        executor._get_checkpoint_result()  # noqa: SLF001
+
+    executor.state.get_checkpoint_result.assert_called_once_with("test_op")
 
 
 # Tests for CheckResult factory methods
