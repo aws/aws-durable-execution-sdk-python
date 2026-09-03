@@ -988,6 +988,49 @@ def test_execute_item_flat_branch_rejects_nested_container_checkpoint():
     child_context.state.wrap_user_function.assert_not_called()
 
 
+@pytest.mark.parametrize("replay_path", ["recorded-terminal", "fallback"])
+def test_flat_replay_rejects_failed_nested_container_checkpoint(replay_path):
+    """Every FLAT reconstruction path rejects a failed NESTED container."""
+    executor = _RecordingExecutor(
+        executables=[Executable(0, lambda: "must-not-run")],
+        max_concurrency=1,
+        completion_config=CompletionConfig(tolerated_failure_count=1),
+        sub_type_top=OperationSubType.PARALLEL,
+        sub_type_iteration=OperationSubType.PARALLEL_BRANCH,
+        name_prefix="parallel-branch-",
+        serdes=None,
+        nesting_type=NestingType.FLAT,
+        operation_id_namespace=_StubNamespace(),
+    )
+    executor_context = Mock()
+    executor_context._parent_id = "parallel-op"  # noqa: SLF001
+    execution_state = Mock()
+    execution_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_from_operation(
+            Operation(
+                operation_id="op_0",
+                operation_type=OperationType.CONTEXT,
+                status=OperationStatus.FAILED,
+                parent_id="parallel-op",
+                sub_type=OperationSubType.PARALLEL_BRANCH,
+                name="parallel-branch-0",
+            )
+        )
+    )
+
+    with pytest.raises(NonDeterministicExecutionError, match="nesting is FLAT"):
+        if replay_path == "recorded-terminal":
+            executor._replay_terminal_item(  # noqa: SLF001
+                execution_state, executor_context, executor.executables[0]
+            )
+        else:
+            executor._replay_from_checkpoints(  # noqa: SLF001
+                execution_state, executor_context
+            )
+
+    executor_context.create_child_context.assert_not_called()
+
+
 def test_concurrent_executor_create_result_failure_tolerance_exceeded():
     """Test ConcurrentExecutor with failure tolerance exceeded using public execute method."""
 
@@ -1632,6 +1675,7 @@ def test_replay_flat_branch_retryable_serdes_error_escapes_batch():
     # A non-terminal checkpoint (neither succeeded nor failed) makes the FLAT
     # replay path re-execute the branch body.
     checkpoint: Mock = Mock()
+    checkpoint.is_existent.return_value = False
     checkpoint.is_succeeded.return_value = False
     checkpoint.is_failed.return_value = False
     execution_state: Mock = Mock()
@@ -1663,6 +1707,7 @@ def test_replay_flat_branch_nondeterminism_escapes_batch():
 
     checkpoint: Mock = Mock()
     checkpoint.operation = None
+    checkpoint.is_existent.return_value = False
     checkpoint.is_succeeded.return_value = False
     checkpoint.is_failed.return_value = False
     execution_state: Mock = Mock()

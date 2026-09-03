@@ -2911,9 +2911,14 @@ def test_durable_execution_preserves_nested_nondeterminism_error():
 
 @pytest.mark.parametrize("operation_kind", ["map", "parallel"])
 @pytest.mark.parametrize("parent_replay_children", [False, True])
+@pytest.mark.parametrize(
+    "branch_status",
+    [OperationStatus.SUCCEEDED, OperationStatus.FAILED],
+)
 def test_durable_execution_rejects_nested_branch_checkpoint_in_flat_replay(
     operation_kind: str,
     parent_replay_children: bool,
+    branch_status: OperationStatus,
 ):
     """Real STARTED and ReplayChildren replays reject NESTED-to-FLAT drift."""
     mock_client = Mock(spec=DurableServiceClient)
@@ -2959,11 +2964,27 @@ def test_durable_execution_rejects_nested_branch_checkpoint_in_flat_replay(
     nested_branch_operation = Operation(
         operation_id=branch_id,
         operation_type=OperationType.CONTEXT,
-        status=OperationStatus.SUCCEEDED,
+        status=branch_status,
         parent_id=parent_id,
         sub_type=branch_sub_type,
         name=branch_name,
-        context_details=ContextDetails(result=json.dumps("cached")),
+        context_details=ContextDetails(
+            result=(
+                json.dumps("cached")
+                if branch_status is OperationStatus.SUCCEEDED
+                else None
+            ),
+            error=(
+                ErrorObject(
+                    message="branch failed",
+                    type="ValueError",
+                    data=None,
+                    stack_trace=None,
+                )
+                if branch_status is OperationStatus.FAILED
+                else None
+            ),
+        ),
     )
     invocation_input = DurableExecutionInvocationInputWithClient(
         durable_execution_arn="arn:test:execution/exec1",

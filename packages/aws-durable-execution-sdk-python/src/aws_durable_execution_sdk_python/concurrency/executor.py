@@ -171,6 +171,24 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             name=self.get_iteration_name(executable.index),
         )
 
+    def _validate_branch_checkpoint_nesting(
+        self,
+        operation_identifier: OperationIdentifier,
+        checkpoint: CheckpointedResult,
+    ) -> None:
+        """Validate branch identity and reject NESTED history in FLAT mode."""
+        operation_identifier.validate_checkpoint(checkpoint.operation)
+        if self.nesting_type is NestingType.FLAT and checkpoint.is_existent():
+            msg = (
+                "Non-deterministic branch nesting at "
+                f"id={operation_identifier.operation_id!r}: "
+                "checkpoint contains a NESTED branch context but current "
+                "nesting is FLAT"
+            )
+            raise NonDeterministicExecutionError(
+                msg, step_id=operation_identifier.operation_id
+            )
+
     def _build_items_snapshot(self) -> tuple[CompletionItemStatus, ...]:
         """Build the per-branch status snapshot for the custom predicate.
 
@@ -622,19 +640,9 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 operation_identifier.operation_id
             )
             if is_virtual:
-                if branch_checkpoint.is_existent():
-                    operation_identifier.validate_checkpoint(
-                        branch_checkpoint.operation
-                    )
-                    msg = (
-                        "Non-deterministic branch nesting at "
-                        f"id={operation_identifier.operation_id!r}: "
-                        "checkpoint contains a NESTED branch context but current "
-                        "nesting is FLAT"
-                    )
-                    raise NonDeterministicExecutionError(
-                        msg, step_id=operation_identifier.operation_id
-                    )
+                self._validate_branch_checkpoint_nesting(
+                    operation_identifier, branch_checkpoint
+                )
             elif not branch_checkpoint.is_existent():
                 child_context._set_replay_status_new()  # noqa: SLF001
             elif branch_checkpoint.operation is not None:
@@ -717,7 +725,7 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         checkpoint: CheckpointedResult = execution_state.get_checkpoint_result(
             operation_identifier.operation_id
         )
-        operation_identifier.validate_checkpoint(checkpoint.operation)
+        self._validate_branch_checkpoint_nesting(operation_identifier, checkpoint)
         if self.nesting_type is NestingType.NESTED and not checkpoint.is_terminal():
             checkpoint_status = (
                 checkpoint.status.value if checkpoint.status is not None else None
@@ -779,7 +787,7 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             checkpoint = execution_state.get_checkpoint_result(
                 operation_identifier.operation_id
             )
-            operation_identifier.validate_checkpoint(checkpoint.operation)
+            self._validate_branch_checkpoint_nesting(operation_identifier, checkpoint)
 
             result: ResultType | None = None
             error = None
