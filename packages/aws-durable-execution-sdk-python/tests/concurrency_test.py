@@ -1101,6 +1101,7 @@ def test_replay_started_nested_branch_allows_missing_checkpoint():
     execution_state.get_checkpoint_result.return_value = (
         CheckpointedResult.create_not_found()
     )
+    execution_state.operations = {}
     parent_checkpoint = CheckpointedResult(
         result=json.dumps(
             {
@@ -1114,6 +1115,50 @@ def test_replay_started_nested_branch_allows_missing_checkpoint():
     result = executor.replay(execution_state, executor_context, parent_checkpoint)
 
     assert result.all[0].status is BatchItemStatus.STARTED
+
+
+def test_replay_started_nested_branch_rejects_flat_child_history():
+    """A missing NESTED container cannot hide branch-namespaced FLAT children."""
+    executor = _RecordingExecutor(
+        executables=[Executable(0, lambda: "must-not-run")],
+        max_concurrency=1,
+        completion_config=CompletionConfig(min_successful=1),
+        sub_type_top=OperationSubType.PARALLEL,
+        sub_type_iteration=OperationSubType.PARALLEL_BRANCH,
+        name_prefix="parallel-branch-",
+        serdes=None,
+        nesting_type=NestingType.NESTED,
+        operation_id_namespace=_StubNamespace(),
+    )
+    executor_context = Mock()
+    executor_context._parent_id = "parallel-op"  # noqa: SLF001
+    execution_state = Mock()
+    execution_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    inner_operation_id = OperationIdNamespace("op_0").create_id_for_step(1)
+    execution_state.operations = {
+        inner_operation_id: Operation(
+            operation_id=inner_operation_id,
+            operation_type=OperationType.STEP,
+            status=OperationStatus.STARTED,
+            parent_id="parallel-op",
+            sub_type=OperationSubType.STEP,
+            name="inner-step",
+        )
+    }
+    parent_checkpoint = CheckpointedResult(
+        result=json.dumps(
+            {
+                "totalCount": 1,
+                "completionReason": "ALL_COMPLETED",
+                "startedIndexes": [0],
+            }
+        )
+    )
+
+    with pytest.raises(NonDeterministicExecutionError, match="FLAT history"):
+        executor.replay(execution_state, executor_context, parent_checkpoint)
 
 
 def test_concurrent_executor_create_result_failure_tolerance_exceeded():
@@ -3671,6 +3716,7 @@ def _make_replay_mocks(branch_checkpoints: dict):
     execution_state.durable_execution_arn = (
         "arn:aws:durable:us-east-1:123456789012:execution/test"
     )
+    execution_state.operations = {}
 
     def get_checkpoint_result(operation_id: str):
         checkpoint = branch_checkpoints.get(operation_id)

@@ -3090,7 +3090,7 @@ def test_durable_execution_rejects_nested_branch_checkpoint_in_flat_replay(
 
 
 @pytest.mark.parametrize("operation_kind", ["map", "parallel"])
-@pytest.mark.parametrize("drift", ["nested-to-flat", "name"])
+@pytest.mark.parametrize("drift", ["nested-to-flat", "flat-to-nested", "name"])
 def test_durable_execution_validates_started_replaychildren_branch(
     operation_kind: str,
     drift: str,
@@ -3099,6 +3099,7 @@ def test_durable_execution_validates_started_replaychildren_branch(
     mock_client = Mock(spec=DurableServiceClient)
     parent_id = OperationIdNamespace().create_id_for_step(1)
     branch_id = OperationIdNamespace(parent_id).create_id_for_step(0)
+    inner_id = OperationIdNamespace(branch_id).create_id_for_step(1)
     is_map = operation_kind == "map"
     parent_sub_type = OperationSubType.MAP if is_map else OperationSubType.PARALLEL
     branch_sub_type = (
@@ -3138,11 +3139,23 @@ def test_durable_execution_validates_started_replaychildren_branch(
         sub_type=branch_sub_type,
         name=checkpoint_name,
     )
+    flat_inner_operation = Operation(
+        operation_id=inner_id,
+        operation_type=OperationType.STEP,
+        status=OperationStatus.STARTED,
+        parent_id=parent_id,
+        sub_type=OperationSubType.STEP,
+        name="inner-step",
+    )
+    replay_operations = [execution_operation, parent_operation]
+    replay_operations.append(
+        flat_inner_operation if drift == "flat-to-nested" else branch_operation
+    )
     invocation_input = DurableExecutionInvocationInputWithClient(
         durable_execution_arn="arn:test:execution/exec1",
         checkpoint_token="token123",  # noqa: S106
         initial_execution_state=InitialExecutionState(
-            operations=[execution_operation, parent_operation, branch_operation],
+            operations=replay_operations,
             next_marker="",
         ),
         service_client=mock_client,
@@ -3184,7 +3197,11 @@ def test_durable_execution_validates_started_replaychildren_branch(
         result["Error"]["ErrorType"]
         == "aws_durable_execution_sdk_python.exceptions.NonDeterministicExecutionError"
     )
-    expected_detail = "nesting is FLAT" if drift == "nested-to-flat" else "name"
+    expected_detail = {
+        "nested-to-flat": "nesting is FLAT",
+        "flat-to-nested": "FLAT history",
+        "name": "name",
+    }[drift]
     assert expected_detail in result["Error"]["ErrorMessage"]
     assert branch_body_calls == []
     mock_client.checkpoint.assert_not_called()

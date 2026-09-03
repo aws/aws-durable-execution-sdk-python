@@ -189,6 +189,26 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 msg, step_id=operation_identifier.operation_id
             )
 
+    @staticmethod
+    def _find_flat_branch_child_operation_id(
+        execution_state: ExecutionState,
+        executor_context: DurableContext,
+        operation_identifier: OperationIdentifier,
+    ) -> str | None:
+        """Return a branch-namespaced operation parented directly to the batch."""
+        operations = execution_state.operations
+        branch_namespace = OperationIdNamespace(operation_identifier.operation_id)
+        expected_flat_parent_id = executor_context._parent_id  # noqa: SLF001
+        for logical_step in range(1, len(operations) + 1):
+            child_operation_id = branch_namespace.create_id_for_step(logical_step)
+            child_operation = operations.get(child_operation_id)
+            if (
+                child_operation is not None
+                and child_operation.parent_id == expected_flat_parent_id
+            ):
+                return child_operation_id
+        return None
+
     def _build_items_snapshot(self) -> tuple[CompletionItemStatus, ...]:
         """Build the per-branch status snapshot for the custom predicate.
 
@@ -705,6 +725,26 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 self._validate_branch_checkpoint_nesting(
                     operation_identifier, checkpoint
                 )
+                if (
+                    self.nesting_type is NestingType.NESTED
+                    and not checkpoint.is_existent()
+                ):
+                    flat_child_operation_id = self._find_flat_branch_child_operation_id(
+                        execution_state,
+                        executor_context,
+                        operation_identifier,
+                    )
+                    if flat_child_operation_id is not None:
+                        msg = (
+                            "Non-deterministic branch nesting at "
+                            f"id={operation_identifier.operation_id!r}: "
+                            "recorded STARTED NESTED branch has no container "
+                            "checkpoint but contains a child operation from FLAT "
+                            f"history at id={flat_child_operation_id!r}"
+                        )
+                        raise NonDeterministicExecutionError(
+                            msg, step_id=operation_identifier.operation_id
+                        )
                 items.append(BatchItem(executable.index, BatchItemStatus.STARTED))
                 continue
             items.append(
