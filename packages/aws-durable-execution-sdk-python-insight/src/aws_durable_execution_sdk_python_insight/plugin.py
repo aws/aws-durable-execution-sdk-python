@@ -342,9 +342,9 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         if should_emit:
             # Only terminal (SUCCEEDED/FAILED) records carry an end time; a
             # PENDING/RETRY invocation end maps to RUNNING (still in flight) and
-            # must omit endTime/durationMs. Passing end_time=None makes _emit
-            # drop both fields. Output and error likewise belong only to a
-            # terminal record.
+            # must omit endTime/durationMs. Passing end_time=None makes
+            # _schedule_record drop both fields. Output and error likewise
+            # belong only to a terminal record.
             self._schedule_record(
                 arn,
                 state,
