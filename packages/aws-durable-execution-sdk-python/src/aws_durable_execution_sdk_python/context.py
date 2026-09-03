@@ -596,7 +596,10 @@ class DurableContext(DurableContextProtocol):
 
     @contextmanager
     def _operation_replay_aware(
-        self, sub_type: OperationSubType, name: str | None = None
+        self,
+        sub_type: OperationSubType,
+        name: str | None = None,
+        operation_type: OperationType | None = None,
     ) -> Iterator[OperationIdentifier]:
         """Allocate an operation and validate its replay identity before hooks."""
         operation_identifier = OperationIdentifier(
@@ -604,6 +607,7 @@ class DurableContext(DurableContextProtocol):
             sub_type=sub_type,
             parent_id=self._parent_id,
             name=name,
+            operation_type=operation_type,
         )
         with self._replay_aware(operation_identifier):
             yield operation_identifier
@@ -808,7 +812,11 @@ class DurableContext(DurableContextProtocol):
             else OperationSubType.RUN_IN_CHILD_CONTEXT
         )
 
-        with self._operation_replay_aware(sub_type, step_name) as operation_identifier:
+        with self._operation_replay_aware(
+            sub_type,
+            step_name,
+            operation_type=OperationType.CONTEXT,
+        ) as operation_identifier:
             operation_id = operation_identifier.operation_id
             is_virtual: bool = config.is_virtual if config else False
 

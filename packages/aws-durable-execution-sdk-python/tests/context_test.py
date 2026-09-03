@@ -1120,7 +1120,11 @@ def test_run_in_child_context_basic(mock_handler):
     call_args = mock_handler.call_args
     assert call_args[1]["state"] is mock_state
     assert call_args[1]["operation_identifier"] == OperationIdentifier(
-        expected_operation_id, OperationSubType.RUN_IN_CHILD_CONTEXT, None, None
+        expected_operation_id,
+        OperationSubType.RUN_IN_CHILD_CONTEXT,
+        None,
+        None,
+        operation_type=OperationType.CONTEXT,
     )
     assert call_args[1]["config"] is None
 
@@ -1136,7 +1140,7 @@ def test_run_in_child_context_with_name_and_config(mock_handler):
     mock_callable = Mock()
     mock_callable._original_name = "original_function"  # noqa: SLF001
 
-    config = ChildConfig()
+    config = ChildConfig(sub_type=OperationSubType.STEP)
 
     context = create_test_context(state=mock_state)
     [context._create_step_id() for _ in range(3)]  # Set counter to 3 # noqa: SLF001
@@ -1150,7 +1154,11 @@ def test_run_in_child_context_with_name_and_config(mock_handler):
     assert result == "configured_child_result"
     call_args = mock_handler.call_args
     assert call_args[1]["operation_identifier"] == OperationIdentifier(
-        expected_id, OperationSubType.RUN_IN_CHILD_CONTEXT, None, "original_function"
+        expected_id,
+        OperationSubType.STEP,
+        None,
+        "original_function",
+        operation_type=OperationType.CONTEXT,
     )
     assert call_args[1]["config"] is config
 
@@ -1183,7 +1191,11 @@ def test_run_in_child_context_with_parent_id(mock_executor_class):
 
     call_args = mock_executor_class.call_args
     assert call_args[1]["operation_identifier"] == OperationIdentifier(
-        expected_id, OperationSubType.RUN_IN_CHILD_CONTEXT, "parent456", None
+        expected_id,
+        OperationSubType.RUN_IN_CHILD_CONTEXT,
+        "parent456",
+        None,
+        operation_type=OperationType.CONTEXT,
     )
 
 
@@ -1248,12 +1260,20 @@ def test_run_in_child_context_increments_counter(mock_executor_class):
     assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
     ] == OperationIdentifier(
-        expected_id1, OperationSubType.RUN_IN_CHILD_CONTEXT, None, None
+        expected_id1,
+        OperationSubType.RUN_IN_CHILD_CONTEXT,
+        None,
+        None,
+        operation_type=OperationType.CONTEXT,
     )
     assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
     ] == OperationIdentifier(
-        expected_id2, OperationSubType.RUN_IN_CHILD_CONTEXT, None, None
+        expected_id2,
+        OperationSubType.RUN_IN_CHILD_CONTEXT,
+        None,
+        None,
+        operation_type=OperationType.CONTEXT,
     )
 
 

@@ -1031,6 +1031,91 @@ def test_flat_replay_rejects_failed_nested_container_checkpoint(replay_path):
     executor_context.create_child_context.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("nesting_type", "checkpoint_name", "mismatch"),
+    [
+        (NestingType.FLAT, "parallel-branch-0", "nesting is FLAT"),
+        (NestingType.NESTED, "old-branch-name", "name"),
+    ],
+)
+def test_replay_started_branch_validates_existing_checkpoint(
+    nesting_type, checkpoint_name, mismatch
+):
+    """Recorded STARTED branches still validate nesting and identity."""
+    executor = _RecordingExecutor(
+        executables=[Executable(0, lambda: "must-not-run")],
+        max_concurrency=1,
+        completion_config=CompletionConfig(min_successful=1),
+        sub_type_top=OperationSubType.PARALLEL,
+        sub_type_iteration=OperationSubType.PARALLEL_BRANCH,
+        name_prefix="parallel-branch-",
+        serdes=None,
+        nesting_type=nesting_type,
+        operation_id_namespace=_StubNamespace(),
+    )
+    executor_context = Mock()
+    executor_context._parent_id = "parallel-op"  # noqa: SLF001
+    execution_state = Mock()
+    execution_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_from_operation(
+            Operation(
+                operation_id="op_0",
+                operation_type=OperationType.CONTEXT,
+                status=OperationStatus.STARTED,
+                parent_id="parallel-op",
+                sub_type=OperationSubType.PARALLEL_BRANCH,
+                name=checkpoint_name,
+            )
+        )
+    )
+    parent_checkpoint = CheckpointedResult(
+        result=json.dumps(
+            {
+                "totalCount": 1,
+                "completionReason": "ALL_COMPLETED",
+                "startedIndexes": [0],
+            }
+        )
+    )
+
+    with pytest.raises(NonDeterministicExecutionError, match=mismatch):
+        executor.replay(execution_state, executor_context, parent_checkpoint)
+
+
+def test_replay_started_nested_branch_allows_missing_checkpoint():
+    """A submitted NESTED branch may not have written its START checkpoint yet."""
+    executor = _RecordingExecutor(
+        executables=[Executable(0, lambda: "must-not-run")],
+        max_concurrency=1,
+        completion_config=CompletionConfig(min_successful=1),
+        sub_type_top=OperationSubType.PARALLEL,
+        sub_type_iteration=OperationSubType.PARALLEL_BRANCH,
+        name_prefix="parallel-branch-",
+        serdes=None,
+        nesting_type=NestingType.NESTED,
+        operation_id_namespace=_StubNamespace(),
+    )
+    executor_context = Mock()
+    executor_context._parent_id = "parallel-op"  # noqa: SLF001
+    execution_state = Mock()
+    execution_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
+    parent_checkpoint = CheckpointedResult(
+        result=json.dumps(
+            {
+                "totalCount": 1,
+                "completionReason": "ALL_COMPLETED",
+                "startedIndexes": [0],
+            }
+        )
+    )
+
+    result = executor.replay(execution_state, executor_context, parent_checkpoint)
+
+    assert result.all[0].status is BatchItemStatus.STARTED
+
+
 def test_concurrent_executor_create_result_failure_tolerance_exceeded():
     """Test ConcurrentExecutor with failure tolerance exceeded using public execute method."""
 

@@ -696,6 +696,15 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             if executable.index >= record.started_total:
                 continue
             if executable.index in record.started_indexes:
+                operation_identifier = self._get_iteration_operation_identifier(
+                    executor_context, executable
+                )
+                checkpoint = execution_state.get_checkpoint_result(
+                    operation_identifier.operation_id
+                )
+                self._validate_branch_checkpoint_nesting(
+                    operation_identifier, checkpoint
+                )
                 items.append(BatchItem(executable.index, BatchItemStatus.STARTED))
                 continue
             items.append(
