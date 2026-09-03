@@ -1,0 +1,1 @@
+{"finding_digest":"2b1ba06f6ee2471f2a902e471ad8df72874ce8a40f1ed0fb4020f48050050aaa","finding_id":"arf_v1_fmn2a33o4jdr6kuqfzdrvwg7ok","identity_key":"durable_parent_span.py::note_start_time_note_end_time::missing-lock","pull_request_number":696,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"claude","schema_version":1}
