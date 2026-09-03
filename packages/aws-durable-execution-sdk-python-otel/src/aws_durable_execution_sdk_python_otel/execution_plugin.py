@@ -53,7 +53,6 @@ from opentelemetry.sdk.trace import Tracer as SdkTracer
 from opentelemetry.sdk.trace.sampling import Sampler
 from opentelemetry.trace import (
     Link,
-    NonRecordingSpan,
     Span,
     SpanContext,
     SpanKind,
@@ -79,6 +78,10 @@ from aws_durable_execution_sdk_python_otel.durable_sampling import (
     is_sampled,
     resolve_sampling_result,
     store_sampling_intent,
+)
+from aws_durable_execution_sdk_python_otel.durable_parent_span import (
+    DurableParentSpan,
+    ensure_end_after_start,
 )
 from aws_durable_execution_sdk_python_otel.execution_trace_context import (
     ExecutionTraceContext,
@@ -326,14 +329,38 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             trace_state=self._resolved_trace_state(),
         )
 
-    def _register_operation_placeholder(self, operation_id: str) -> Span | None:
+    def _register_operation_placeholder(
+        self,
+        operation_id: str,
+        start_time: datetime.datetime | None = None,
+    ) -> DurableParentSpan | None:
         """Register a non-recording placeholder holding the operation context."""
         span_context = self._operation_span_context(operation_id)
         if span_context is None:
             return None
-        placeholder = NonRecordingSpan(span_context)
+        placeholder = DurableParentSpan(span_context, start_time=start_time)
         self._set_span(operation_id, placeholder)
         return placeholder
+
+    def _note_parent_start(
+        self,
+        parent_id: str | None,
+        timestamp: datetime.datetime | None,
+    ) -> None:
+        """Include a child start time in a deferred parent placeholder."""
+        parent = self._resolve_parent(parent_id)
+        if isinstance(parent, DurableParentSpan):
+            parent.note_start_time(timestamp)
+
+    def _note_parent_end(
+        self,
+        parent_id: str | None,
+        timestamp: datetime.datetime | None,
+    ) -> None:
+        """Include a child end time in a deferred parent placeholder."""
+        parent = self._resolve_parent(parent_id)
+        if isinstance(parent, DurableParentSpan):
+            parent.note_end_time(timestamp)
 
     def _invocation_parent_context(self) -> Context:
         """Return same-trace ambient context, else execution ancestor context."""
@@ -351,7 +378,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 trace.set_span_in_context(ambient_span, Context())
             )
 
-        ancestor = NonRecordingSpan(execution_trace_context.execution_ancestor)
+        ancestor = DurableParentSpan(execution_trace_context.execution_ancestor)
         return self._with_sampling(trace.set_span_in_context(ancestor, Context()))
 
     def _with_sampling(self, parent_context: Context) -> Context:
@@ -459,7 +486,10 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             trace_flags=self._execution_trace_context.trace_flags,
             trace_state=self._resolved_trace_state(),
         )
-        self._workflow_span = NonRecordingSpan(workflow_span_context)
+        self._workflow_span = DurableParentSpan(
+            workflow_span_context,
+            start_time=self._execution_start_time,
+        )
 
     def _export_workflow_span(self, info: InvocationEndInfo) -> None:
         """Create and end the recording Workflow span once, on a terminal status.
@@ -473,7 +503,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             return
         parent_context = self._with_sampling(
             trace.set_span_in_context(
-                NonRecordingSpan(self._execution_trace_context.execution_ancestor),
+                DurableParentSpan(self._execution_trace_context.execution_ancestor),
                 Context(),
             )
         )
@@ -605,7 +635,8 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             return  # tracked via on_user_function_start
         # Hold a non-recording placeholder while the operation is open; its
         # recording span is exported once on terminal on_operation_end.
-        self._register_operation_placeholder(info.operation_id)
+        self._register_operation_placeholder(info.operation_id, info.start_time)
+        self._note_parent_start(info.parent_id, info.start_time)
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
         logger.debug("Durable operation ended: %s", info)
@@ -618,14 +649,24 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             self._ended_operation_ids.add(info.operation_id)
         # An open operation is held as a non-recording placeholder; drop it and
         # create the single recording span for the operation now.
+        placeholder = self._get_span(info.operation_id)
         self._pop_span(info.operation_id)
         parent = self._resolve_parent(info.parent_id)
+        start_time = info.start_time
+        end_time = info.end_time
+        if isinstance(placeholder, DurableParentSpan):
+            start_time = placeholder.normalized_start_time(start_time)
+            end_time = placeholder.normalized_end_time(
+                end_time,
+                start_time=start_time,
+            )
+        end_time = ensure_end_after_start(start_time, end_time)
         span = self._start_span(
             operation_id=info.operation_id,
             name=info.name or info.operation_id,
             info=info,
             parent=parent,
-            start_time=info.start_time,
+            start_time=start_time,
         )
 
         if info.error:
@@ -636,9 +677,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         else:
             span.set_status(StatusCode.OK)
 
-        end_time = info.end_time
-        if end_time is not None and end_time == info.start_time:
-            end_time += datetime.timedelta(microseconds=1)
+        self._note_parent_end(info.parent_id, end_time)
         popped = self._pop_span(info.operation_id)
         if popped is not None:
             popped.end(end_time=_to_otel_timestamp(end_time))
@@ -712,12 +751,17 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 span_key=key,
                 deterministic=False,
             )
+            self._note_parent_start(info.operation_id, info.start_time)
         else:  # CONTEXT
             # A child context can suspend before completing, so hold a
             # non-recording placeholder while it runs; on_operation_end
             # materializes its single recording span. This keeps a suspended
             # context from being exported early and re-exported on replay.
-            span = self._register_operation_placeholder(info.operation_id)
+            span = self._register_operation_placeholder(
+                info.operation_id,
+                info.start_time,
+            )
+            self._note_parent_start(info.parent_id, info.start_time)
         if span is not None:
             self._attach_context(
                 key, trace.set_span_in_context(span, otel_context.get_current())
@@ -737,6 +781,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             raise RuntimeError(
                 "on_user_function_end without matching on_user_function_start"
             )
+        end_time = ensure_end_after_start(info.start_time, info.end_time)
+        self._note_parent_end(info.operation_id, end_time)
+        self._note_parent_end(info.parent_id, end_time)
         if (
             info.operation_type is OperationType.STEP
             and info.outcome is not UserFunctionOutcome.INCOMPLETE
@@ -756,9 +803,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             else:
                 span.set_status(StatusCode.OK)
 
-            end_time = info.end_time
-            if end_time is not None and end_time == info.start_time:
-                end_time += datetime.timedelta(microseconds=1)
+            end_time = ensure_end_after_start(info.start_time, info.end_time)
             popped = self._pop_span(key)
             if popped is not None:
                 popped.end(end_time=_to_otel_timestamp(end_time))

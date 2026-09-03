@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import opentelemetry.context as otel_context
@@ -33,6 +33,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import (
     NonRecordingSpan,
     SpanContext,
+    SpanKind,
     TraceFlags,
     TraceState,
 )
@@ -44,6 +45,9 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     operation_id_to_span_id,
 )
 from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
+from aws_durable_execution_sdk_python_otel.durable_parent_span import (
+    DurableParentSpan,
+)
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 
 
@@ -62,9 +66,9 @@ def _assert_otel_context_balanced():
     """
     before = otel_context.get_current()
     yield
-    assert otel_context.get_current() == before, (
-        "test leaked OTel context state: an attach() was not detached"
-    )
+    assert (
+        otel_context.get_current() == before
+    ), "test leaked OTel context state: an attach() was not detached"
 
 
 def _create_plugin(
@@ -302,6 +306,63 @@ def test_workflow_span_not_exported_on_non_terminal_status():
     # (created + ended) on a terminal status, so it is not exported here.
     assert "Invocation" in names
     assert "Workflow" not in names
+
+
+def test_workflow_placeholder_exposes_vendor_parent_span_fields():
+    plugin, _ = _create_plugin()
+
+    plugin.on_invocation_start(_invocation_start_info())
+
+    placeholder = plugin._workflow_span
+    assert isinstance(placeholder, DurableParentSpan)
+    assert not placeholder.is_recording()
+    assert placeholder.kind is SpanKind.INTERNAL
+    assert placeholder.attributes.get("durable.execution.arn") is None
+
+    plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+
+
+def test_deferred_operation_encloses_attempt_timestamps():
+    """A materialized operation must contain attempts emitted before its end."""
+    plugin, exporter = _create_plugin()
+    operation_start_time = START_TIME + timedelta(seconds=1)
+
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id="step-1",
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="step-1",
+            parent_id=None,
+            start_time=operation_start_time,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    plugin.on_user_function_start(_step_start_info("step-1"))
+    plugin.on_user_function_end(_step_end_info("step-1"))
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id="step-1",
+            operation_type=OperationType.STEP,
+            sub_type=OperationSubType.STEP,
+            name="step-1",
+            parent_id=None,
+            start_time=operation_start_time,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    operation = spans["step-1"]
+    attempt = spans["step-1 attempt 1"]
+    assert operation.start_time <= attempt.start_time
+    assert operation.end_time >= attempt.end_time
 
 
 def test_operation_parented_under_workflow_and_linked_to_invocation():

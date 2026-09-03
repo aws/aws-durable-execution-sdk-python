@@ -25,7 +25,6 @@ from opentelemetry.sdk.trace import Tracer as SdkTracer
 from opentelemetry.sdk.trace.sampling import Sampler
 from opentelemetry.trace import (
     Link,
-    NonRecordingSpan,
     Span,
     SpanContext,
     SpanKind,
@@ -51,6 +50,9 @@ from aws_durable_execution_sdk_python_otel.durable_sampling import (
     is_sampled,
     resolve_sampling_result,
     store_sampling_intent,
+)
+from aws_durable_execution_sdk_python_otel.durable_parent_span import (
+    DurableParentSpan,
 )
 from aws_durable_execution_sdk_python_otel.execution_trace_context import (
     ExecutionTraceContext,
@@ -341,7 +343,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 trace.set_span_in_context(ambient_span, Context())
             )
 
-        ancestor = NonRecordingSpan(execution_trace_context.execution_ancestor)
+        ancestor = DurableParentSpan(execution_trace_context.execution_ancestor)
         return self._with_sampling(trace.set_span_in_context(ancestor, Context()))
 
     def _with_sampling(self, parent_context: Context) -> Context:
@@ -589,7 +591,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             trace_flags=self._execution_trace_context.trace_flags,
             trace_state=self._resolved_trace_state(),
         )
-        self._workflow_span = NonRecordingSpan(workflow_span_context)
+        self._workflow_span = DurableParentSpan(
+            workflow_span_context,
+            start_time=self._execution_start_time,
+        )
 
     def _export_workflow_span(self, info: InvocationEndInfo) -> None:
         """Create and end the recording Workflow span once, on a terminal status.
@@ -603,7 +608,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             return
         parent_context = self._with_sampling(
             trace.set_span_in_context(
-                NonRecordingSpan(self._execution_trace_context.execution_ancestor),
+                DurableParentSpan(self._execution_trace_context.execution_ancestor),
                 Context(),
             )
         )
