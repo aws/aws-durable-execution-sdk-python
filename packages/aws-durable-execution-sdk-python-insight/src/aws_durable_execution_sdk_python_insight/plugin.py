@@ -33,7 +33,6 @@ from __future__ import annotations
 import datetime
 import json
 import math
-import sys
 import threading
 from typing import Any, Callable
 
@@ -47,10 +46,10 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationType,
 )
 
+from aws_durable_execution_sdk_python_insight._export_scheduler import _ExportScheduler
 from aws_durable_execution_sdk_python_insight.exporters.lambda_log_exporter import (
     LambdaLogExporter,
 )
-from aws_durable_execution_sdk_python_insight.truncation import truncate_record
 from aws_durable_execution_sdk_python_insight.types import (
     ContentConfig,
     EmitMode,
@@ -161,7 +160,7 @@ def _apply_result_override(
 
 
 class _ExecutionState:
-    __slots__ = ("start_time", "parsed_arn", "cached_input", "operations")
+    __slots__ = ("start_time", "parsed_arn", "cached_input", "operations", "scheduled")
 
     def __init__(self, start_time: Any, parsed_arn: dict[str, str]) -> None:
         self.start_time = start_time
@@ -170,6 +169,10 @@ class _ExecutionState:
         # operation_id -> OperationInfo, adopted verbatim from the SDK's
         # authoritative snapshot (invocation start/end and operation-change).
         self.operations: dict[str, OperationInfo] = {}
+        # True once at least one record was scheduled for the current
+        # invocation; gates the invocation-end drain/flush so a no-op invocation
+        # (e.g. on-complete + non-terminal end) never touches a lane.
+        self.scheduled: bool = False
 
 
 class WorkflowInsightPlugin(DurableInstrumentationPlugin):
@@ -205,6 +208,12 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         self._exporters: list[InsightExporter] = (
             list(config.exporters) if config.exporters else [LambdaLogExporter()]
         )
+        # One shared deadline (seconds) for the invocation-end drain + flush.
+        self._export_timeout = float(config.export_timeout_seconds)
+        # Off-thread export scheduler: one lazy daemon worker per exporter. All
+        # copy/render/truncation/export/flush runs there, never on the checkpoint
+        # hook thread.
+        self._scheduler = _ExportScheduler(self._exporters)
         self._state: dict[str, _ExecutionState] = {}
         self._lock = threading.Lock()
 
@@ -239,6 +248,21 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         with self._lock:
             state.operations = dict(operations)
 
+    def _mark_scheduled(self, state: _ExecutionState) -> None:
+        # Mutate ``scheduled`` under the same lock that guards every other field
+        # of the shared ``_ExecutionState``. The lock is released before any
+        # scheduler/exporter work runs (see ``_schedule_record``), so it never
+        # covers I/O and introduces no new lock ordering.
+        with self._lock:
+            state.scheduled = True
+
+    def _was_scheduled(self, state: _ExecutionState) -> bool:
+        # Read ``scheduled`` under the lock, then act on the returned snapshot
+        # outside it -- the invocation-end drain must not hold the plugin lock
+        # while calling the scheduler.
+        with self._lock:
+            return state.scheduled
+
     # -- hooks ----------------------------------------------------------------
 
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
@@ -257,7 +281,7 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         # plugin instance never saw via per-operation hooks.
         self._adopt_operations(state, info.operations)
         if self._emit_mode == EmitMode.ON_CHANGE:
-            self._emit(
+            self._schedule_record(
                 arn,
                 state,
                 status="RUNNING",
@@ -267,23 +291,30 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
             )
 
     def on_operation_change(self, info: OperationChangeInfo) -> None:
+        # Non-on-change modes never emit mid-invocation, so skip all work here
+        # (adopting the snapshot, sampling) -- the terminal record is rebuilt
+        # from the invocation-end snapshot. This keeps the checkpoint path free
+        # of Insight work outside on-change mode.
+        if self._emit_mode != EmitMode.ON_CHANGE:
+            return
         arn = info.execution_arn
         if not arn or not self._sampled_in(arn):
             return
         state = self._ensure_state(arn)
         # Replace state with the full operations snapshot carried by the hook.
         self._adopt_operations(state, info.operations)
-        # on-change mode exports an updated RUNNING record on each change so
-        # mid-invocation progress is observable, not only at start/end.
-        if self._emit_mode == EmitMode.ON_CHANGE:
-            self._emit(
-                arn,
-                state,
-                status="RUNNING",
-                end_time=None,
-                output_raw=None,
-                error=None,
-            )
+        # on-change mode schedules an updated RUNNING record on each change so
+        # mid-invocation progress is observable. The schedule call returns
+        # immediately -- rendering/export happens off the checkpoint thread -- so
+        # a slow exporter never blocks workflow progress.
+        self._schedule_record(
+            arn,
+            state,
+            status="RUNNING",
+            end_time=None,
+            output_raw=None,
+            error=None,
+        )
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         arn = info.execution_arn
@@ -311,10 +342,10 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         if should_emit:
             # Only terminal (SUCCEEDED/FAILED) records carry an end time; a
             # PENDING/RETRY invocation end maps to RUNNING (still in flight) and
-            # must omit endTime/durationMs. Passing end_time=None makes _emit
-            # drop both fields. Output and error likewise belong only to a
-            # terminal record.
-            self._emit(
+            # must omit endTime/durationMs. Passing end_time=None makes
+            # _schedule_record drop both fields. Output and error likewise
+            # belong only to a terminal record.
+            self._schedule_record(
                 arn,
                 state,
                 status=status,
@@ -322,6 +353,14 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
                 output_raw=info.execution_result if is_terminal else None,
                 error=info.error if is_terminal else None,
             )
+
+        # Drain and flush the touched lanes under one shared timeout, but only if
+        # this invocation actually scheduled something. A no-op invocation (e.g.
+        # on-complete + non-terminal end) touches no lane and needs no flush,
+        # which also avoids spinning up an idle worker just to flush nothing.
+        # Read the flag under the lock, then call the scheduler outside it.
+        if self._was_scheduled(state):
+            self._scheduler.end_invocation(self._export_timeout)
 
         # Clear state after EVERY invocation end, including PENDING/RETRY. The
         # next invocation rebuilds it from InvocationStartInfo.operations, so a
@@ -373,7 +412,7 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
             records.append(entry)
         return records
 
-    def _emit(
+    def _schedule_record(
         self,
         execution_arn: str,
         state: _ExecutionState,
@@ -383,6 +422,31 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         output_raw: str | None,
         error: Any,
     ) -> None:
+        record = self._build_record(
+            execution_arn,
+            state,
+            status=status,
+            end_time=end_time,
+            output_raw=output_raw,
+            error=error,
+        )
+        # Hand the canonical record to the scheduler; per-exporter copy, render,
+        # truncation, export and flush all run on the lane workers, never here.
+        self._scheduler.schedule(execution_arn, record)
+        # Set the flag under the plugin lock AFTER the scheduler call so the lock
+        # never covers scheduler work.
+        self._mark_scheduled(state)
+
+    def _build_record(
+        self,
+        execution_arn: str,
+        state: _ExecutionState,
+        *,
+        status: str,
+        end_time: Any,
+        output_raw: str | None,
+        error: Any,
+    ) -> dict[str, Any]:
         arn = state.parsed_arn
         start_time = state.start_time
         duration = _duration_ms(start_time, end_time)
@@ -434,22 +498,7 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         if error is not None:
             record["error"] = {"name": error.type, "message": error.message}
         record["operations"] = self._build_operations(operations)
-
-        for exporter in self._exporters:
-            try:
-                shaped = truncate_record(
-                    record, exporter.max_record_size_bytes, exporter.render
-                )
-                exporter.export(shaped)
-            except Exception as exc:  # noqa: BLE001 - one exporter must not break others / the execution
-                # NOTE (parity gap, same as JS Promise.allSettled): exporter
-                # failures are swallowed so instrumentation never breaks the
-                # execution. A silently broken exporter is indistinguishable
-                # from success; we at least log to stderr.
-                print(
-                    f"[workflow-insight] exporter {type(exporter).__name__} failed: {exc}",
-                    file=sys.stderr,
-                )  # noqa: T201
+        return record
 
 
 def workflow_insight(config: WorkflowInsightConfig) -> WorkflowInsightPlugin:
