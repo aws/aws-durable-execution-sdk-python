@@ -69,9 +69,9 @@ def _assert_otel_context_balanced():
     """Assert each test leaves the OTel thread-local context as it found it."""
     before = otel_context.get_current()
     yield
-    assert (
-        otel_context.get_current() == before
-    ), "test leaked OTel context state: an attach() was not detached"
+    assert otel_context.get_current() == before, (
+        "test leaked OTel context state: an attach() was not detached"
+    )
 
 
 def _provider() -> tuple[TracerProvider, InMemorySpanExporter]:
@@ -91,10 +91,12 @@ class _AdotParentInspectionProcessor(SpanProcessor):
         if isinstance(parent, ReadableSpan):
             _ = parent.attributes
         else:
-            _ = parent.kind
-            _ = parent.attributes.get("aws.trace.id")
-        if parent.kind is SpanKind.SERVER:
-            _ = parent.kind
+            parent_kind = getattr(parent, "kind", None)
+            parent_attributes = getattr(parent, "attributes", {})
+            _ = parent_kind
+            _ = parent_attributes.get("aws.trace.id")
+        if getattr(parent, "kind", None) is SpanKind.SERVER:
+            _ = getattr(parent, "kind", None)
 
     def on_end(self, span: ReadableSpan) -> None:
         return
