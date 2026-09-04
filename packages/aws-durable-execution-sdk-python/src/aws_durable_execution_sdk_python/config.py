@@ -550,8 +550,9 @@ class MapConfig(Generic[T]):
 
         completion_config: Defines when the map operation should complete.
             Controls success/failure criteria for the overall map operation.
-            Default allows any number of failures. Use CompletionConfig.all_successful()
-            to require all items to succeed.
+            The default fails fast: the first failed item fails the batch.
+            Use CompletionConfig.all_completed() to process every item
+            regardless of failures.
 
         serdes: Custom serialization/deserialization configuration for BatchResult.
             Applied at the handler level to serialize the entire BatchResult object.
