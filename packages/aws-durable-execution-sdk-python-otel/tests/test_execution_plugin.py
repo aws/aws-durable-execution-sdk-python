@@ -905,7 +905,6 @@ def test_checkpointless_context_end_uses_a_non_negative_duration():
 def test_virtual_context_replay_uses_unique_linked_segments():
     plugin, exporter = _create_plugin()
     context_id = "flat-branch"
-    logical_span_id = operation_id_to_span_id(EXECUTION_ARN, context_id)
 
     for _ in range(2):
         plugin.on_invocation_start(_invocation_start_info())
@@ -931,10 +930,15 @@ def test_virtual_context_replay_uses_unique_linked_segments():
     contexts = [
         span for span in exporter.get_finished_spans() if span.name == context_id
     ]
+    invocation_ids = {
+        span.context.span_id
+        for span in exporter.get_finished_spans()
+        if span.name == "Invocation"
+    }
     assert len(contexts) == 2
     assert len({span.context.span_id for span in contexts}) == 2
     assert all(
-        logical_span_id in {link.context.span_id for link in span.links}
+        len(span.links) == 1 and span.links[0].context.span_id in invocation_ids
         for span in contexts
     )
 

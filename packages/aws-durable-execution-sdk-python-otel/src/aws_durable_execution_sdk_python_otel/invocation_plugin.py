@@ -401,6 +401,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         existed: bool = False,
         span_key: str | None = None,
         deterministic_span_id: bool = True,
+        link_logical_operation: bool | None = None,
     ) -> Span:
         """Start and store a span for an invocation or durable operation.
 
@@ -418,6 +419,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             deterministic_span_id: Whether to use the deterministic operation
                 span ID. Attempt spans set this to ``False`` so they can be
                 separate children of the logical operation span.
+            link_logical_operation: Whether to link a fresh segment to the
+                deterministic logical operation context. Defaults to ``existed``.
 
         Returns:
             The started OpenTelemetry span.
@@ -441,7 +444,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                     if operation_id
                     else None
                 )
-            if existed and operation_id is not None:
+            should_link_logical_operation = (
+                existed if link_logical_operation is None else link_logical_operation
+            )
+            if should_link_logical_operation and operation_id is not None:
                 operation_context = self._operation_link_context(operation_id)
                 if operation_context is not None and operation_context.is_valid:
                     links = [*links, Link(context=operation_context)]
@@ -809,11 +815,16 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         if info.operation_type is OperationType.CONTEXT:
             with self._operation_spans_lock:
                 context_replay = self._context_operation_replays.get(info.operation_id)
+            checkpointless_context = (
+                context_replay is None and not info.is_replay_children
+            )
             existed = (
                 context_replay is None or context_replay or info.is_replay_children
             )
+            link_logical_operation = existed and not checkpointless_context
         else:
             existed = False
+            link_logical_operation = None
         existing_span = self._get_span(span_key)
         if (
             info.operation_type is OperationType.CONTEXT
@@ -834,6 +845,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 existed=existed,
                 span_key=span_key,
                 deterministic_span_id=info.operation_type is not OperationType.STEP,
+                link_logical_operation=link_logical_operation,
             )
         self._attach_context(
             span_key, trace.set_span_in_context(span, context.get_current())

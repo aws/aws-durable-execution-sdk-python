@@ -14,7 +14,7 @@ checkpoint-backed operation is likewise exported exactly once, on its
 deterministic span ID, when it reaches a terminal status; while it spans
 invocations it is held as a non-recording placeholder so no recording span is
 abandoned. Checkpointless virtual contexts use fresh per-invocation segment IDs
-linked to their deterministic logical operation context.
+and retain their durable operation ID as an attribute for correlation.
 
 This is the Python adaptation of the JS ``ExecutionOtelPlugin`` from
 aws-durable-execution-sdk-js#729. Because the Python plugin interface differs
@@ -706,9 +706,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             if isinstance(placeholder, DurableParentSpan)
             else None
         )
-        logical_span_id = operation_id_to_span_id(
-            self._execution_arn, info.operation_id
-        )
         checkpointless_context = (
             info.operation_type is OperationType.CONTEXT and info.start_time is None
         )
@@ -722,9 +719,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             parent=parent,
             start_time=start_time,
             span_id_override=span_id_override,
-            link_logical_operation=(
-                span_id_override is not None and span_id_override != logical_span_id
-            ),
         )
 
         if info.error:
@@ -751,7 +745,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         span_key: str | None = None,
         deterministic: bool = True,
         span_id_override: int | None = None,
-        link_logical_operation: bool = False,
     ) -> Span:
         """Start a recording span for an operation/attempt and register it.
 
@@ -774,11 +767,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                     else None
                 )
             )
-            if link_logical_operation:
-                logical_context = self._operation_span_context(operation_id)
-                if logical_context is not None and logical_context.is_valid:
-                    links = [*links, Link(context=logical_context)]
-
             if parent is None:
                 parent_ctx = self._with_sampling(Context())
             else:
