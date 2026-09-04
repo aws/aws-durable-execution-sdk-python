@@ -1703,6 +1703,122 @@ def test_replayed_context_span_links_previous_logical_operation():
     }
 
 
+def test_checkpointed_context_first_span_uses_deterministic_id():
+    plugin, exporter = _create_plugin()
+    operation_id = "child-context"
+    span_name = f"step-{operation_id}"
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name=span_name,
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    plugin.on_user_function_start(
+        _user_function_start_info(
+            operation_id,
+            operation_type=OperationType.CONTEXT,
+        )
+    )
+    plugin.on_user_function_end(
+        _user_function_end_info(
+            operation_id,
+            operation_type=OperationType.CONTEXT,
+        )
+    )
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name=span_name,
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+
+    span = next(
+        span for span in exporter.get_finished_spans() if span.name == span_name
+    )
+    assert span.context.span_id == operation_id_to_span_id(EXECUTION_ARN, operation_id)
+    plugin.on_invocation_end(_invocation_end_info())
+
+
+def test_virtual_context_replay_uses_unique_linked_segments():
+    plugin, exporter = _create_plugin()
+    operation_id = "flat-branch"
+    span_name = f"step-{operation_id}"
+    logical_span_id = operation_id_to_span_id(EXECUTION_ARN, operation_id)
+
+    for _ in range(2):
+        plugin.on_invocation_start(_invocation_start_info())
+        # Virtual contexts have no durable START hook.
+        plugin.on_user_function_start(
+            _user_function_start_info(
+                operation_id,
+                operation_type=OperationType.CONTEXT,
+            )
+        )
+        plugin.on_user_function_end(
+            _user_function_end_info(
+                operation_id,
+                operation_type=OperationType.CONTEXT,
+            )
+        )
+        plugin.on_operation_end(
+            OperationEndInfo(
+                operation_id=operation_id,
+                operation_type=OperationType.CONTEXT,
+                sub_type=OperationSubType.PARALLEL,
+                name=span_name,
+                parent_id=None,
+                start_time=None,
+                is_replayed=False,
+                status=OperationStatus.SUCCEEDED,
+                end_time=END_TIME,
+                error=None,
+            )
+        )
+        plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+
+    contexts = [
+        span for span in exporter.get_finished_spans() if span.name == span_name
+    ]
+    assert len(contexts) == 2
+    assert len({span.context.span_id for span in contexts}) == 2
+    assert all(
+        logical_span_id in {link.context.span_id for link in span.links}
+        for span in contexts
+    )
+
+
+def test_incomplete_attempt_is_marked_when_invocation_ends():
+    plugin, exporter = _create_plugin()
+    operation_id = "step-suspends"
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_user_function_start(_user_function_start_info(operation_id))
+    plugin.on_user_function_end(_user_function_incomplete_info(operation_id))
+
+    plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+
+    attempt = next(
+        span
+        for span in exporter.get_finished_spans()
+        if span.name == f"step-{operation_id} attempt 1"
+    )
+    assert attempt.attributes["durable.span.truncated_at_invocation_boundary"] is True
+
+
 def test_workflow_span_name_is_configurable():
     """The Workflow span name can be overridden via constructor kwarg."""
     exporter = InMemorySpanExporter()

@@ -148,6 +148,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._span_time_floor_ns: int | None = None
         # Maps operation ID (None for root) to the active span.
         self._operation_spans: dict[str | None, Span] = {}
+        # Replay state supplied by CONTEXT operation START hooks. Missing
+        # entries identify checkpointless contexts such as FLAT branches.
+        self._context_operation_replays: dict[str, bool] = {}
         # Tokens returned by context.attach(), keyed by the span registry key,
         # paired with the thread that attached them. Every attach the plugin
         # owns is released through _detach_context so the plugin never leaves a
@@ -649,6 +652,11 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             operation_ids = list(reversed(self._operation_spans))
         for operation_id in operation_ids:
             if operation_id:
+                span = self._get_span(operation_id)
+                if span is not None and span.is_recording():
+                    span.set_attribute(
+                        "durable.span.truncated_at_invocation_boundary", True
+                    )
                 self._end_span(operation_id)
 
         invocation_span = self._get_span(None)
@@ -697,6 +705,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._span_time_floor_ns = None
         with self._operation_spans_lock:
             self._operation_spans = {}
+            self._context_operation_replays = {}
         self._tracing_enabled = False
 
     def on_operation_start(self, info: OperationStartInfo) -> None:
@@ -705,7 +714,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         if not self._tracing_enabled:
             return
         if info.operation_type is OperationType.CONTEXT:
-            # Context operations are tracked using on_user_function_start.
+            # The user-function hook owns the span, but this durable START hook
+            # distinguishes checkpoint-backed contexts from virtual branches.
+            with self._operation_spans_lock:
+                self._context_operation_replays[info.operation_id] = info.is_replayed
             return
         parent_span = self._resolve_parent_span(info.parent_id)
         attributes = self._extract_attributes(info)
@@ -794,13 +806,21 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             if info.operation_type is OperationType.CONTEXT
             else info.start_time
         )
+        if info.operation_type is OperationType.CONTEXT:
+            with self._operation_spans_lock:
+                context_replay = self._context_operation_replays.get(info.operation_id)
+            existed = (
+                context_replay is None or context_replay or info.is_replay_children
+            )
+        else:
+            existed = False
         span = self._start_span(
             operation_id=info.operation_id,
             name=span_name,
             attributes=attributes,
             start_time=span_start_time,
             parent_span=parent_span,
-            existed=info.attempt != 1 and info.operation_type is not OperationType.STEP,
+            existed=existed,
             span_key=span_key,
             deterministic_span_id=info.operation_type is not OperationType.STEP,
         )

@@ -10,9 +10,11 @@ ancestor: a propagated backend parent when present, otherwise a deterministic
 synthetic root. The Workflow span is exported exactly once, when the execution
 reaches a terminal status. Operations are parented under the Workflow span (or
 their parent operation) and *linked* to the current Invocation span. Each
-operation is likewise exported exactly once, on its deterministic span ID, when
-it reaches a terminal status; while it spans invocations it is held as a
-non-recording placeholder so no recording span is abandoned.
+checkpoint-backed operation is likewise exported exactly once, on its
+deterministic span ID, when it reaches a terminal status; while it spans
+invocations it is held as a non-recording placeholder so no recording span is
+abandoned. Checkpointless virtual contexts use fresh per-invocation segment IDs
+linked to their deterministic logical operation context.
 
 This is the Python adaptation of the JS ``ExecutionOtelPlugin`` from
 aws-durable-execution-sdk-js#729. Because the Python plugin interface differs
@@ -147,6 +149,10 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._workflow_span: Span | None = None
         self._invocation_span: Span | None = None
         self._operation_spans: dict[str, Span] = {}
+        # CONTEXT operations that emitted a durable START hook this invocation.
+        # A context absent from this set is checkpointless (for example, a FLAT
+        # map/parallel branch) and needs a fresh per-invocation span identity.
+        self._checkpointed_context_ids: set[str] = set()
         # Operations whose span was already exported this invocation, so a
         # repeated on_operation_end does not export it twice.
         self._ended_operation_ids: set[str] = set()
@@ -316,14 +322,23 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             return self._execution_trace_context.execution_ancestor.trace_state
         return TraceState()
 
-    def _operation_span_context(self, operation_id: str) -> SpanContext | None:
-        """Return the deterministic SpanContext for a logical operation."""
+    def _operation_span_context(
+        self,
+        operation_id: str,
+        *,
+        span_id: int | None = None,
+    ) -> SpanContext | None:
+        """Return a SpanContext for an operation or invocation-local segment."""
         execution_trace_context = self._execution_trace_context
         if execution_trace_context is None:
             return None
         return SpanContext(
             trace_id=execution_trace_context.trace_id,
-            span_id=operation_id_to_span_id(self._execution_arn, operation_id),
+            span_id=(
+                span_id
+                if span_id is not None
+                else operation_id_to_span_id(self._execution_arn, operation_id)
+            ),
             is_remote=False,
             trace_flags=execution_trace_context.trace_flags,
             trace_state=self._resolved_trace_state(),
@@ -333,9 +348,14 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self,
         operation_id: str,
         start_time: datetime.datetime | None = None,
+        *,
+        deterministic: bool = True,
     ) -> DurableParentSpan | None:
         """Register a non-recording placeholder holding the operation context."""
-        span_context = self._operation_span_context(operation_id)
+        span_context = self._operation_span_context(
+            operation_id,
+            span_id=None if deterministic else self._id_generator.generate_span_id(),
+        )
         if span_context is None:
             return None
         existing = self._get_span(operation_id)
@@ -628,6 +648,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._invocation_span = None
         with self._lock:
             self._operation_spans = {}
+            self._checkpointed_context_ids = set()
             self._ended_operation_ids = set()
         self._tracing_enabled = False
 
@@ -639,7 +660,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         if not self._tracing_enabled:
             return
         if info.operation_type is OperationType.CONTEXT:
-            return  # tracked via on_user_function_start
+            with self._lock:
+                self._checkpointed_context_ids.add(info.operation_id)
+            return  # span tracked via on_user_function_start
         # Hold a non-recording placeholder while the operation is open; its
         # recording span is exported once on terminal on_operation_end.
         self._register_operation_placeholder(info.operation_id, info.start_time)
@@ -678,12 +701,30 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             # the tracer to choose a later wall-clock start.
             start_time = end_time
         end_time = ensure_end_after_start(start_time, end_time)
+        placeholder_span_id = (
+            placeholder.get_span_context().span_id
+            if isinstance(placeholder, DurableParentSpan)
+            else None
+        )
+        logical_span_id = operation_id_to_span_id(
+            self._execution_arn, info.operation_id
+        )
+        checkpointless_context = (
+            info.operation_type is OperationType.CONTEXT and info.start_time is None
+        )
+        span_id_override = placeholder_span_id
+        if span_id_override is None and checkpointless_context:
+            span_id_override = self._id_generator.generate_span_id()
         span = self._start_span(
             operation_id=info.operation_id,
             name=info.name or info.operation_id,
             info=info,
             parent=parent,
             start_time=start_time,
+            span_id_override=span_id_override,
+            link_logical_operation=(
+                span_id_override is not None and span_id_override != logical_span_id
+            ),
         )
 
         if info.error:
@@ -709,6 +750,8 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         start_time: datetime.datetime | None,
         span_key: str | None = None,
         deterministic: bool = True,
+        span_id_override: int | None = None,
+        link_logical_operation: bool = False,
     ) -> Span:
         """Start a recording span for an operation/attempt and register it.
 
@@ -723,10 +766,18 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 existing.end()
             links = self._build_invocation_links()
             span_id = (
-                operation_id_to_span_id(self._execution_arn, operation_id)
-                if deterministic
-                else None
+                span_id_override
+                if span_id_override is not None
+                else (
+                    operation_id_to_span_id(self._execution_arn, operation_id)
+                    if deterministic
+                    else None
+                )
             )
+            if link_logical_operation:
+                logical_context = self._operation_span_context(operation_id)
+                if logical_context is not None and logical_context.is_valid:
+                    links = [*links, Link(context=logical_context)]
 
             if parent is None:
                 parent_ctx = self._with_sampling(Context())
@@ -778,9 +829,12 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             # non-recording placeholder while it runs; on_operation_end
             # materializes its single recording span. This keeps a suspended
             # context from being exported early and re-exported on replay.
+            with self._lock:
+                checkpointed = info.operation_id in self._checkpointed_context_ids
             span = self._register_operation_placeholder(
                 info.operation_id,
                 info.start_time,
+                deterministic=checkpointed or info.is_replay_children,
             )
             self._note_parent_start(info.parent_id, info.start_time)
         if span is not None:

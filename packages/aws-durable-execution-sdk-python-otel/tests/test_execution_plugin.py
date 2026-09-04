@@ -799,6 +799,18 @@ def test_suspended_child_context_exports_one_span_on_replay():
 
     # Invocation 1: the child context starts and suspends (no end hook).
     plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id=context_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name=context_id,
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
     plugin.on_user_function_start(_context_start_info(context_id))
     placeholder = plugin._get_span(context_id)
     assert placeholder is not None
@@ -810,6 +822,18 @@ def test_suspended_child_context_exports_one_span_on_replay():
 
     # Invocation 2: the context replays and completes.
     plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id=context_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name=context_id,
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=True,
+            status=OperationStatus.STARTED,
+        )
+    )
     plugin.on_user_function_start(_context_start_info(context_id))
     plugin.on_user_function_end(_context_end_info(context_id))
     plugin.on_operation_end(
@@ -860,6 +884,43 @@ def test_checkpointless_context_end_uses_a_non_negative_duration():
     )
     assert span.start_time == int(END_TIME.timestamp() * 1_000_000_000)
     assert span.end_time > span.start_time
+
+
+def test_virtual_context_replay_uses_unique_linked_segments():
+    plugin, exporter = _create_plugin()
+    context_id = "flat-branch"
+    logical_span_id = operation_id_to_span_id(EXECUTION_ARN, context_id)
+
+    for _ in range(2):
+        plugin.on_invocation_start(_invocation_start_info())
+        # Virtual contexts have no durable START hook.
+        plugin.on_user_function_start(_context_start_info(context_id))
+        plugin.on_user_function_end(_context_end_info(context_id))
+        plugin.on_operation_end(
+            OperationEndInfo(
+                operation_id=context_id,
+                operation_type=OperationType.CONTEXT,
+                sub_type=OperationSubType.PARALLEL,
+                name=context_id,
+                parent_id=None,
+                start_time=None,
+                is_replayed=False,
+                status=OperationStatus.SUCCEEDED,
+                end_time=END_TIME,
+                error=None,
+            )
+        )
+        plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+
+    contexts = [
+        span for span in exporter.get_finished_spans() if span.name == context_id
+    ]
+    assert len(contexts) == 2
+    assert len({span.context.span_id for span in contexts}) == 2
+    assert all(
+        logical_span_id in {link.context.span_id for link in span.links}
+        for span in contexts
+    )
 
 
 def test_incomplete_attempt_is_marked_when_invocation_ends():
