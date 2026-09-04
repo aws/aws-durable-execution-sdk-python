@@ -1995,6 +1995,19 @@ def test_reentered_child_context_does_not_leave_abandoned_span_current():
     before_context = otel_context.get_current()
     context_id = "ctx-1"
 
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id=context_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name=context_id,
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+
     # First run: the child context suspends, so no end hook fires.
     plugin.on_user_function_start(
         _user_function_start_info(context_id, operation_type=OperationType.CONTEXT)
@@ -2007,6 +2020,7 @@ def test_reentered_child_context_does_not_leave_abandoned_span_current():
         _user_function_start_info(context_id, operation_type=OperationType.CONTEXT)
     )
     assert len([key for key in plugin._context_tokens if key == context_id]) == 1
+    assert plugin._get_span(context_id) is suspended_span
 
     plugin.on_user_function_end(
         _user_function_end_info(context_id, operation_type=OperationType.CONTEXT)
@@ -2018,6 +2032,22 @@ def test_reentered_child_context_does_not_leave_abandoned_span_current():
         trace.get_current_span().get_span_context().span_id
         != suspended_span.get_span_context().span_id
     )
+
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id=context_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name=context_id,
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+    assert not suspended_span.is_recording()
 
     plugin.on_invocation_end(_invocation_end_info())
 
@@ -2110,7 +2140,9 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
             "ctx-inner", parent_id="ctx-outer", operation_type=OperationType.CONTEXT
         )
     )
+    suspended_inner = plugin._get_span("ctx-inner")
     assert suspended_outer is not None
+    assert suspended_inner is not None
 
     # Both contexts suspend: the inner one unwinds first.
     plugin.on_user_function_end(
@@ -2142,7 +2174,8 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
     )
     resumed_inner = plugin._get_span("ctx-inner")
     assert resumed_outer is not None
-    assert resumed_outer is not suspended_outer
+    assert resumed_outer is suspended_outer
+    assert resumed_inner is suspended_inner
     assert trace.get_current_span() is resumed_inner
 
     plugin.on_user_function_end(
@@ -2151,7 +2184,7 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
         )
     )
 
-    # The resumed outer scope is restored, not the one from the suspended run.
+    # The reused outer span's scope is restored.
     assert trace.get_current_span() is resumed_outer
 
     plugin.on_user_function_end(

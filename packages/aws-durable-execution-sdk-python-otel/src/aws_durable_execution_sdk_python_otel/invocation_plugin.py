@@ -814,16 +814,27 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             )
         else:
             existed = False
-        span = self._start_span(
-            operation_id=info.operation_id,
-            name=span_name,
-            attributes=attributes,
-            start_time=span_start_time,
-            parent_span=parent_span,
-            existed=existed,
-            span_key=span_key,
-            deterministic_span_id=info.operation_type is not OperationType.STEP,
-        )
+        existing_span = self._get_span(span_key)
+        if (
+            info.operation_type is OperationType.CONTEXT
+            and existing_span is not None
+            and existing_span.is_recording()
+        ):
+            # A timed in-process resume can re-enter a CONTEXT before its
+            # previous user-function scope reports an end. Continue the same
+            # invocation segment instead of overwriting and abandoning it.
+            span = existing_span
+        else:
+            span = self._start_span(
+                operation_id=info.operation_id,
+                name=span_name,
+                attributes=attributes,
+                start_time=span_start_time,
+                parent_span=parent_span,
+                existed=existed,
+                span_key=span_key,
+                deterministic_span_id=info.operation_type is not OperationType.STEP,
+            )
         self._attach_context(
             span_key, trace.set_span_in_context(span, context.get_current())
         )
