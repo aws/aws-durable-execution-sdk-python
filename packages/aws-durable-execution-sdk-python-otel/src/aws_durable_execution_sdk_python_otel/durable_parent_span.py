@@ -70,6 +70,13 @@ class DurableParentSpan(Span):
     ) -> None:
         return
 
+    def add_link(
+        self,
+        context: SpanContext,
+        attributes: Mapping[str, Any] | None = None,
+    ) -> None:
+        return
+
     def update_name(self, name: str) -> None:
         return
 

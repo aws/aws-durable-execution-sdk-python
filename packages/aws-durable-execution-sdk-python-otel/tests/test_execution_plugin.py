@@ -322,6 +322,22 @@ def test_workflow_placeholder_exposes_vendor_parent_span_fields():
     plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
 
 
+def test_durable_parent_span_implements_current_span_interface():
+    span_context = SpanContext(
+        trace_id=1,
+        span_id=1,
+        is_remote=False,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        trace_state=TraceState(),
+    )
+
+    placeholder = DurableParentSpan(span_context)
+    placeholder.add_link(span_context)
+
+    assert placeholder.get_span_context() == span_context
+    assert not placeholder.is_recording()
+
+
 def test_deferred_operation_encloses_attempt_timestamps():
     """A materialized operation must contain attempts emitted before its end."""
     plugin, exporter = _create_plugin()
