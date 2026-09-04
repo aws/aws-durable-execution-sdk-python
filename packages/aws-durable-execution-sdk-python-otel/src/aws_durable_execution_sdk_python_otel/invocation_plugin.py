@@ -151,6 +151,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         # Replay state supplied by CONTEXT operation START hooks. Missing
         # entries identify checkpointless contexts such as FLAT branches.
         self._context_operation_replays: dict[str, bool] = {}
+        # STEP attempt spans whose user function explicitly ended INCOMPLETE.
+        # Only these spans are marked truncated during invocation cleanup.
+        self._incomplete_attempt_span_keys: set[str] = set()
         # Tokens returned by context.attach(), keyed by the span registry key,
         # paired with the thread that attached them. Every attach the plugin
         # owns is released through _detach_context so the plugin never leaves a
@@ -656,10 +659,15 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         # order to keep every child contained within its parent.
         with self._operation_spans_lock:
             operation_ids = list(reversed(self._operation_spans))
+            incomplete_attempt_span_keys = set(self._incomplete_attempt_span_keys)
         for operation_id in operation_ids:
             if operation_id:
                 span = self._get_span(operation_id)
-                if span is not None and span.is_recording():
+                if (
+                    operation_id in incomplete_attempt_span_keys
+                    and span is not None
+                    and span.is_recording()
+                ):
                     span.set_attribute(
                         "durable.span.truncated_at_invocation_boundary", True
                     )
@@ -712,6 +720,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         with self._operation_spans_lock:
             self._operation_spans = {}
             self._context_operation_replays = {}
+            self._incomplete_attempt_span_keys = set()
         self._tracing_enabled = False
 
     def on_operation_start(self, info: OperationStartInfo) -> None:
@@ -873,6 +882,13 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             raise RuntimeError(
                 "on_user_function_end called without matching on_user_function_start"
             )
+
+        if info.operation_type is OperationType.STEP:
+            with self._operation_spans_lock:
+                if info.outcome is UserFunctionOutcome.INCOMPLETE:
+                    self._incomplete_attempt_span_keys.add(span_key)
+                else:
+                    self._incomplete_attempt_span_keys.discard(span_key)
 
         if (
             info.operation_type is OperationType.STEP

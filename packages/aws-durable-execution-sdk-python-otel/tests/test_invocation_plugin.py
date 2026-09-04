@@ -1594,6 +1594,10 @@ def test_open_operation_reference_is_non_recording_after_non_terminal(status):
     plugin.on_invocation_end(_invocation_end_info(status))
 
     assert not operation_reference.is_recording()
+    assert (
+        "durable.span.truncated_at_invocation_boundary"
+        not in operation_reference.attributes
+    )
 
 
 def test_operation_span_links_to_workflow_span():
