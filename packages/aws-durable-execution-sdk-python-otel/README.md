@@ -397,7 +397,7 @@ setups.
 ## Requirements
 
 - Python >= 3.11
-- `aws-durable-execution-sdk-python` >= 1.8.0
+- `aws-durable-execution-sdk-python` >= 2.0.0
 - An ADOT/community OpenTelemetry Lambda layer, or the `standalone` extra
 
 ## License

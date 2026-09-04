@@ -21,9 +21,9 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
 ]
 dependencies = [
-  # >=1.8.0: first release carrying the plugin invocation-hook fields
+  # >=2.0.0: first published release carrying the plugin invocation-hook fields
   # (InvocationInfo.execution_input / InvocationEndInfo.execution_result).
-  "aws-durable-execution-sdk-python>=1.8.0",
+  "aws-durable-execution-sdk-python>=2.0.0",
 ]
 
 [project.optional-dependencies]

@@ -129,7 +129,7 @@ test = "pytest packages/aws-durable-execution-sdk-python-examples/test {args}"
 
 [tool.hatch.envs.test-pypi-otel]
 dependencies = [
-  "aws-durable-execution-sdk-python>=1.8.0",
+  "aws-durable-execution-sdk-python>=2.0.0",
   "opentelemetry-sdk>=1.20.0",
   "opentelemetry-propagator-aws-xray",
   "pytest",
