@@ -417,6 +417,53 @@ def test_invocation_span_parents_to_same_trace_ambient_span():
     assert workflow.parent.span_id == derive_execution_root_span_id(EXECUTION_ARN)
 
 
+def test_pre_terminal_placeholder_preserves_same_trace_tracestate():
+    """The Workflow placeholder and operation links carry ambient tracestate."""
+    plugin, exporter = _create_plugin()
+    canonical_trace_id = _to_otel_trace_id(EXECUTION_ARN, START_TIME)
+    trace_state = TraceState([("vendor", "opaque")])
+    ambient_context = SpanContext(
+        trace_id=canonical_trace_id,
+        span_id=int("1234567890abcdef", 16),
+        is_remote=False,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        trace_state=trace_state,
+    )
+    ambient = NonRecordingSpan(ambient_context)
+    token = otel_context.attach(trace.set_span_in_context(ambient, Context()))
+    try:
+        plugin.on_invocation_start(_invocation_start_info())
+        assert plugin._workflow_span is not None
+        assert plugin._workflow_span.get_span_context().trace_state == trace_state
+        # A cross-invocation completion links the deterministic operation context.
+        plugin.on_operation_end(
+            OperationEndInfo(
+                operation_id="wait-existing",
+                operation_type=OperationType.WAIT,
+                sub_type=OperationSubType.WAIT,
+                name="existing-wait",
+                parent_id=None,
+                start_time=START_TIME,
+                is_replayed=False,
+                status=OperationStatus.SUCCEEDED,
+                end_time=END_TIME,
+                error=None,
+            )
+        )
+        plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+    finally:
+        otel_context.detach(token)
+
+    span = next(s for s in exporter.get_finished_spans() if s.name == "existing-wait")
+    operation_link = next(
+        link
+        for link in span.links
+        if link.context.span_id
+        == operation_id_to_span_id(EXECUTION_ARN, "wait-existing")
+    )
+    assert operation_link.context.trace_state == trace_state
+
+
 def test_extracted_remote_parent_is_execution_ancestor():
     remote_trace_id = int("5759e988bd862e3fe1be46a994272793", 16)
     remote_parent_id = int("53995c3f42cd8ad8", 16)
@@ -1484,7 +1531,11 @@ def test_workflow_span_exported_on_terminal(status, expected_code):
 
 @pytest.mark.parametrize("status", [InvocationStatus.PENDING, InvocationStatus.RETRY])
 def test_workflow_span_not_exported_on_non_terminal(status):
-    """Non-terminal invocations do not export (end) the Workflow span."""
+    """Non-terminal invocations do not materialize (export) the Workflow span.
+
+    The Workflow span is a non-recording placeholder during the invocation, so a
+    non-terminal status leaves nothing to export and no recording span to abandon.
+    """
     plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_invocation_end(_invocation_end_info(status))
@@ -1492,6 +1543,61 @@ def test_workflow_span_not_exported_on_non_terminal(status):
     names = [s.name for s in exporter.get_finished_spans()]
     assert "Workflow" not in names
     assert "Invocation" in names
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        InvocationStatus.PENDING,
+        InvocationStatus.RETRY,
+        InvocationStatus.SUCCEEDED,
+        InvocationStatus.FAILED,
+    ],
+)
+def test_workflow_reference_is_non_recording_after_cleanup(status):
+    """The retained Workflow span reference is never a recording span.
+
+    During the invocation it is a non-recording deterministic placeholder, so
+    invocation cleanup on any status leaves no recording span abandoned.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    workflow_reference = plugin._workflow_span
+    assert workflow_reference is not None
+    assert not workflow_reference.is_recording()
+
+    plugin.on_invocation_end(_invocation_end_info(status))
+
+    assert not workflow_reference.is_recording()
+
+
+@pytest.mark.parametrize("status", [InvocationStatus.PENDING, InvocationStatus.RETRY])
+def test_open_operation_reference_is_non_recording_after_non_terminal(status):
+    """A suspended operation's retained span reference is ended, not abandoned."""
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id="wait-1",
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="wait-for-signal",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    operation_reference = plugin._get_span("wait-1")
+    assert operation_reference is not None
+
+    plugin.on_invocation_end(_invocation_end_info(status))
+
+    assert not operation_reference.is_recording()
+    assert (
+        "durable.span.truncated_at_invocation_boundary"
+        not in operation_reference.attributes
+    )
 
 
 def test_operation_span_links_to_workflow_span():
@@ -1599,6 +1705,122 @@ def test_replayed_context_span_links_previous_logical_operation():
         derive_workflow_span_id(EXECUTION_ARN),
         operation_id_to_span_id(EXECUTION_ARN, operation_id),
     }
+
+
+def test_checkpointed_context_first_span_uses_deterministic_id():
+    plugin, exporter = _create_plugin()
+    operation_id = "child-context"
+    span_name = f"step-{operation_id}"
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name=span_name,
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+    plugin.on_user_function_start(
+        _user_function_start_info(
+            operation_id,
+            operation_type=OperationType.CONTEXT,
+        )
+    )
+    plugin.on_user_function_end(
+        _user_function_end_info(
+            operation_id,
+            operation_type=OperationType.CONTEXT,
+        )
+    )
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name=span_name,
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+
+    span = next(
+        span for span in exporter.get_finished_spans() if span.name == span_name
+    )
+    assert span.context.span_id == operation_id_to_span_id(EXECUTION_ARN, operation_id)
+    plugin.on_invocation_end(_invocation_end_info())
+
+
+def test_virtual_context_replay_uses_unique_linked_segments():
+    plugin, exporter = _create_plugin()
+    operation_id = "flat-branch"
+    span_name = f"step-{operation_id}"
+    workflow_span_id = derive_workflow_span_id(EXECUTION_ARN)
+
+    for _ in range(2):
+        plugin.on_invocation_start(_invocation_start_info())
+        # Virtual contexts have no durable START hook.
+        plugin.on_user_function_start(
+            _user_function_start_info(
+                operation_id,
+                operation_type=OperationType.CONTEXT,
+            )
+        )
+        plugin.on_user_function_end(
+            _user_function_end_info(
+                operation_id,
+                operation_type=OperationType.CONTEXT,
+            )
+        )
+        plugin.on_operation_end(
+            OperationEndInfo(
+                operation_id=operation_id,
+                operation_type=OperationType.CONTEXT,
+                sub_type=OperationSubType.PARALLEL,
+                name=span_name,
+                parent_id=None,
+                start_time=None,
+                is_replayed=False,
+                status=OperationStatus.SUCCEEDED,
+                end_time=END_TIME,
+                error=None,
+            )
+        )
+        plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+
+    contexts = [
+        span for span in exporter.get_finished_spans() if span.name == span_name
+    ]
+    assert len(contexts) == 2
+    assert len({span.context.span_id for span in contexts}) == 2
+    assert all(
+        len(span.links) == 1 and span.links[0].context.span_id == workflow_span_id
+        for span in contexts
+    )
+
+
+def test_incomplete_attempt_is_marked_when_invocation_ends():
+    plugin, exporter = _create_plugin()
+    operation_id = "step-suspends"
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_user_function_start(_user_function_start_info(operation_id))
+    plugin.on_user_function_end(_user_function_incomplete_info(operation_id))
+
+    plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+
+    attempt = next(
+        span
+        for span in exporter.get_finished_spans()
+        if span.name == f"step-{operation_id} attempt 1"
+    )
+    assert attempt.attributes["durable.span.truncated_at_invocation_boundary"] is True
 
 
 def test_workflow_span_name_is_configurable():
@@ -1777,6 +1999,19 @@ def test_reentered_child_context_does_not_leave_abandoned_span_current():
     before_context = otel_context.get_current()
     context_id = "ctx-1"
 
+    plugin.on_operation_start(
+        OperationStartInfo(
+            operation_id=context_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name=context_id,
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.STARTED,
+        )
+    )
+
     # First run: the child context suspends, so no end hook fires.
     plugin.on_user_function_start(
         _user_function_start_info(context_id, operation_type=OperationType.CONTEXT)
@@ -1789,6 +2024,7 @@ def test_reentered_child_context_does_not_leave_abandoned_span_current():
         _user_function_start_info(context_id, operation_type=OperationType.CONTEXT)
     )
     assert len([key for key in plugin._context_tokens if key == context_id]) == 1
+    assert plugin._get_span(context_id) is suspended_span
 
     plugin.on_user_function_end(
         _user_function_end_info(context_id, operation_type=OperationType.CONTEXT)
@@ -1800,6 +2036,22 @@ def test_reentered_child_context_does_not_leave_abandoned_span_current():
         trace.get_current_span().get_span_context().span_id
         != suspended_span.get_span_context().span_id
     )
+
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id=context_id,
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name=context_id,
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+    assert not suspended_span.is_recording()
 
     plugin.on_invocation_end(_invocation_end_info())
 
@@ -1892,7 +2144,9 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
             "ctx-inner", parent_id="ctx-outer", operation_type=OperationType.CONTEXT
         )
     )
+    suspended_inner = plugin._get_span("ctx-inner")
     assert suspended_outer is not None
+    assert suspended_inner is not None
 
     # Both contexts suspend: the inner one unwinds first.
     plugin.on_user_function_end(
@@ -1924,7 +2178,8 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
     )
     resumed_inner = plugin._get_span("ctx-inner")
     assert resumed_outer is not None
-    assert resumed_outer is not suspended_outer
+    assert resumed_outer is suspended_outer
+    assert resumed_inner is suspended_inner
     assert trace.get_current_span() is resumed_inner
 
     plugin.on_user_function_end(
@@ -1933,7 +2188,7 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
         )
     )
 
-    # The resumed outer scope is restored, not the one from the suspended run.
+    # The reused outer span's scope is restored.
     assert trace.get_current_span() is resumed_outer
 
     plugin.on_user_function_end(

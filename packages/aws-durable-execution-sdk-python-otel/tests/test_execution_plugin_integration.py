@@ -33,11 +33,12 @@ from aws_durable_execution_sdk_python.plugin import (
 )
 from opentelemetry import trace
 from opentelemetry.context import Context
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import (
     ProxyTracerProvider,
+    SpanKind,
     TracerProvider as ApiTracerProvider,
 )
 
@@ -78,6 +79,33 @@ def _provider() -> tuple[TracerProvider, InMemorySpanExporter]:
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     return provider, exporter
+
+
+class _AdotParentInspectionProcessor(SpanProcessor):
+    """Exercise the SDK-only parent fields accessed by the ADOT processor."""
+
+    def on_start(self, span, parent_context=None) -> None:
+        parent = trace.get_current_span(parent_context)
+        if not parent.get_span_context().is_valid:
+            return
+        if isinstance(parent, ReadableSpan):
+            _ = parent.attributes
+        else:
+            parent_kind = getattr(parent, "kind", None)
+            parent_attributes = getattr(parent, "attributes", {})
+            _ = parent_kind
+            _ = parent_attributes.get("aws.trace.id")
+        if getattr(parent, "kind", None) is SpanKind.SERVER:
+            _ = getattr(parent, "kind", None)
+
+    def on_end(self, span: ReadableSpan) -> None:
+        return
+
+    def shutdown(self) -> None:
+        return
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return True
 
 
 def _invocation_start() -> InvocationStartInfo:
@@ -239,6 +267,32 @@ def test_global_proxy_binds_sdk_provider_before_first_invocation(
     assert {span.name for span in exporter.get_finished_spans()} == {
         "Invocation",
         "Workflow",
+    }
+
+
+def test_parent_placeholder_supports_adot_style_parent_inspection() -> None:
+    """A vendor processor can inspect a deferred parent without an exception."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(_AdotParentInspectionProcessor())
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    plugin = ExecutionOtelPlugin(
+        OtelPluginConfig(
+            tracer_provider=provider,
+            context_extractor=lambda _: None,
+            enrich_logger=False,
+        )
+    )
+
+    plugin.on_invocation_start(_invocation_start())
+    _run_step_lifecycle(plugin)
+    plugin.on_invocation_end(_invocation_end())
+
+    assert {span.name for span in exporter.get_finished_spans()} == {
+        "Invocation",
+        "Workflow",
+        OP_NAME,
+        f"{OP_NAME} attempt 1",
     }
 
 
