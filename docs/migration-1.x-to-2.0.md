@@ -4,7 +4,7 @@
 most likely to touch your code are the typed, per-operation
 [error hierarchy](#error-handling), the
 [first-run serialize and deserialize round trip](#serialize-and-deserialize-round-trip),
-and the new fail-fast [default `map` and `parallel` completion](#completionconfigall_completed-tolerates-all-failures).
+and [replay operation identity validation](#replay-validates-operation-identity).
 
 ## Why upgrade to 2.0
 
@@ -34,8 +34,8 @@ and the new fail-fast [default `map` and `parallel` completion](#completionconfi
 The changes
 most likely to touch your code are the
 [typed error hierarchy](#callableruntimeerror-and-friends-removed), the
-[first-run round trip](#first-run-serialize-and-deserialize-round-trip), and the
-[fail-fast `map` and `parallel` default](#completionconfigall_completed-tolerates-all-failures).
+[first-run round trip](#first-run-serialize-and-deserialize-round-trip), and
+[replay operation identity validation](#replay-validates-operation-identity).
 [Finding affected code](#finding-affected-code) lists a grep checklist.
 
 ### `CallableRuntimeError` and friends removed
@@ -83,8 +83,11 @@ except (DurableOperationError, SerDesError):
 
 ### Serdes failures surface as `SerDesError`, not `ExecutionError`
 
-`SerDesError` descends directly from `DurableExecutionsError`, not from
-`ExecutionError`.
+In `1.x`, the SDK wrapped serialization and deserialization failures in
+`ExecutionError`. In `2.0` it raises `SerDesError` instead. The class hierarchy
+did not change: `SerDesError` descends from `DurableExecutionsError` in both
+versions, and it is not an `ExecutionError` subclass, so an
+`except ExecutionError` handler no longer catches serdes failures.
 
 Catch `SerDesError` (or `DurableExecutionsError`) where you caught
 `ExecutionError` for a serdes failure.
@@ -159,21 +162,27 @@ the parent suspends too.
 Revisit the value if you sized `max_concurrency` around thread count rather than
 concurrent in-flight work.
 
-### `CompletionConfig.all_completed()` tolerates all failures
+### `CompletionConfig.all_completed()` now actually tolerates all failures
 
-`all_completed()` now tolerates every failure, and the default `map` and
-`parallel` completion config runs fail-fast: the batch completes after the first
-observed failure and stops scheduling pending items. The SDK does not cancel
-already-started items, so with unlimited concurrency every item may already be
-running. Set `max_concurrency` to bound that.
+In `1.x`, `all_completed()` returned an all-`None` config, which hit the
+fail-fast path: the batch failed on the first item failure, the same as the
+default. In `2.0` it returns `tolerated_failure_percentage=100` and tolerates
+every failure, as its name always promised. The default `map` and `parallel`
+completion behavior is unchanged: both versions fail fast on the first observed
+failure, stop scheduling pending items, and do not cancel already-started items.
 
-Call the factory instead of hand-building the old all-`None` config. Pass
-`all_completed()` explicitly to keep the `1.x` process-all behavior.
+If you called `all_completed()` in `1.x`, you got fail-fast behavior. After you
+upgrade, the same call processes every item even when some fail. To keep the
+fail-fast behavior you had, switch to `CompletionConfig.all_successful()` or a
+bare `CompletionConfig()`. To process every item even when some fail, keep
+`all_completed()`:
 
 ```python
-# 2.0: keep processing every item even when some fail
+# 1.x all_completed() behaved like this; keep fail-fast explicitly:
+MapConfig(completion_config=CompletionConfig.all_successful())
+
+# 2.0 all_completed() now means what it says; process every item:
 MapConfig(completion_config=CompletionConfig.all_completed())
-ParallelConfig(completion_config=CompletionConfig.all_completed())
 ```
 
 ### `BatchResult.all` omits never-started branches
@@ -216,15 +225,19 @@ Catch `WaitForConditionError` instead of inspecting the returned state.
 On replay, the SDK validates each operation's checkpoint against the current
 code by `type`, `sub_type`, `name`, and `parent_id`. Any mismatch raises
 `NonDeterministicExecutionError` and fails the execution. `1.x` let a renamed or
-reordered operation consume a neighboring checkpoint silently. `2.0` fails fast.
+reordered operation consume a neighboring checkpoint silently. `2.0` fails fast
+when the drift changes any of those four fields. Validation cannot catch a swap
+of operations with identical identities, for example two unnamed steps under the
+same parent, so it narrows the silent-mismatch window rather than closing it.
 A `map` or `parallel` batch also validates FLAT against NESTED nesting drift.
 
 `NonDeterministicExecutionError` descends from `ExecutionError`, so it is
 unrecoverable and you should not catch it. Treat this change as a deployment
 constraint rather than a code change. Do not rename an operation (the `name=`
 argument, or a step function's name when you omit `name`), change a batch's
-`nesting_type`, or reparent an operation while executions are in flight. Drain
-in-flight executions before you deploy such a change.
+`nesting_type`, reorder operations, or reparent an operation while executions
+are in flight, even when the reordered operations carry identical identities.
+Drain in-flight executions before you deploy such a change.
 
 ### `wait_for_condition` fails on unreadable polling state
 
@@ -368,13 +381,18 @@ currently treats an empty-string checkpoint payload as no stored polling state
 on resume, so the operation can restart from `initial_state`.
 
 `RetryableSerDesError` does more than retry serialization. An executor re-raises
-it before it writes a success checkpoint, so the backend re-invokes the whole
-execution. An `AT_LEAST_ONCE_PER_RETRY` step re-runs its body and repeats its
-side effects on that re-invocation, so raise `RetryableSerDesError` only from an
+it without writing a checkpoint, so the invocation fails and the backend
+re-invokes the whole execution. What happens next depends on the phase in which
+the error was raised. When the first-run result round trip fails before the
+success checkpoint exists, an `AT_LEAST_ONCE_PER_RETRY` step re-runs its body
+and repeats its side effects, so raise `RetryableSerDesError` there only from an
 idempotent step or accept the duplicate work. An `AT_MOST_ONCE_PER_RETRY` step
 already wrote its START checkpoint, so the retried invocation treats the step as
 interrupted and applies the step retry strategy instead of re-running the body.
-Raise `SerDesError` for a permanent failure.
+When the error is raised while deserializing an already-succeeded checkpoint,
+the success checkpoint exists, so the next invocation retries only the
+deserialization and never re-runs the step body. Raise `SerDesError` for a
+permanent failure.
 
 ## Custom Completion Predicate
 
@@ -406,9 +424,10 @@ Three constraints govern the predicate:
 
 - It cannot combine with `min_successful` or the `tolerated_failure_*` fields.
   Combining them raises `ValidationError` at construction.
-- It runs before the SDK schedules any branch (`completed_count == 0`) and on
-  each suspension state change. At those points an unscheduled item has status
-  `None`, so handle a missing status explicitly, or the predicate can fail the
+- It runs on every branch state change: scheduling, completion, failure, and
+  suspension. The first evaluation happens before the SDK schedules any branch
+  (`completed_count == 0`), and an unscheduled item has status `None` at that
+  point, so handle a missing status explicitly, or the predicate can fail the
   batch or complete it before useful work starts.
 - It must stay deterministic, side-effect-free, and monotonic. Once a progress
   snapshot returns `complete_batch(outcome)`, every later snapshot that contains
@@ -434,7 +453,7 @@ or wrapper, must now pass `attempt` or construction raises `TypeError`.
 
 Instrumentation plugins remain experimental in this release, and the plugin
 interface changed incompatibly. See the
-[observability and plugin documentation](https://docs.aws.amazon.com/durable-execution/sdk-reference/observability/logging/)
+[plugin documentation](https://docs.aws.amazon.com/durable-execution/sdk-reference/observability/plugins/)
 for details.
 
 ## Recommended Validation After Upgrading
