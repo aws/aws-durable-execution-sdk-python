@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import threading
 from collections.abc import Mapping
 from typing import Any
 
@@ -44,6 +45,7 @@ class DurableParentSpan(Span):
         self.status = Status(StatusCode.UNSET)
         self._earliest_start_time = start_time
         self._latest_end_time: datetime.datetime | None = None
+        self._timestamp_lock = threading.Lock()
 
     def get_span_context(self) -> SpanContext:
         return self._span_context
@@ -91,25 +93,31 @@ class DurableParentSpan(Span):
         """Include a descendant or operation start timestamp."""
         if timestamp is None:
             return
-        if self._earliest_start_time is None or timestamp < self._earliest_start_time:
-            self._earliest_start_time = timestamp
+        with self._timestamp_lock:
+            if (
+                self._earliest_start_time is None
+                or timestamp < self._earliest_start_time
+            ):
+                self._earliest_start_time = timestamp
 
     def note_end_time(self, timestamp: datetime.datetime | None) -> None:
         """Include a descendant or operation end timestamp."""
         if timestamp is None:
             return
-        if self._latest_end_time is None or timestamp > self._latest_end_time:
-            self._latest_end_time = timestamp
+        with self._timestamp_lock:
+            if self._latest_end_time is None or timestamp > self._latest_end_time:
+                self._latest_end_time = timestamp
 
     def normalized_start_time(
         self, timestamp: datetime.datetime | None
     ) -> datetime.datetime | None:
         """Return a start that encloses all observed descendants."""
-        if timestamp is None:
-            return self._earliest_start_time
-        if self._earliest_start_time is None:
-            return timestamp
-        return min(timestamp, self._earliest_start_time)
+        with self._timestamp_lock:
+            if timestamp is None:
+                return self._earliest_start_time
+            if self._earliest_start_time is None:
+                return timestamp
+            return min(timestamp, self._earliest_start_time)
 
     def normalized_end_time(
         self,
@@ -118,12 +126,13 @@ class DurableParentSpan(Span):
         start_time: datetime.datetime | None = None,
     ) -> datetime.datetime | None:
         """Return an end that encloses all observed descendants."""
-        if timestamp is None:
-            normalized = self._latest_end_time
-        elif self._latest_end_time is None:
-            normalized = timestamp
-        else:
-            normalized = max(timestamp, self._latest_end_time)
+        with self._timestamp_lock:
+            if timestamp is None:
+                normalized = self._latest_end_time
+            elif self._latest_end_time is None:
+                normalized = timestamp
+            else:
+                normalized = max(timestamp, self._latest_end_time)
         if (
             start_time is not None
             and normalized is not None

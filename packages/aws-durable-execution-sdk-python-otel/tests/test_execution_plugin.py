@@ -66,9 +66,9 @@ def _assert_otel_context_balanced():
     """
     before = otel_context.get_current()
     yield
-    assert (
-        otel_context.get_current() == before
-    ), "test leaked OTel context state: an attach() was not detached"
+    assert otel_context.get_current() == before, (
+        "test leaked OTel context state: an attach() was not detached"
+    )
 
 
 def _create_plugin(
@@ -363,6 +363,25 @@ def test_deferred_operation_encloses_attempt_timestamps():
     attempt = spans["step-1 attempt 1"]
     assert operation.start_time <= attempt.start_time
     assert operation.end_time >= attempt.end_time
+
+
+def test_deferred_parent_timestamps_are_thread_safe():
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+
+    parent = plugin._workflow_span
+    assert isinstance(parent, DurableParentSpan)
+
+    start_times = [START_TIME + timedelta(seconds=offset) for offset in (3, 1, 2, 4)]
+    end_times = [END_TIME + timedelta(seconds=offset) for offset in (2, 4, 1, 3)]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(parent.note_start_time, start_times))
+        list(executor.map(parent.note_end_time, end_times))
+
+    assert parent.normalized_start_time(None) == START_TIME
+    assert parent.normalized_end_time(END_TIME) == END_TIME + timedelta(seconds=4)
+
+    plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
 
 
 def test_operation_parented_under_workflow_and_linked_to_invocation():
@@ -748,6 +767,30 @@ def test_suspend_then_resume_operation_exports_one_deterministic_span():
         EXECUTION_ARN, operation_id
     )
 
+    # ReplayChildren/virtual child completion callbacks are replay-only and
+    # must not re-export the terminal deterministic span in a later invocation.
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id=operation_id,
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            name="long-wait",
+            parent_id=None,
+            start_time=START_TIME,
+            is_replayed=True,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+
+    operation_spans = [
+        s for s in exporter.get_finished_spans() if s.name == "long-wait"
+    ]
+    assert len(operation_spans) == 1
+
 
 def test_suspended_child_context_exports_one_span_on_replay():
     """A child context that suspends then replays exports a single span."""
@@ -790,6 +833,49 @@ def test_suspended_child_context_exports_one_span_on_replay():
     assert contexts[0].context.span_id == operation_id_to_span_id(
         EXECUTION_ARN, context_id
     )
+
+
+def test_checkpointless_context_end_uses_a_non_negative_duration():
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id="virtual-context",
+            operation_type=OperationType.CONTEXT,
+            sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+            name="virtual-context",
+            parent_id=None,
+            start_time=None,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+            error=None,
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
+    span = next(
+        span for span in exporter.get_finished_spans() if span.name == "virtual-context"
+    )
+    assert span.start_time == int(END_TIME.timestamp() * 1_000_000_000)
+    assert span.end_time > span.start_time
+
+
+def test_incomplete_attempt_is_marked_when_invocation_ends():
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_user_function_start(_step_start_info("step-suspends"))
+    plugin.on_user_function_end(_step_incomplete_info("step-suspends"))
+
+    plugin.on_invocation_end(_invocation_end_info(status=InvocationStatus.PENDING))
+
+    attempt = next(
+        span
+        for span in exporter.get_finished_spans()
+        if span.name == "step-suspends attempt 1"
+    )
+    assert attempt.attributes["durable.span.truncated_at_invocation_boundary"] is True
 
 
 def test_duplicate_operation_end_exports_span_once():
@@ -1049,7 +1135,9 @@ def _context_incomplete_info(
 
 
 def _context_start_info(
-    operation_id: str, parent_id: str | None = None
+    operation_id: str,
+    parent_id: str | None = None,
+    start_time: datetime = START_TIME,
 ) -> UserFunctionStartInfo:
     return UserFunctionStartInfo(
         operation_id=operation_id,
@@ -1057,7 +1145,7 @@ def _context_start_info(
         sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
         name=operation_id,
         parent_id=parent_id,
-        start_time=START_TIME,
+        start_time=start_time,
         is_replayed=False,
         status=OperationStatus.STARTED,
         is_replay_children=False,
@@ -1303,8 +1391,15 @@ def test_reentered_child_context_does_not_leave_abandoned_span_current():
     assert suspended_span is not None
 
     # Timed in-process resume re-enters the same operation.
-    plugin.on_user_function_start(_context_start_info(context_id))
+    plugin.on_user_function_start(
+        _context_start_info(
+            context_id,
+            start_time=START_TIME + timedelta(seconds=1),
+        )
+    )
     assert len([key for key in plugin._context_tokens if key == context_id]) == 1
+    assert plugin._get_span(context_id) is suspended_span
+    assert suspended_span.normalized_start_time(None) == START_TIME
 
     plugin.on_user_function_end(_context_end_info(context_id))
 
@@ -1325,7 +1420,12 @@ def test_reentered_step_attempt_releases_the_previous_scope():
     before_context = otel_context.get_current()
 
     plugin.on_user_function_start(_step_start_info("step-1"))
+    first_attempt = plugin._get_span("step-1:attempt:1")
+    assert first_attempt is not None
+
     plugin.on_user_function_start(_step_start_info("step-1"))
+    assert not first_attempt.is_recording()
+
     plugin.on_user_function_end(_step_end_info("step-1"))
 
     assert otel_context.get_current() == before_context
@@ -1423,7 +1523,9 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
     )
     resumed_inner = plugin._get_span("ctx-inner")
     assert resumed_outer is not None
-    assert resumed_outer is not suspended_outer
+    # Re-entry reuses the deferred placeholder so timestamps from the
+    # suspended run remain available when the context eventually completes.
+    assert resumed_outer is suspended_outer
     assert trace.get_current_span() is resumed_inner
 
     plugin.on_user_function_end(_context_end_info("ctx-inner", parent_id="ctx-outer"))

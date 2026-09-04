@@ -338,6 +338,10 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         span_context = self._operation_span_context(operation_id)
         if span_context is None:
             return None
+        existing = self._get_span(operation_id)
+        if isinstance(existing, DurableParentSpan):
+            existing.note_start_time(start_time)
+            return existing
         placeholder = DurableParentSpan(span_context, start_time=start_time)
         self._set_span(operation_id, placeholder)
         return placeholder
@@ -548,6 +552,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 continue
             popped = self._pop_span(key)
             if popped is not None:
+                popped.set_attribute(
+                    "durable.span.truncated_at_invocation_boundary", True
+                )
                 popped.end()
 
     def _start_invocation_span(self, info: InvocationStartInfo) -> None:
@@ -642,6 +649,11 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         logger.debug("Durable operation ended: %s", info)
         if not self._tracing_enabled:
             return
+        # ReplayChildren and virtual child contexts intentionally re-execute
+        # without creating a new terminal checkpoint. Their end callback is
+        # replay-only and must not re-export the deterministic logical span.
+        if info.is_replayed:
+            return
         # Export the span only on the first end for this operation.
         with self._lock:
             if info.operation_id in self._ended_operation_ids:
@@ -660,6 +672,11 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 end_time,
                 start_time=start_time,
             )
+        if start_time is None and end_time is not None:
+            # Checkpointless child contexts report no durable start timestamp.
+            # Use their callback end as the lower bound rather than allowing
+            # the tracer to choose a later wall-clock start.
+            start_time = end_time
         end_time = ensure_end_after_start(start_time, end_time)
         span = self._start_span(
             operation_id=info.operation_id,
@@ -700,6 +717,10 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         """
         key = span_key if span_key is not None else operation_id
         with self._lock:
+            existing = self._operation_spans.get(key)
+            if existing is not None and existing.is_recording():
+                existing.set_attribute("durable.span.replaced_on_reentry", True)
+                existing.end()
             links = self._build_invocation_links()
             span_id = (
                 operation_id_to_span_id(self._execution_arn, operation_id)
