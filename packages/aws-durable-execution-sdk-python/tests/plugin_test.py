@@ -317,7 +317,7 @@ class TestDataClasses(unittest.TestCase):
 
         self.assertIs(info.status, InvocationStatus.PENDING)
 
-    def test_payload_fields_are_marked_experimental(self):
+    def test_payload_fields_are_not_marked_experimental(self):
         plugin_info_types = (
             OperationInfo,
             OperationStartInfo,
@@ -334,9 +334,9 @@ class TestDataClasses(unittest.TestCase):
         for info_type in plugin_info_types:
             for info_field in fields(info_type):
                 if any(term in info_field.name for term in payload_field_terms):
-                    self.assertIs(
-                        info_field.metadata.get("experimental"),
-                        True,
+                    self.assertNotIn(
+                        "experimental",
+                        info_field.metadata,
                         f"{info_type.__name__}.{info_field.name}",
                     )
 
