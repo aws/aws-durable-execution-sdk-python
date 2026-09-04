@@ -22,7 +22,7 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
-  "aws-durable-execution-sdk-python>=1.8.0",
+  "aws-durable-execution-sdk-python>=2.0.0",
 ]
 
 [project.entry-points."aws_durable_execution.plugins"]

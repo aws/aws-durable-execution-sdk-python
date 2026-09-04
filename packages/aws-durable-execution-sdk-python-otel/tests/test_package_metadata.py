@@ -4,7 +4,7 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
-CORE_DEPENDENCY = "aws-durable-execution-sdk-python>=1.8.0"
+CORE_DEPENDENCY = "aws-durable-execution-sdk-python>=2.0.0"
 TEST_OTEL_DEPENDENCIES = {
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-propagator-aws-xray",
