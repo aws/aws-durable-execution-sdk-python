@@ -98,6 +98,8 @@ def _tracking_checkpoint(initial_operations: list[Operation] | None = None):
                     operation_type=update.operation_type,
                     status=OperationStatus.STARTED,
                     parent_id=update.parent_id,
+                    name=update.name,
+                    sub_type=update.sub_type,
                 )
             )
         return CheckpointOutput(
@@ -182,6 +184,7 @@ def test_plugin_payload_surfaces_on_replay_invocation():
     completed_wait = {
         "Id": next(operation_id_sequence()),
         "Type": OperationType.WAIT.value,
+        "SubType": "Wait",
         "Status": OperationStatus.SUCCEEDED.value,
     }
 

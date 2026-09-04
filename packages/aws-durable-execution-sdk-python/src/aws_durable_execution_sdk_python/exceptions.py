@@ -265,8 +265,11 @@ class DurableOperationError(DurableExecutionsError):
 
     Wraps a failure that escaped a Durable Function operation (step, invoke,
     child context, wait_for_condition). The concrete class identifies the
-    operation kind (so callers can ``except StepError``); the escaping error is
-    preserved as ``__cause__`` on the first run and reconstructed on replay.
+    operation kind (so callers can ``except StepError``). ``__cause__`` holds a
+    ``DurableOperationError`` stand-in rebuilt from the checkpointed error
+    fields on both the first run and replay, for determinism; it does not hold
+    the original exception object. Inspect failures through ``error_type``,
+    ``message``, ``data``, and ``stack_trace``.
 
     Attributes:
         message: Human-readable failure message.

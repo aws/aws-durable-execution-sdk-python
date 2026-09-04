@@ -12,6 +12,8 @@ from opentelemetry.sdk.trace import IdGenerator, RandomIdGenerator, TracerProvid
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     DeterministicIdGenerator,
     _to_otel_trace_id,
+    derive_execution_root_span_id,
+    derive_workflow_span_id,
     operation_id_to_span_id,
 )
 
@@ -303,3 +305,37 @@ def test_id_overrides_are_isolated_across_async_tasks():
 
     assert result_a == (task_a_trace_id, task_a_span_id)
     assert result_b == (task_b_trace_id, task_b_span_id)
+
+
+# ---------------------------------------------------------------------------
+# derive_execution_root_span_id
+# ---------------------------------------------------------------------------
+_ROOT_ARN = "test-arn/execution-root"
+
+
+def test_derive_execution_root_span_id_is_deterministic():
+    assert derive_execution_root_span_id(_ROOT_ARN) == derive_execution_root_span_id(
+        _ROOT_ARN
+    )
+
+
+def test_derive_execution_root_span_id_differs_by_arn():
+    assert derive_execution_root_span_id(_ROOT_ARN) != derive_execution_root_span_id(
+        _ROOT_ARN + "-other"
+    )
+
+
+def test_derive_execution_root_span_id_is_64_bit():
+    span_id = derive_execution_root_span_id(_ROOT_ARN)
+    assert 0 < span_id < 2**64
+
+
+def test_derive_execution_root_span_id_rejects_empty_arn():
+    with pytest.raises(ValueError, match="execution ARN is required"):
+        derive_execution_root_span_id("")
+
+
+def test_derive_execution_root_span_id_differs_from_workflow_span_id():
+    assert derive_execution_root_span_id(_ROOT_ARN) != derive_workflow_span_id(
+        _ROOT_ARN
+    )

@@ -93,9 +93,7 @@ class StepOperationExecutor(OperationExecutor[T]):
             StepInterruptedError: For interrupted AT_MOST_ONCE operations
             SuspendExecution: For PENDING operations waiting for retry
         """
-        checkpointed_result: CheckpointedResult = self.state.get_checkpoint_result(
-            self.operation_identifier.operation_id
-        )
+        checkpointed_result = self._get_checkpoint_result()
 
         # Terminal success - deserialize and return
         if checkpointed_result.is_succeeded():
@@ -175,9 +173,7 @@ class StepOperationExecutor(OperationExecutor[T]):
             # After creating sync checkpoint, check the status
             if is_sync:
                 # Refresh checkpoint result to check for immediate response
-                refreshed_result: CheckpointedResult = self.state.get_checkpoint_result(
-                    self.operation_identifier.operation_id
-                )
+                refreshed_result = self._get_checkpoint_result()
 
                 # START checkpoint only returns STARTED status
                 # Any errors would be thrown as runtime exceptions during checkpoint creation

@@ -427,8 +427,8 @@ def test_child_handler_invocation_error_reraised():
     mock_state.emit_child_context_end_hook.assert_not_called()
 
 
-def test_child_handler_execution_error_wrapped():
-    """ExecutionError is wrapped as ChildContextError (replay-safe), not raised raw."""
+def test_child_handler_execution_error_reraised_without_fail_checkpoint():
+    """ExecutionError escapes unchanged without mutating child history."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
     mock_result = Mock()
@@ -441,7 +441,7 @@ def test_child_handler_execution_error_wrapped():
     mock_callable = Mock(side_effect=test_error)
     mock_state.wrap_user_function.return_value = mock_callable
 
-    with pytest.raises(ChildContextError) as exc_info:
+    with pytest.raises(ExecutionError) as exc_info:
         child_handler(
             mock_callable,
             mock_state,
@@ -451,18 +451,15 @@ def test_child_handler_execution_error_wrapped():
             None,
         )
 
-    # Not the raw ExecutionError; the original type survives on error_type.
-    assert not isinstance(exc_info.value, ExecutionError)
-    assert (
-        exc_info.value.error_type
-        == "aws_durable_execution_sdk_python.exceptions.ExecutionError"
-    )
+    assert exc_info.value is test_error
 
-    # Verify FAIL checkpoint was created
-    assert mock_state.create_checkpoint.call_count == 2  # start and fail
-    fail_call = mock_state.create_checkpoint.call_args_list[1]
-    fail_operation = fail_call[1]["operation_update"]
-    assert fail_operation.action is OperationAction.FAIL
+    # Only the async START checkpoint is written - no FAIL.
+    assert mock_state.create_checkpoint.call_count == 1
+    actions = [
+        call.kwargs["operation_update"].action
+        for call in mock_state.create_checkpoint.call_args_list
+    ]
+    assert OperationAction.FAIL not in actions
 
 
 def test_child_handler_non_retryable_invocation_error_wrapped():

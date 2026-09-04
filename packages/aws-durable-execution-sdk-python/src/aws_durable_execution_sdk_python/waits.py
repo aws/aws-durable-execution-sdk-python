@@ -99,7 +99,17 @@ def create_wait_strategy(
 
 @dataclass(frozen=True)
 class WaitForConditionConfig(Generic[T]):
-    """Configuration for wait_for_condition."""
+    """Configuration for wait_for_condition.
+
+    Attributes:
+        wait_strategy: Called after each poll with (state, attempts_made) and
+            returns a WaitForConditionDecision (continue_waiting or stop_polling).
+        initial_state: State passed to the first poll. It is round-tripped
+            through serdes (serialize then deserialize) before the first check,
+            so it must be serializable by the configured serdes.
+        serdes: SerDes used to serialize and deserialize the polled state at
+            each checkpoint. Defaults to the SDK's extended-type serdes when None.
+    """
 
     wait_strategy: Callable[[T, int], WaitForConditionDecision]
     initial_state: T

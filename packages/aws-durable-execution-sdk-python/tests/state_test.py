@@ -18,9 +18,11 @@ from aws_durable_execution_sdk_python.exceptions import (
     CheckpointError,
     DurableApiErrorCategory,
     GetExecutionStateError,
+    NonDeterministicExecutionError,
     OrphanedChildException,
     StepError,
     SuspendExecution,
+    TerminationReason,
     TimedSuspendExecution,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -612,6 +614,112 @@ def test_get_checkpoint_result_operation_not_found():
     assert result.is_succeeded() is False
     assert result.result is None
     assert result.operation is None
+
+
+@pytest.mark.parametrize(
+    ("checkpoint", "operation_identifier", "mismatch"),
+    [
+        (
+            Operation(
+                operation_id="op1",
+                operation_type=OperationType.WAIT,
+                status=OperationStatus.SUCCEEDED,
+                sub_type=OperationSubType.WAIT,
+                name="current-name",
+            ),
+            OperationIdentifier("op1", OperationSubType.STEP, name="current-name"),
+            "type",
+        ),
+        (
+            Operation(
+                operation_id="op1",
+                operation_type=OperationType.STEP,
+                status=OperationStatus.SUCCEEDED,
+                sub_type=OperationSubType.WAIT_FOR_CONDITION,
+                name="current-name",
+            ),
+            OperationIdentifier("op1", OperationSubType.STEP, name="current-name"),
+            "subtype",
+        ),
+        (
+            Operation(
+                operation_id="op1",
+                operation_type=OperationType.STEP,
+                status=OperationStatus.SUCCEEDED,
+                sub_type=OperationSubType.STEP,
+                name="checkpoint-name",
+            ),
+            OperationIdentifier("op1", OperationSubType.STEP, name="current-name"),
+            "name",
+        ),
+        (
+            Operation(
+                operation_id="op1",
+                operation_type=OperationType.STEP,
+                status=OperationStatus.SUCCEEDED,
+                parent_id="old-parent",
+                sub_type=OperationSubType.STEP,
+                name="current-name",
+            ),
+            OperationIdentifier(
+                "op1",
+                OperationSubType.STEP,
+                parent_id="current-parent",
+                name="current-name",
+            ),
+            "parent_id",
+        ),
+    ],
+)
+def test_operation_identifier_rejects_mismatched_checkpoint_identity(
+    checkpoint: Operation,
+    operation_identifier: OperationIdentifier,
+    mismatch: str,
+):
+    """Replay checkpoints must match the current operation before use."""
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={"op1": checkpoint},
+        service_client=Mock(spec=LambdaClient),
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+
+    with pytest.raises(NonDeterministicExecutionError, match=mismatch) as error_info:
+        operation_identifier.validate_checkpoint(
+            state.get_checkpoint_result(operation_identifier.operation_id).operation
+        )
+
+    assert error_info.value.step_id == "op1"
+    assert (
+        error_info.value.termination_reason
+        is TerminationReason.NON_DETERMINISTIC_EXECUTION
+    )
+
+
+def test_operation_identifier_normalizes_empty_name_to_wire_identity():
+    """An empty emitted name is omitted on the wire and replays as None."""
+    operation = Operation(
+        operation_id="op1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        sub_type=OperationSubType.STEP,
+        name=None,
+    )
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={"op1": operation},
+        service_client=Mock(spec=LambdaClient),
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+
+    result = state.get_checkpoint_result("op1")
+    OperationIdentifier("op1", OperationSubType.STEP, name="").validate_checkpoint(
+        result.operation
+    )
+
+    assert result.operation is operation
 
 
 def test_create_checkpoint():
@@ -1423,6 +1531,87 @@ def test_rejection_of_operations_from_completed_parents():
         state.create_checkpoint(child_checkpoint, is_sync=False)
 
     # Verify exception contains operation_id
+    assert exc_info.value.operation_id == "child_1"
+
+
+def test_parent_done_recheck_rejects_checkpoint_racing_parent_completion():
+    """A checkpoint that passed validation is rejected if its parent completes.
+
+    The child pauses in the operation hook after releasing _parent_done_lock and
+    before acquiring _completion_lock. Completing the parent during that pause
+    deterministically reproduces the validation-to-enqueue race without sleeps.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    mock_plugin_executor = Mock(spec=PluginExecutor)
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=mock_plugin_executor,
+    )
+
+    child_reached_hook = threading.Event()
+    release_child_hook = threading.Event()
+
+    def block_child_completion(operation_update: OperationUpdate, **_: object) -> None:
+        if (
+            operation_update.operation_id == "child_1"
+            and operation_update.action == OperationAction.SUCCEED
+        ):
+            child_reached_hook.set()
+            assert release_child_hook.wait(timeout=2.0), (
+                "child checkpoint was not released"
+            )
+
+    mock_plugin_executor.on_operation_action.side_effect = block_child_completion
+
+    state.create_checkpoint(
+        OperationUpdate(
+            operation_id="parent_1",
+            operation_type=OperationType.CONTEXT,
+            action=OperationAction.START,
+        ),
+        is_sync=False,
+    )
+    state.create_checkpoint(
+        OperationUpdate(
+            operation_id="child_1",
+            operation_type=OperationType.CONTEXT,
+            action=OperationAction.START,
+            parent_id="parent_1",
+        ),
+        is_sync=False,
+    )
+    child_complete = OperationUpdate(
+        operation_id="child_1",
+        operation_type=OperationType.CONTEXT,
+        action=OperationAction.SUCCEED,
+        parent_id="parent_1",
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        child_future = executor.submit(state.create_checkpoint, child_complete, False)
+        assert child_reached_hook.wait(timeout=2.0), (
+            "child checkpoint did not reach the hook"
+        )
+
+        try:
+            state.create_checkpoint(
+                OperationUpdate(
+                    operation_id="parent_1",
+                    operation_type=OperationType.CONTEXT,
+                    action=OperationAction.SUCCEED,
+                ),
+                is_sync=False,
+            )
+            assert "child_1" in state._parent_done
+        finally:
+            release_child_hook.set()
+
+        with pytest.raises(OrphanedChildException) as exc_info:
+            child_future.result(timeout=2.0)
+
     assert exc_info.value.operation_id == "child_1"
 
 

@@ -64,6 +64,8 @@ def create_mock_checkpoint_with_operations():
                 operation_type=update.operation_type,
                 status=OperationStatus.STARTED,  # New operations start as STARTED
                 parent_id=update.parent_id,
+                name=update.name,
+                sub_type=update.sub_type,
             )
             operations.append(op)
 
@@ -540,8 +542,11 @@ def test_durable_wait_for_callback_decorator():
             operations = [
                 Operation(
                     operation_id=update.operation_id,
-                    operation_type=OperationType.CALLBACK,
+                    operation_type=update.operation_type,
                     status=OperationStatus.STARTED,
+                    parent_id=update.parent_id,
+                    name=update.name,
+                    sub_type=update.sub_type,
                     callback_details=CallbackDetails(
                         callback_id=f"callback-{update.operation_id[:8]}"
                     ),

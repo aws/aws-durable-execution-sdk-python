@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, TypeVar
 from aws_durable_execution_sdk_python.config import ChildConfig
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
+    ExecutionError,
     InvocationError,
     SuspendExecution,
 )
@@ -82,9 +83,7 @@ class ChildOperationExecutor(OperationExecutor[T]):
         Raises:
             ChildContextError: For FAILED operations
         """
-        checkpointed_result: CheckpointedResult = self.state.get_checkpoint_result(
-            self.operation_identifier.operation_id
-        )
+        checkpointed_result = self._get_checkpoint_result()
 
         # Terminal success without replay_children - deserialize and return
         if (
@@ -270,6 +269,11 @@ class ChildOperationExecutor(OperationExecutor[T]):
             return return_value  # noqa: TRY300
         except SuspendExecution:
             # Don't checkpoint SuspendExecution - let it bubble up
+            raise
+        except ExecutionError:
+            # Execution-terminal SDK errors (including nondeterminism) must
+            # escape unchanged without mutating history or being wrapped as a
+            # child failure.
             raise
         except Exception as e:
             # Retryable InvocationError: re-raise with no FAIL checkpoint so the

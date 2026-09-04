@@ -47,6 +47,7 @@ from opentelemetry.trace import (
 
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     DeterministicIdGenerator,
+    derive_execution_root_span_id,
     derive_workflow_span_id,
     operation_id_to_span_id,
 )
@@ -175,7 +176,7 @@ def _config_for_provider(
         monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
     return OtelPluginConfig(
         tracer_provider=None if uses_global_provider else provider,
-        context_extractor=lambda _: Context(),
+        context_extractor=lambda _: None,
         enrich_logger=False,
     )
 
@@ -229,7 +230,7 @@ def test_global_proxy_binds_sdk_provider_before_first_invocation(
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: current_provider[0])
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            context_extractor=lambda _: Context(),
+            context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
@@ -254,7 +255,7 @@ def test_global_proxy_disables_entire_invocation_until_sdk_provider_is_ready(
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: current_provider[0])
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            context_extractor=lambda _: Context(),
+            context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
@@ -286,10 +287,14 @@ def _assert_hierarchy(exporter: InMemorySpanExporter) -> None:
     operation = spans[OP_NAME]
     attempt = spans[f"{OP_NAME} attempt 1"]
 
-    # Invocation span is a root (empty extracted context) and records status.
-    assert invocation.parent is None
+    # Invocation shares the synthetic execution root with Workflow and records
+    # status.
+    assert invocation.parent is not None
+    assert workflow.parent is not None
     assert invocation.kind is SpanKind.INTERNAL
-    assert invocation.context.trace_id != workflow.context.trace_id
+    assert invocation.context.trace_id == workflow.context.trace_id
+    assert invocation.parent.span_id == workflow.parent.span_id
+    assert invocation.parent.span_id == derive_execution_root_span_id(EXECUTION_ARN)
     assert invocation.attributes is not None
     assert (
         invocation.attributes["durable.invocation.status"]
@@ -311,7 +316,7 @@ def _assert_hierarchy(exporter: InMemorySpanExporter) -> None:
     [False, True],
     ids=["explicit", "global"],
 )
-def test_invocation_span_parents_to_ambient_for_all_provider_modes(
+def test_invocation_span_ignores_different_trace_ambient_for_all_provider_modes(
     uses_global_provider: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     provider, exporter = _provider()
@@ -334,11 +339,13 @@ def test_invocation_span_parents_to_ambient_for_all_provider_modes(
     invocation = spans["Invocation"]
     operation = spans[OP_NAME]
 
-    assert workflow.parent is None
+    assert workflow.parent is not None
     assert workflow.context.trace_id != ambient.get_span_context().trace_id
     assert invocation.parent is not None
-    assert invocation.parent.span_id == ambient.get_span_context().span_id
-    assert invocation.context.trace_id == ambient.get_span_context().trace_id
+    assert invocation.parent.span_id != ambient.get_span_context().span_id
+    assert invocation.context.trace_id != ambient.get_span_context().trace_id
+    assert invocation.context.trace_id == workflow.context.trace_id
+    assert invocation.parent.span_id == workflow.parent.span_id
     assert operation.parent is not None
     assert operation.parent.span_id == invocation.context.span_id
     assert {link.context.span_id for link in operation.links} == {
@@ -354,7 +361,7 @@ def test_community_layer_full_lifecycle_uses_supplied_provider():
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
             tracer_provider=provider,
-            context_extractor=lambda _: Context(),
+            context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
@@ -376,7 +383,7 @@ def test_adot_layer_full_lifecycle_uses_global_provider(monkeypatch):
 
     plugin = InvocationOtelPlugin(
         OtelPluginConfig(
-            context_extractor=lambda _: Context(),
+            context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
@@ -395,14 +402,14 @@ def test_second_plugin_uses_execution_trace_id_independent_of_xray(monkeypatch):
     first_plugin = InvocationOtelPlugin(
         OtelPluginConfig(
             tracer_provider=provider,
-            context_extractor=lambda _: Context(),
+            context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
     target_plugin = InvocationOtelPlugin(
         OtelPluginConfig(
             tracer_provider=provider,
-            context_extractor=lambda _: Context(),
+            context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
