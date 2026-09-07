@@ -58,7 +58,7 @@ jobs:
       actions: write
       contents: read
       id-token: write
-    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@b8ca81f11aa28e7f7b77ad96a6d323ce10b5f21f
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@c31f95f448a4fe8ffb93203c7920a48e87362801
     with:
       language: python
       resource_prefix: p
