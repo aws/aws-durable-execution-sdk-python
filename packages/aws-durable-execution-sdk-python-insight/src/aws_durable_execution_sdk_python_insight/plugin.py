@@ -57,6 +57,7 @@ from aws_durable_execution_sdk_python_insight.types import (
     OperationDetail,
     OperationOverride,
     WorkflowInsightConfig,
+    _validate_exporter_instances,
 )
 
 
@@ -202,11 +203,14 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         if ops is not None:
             for override in ops.overrides:
                 self._overrides_by_name[override.operation_name] = override
-        # Default-exporter parity with the JS plugin: an omitted OR an explicitly
-        # empty exporter list falls back to the Lambda log exporter, so the
-        # plugin is never a silent no-op. A non-empty list is used verbatim.
+        # Snapshot and revalidate at use time. ``WorkflowInsightConfig`` is
+        # frozen, but its caller-owned list can still be mutated after
+        # construction; the exact snapshot used to create lanes must preserve
+        # the one-worker-per-distinct-instance invariant.
+        configured_exporters = list(config.exporters)
+        _validate_exporter_instances(configured_exporters)
         self._exporters: list[InsightExporter] = (
-            list(config.exporters) if config.exporters else [LambdaLogExporter()]
+            configured_exporters if configured_exporters else [LambdaLogExporter()]
         )
         # One shared deadline (seconds) for the invocation-end drain + flush.
         self._export_timeout = float(config.export_timeout_seconds)

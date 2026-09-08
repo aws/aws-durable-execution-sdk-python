@@ -220,3 +220,34 @@ def test_default_exporter_unaffected_by_instance_check():
     plugin = workflow_insight(WorkflowInsightConfig())
     assert len(plugin._exporters) == 1
     assert len(plugin._scheduler._lanes) == 1
+
+
+def test_mutating_original_exporter_list_to_duplicate_raises_at_plugin_creation():
+    exporter = _StubExporter()
+    exporters = [exporter]
+    config = WorkflowInsightConfig(exporters=exporters)
+    exporters.append(exporter)
+
+    with pytest.raises(ValueError, match="same exporter instance"):
+        workflow_insight(config)
+
+
+def test_mutating_config_exporters_to_duplicate_raises_at_plugin_creation():
+    exporter = _StubExporter()
+    config = WorkflowInsightConfig(exporters=[exporter])
+    config.exporters.append(exporter)
+
+    with pytest.raises(ValueError, match="same exporter instance"):
+        workflow_insight(config)
+
+
+def test_mutating_exporter_list_with_distinct_instance_is_accepted():
+    first = _StubExporter()
+    second = _StubExporter()
+    exporters = [first]
+    config = WorkflowInsightConfig(exporters=exporters)
+    exporters.append(second)
+
+    plugin = workflow_insight(config)
+    assert plugin._exporters == [first, second]
+    assert [lane._exporter for lane in plugin._scheduler._lanes] == [first, second]
