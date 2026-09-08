@@ -12,6 +12,7 @@ config field names; the *emitted wire record* keeps the JS camelCase field names
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Callable, Literal, Protocol
@@ -152,17 +153,30 @@ class WorkflowInsightConfig:
             seen.append(exporter)
 
     def _validate_export_timeout(self) -> None:
-        # A finite, strictly-positive number. Reject ``bool`` (a subtype of
-        # ``int`` that would silently mean 1s / disallowed 0s), NaN, +/-inf, zero
-        # and negatives -- an invalid timeout must fail loudly at construction,
-        # not silently disable or unbound the invocation-end drain.
+        # A finite, strictly-positive number within Event.wait's platform bound.
+        # Reject ``bool`` (an ``int`` subtype), values that overflow float
+        # conversion, NaN, infinity, zero, negatives, and values above
+        # ``threading.TIMEOUT_MAX``. Invalid input must fail at construction,
+        # before invocation-end cleanup can be interrupted by ``OverflowError``.
         timeout = self.export_timeout_seconds
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             raise ValueError(
                 f"export_timeout_seconds must be a number, got {type(timeout).__name__}"
             )
-        if not math.isfinite(timeout) or timeout <= 0:
+        try:
+            normalized = float(timeout)
+        except (OverflowError, TypeError, ValueError) as exc:
             raise ValueError(
-                "export_timeout_seconds must be a finite number greater than "
-                f"zero, got {timeout!r}"
+                "export_timeout_seconds must be representable as a finite float"
+            ) from exc
+        if (
+            not math.isfinite(normalized)
+            or normalized <= 0
+            or normalized > threading.TIMEOUT_MAX
+        ):
+            raise ValueError(
+                "export_timeout_seconds must be finite, greater than zero, and "
+                f"no greater than threading.TIMEOUT_MAX ({threading.TIMEOUT_MAX}), "
+                f"got {timeout!r}"
             )
+        object.__setattr__(self, "export_timeout_seconds", normalized)

@@ -17,6 +17,8 @@ import threading
 import time
 from typing import Any
 
+import pytest
+
 from aws_durable_execution_sdk_python.lambda_service import (
     OperationStatus,
     OperationSubType,
@@ -182,6 +184,18 @@ def test_non_on_change_mode_skips_operation_change_work():
     state = plugin._state.get(ARN)
     assert state is not None and state.operations == {}  # snapshot not adopted
     assert state.scheduled is False  # nothing scheduled on the change
+
+
+def test_oversized_timeout_rejected_before_exporter_worker_starts():
+    exporter = _BlockingExporter()
+    with pytest.raises(ValueError, match="threading.TIMEOUT_MAX"):
+        workflow_insight(
+            WorkflowInsightConfig(
+                exporters=[exporter],
+                export_timeout_seconds=threading.TIMEOUT_MAX * 2,
+            )
+        )
+    assert not exporter.started.is_set()
 
 
 # -- a blocked exporter never blocks a hook ----------------------------------

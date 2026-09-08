@@ -11,6 +11,8 @@ Also carries a smoke test for the exact documented call shape (comment 4).
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from aws_durable_execution_sdk_python_insight import (
@@ -131,10 +133,10 @@ def test_export_timeout_defaults_to_five_seconds():
     assert workflow_insight(config)._export_timeout == 5.0
 
 
-@pytest.mark.parametrize("value", [0.1, 1, 2.5, 30])
+@pytest.mark.parametrize("value", [0.1, 1, 2.5, 30, threading.TIMEOUT_MAX])
 def test_export_timeout_accepts_finite_positive_numbers(value):
     config = WorkflowInsightConfig(export_timeout_seconds=value)
-    assert config.export_timeout_seconds == value
+    assert config.export_timeout_seconds == float(value)
     assert workflow_insight(config)._export_timeout == float(value)
 
 
@@ -148,6 +150,8 @@ def test_export_timeout_accepts_finite_positive_numbers(value):
         float("nan"),
         float("inf"),
         float("-inf"),
+        threading.TIMEOUT_MAX * 2,
+        10**1000,
         True,  # bool is an int subtype but must be rejected explicitly
         False,
         "5",  # non-numeric
