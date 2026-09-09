@@ -23,7 +23,8 @@ import copy
 import logging
 import threading
 import time
-from collections import OrderedDict, deque
+from collections import deque
+from dataclasses import dataclass
 from typing import Any
 
 from aws_durable_execution_sdk_python_insight.truncation import truncate_record
@@ -52,6 +53,15 @@ _DEFAULT_MAX_PENDING_RECORDS_PER_EXECUTION = 16
 # Queue entry kinds.
 _RECORD = "record"
 _FLUSH = "flush"
+
+_RecordToken = tuple[str, int]
+
+
+@dataclass(slots=True)
+class _PendingRecord:
+    sequence: int
+    generation: int
+    value: dict[str, Any]
 
 
 class _FlushBarrier:
@@ -106,12 +116,15 @@ class _ExporterLane:
         # makes any accidental recursive acquisition fail loudly instead of
         # silently succeeding.
         self._cond = threading.Condition(threading.Lock())
-        # Ordered work list: entries are (_RECORD, arn) or (_FLUSH, barrier).
+        # Ordered work list: entries are (_RECORD, (arn, generation)) or
+        # (_FLUSH, barrier). A generation changes whenever a flush is queued, so
+        # one ARN can have independent tokens on both sides of a barrier.
         self._queue: deque[tuple[str, Any]] = deque()
-        # arn -> bounded FIFO of pending records. Insertion order is the ARN
-        # fairness order; scheduling an existing ARN moves its queue token to
-        # the back, and the worker requeues an ARN that has more records.
-        self._pending: OrderedDict[str, deque[dict[str, Any]]] = OrderedDict()
+        # arn -> FIFO ordered by record sequence. Queue-token order, not this
+        # mapping, controls round-robin fairness.
+        self._pending: dict[str, deque[_PendingRecord]] = {}
+        self._generation = 0
+        self._next_sequence = 0
         self._stop_when_idle = False
         self._worker: threading.Thread | None = None
 
@@ -120,23 +133,30 @@ class _ExporterLane:
     def schedule(self, execution_arn: str, record: dict[str, Any]) -> None:
         with self._cond:
             self._stop_when_idle = False
-            if execution_arn in self._pending:
-                pending = self._pending[execution_arn]
-                if len(pending) >= self._max_pending_per_execution:
-                    pending.popleft()
-                    _logger.warning(
-                        "workflow-insight: pending export FIFO for %s on %s is "
-                        "full (cap=%d); dropping oldest pending record",
-                        execution_arn,
-                        type(self._exporter).__name__,
-                        self._max_pending_per_execution,
-                    )
-                pending.append(record)
-                self._pending.move_to_end(execution_arn)
-                self._move_record_token_to_back(execution_arn)
+            pending = self._pending.get(execution_arn)
+            if pending is None:
+                pending = deque()
+                self._pending[execution_arn] = pending
+            elif len(pending) >= self._max_pending_per_execution:
+                self._drop_oldest_pending_record(execution_arn)
+                pending = self._pending.setdefault(execution_arn, deque())
+                _logger.warning(
+                    "workflow-insight: pending export FIFO for %s on %s is "
+                    "full (cap=%d); dropping oldest pending record",
+                    execution_arn,
+                    type(self._exporter).__name__,
+                    self._max_pending_per_execution,
+                )
+
+            generation = self._generation
+            has_generation = bool(pending and pending[-1].generation == generation)
+            pending.append(_PendingRecord(self._next_sequence, generation, record))
+            self._next_sequence += 1
+            token = (execution_arn, generation)
+            if has_generation:
+                self._move_record_token_to_back(token)
             else:
-                self._pending[execution_arn] = deque([record])
-                self._queue.append((_RECORD, execution_arn))
+                self._queue.append((_RECORD, token))
                 self._enforce_pending_execution_cap()
             self._enforce_pending_record_cap()
             self._ensure_worker_locked()
@@ -146,6 +166,7 @@ class _ExporterLane:
         barrier = _FlushBarrier()
         with self._cond:
             self._queue.append((_FLUSH, barrier))
+            self._generation += 1
             self._ensure_worker_locked()
             self._cond.notify()
         return barrier
@@ -181,34 +202,31 @@ class _ExporterLane:
 
     # -- queue bookkeeping (must hold ``_cond``) ------------------------------
 
-    def _move_record_token_to_back(self, execution_arn: str) -> None:
+    def _move_record_token_to_back(self, token: _RecordToken) -> None:
         for index, (kind, payload) in enumerate(self._queue):
-            if kind == _RECORD and payload == execution_arn:
+            if kind == _RECORD and payload == token:
                 del self._queue[index]
-                self._queue.append((_RECORD, execution_arn))
+                self._queue.append((_RECORD, token))
                 return
-        # No token means the ARN's last queued record is currently in flight.
-        # The next schedule sees it absent from ``_pending`` and appends a fresh
-        # FIFO plus token, preserving the in-flight record before new work.
 
-    def _requeue_record_before_flush(self, execution_arn: str) -> None:
-        """Requeue an ARN behind peer records but before its drain barrier.
-
-        A record token represents the ARN's whole pending FIFO at the moment the
-        barrier is enqueued. Consuming one record must not move the remaining
-        pre-barrier records behind that barrier, or invocation end could flush
-        and return while part of its FIFO is still waiting.
-        """
+    def _requeue_record_before_flush(self, token: _RecordToken) -> None:
+        """Requeue one generation behind peers but before its flush barrier."""
         for index, (kind, _) in enumerate(self._queue):
             if kind == _FLUSH:
-                self._queue.insert(index, (_RECORD, execution_arn))
+                self._queue.insert(index, (_RECORD, token))
                 return
-        self._queue.append((_RECORD, execution_arn))
+        self._queue.append((_RECORD, token))
+
+    def _oldest_pending_arn(self) -> str:
+        return min(
+            self._pending,
+            key=lambda arn: self._pending[arn][0].sequence,
+        )
 
     def _enforce_pending_execution_cap(self) -> None:
         while len(self._pending) > self._max_pending:
-            old_arn, _ = self._pending.popitem(last=False)
-            self._remove_record_token(old_arn)
+            old_arn = self._oldest_pending_arn()
+            self._drop_pending_execution(old_arn)
             _logger.warning(
                 "workflow-insight: export lane for %s is full "
                 "(cap=%d); dropping pending records for %s",
@@ -221,9 +239,8 @@ class _ExporterLane:
         while sum(len(records) for records in self._pending.values()) > (
             self._max_pending_records
         ):
-            old_arn = next(iter(self._pending))
-            records = self._pending[old_arn]
-            records.popleft()
+            old_arn = self._oldest_pending_arn()
+            self._drop_oldest_pending_record(old_arn)
             _logger.warning(
                 "workflow-insight: export lane for %s reached its pending "
                 "record cap (%d); dropping oldest pending record for %s",
@@ -231,13 +248,26 @@ class _ExporterLane:
                 self._max_pending_records,
                 old_arn,
             )
-            if not records:
-                del self._pending[old_arn]
-                self._remove_record_token(old_arn)
 
-    def _remove_record_token(self, execution_arn: str) -> None:
+    def _drop_oldest_pending_record(self, execution_arn: str) -> None:
+        records = self._pending[execution_arn]
+        dropped = records.popleft()
+        token = (execution_arn, dropped.generation)
+        if not records or records[0].generation != dropped.generation:
+            self._remove_record_token(token)
+        if not records:
+            del self._pending[execution_arn]
+
+    def _drop_pending_execution(self, execution_arn: str) -> None:
+        del self._pending[execution_arn]
+        for index in range(len(self._queue) - 1, -1, -1):
+            kind, payload = self._queue[index]
+            if kind == _RECORD and payload[0] == execution_arn:
+                del self._queue[index]
+
+    def _remove_record_token(self, token: _RecordToken) -> None:
         for index, (kind, payload) in enumerate(self._queue):
-            if kind == _RECORD and payload == execution_arn:
+            if kind == _RECORD and payload == token:
                 del self._queue[index]
                 return
 
@@ -271,17 +301,17 @@ class _ExporterLane:
                 kind, payload = self._queue.popleft()
                 record: dict[str, Any] | None = None
                 if kind == _RECORD:
-                    pending = self._pending.get(payload)
-                    if not pending:
+                    token: _RecordToken = payload
+                    execution_arn, generation = token
+                    pending = self._pending.get(execution_arn)
+                    if not pending or pending[0].generation != generation:
                         continue
-                    record = pending.popleft()
-                    if pending:
-                        # Round-robin across ARNs: one record per turn, then the
-                        # ARN goes behind all queue entries already waiting.
-                        self._pending.move_to_end(payload)
-                        self._requeue_record_before_flush(payload)
-                    else:
-                        del self._pending[payload]
+                    record = pending.popleft().value
+                    if pending and pending[0].generation == generation:
+                        # One record per ARN turn within this barrier generation.
+                        self._requeue_record_before_flush(token)
+                    elif not pending:
+                        del self._pending[execution_arn]
 
             if kind == _RECORD and record is not None:
                 self._export_one(record)

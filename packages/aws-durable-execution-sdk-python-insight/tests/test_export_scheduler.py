@@ -420,6 +420,29 @@ def test_flush_barrier_waits_for_entire_pending_fifo():
     ]
 
 
+def test_flush_barrier_splits_same_execution_fifo_by_generation():
+    exporter = FirstExportBlockingRecorder()
+    scheduler = _ExportScheduler([exporter])
+    lane = scheduler._lanes[0]
+    scheduler.schedule(ARN_A, _rec(ARN_A, "a1"))
+    assert _wait_until(exporter.started.is_set)
+
+    scheduler.schedule(ARN_A, _rec(ARN_A, "a2"))
+    barrier = lane.enqueue_flush()
+    scheduler.schedule(ARN_A, _rec(ARN_A, "a3"))
+    exporter.release()
+
+    assert barrier.wait(5.0)
+    lane.request_stop_when_idle()
+    assert _wait_until(lambda: not lane._worker_alive())
+    assert exporter.calls == [
+        ("export", "a1"),
+        ("export", "a2"),
+        ("flush", None),
+        ("export", "a3"),
+    ]
+
+
 def test_record_scheduled_after_barrier_waits_for_later_flush():
     exporter = FirstExportBlockingRecorder()
     scheduler = _ExportScheduler([exporter])
@@ -658,6 +681,23 @@ def test_record_sizing_exception_does_not_escape_schedule(monkeypatch):
     scheduler.end_invocation(5.0)
 
 
+def test_pending_record_cap_evicts_true_oldest_across_arns():
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter], max_pending_records=2)
+    scheduler.schedule(ARN_C, _rec(ARN_C, "inflight"))
+    assert _wait_until(exporter.started.is_set)
+
+    scheduler.schedule(ARN_A, _rec(ARN_A, "a1"))
+    scheduler.schedule(ARN_B, _rec(ARN_B, "b1", status="SUCCEEDED"))
+    scheduler.schedule(ARN_A, _rec(ARN_A, "a2"))
+
+    exporter.release()
+    scheduler.end_invocation(5.0)
+    # A1 is globally oldest. B1 remains even though scheduling A2 moved A's
+    # fairness token behind B's token.
+    assert exporter.exported_values() == ["inflight", "b1", "a2"]
+
+
 def test_cancelled_barrier_is_cleaned_up_and_worker_exits():
     exporter = BlockingExporter()
     scheduler = _ExportScheduler([exporter])
@@ -698,13 +738,14 @@ def test_repeated_timeouts_behind_blocked_exporter_stay_bounded():
         # The cancelled barrier is pulled from the queue immediately, so no
         # _FLUSH marker lingers behind the blocked worker.
         assert lane._queued_flush_count() == 0
-        # Queue holds one token for the ARN; records are bounded inside its FIFO.
-        assert lane._queue_len() <= 1
+        # Each cancelled barrier can leave one generation token, but both
+        # records and tokens remain bounded by the per-execution FIFO depth.
+        assert lane._queue_len() <= 16
         assert lane._pending_record_count() <= 16
 
-    # Bounded state: one in-flight ARN with a bounded pending FIFO, and no
-    # growing pile of barriers.
-    assert lane._queue_len() <= 1
+    # Bounded state: one in-flight ARN with a bounded pending FIFO and bounded
+    # generation tokens, with no growing pile of barriers.
+    assert lane._queue_len() <= 16
     assert lane._pending_count() <= 1
     assert lane._pending_record_count() <= 16
     assert lane._queued_flush_count() == 0
