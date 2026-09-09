@@ -173,8 +173,11 @@ class FailingExporter:
         raise RuntimeError("flush boom")
 
 
-class _Uncopyable:
-    """A payload whose ``deepcopy`` raises, to force a per-record copy failure."""
+class _Uncopyable(dict[str, str]):
+    """A JSON-serializable payload whose ``deepcopy`` raises."""
+
+    def __init__(self) -> None:
+        super().__init__({"value": "safe"})
 
     def __deepcopy__(self, memo: dict[int, Any]) -> Any:
         raise RuntimeError("uncopyable payload")
@@ -696,6 +699,51 @@ def test_pending_record_cap_evicts_true_oldest_across_arns():
     # A1 is globally oldest. B1 remains even though scheduling A2 moved A's
     # fairness token behind B's token.
     assert exporter.exported_values() == ["inflight", "b1", "a2"]
+
+
+def test_pending_byte_budget_evicts_oldest_large_record():
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter], max_pending_bytes=2_000)
+    lane = scheduler._lanes[0]
+    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
+    assert _wait_until(exporter.started.is_set)
+
+    scheduler.schedule(ARN_B, _rec(ARN_B, "b" * 1_500))
+    scheduler.schedule(ARN_C, _rec(ARN_C, "c" * 1_500))
+
+    assert lane._pending_record_count() == 1
+    assert lane._pending_bytes_count() <= 2_000
+    exporter.release()
+    scheduler.end_invocation(5.0)
+    exported = exporter.exported_values()
+    assert exported[0] == "inflight"
+    assert exported[1] == "c" * 1_500
+
+
+def test_cancelled_barrier_preserves_generation_order_and_terminal():
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter])
+    lane = scheduler._lanes[0]
+    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
+    assert _wait_until(exporter.started.is_set)
+
+    scheduler.schedule(ARN_A, _rec(ARN_A, "pre-1"))
+    scheduler.schedule(ARN_A, _rec(ARN_A, "pre-2"))
+    barrier = lane.enqueue_flush()
+    scheduler.schedule(ARN_A, _rec(ARN_A, "terminal", status="SUCCEEDED"))
+    lane.cancel_flush(barrier)
+    lane.request_stop_when_idle()
+    exporter.release()
+
+    assert _wait_until(lambda: not lane._worker_alive())
+    assert exporter.exported_values() == [
+        "inflight",
+        "pre-1",
+        "pre-2",
+        "terminal",
+    ]
+    assert lane._pending_record_count() == 0
+    assert lane._queue_len() == 0
 
 
 def test_cancelled_barrier_is_cleaned_up_and_worker_exits():

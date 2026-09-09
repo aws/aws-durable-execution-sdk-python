@@ -10,8 +10,8 @@ flush calls.
 Each exporter lane:
 
 * Keeps a bounded FIFO per execution ARN and processes ARNs round-robin.
-* Drops the oldest pending snapshots when the per-execution or lane-wide limit
-  is reached, favoring the newest progress and terminal snapshots.
+* Drops the oldest pending snapshots when the per-execution, lane-wide record,
+  or byte limit is reached, favoring recent progress and terminal snapshots.
 * Uses a lane-wide flush barrier at invocation end. All barriers share one
   timeout; timed-out barriers are removed without replacing a blocked worker.
 * Stops its worker after an invocation has drained and the lane becomes idle.
@@ -27,7 +27,10 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-from aws_durable_execution_sdk_python_insight.truncation import truncate_record
+from aws_durable_execution_sdk_python_insight.truncation import (
+    json_byte_size,
+    truncate_record,
+)
 from aws_durable_execution_sdk_python_insight.types import InsightExporter
 
 
@@ -50,6 +53,10 @@ _DEFAULT_MAX_PENDING_RECORDS = 1024
 # exporter. The in-flight record is not included in this count.
 _DEFAULT_MAX_PENDING_RECORDS_PER_EXECUTION = 16
 
+# Canonical JSON-byte estimate retained by one blocked lane. This keeps the
+# instrumentation backlog well below Lambda's 128 MiB memory floor.
+_DEFAULT_MAX_PENDING_BYTES = 16_000_000
+
 # Queue entry kinds.
 _RECORD = "record"
 _FLUSH = "flush"
@@ -62,6 +69,7 @@ class _PendingRecord:
     sequence: int
     generation: int
     value: dict[str, Any]
+    size: int
 
 
 class _FlushBarrier:
@@ -104,11 +112,14 @@ class _ExporterLane:
         max_pending_records_per_execution: int = (
             _DEFAULT_MAX_PENDING_RECORDS_PER_EXECUTION
         ),
+        max_pending_bytes: int = _DEFAULT_MAX_PENDING_BYTES,
     ) -> None:
         self._exporter = exporter
         self._max_pending = max(1, max_pending_executions)
         self._max_pending_records = max(1, max_pending_records)
         self._max_pending_per_execution = max(1, max_pending_records_per_execution)
+        self._max_pending_bytes = max(1, max_pending_bytes)
+        self._pending_bytes = 0
         # Explicit non-reentrant Lock rather than Condition()'s default RLock:
         # the lane never re-acquires ``_cond`` while already holding it (worker
         # I/O -- export/flush -- runs outside the lock and no locked helper
@@ -130,9 +141,19 @@ class _ExporterLane:
 
     # -- producer API (checkpoint / invocation-end threads) -------------------
 
-    def schedule(self, execution_arn: str, record: dict[str, Any]) -> None:
+    def schedule(
+        self,
+        execution_arn: str,
+        record: dict[str, Any],
+        record_size: int | None,
+    ) -> None:
         with self._cond:
             self._stop_when_idle = False
+            size = (
+                self._max_pending_bytes + 1
+                if record_size is None
+                else max(0, record_size)
+            )
             pending = self._pending.get(execution_arn)
             if pending is None:
                 pending = deque()
@@ -150,7 +171,10 @@ class _ExporterLane:
 
             generation = self._generation
             has_generation = bool(pending and pending[-1].generation == generation)
-            pending.append(_PendingRecord(self._next_sequence, generation, record))
+            pending.append(
+                _PendingRecord(self._next_sequence, generation, record, size)
+            )
+            self._pending_bytes += size
             self._next_sequence += 1
             token = (execution_arn, generation)
             if has_generation:
@@ -159,6 +183,7 @@ class _ExporterLane:
                 self._queue.append((_RECORD, token))
                 self._enforce_pending_execution_cap()
             self._enforce_pending_record_cap()
+            self._enforce_pending_byte_cap()
             self._ensure_worker_locked()
             self._cond.notify()
 
@@ -210,9 +235,15 @@ class _ExporterLane:
                 return
 
     def _requeue_record_before_flush(self, token: _RecordToken) -> None:
-        """Requeue one generation behind peers but before its flush barrier."""
-        for index, (kind, _) in enumerate(self._queue):
-            if kind == _FLUSH:
+        """Requeue behind peers without crossing this ARN's next generation."""
+        execution_arn, generation = token
+        for index, (kind, payload) in enumerate(self._queue):
+            later_same_arn = (
+                kind == _RECORD
+                and payload[0] == execution_arn
+                and payload[1] > generation
+            )
+            if kind == _FLUSH or later_same_arn:
                 self._queue.insert(index, (_RECORD, token))
                 return
         self._queue.append((_RECORD, token))
@@ -249,17 +280,33 @@ class _ExporterLane:
                 old_arn,
             )
 
-    def _drop_oldest_pending_record(self, execution_arn: str) -> None:
+    def _enforce_pending_byte_cap(self) -> None:
+        while self._pending_bytes > self._max_pending_bytes and self._pending:
+            old_arn = self._oldest_pending_arn()
+            dropped_size = self._drop_oldest_pending_record(old_arn)
+            _logger.warning(
+                "workflow-insight: export lane for %s reached its pending byte "
+                "budget (%d); dropping %d-byte pending record for %s",
+                type(self._exporter).__name__,
+                self._max_pending_bytes,
+                dropped_size,
+                old_arn,
+            )
+
+    def _drop_oldest_pending_record(self, execution_arn: str) -> int:
         records = self._pending[execution_arn]
         dropped = records.popleft()
+        self._pending_bytes -= dropped.size
         token = (execution_arn, dropped.generation)
         if not records or records[0].generation != dropped.generation:
             self._remove_record_token(token)
         if not records:
             del self._pending[execution_arn]
+        return dropped.size
 
     def _drop_pending_execution(self, execution_arn: str) -> None:
-        del self._pending[execution_arn]
+        records = self._pending.pop(execution_arn)
+        self._pending_bytes -= sum(record.size for record in records)
         for index in range(len(self._queue) - 1, -1, -1):
             kind, payload = self._queue[index]
             if kind == _RECORD and payload[0] == execution_arn:
@@ -306,7 +353,9 @@ class _ExporterLane:
                     pending = self._pending.get(execution_arn)
                     if not pending or pending[0].generation != generation:
                         continue
-                    record = pending.popleft().value
+                    pending_record = pending.popleft()
+                    self._pending_bytes -= pending_record.size
+                    record = pending_record.value
                     if pending and pending[0].generation == generation:
                         # One record per ARN turn within this barrier generation.
                         self._requeue_record_before_flush(token)
@@ -384,6 +433,10 @@ class _ExporterLane:
         with self._cond:
             return sum(len(records) for records in self._pending.values())
 
+    def _pending_bytes_count(self) -> int:
+        with self._cond:
+            return self._pending_bytes
+
     def _queue_len(self) -> int:
         with self._cond:
             return len(self._queue)
@@ -405,6 +458,7 @@ class _ExportScheduler:
         max_pending_records_per_execution: int = (
             _DEFAULT_MAX_PENDING_RECORDS_PER_EXECUTION
         ),
+        max_pending_bytes: int = _DEFAULT_MAX_PENDING_BYTES,
     ) -> None:
         self._lanes = [
             _ExporterLane(
@@ -412,14 +466,16 @@ class _ExportScheduler:
                 max_pending_executions=max_pending_executions,
                 max_pending_records=max_pending_records,
                 max_pending_records_per_execution=max_pending_records_per_execution,
+                max_pending_bytes=max_pending_bytes,
             )
             for exporter in exporters
         ]
 
     def schedule(self, execution_arn: str, record: dict[str, Any]) -> None:
         """Fan a canonical record out to every lane. Returns immediately."""
+        record_size = json_byte_size(record)
         for lane in self._lanes:
-            lane.schedule(execution_arn, record)
+            lane.schedule(execution_arn, record, record_size)
 
     def end_invocation(self, timeout_seconds: float) -> bool:
         """Drain and flush every touched lane under one shared timeout.
