@@ -1,36 +1,21 @@
 # SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Asynchronous, coalescing export scheduler for the Workflow Insight plugin.
+"""Asynchronous export scheduler for the Workflow Insight plugin.
 
-The plugin builds one canonical ``WorkflowInsight`` record on the SDK checkpoint
-thread and hands it to :class:`_ExportScheduler`. The scheduler keeps all
-exporter-specific work -- per-exporter copy, ``render``, truncation, ``export``
-and ``flush`` -- off the checkpoint thread by running it in a lazily-created
-daemon worker, one per exporter ("lane"). Scheduling a record only enqueues it
-and returns immediately, so ``on_operation_change`` never blocks on a slow
-exporter.
+Exporter work runs outside the SDK checkpoint thread. Each exporter has one
+lazy daemon worker that serializes copying, rendering, truncation, export, and
+flush calls.
 
-Design (``workflow-insight-async-export-design.md``):
+Each exporter lane:
 
-* One lazy daemon worker per exporter lane; never more than one live worker per
-  lane, and a blocked worker is retained -- never replaced -- so threads cannot
-  grow without bound.
-* Per lane, at most one in-flight record and one latest *pending* record per
-  execution ARN. Records are cumulative snapshots, so a newer pending record for
-  an ARN replaces the older one (coalescing); an in-flight record is never
-  cancelled. Updating a pending ARN moves it to the back of the queue for
-  fairness across ARNs. Pending ARNs are capped; the oldest is evicted when the
-  cap is exceeded (only reachable behind a blocked/slow exporter).
-* Invocation end enqueues one flush barrier per touched lane after the latest
-  record and waits for all barriers under a single shared timeout deadline. On
-  timeout the workflow response is returned, degradation is logged, and each
-  stale barrier is cancelled and its still-queued ``_FLUSH`` marker pulled from
-  the lane so barriers cannot accumulate behind a blocked worker; any blocked
-  worker stays daemonized (a synchronous Python ``export()`` cannot be safely
-  killed) and completes an already-popped barrier itself.
-* Idle workers exit after the drain/flush request, so a normal invocation leaves
-  no lingering thread.
+* Keeps the latest pending snapshot per execution ARN and processes ARNs
+  round-robin.
+* Drops the oldest pending execution when the lane-wide limit is reached,
+  keeping memory bounded.
+* Uses a lane-wide flush barrier at invocation end. All barriers share one
+  timeout; timed-out barriers are removed without replacing a blocked worker.
+* Stops its worker after an invocation has drained and the lane becomes idle.
 """
 
 from __future__ import annotations
