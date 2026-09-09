@@ -34,6 +34,7 @@ import datetime
 import json
 import math
 import threading
+import weakref
 from typing import Any, Callable
 
 from aws_durable_execution_sdk_python.plugin import (
@@ -70,6 +71,32 @@ _STATUS_MAP: dict[InvocationStatus, str] = {
     InvocationStatus.PENDING: "RUNNING",
     InvocationStatus.RETRY: "RUNNING",
 }
+
+_exporter_owner_lock = threading.Lock()
+_exporter_owners: list[tuple[InsightExporter, weakref.ReferenceType[object]]] = []
+
+
+def _claim_exporters(owner: object, exporters: list[InsightExporter]) -> None:
+    """Give each exporter object to at most one live plugin instance."""
+
+    def release(owner_ref: weakref.ReferenceType[object]) -> None:
+        with _exporter_owner_lock:
+            _exporter_owners[:] = [
+                entry for entry in _exporter_owners if entry[1] is not owner_ref
+            ]
+
+    owner_ref = weakref.ref(owner, release)
+    with _exporter_owner_lock:
+        _exporter_owners[:] = [
+            entry for entry in _exporter_owners if entry[1]() is not None
+        ]
+        for exporter in exporters:
+            if any(existing is exporter for existing, _ in _exporter_owners):
+                raise ValueError(
+                    "the same exporter instance cannot be shared across "
+                    "Workflow Insight plugin instances"
+                )
+        _exporter_owners.extend((exporter, owner_ref) for exporter in exporters)
 
 
 def _parse_execution_arn(execution_arn: str) -> dict[str, str]:
@@ -220,6 +247,7 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         self._scheduler = _ExportScheduler(self._exporters)
         self._state: dict[str, _ExecutionState] = {}
         self._lock = threading.Lock()
+        _claim_exporters(self, self._exporters)
 
     # -- sampling / state -----------------------------------------------------
 

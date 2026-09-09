@@ -11,6 +11,7 @@ Also carries a smoke test for the exact documented call shape (comment 4).
 
 from __future__ import annotations
 
+import gc
 import threading
 
 import pytest
@@ -212,6 +213,28 @@ def test_two_distinct_same_class_instances_accepted_each_own_lane():
     lanes = plugin._scheduler._lanes
     assert len(lanes) == 2
     assert [lane._exporter for lane in lanes] == [a, b]
+
+
+def test_exporter_instance_cannot_be_shared_across_live_plugins():
+    exporter = _StubExporter()
+    config = WorkflowInsightConfig(exporters=[exporter])
+    owner = workflow_insight(config)
+
+    with pytest.raises(ValueError, match="shared across Workflow Insight"):
+        workflow_insight(config)
+
+    assert owner._exporters == [exporter]
+
+
+def test_exporter_instance_can_be_reused_after_owner_is_collected():
+    exporter = _StubExporter()
+    config = WorkflowInsightConfig(exporters=[exporter])
+    owner = workflow_insight(config)
+    del owner
+    gc.collect()
+
+    replacement = workflow_insight(config)
+    assert replacement._exporters == [exporter]
 
 
 def test_default_exporter_unaffected_by_instance_check():

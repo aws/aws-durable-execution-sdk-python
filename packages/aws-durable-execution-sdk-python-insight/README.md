@@ -59,10 +59,12 @@ Behavior is validated cross-SDK by the `insight` conformance suite
 > truncation, `export()` and `flush()` — runs on a background daemon worker per
 > exporter, never on the SDK checkpoint path, so a slow exporter does not delay
 > workflow progress. Because each configured exporter is driven by its own
-> single background worker, every entry in `exporters` must be a **distinct
-> instance**: passing the same object twice raises `ValueError` at construction.
-> Two separate instances of the same exporter class (e.g. two `S3Exporter`s for
-> different buckets) are fine — each gets its own worker. Rapid cumulative
+> single background worker, each exporter object may belong to only one live
+> `WorkflowInsightPlugin`: listing it twice or sharing it across plugin instances
+> raises `ValueError`. Separate instances of the same exporter class (e.g. two
+> `S3Exporter`s for different buckets) are fine. A blocked lane retains at most
+> 1,024 pending executions and 16 MB of estimated canonical JSON; it drops the
+> oldest pending snapshot when either bound is reached. Rapid cumulative
 > snapshots for one execution are coalesced, so a lane may skip intermediate
 > `on-change` records; the terminal record is always delivered under normal
 > completion. At invocation end the plugin drains and flushes the touched

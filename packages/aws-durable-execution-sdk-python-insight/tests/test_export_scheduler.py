@@ -154,8 +154,11 @@ class FailingExporter:
         raise RuntimeError("flush boom")
 
 
-class _Uncopyable:
-    """A payload whose ``deepcopy`` raises, to force a per-record copy failure."""
+class _Uncopyable(dict[str, str]):
+    """A JSON-serializable payload whose ``deepcopy`` raises."""
+
+    def __init__(self) -> None:
+        super().__init__({"value": "safe"})
 
     def __deepcopy__(self, memo: dict[int, Any]) -> Any:
         raise RuntimeError("uncopyable payload")
@@ -488,6 +491,25 @@ def test_pending_execution_cap_evicts_oldest():
     assert _wait_until(lambda: lane._pending_count() == 2)
     exporter.release()
     scheduler.end_invocation(5.0)
+
+
+def test_pending_byte_budget_evicts_oldest_large_record():
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter], max_pending_bytes=2_000)
+    lane = scheduler._lanes[0]
+    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
+    assert _wait_until(exporter.started.is_set)
+
+    scheduler.schedule(ARN_B, _rec(ARN_B, "b" * 1_500))
+    scheduler.schedule(ARN_C, _rec(ARN_C, "c" * 1_500))
+
+    assert lane._pending_count() == 1
+    assert lane._pending_bytes_count() <= 2_000
+    exporter.release()
+    scheduler.end_invocation(5.0)
+    exported = exporter.exported_values()
+    assert exported[0] == "inflight"
+    assert exported[1] == "c" * 1_500
 
 
 def test_cancelled_barrier_is_cleaned_up_and_worker_exits():
