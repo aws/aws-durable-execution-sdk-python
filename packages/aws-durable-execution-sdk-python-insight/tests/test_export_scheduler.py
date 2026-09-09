@@ -180,18 +180,22 @@ def test_worker_created_lazily_on_first_schedule():
     assert _wait_until(lane._worker_alive)
     exporter.release()
     scheduler.end_invocation(5.0)
+    assert _wait_until(lambda: not lane._worker_alive())
 
 
 def test_one_worker_per_exporter():
-    base = _insight_thread_count()
     e1, e2 = BlockingExporter(), BlockingExporter()
     scheduler = _ExportScheduler([e1, e2])
     scheduler.schedule(ARN_A, _rec(ARN_A, "a1"))
     assert _wait_until(lambda: e1.started.is_set() and e2.started.is_set())
-    assert _wait_until(lambda: _insight_thread_count() - base == 2)
+    assert _lane_worker_count(scheduler._lanes[0]) == 1
+    assert _lane_worker_count(scheduler._lanes[1]) == 1
     e1.release()
     e2.release()
     scheduler.end_invocation(5.0)
+    assert _wait_until(
+        lambda: not any(lane._worker_alive() for lane in scheduler._lanes)
+    )
 
 
 def test_repeated_scheduling_does_not_grow_threads():
