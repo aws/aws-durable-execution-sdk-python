@@ -59,18 +59,26 @@ Behavior is validated cross-SDK by the `insight` conformance suite
 > truncation, `export()` and `flush()` — runs on a background daemon worker per
 > exporter, never on the SDK checkpoint path, so a slow exporter does not delay
 > workflow progress. Because each configured exporter is driven by its own
-> single background worker, each exporter object may belong to only one live
-> `WorkflowInsightPlugin`: listing it twice or sharing it across plugin instances
-> raises `ValueError`. Separate instances of the same exporter class (e.g. two
-> `S3Exporter`s for different buckets) are fine. A blocked lane retains at most
-> 1,024 pending executions and 16 MB of estimated retained memory; it drops the
-> oldest pending snapshot when either bound is reached. Rapid cumulative
-> snapshots for one execution are coalesced, so a lane may skip intermediate
-> `on-change` records; the terminal record is always delivered under normal
-> completion. At invocation end the plugin drains and flushes the touched
-> exporters under a single shared deadline
+> single background worker, every entry in `exporters` must be a **distinct
+> instance**: passing the same object twice raises `ValueError` at construction.
+> Two separate instances of the same exporter class (e.g. two `S3Exporter`s for
+> different buckets) are fine — each gets its own worker. Each lane keeps a
+> bounded FIFO of up to 16 pending snapshots per execution and at most 1,024
+> pending snapshots across the lane, preserving ordinary bursts without relying
+> on daemon-thread scheduling. If an exporter remains slower than the producer
+> and either bound fills, the oldest pending snapshot is dropped so the newest progress and terminal snapshots are retained. At
+> invocation end the plugin drains and flushes the touched exporters under a
+> single shared deadline
 > (`WorkflowInsightConfig.export_timeout_seconds`, default `5.0`); on timeout the
 > workflow response is returned and record delivery degrades to best-effort.
+>
+> `flush()` is lane-wide, not execution-scoped: it applies to the configured
+> exporter instance's entire buffer. A barrier may therefore publish records
+> from another execution that were already buffered, while a record scheduled
+> after that barrier is exported after the flush and waits for a later barrier.
+> A custom batching exporter that requires execution-level isolation should key
+> its buffer by `executionArn` or use a distinct exporter instance per isolated
+> stream.
 
 ## Requirements
 

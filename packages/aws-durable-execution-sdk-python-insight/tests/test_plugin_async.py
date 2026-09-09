@@ -237,6 +237,38 @@ def test_operation_change_returns_immediately_with_blocked_exporter():
     plugin.on_invocation_end(_end(_ops(op)))
 
 
+def test_tight_on_change_burst_preserves_all_records():
+    """Fast consecutive hooks do not depend on daemon-thread scheduling.
+
+    This mirrors the reported parallel/map fan-in shape: invocation start, ten
+    back-to-back operation changes, then terminal completion. The default FIFO
+    depth preserves all twelve records even if the worker gets no turn until
+    after the caller has scheduled the entire burst.
+    """
+    exporter = _BufferedExporter()
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
+    )
+    plugin.on_invocation_start(_start({}))
+    operations: dict[str, OperationInfo] = {}
+    for index in range(10):
+        operation = _step(f"step-{index}", str(index))
+        operations[operation.operation_id] = operation
+        plugin.on_operation_change(
+            OperationChangeInfo(
+                execution_arn=ARN,
+                updated_operations=_ops(operation),
+                operations=dict(operations),
+            )
+        )
+    plugin.on_invocation_end(_end(operations))
+
+    assert [record["status"] for record in exporter.published] == [
+        *("RUNNING" for _ in range(11)),
+        "SUCCEEDED",
+    ]
+
+
 # -- invocation-end drain is bounded by export_timeout_seconds ----------------
 
 

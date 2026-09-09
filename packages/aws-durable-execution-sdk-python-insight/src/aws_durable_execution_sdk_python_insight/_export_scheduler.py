@@ -9,10 +9,9 @@ flush calls.
 
 Each exporter lane:
 
-* Keeps the latest pending snapshot per execution ARN and processes ARNs
-  round-robin.
-* Drops the oldest pending snapshot when the execution-count or byte budget is
-  reached, keeping memory bounded.
+* Keeps a bounded FIFO per execution ARN and processes ARNs round-robin.
+* Drops the oldest pending snapshots when the per-execution or lane-wide limit
+  is reached, favoring the newest progress and terminal snapshots.
 * Uses a lane-wide flush barrier at invocation end. All barriers share one
   timeout; timed-out barriers are removed without replacing a blocked worker.
 * Stops its worker after an invocation has drained and the lane becomes idle.
@@ -21,15 +20,9 @@ Each exporter lane:
 from __future__ import annotations
 
 import copy
-import datetime
-import decimal
-import functools
-import itertools
 import logging
 import threading
 import time
-import types
-import uuid
 from collections import OrderedDict, deque
 from typing import Any
 
@@ -45,198 +38,16 @@ _logger = logging.getLogger("aws_durable_execution_sdk_python_insight")
 # bounded regardless of how long a worker stays blocked.
 _DEFAULT_MAX_PENDING_EXECUTIONS = 1024
 
-# Estimated Python object memory retained by one blocked lane. Lambda functions
-# can be configured with 128 MiB, so keep the instrumentation backlog well below
-# that floor. This is a conservative budget signal, not an exact heap measurement.
-_DEFAULT_MAX_PENDING_BYTES = 16_000_000
+# Upper bound on all pending records in a lane. Keeping this equal to the
+# original distinct-execution cap preserves the scheduler's previous worst-case
+# record count even though one execution can now retain a short burst.
+_DEFAULT_MAX_PENDING_RECORDS = 1024
 
-
-_UNSUPPORTED_RETAINED_GRAPH = object()
-_ATOMIC_RETAINED_TYPES = (
-    str,
-    bytes,
-    bytearray,
-    int,
-    float,
-    complex,
-    bool,
-    type(None),
-    range,
-    type,
-    types.ModuleType,
-    types.CodeType,
-    types.WrapperDescriptorType,
-    types.MethodDescriptorType,
-)
-
-
-_SAFE_OPAQUE_RETAINED_TYPES = (
-    datetime.date,
-    datetime.datetime,
-    datetime.time,
-    datetime.timedelta,
-    decimal.Decimal,
-    uuid.UUID,
-)
-
-
-class _RetainedChildren:
-    __slots__ = ("iterator",)
-
-    def __init__(self, items: Any) -> None:
-        self.iterator = iter(items)
-
-
-def _custom_retained_children(value: Any) -> list[Any]:
-    children: list[Any] = []
-    try:
-        children.append(object.__getattribute__(value, "__dict__"))
-    except Exception:  # noqa: BLE001 - custom objects may use slots only
-        pass
-    for cls in type(value).__mro__:
-        slots = vars(cls).get("__slots__", ())
-        if isinstance(slots, str):
-            slots = (slots,)
-        for slot in slots:
-            if slot in {"__dict__", "__weakref__"}:
-                continue
-            if slot.startswith("__") and not slot.endswith("__"):
-                slot = f"_{cls.__name__.lstrip('_')}{slot}"
-            try:
-                children.append(object.__getattribute__(value, slot))
-            except Exception:  # noqa: BLE001 - unset/custom slots are best-effort
-                pass
-    return children
-
-
-def _retained_children(value: Any) -> Any:
-    custom = _custom_retained_children(value)
-    if isinstance(value, dict):
-        return itertools.chain(dict.__iter__(value), dict.values(value), custom)
-    if isinstance(value, list):
-        return itertools.chain(list.__iter__(value), custom)
-    if isinstance(value, tuple):
-        return itertools.chain(tuple.__iter__(value), custom)
-    if isinstance(value, set):
-        return itertools.chain(set.__iter__(value), custom)
-    if isinstance(value, frozenset):
-        return itertools.chain(frozenset.__iter__(value), custom)
-    if isinstance(value, deque):
-        return itertools.chain(deque.__iter__(value), custom)
-    if isinstance(value, slice):
-        return itertools.chain((value.start, value.stop, value.step), custom)
-    if isinstance(value, memoryview):
-        return itertools.chain((value.obj,), custom)
-    if isinstance(value, functools.partial):
-        return itertools.chain((value.func, value.args, value.keywords), custom)
-    if isinstance(value, types.FunctionType):
-        closure = []
-        for cell in value.__closure__ or ():
-            try:
-                closure.append(cell.cell_contents)
-            except ValueError:
-                pass
-        return itertools.chain(
-            closure, (value.__defaults__, value.__kwdefaults__), custom
-        )
-    if isinstance(value, types.MethodType):
-        return itertools.chain((value.__self__, value.__func__), custom)
-    if isinstance(value, types.BuiltinFunctionType):
-        owner = value.__self__
-        retained = (
-            () if owner is None or isinstance(owner, types.ModuleType) else (owner,)
-        )
-        return itertools.chain(retained, custom)
-    if isinstance(value, types.MethodWrapperType):
-        return itertools.chain((value.__self__,), custom)
-    if isinstance(value, types.GeneratorType):
-        frame = value.gi_frame
-        generator_children = (
-            () if frame is None else (frame.f_locals, value.gi_yieldfrom)
-        )
-        return itertools.chain(generator_children, custom)
-    if type(value) in _ATOMIC_RETAINED_TYPES:
-        return custom
-    if type(value) in _SAFE_OPAQUE_RETAINED_TYPES:
-        return custom
-    if custom:
-        return custom
-    return _UNSUPPORTED_RETAINED_GRAPH
-
-
-def _retained_shallow_size(value: Any) -> int:
-    """Return shallow size without dispatching to user-defined ``__sizeof__``."""
-    try:
-        if isinstance(value, dict):
-            return dict.__sizeof__(value)
-        if isinstance(value, list):
-            return list.__sizeof__(value)
-        if isinstance(value, tuple):
-            return tuple.__sizeof__(value)
-        if isinstance(value, set):
-            return set.__sizeof__(value)
-        if isinstance(value, frozenset):
-            return frozenset.__sizeof__(value)
-        if isinstance(value, deque):
-            return deque.__sizeof__(value)
-        if type(value) in _ATOMIC_RETAINED_TYPES + _SAFE_OPAQUE_RETAINED_TYPES:
-            return value.__sizeof__()
-        return object.__sizeof__(value)
-    except Exception:  # noqa: BLE001 - estimation must never break a hook
-        return 1_024
-
-
-def _estimate_retained_size(value: Any, max_size: int | None = None) -> int:
-    """Estimate retained memory with bounded, non-overridable traversal."""
-    total = 0
-    seen: set[int] = set()
-    stack: list[Any] = [value]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, _RetainedChildren):
-            try:
-                child = next(item.iterator)
-            except StopIteration:
-                continue
-            except Exception:  # noqa: BLE001 - fail closed on malformed iterators
-                return max_size + 1 if max_size is not None else total + 1_024
-            stack.append(item)
-            stack.append(child)
-            continue
-        identity = id(item)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        total += _retained_shallow_size(item)
-        if max_size is not None and total > max_size:
-            return max_size + 1
-        children = _retained_children(item)
-        if children is _UNSUPPORTED_RETAINED_GRAPH:
-            return max_size + 1 if max_size is not None else total + 1_024
-        stack.append(_RetainedChildren(children))
-    return total
-
-
-def _copy_record_containers(record: dict[str, Any]) -> dict[str, Any]:
-    """Copy built-in containers while treating custom values as opaque leaves."""
-    memo: dict[int, Any] = {}
-    seen: set[int] = set()
-    stack: list[Any] = [record]
-    while stack:
-        item = stack.pop()
-        identity = id(item)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        if type(item) is dict:
-            stack.extend(item.keys())
-            stack.extend(item.values())
-        elif type(item) in {list, tuple, set, frozenset, deque}:
-            stack.extend(item)
-        else:
-            memo[identity] = item
-    return copy.deepcopy(record, memo)
-
+# Upper bound on records waiting for one execution in one lane. This is large
+# enough to preserve the known 11-progress-plus-terminal burst without relying
+# on daemon-thread scheduling, while still bounding memory behind a blocked
+# exporter. The in-flight record is not included in this count.
+_DEFAULT_MAX_PENDING_RECORDS_PER_EXECUTION = 16
 
 # Queue entry kinds.
 _RECORD = "record"
@@ -251,12 +62,11 @@ class _FlushBarrier:
     a later, still-blocked worker skips the now-pointless flush.
     """
 
-    __slots__ = ("_event", "canceled", "failed")
+    __slots__ = ("_event", "canceled")
 
     def __init__(self) -> None:
         self._event = threading.Event()
         self.canceled = False
-        self.failed = False
 
     def complete(self) -> None:
         self._event.set()
@@ -280,13 +90,15 @@ class _ExporterLane:
         exporter: InsightExporter,
         *,
         max_pending_executions: int = _DEFAULT_MAX_PENDING_EXECUTIONS,
-        max_pending_bytes: int = _DEFAULT_MAX_PENDING_BYTES,
+        max_pending_records: int = _DEFAULT_MAX_PENDING_RECORDS,
+        max_pending_records_per_execution: int = (
+            _DEFAULT_MAX_PENDING_RECORDS_PER_EXECUTION
+        ),
     ) -> None:
         self._exporter = exporter
         self._max_pending = max(1, max_pending_executions)
-        self._max_pending_bytes = max(1, max_pending_bytes)
-        self._pending_bytes = 0
-        self._inflight_bytes = 0
+        self._max_pending_records = max(1, max_pending_records)
+        self._max_pending_per_execution = max(1, max_pending_records_per_execution)
         # Explicit non-reentrant Lock rather than Condition()'s default RLock:
         # the lane never re-acquires ``_cond`` while already holding it (worker
         # I/O -- export/flush -- runs outside the lock and no locked helper
@@ -296,70 +108,43 @@ class _ExporterLane:
         self._cond = threading.Condition(threading.Lock())
         # Ordered work list: entries are (_RECORD, arn) or (_FLUSH, barrier).
         self._queue: deque[tuple[str, Any]] = deque()
-        # arn -> (latest pending record, retained-memory estimate). Insertion
-        # order is both record age and fairness order because replacing an ARN
-        # moves it to the back.
-        self._pending: OrderedDict[str, tuple[dict[str, Any], int]] = OrderedDict()
+        # arn -> bounded FIFO of pending records. Insertion order is the ARN
+        # fairness order; scheduling an existing ARN moves its queue token to
+        # the back, and the worker requeues an ARN that has more records.
+        self._pending: OrderedDict[str, deque[dict[str, Any]]] = OrderedDict()
         self._stop_when_idle = False
         self._worker: threading.Thread | None = None
-        self._disabled = False
 
     # -- producer API (checkpoint / invocation-end threads) -------------------
 
-    def schedule(
-        self,
-        execution_arn: str,
-        record: dict[str, Any],
-        record_size: int,
-    ) -> None:
+    def schedule(self, execution_arn: str, record: dict[str, Any]) -> None:
         with self._cond:
-            if self._disabled:
-                return
             self._stop_when_idle = False
-            size = max(0, record_size)
-            if size > self._max_pending_bytes:
-                superseded = self._pending.pop(execution_arn, None)
-                if superseded is not None:
-                    _, superseded_size = superseded
-                    self._pending_bytes -= superseded_size
-                    self._remove_record_token(execution_arn)
-                _logger.warning(
-                    "workflow-insight: pending record for %s on %s exceeds the "
-                    "byte budget (%d > %d); dropping this record%s",
-                    execution_arn,
-                    type(self._exporter).__name__,
-                    size,
-                    self._max_pending_bytes,
-                    " and its superseded pending snapshot"
-                    if superseded is not None
-                    else "",
-                )
-                return
             if execution_arn in self._pending:
-                # Coalesce: replace the pending record and move it to the back so
-                # a busy execution cannot starve the others.
-                _, old_size = self._pending[execution_arn]
-                self._pending_bytes -= old_size
-                self._pending[execution_arn] = (record, size)
-                self._pending_bytes += size
+                pending = self._pending[execution_arn]
+                if len(pending) >= self._max_pending_per_execution:
+                    pending.popleft()
+                    _logger.warning(
+                        "workflow-insight: pending export FIFO for %s on %s is "
+                        "full (cap=%d); dropping oldest pending record",
+                        execution_arn,
+                        type(self._exporter).__name__,
+                        self._max_pending_per_execution,
+                    )
+                pending.append(record)
                 self._pending.move_to_end(execution_arn)
                 self._move_record_token_to_back(execution_arn)
             else:
-                self._pending[execution_arn] = (record, size)
-                self._pending_bytes += size
+                self._pending[execution_arn] = deque([record])
                 self._queue.append((_RECORD, execution_arn))
-            self._enforce_pending_caps()
+                self._enforce_pending_execution_cap()
+            self._enforce_pending_record_cap()
             self._ensure_worker_locked()
             self._cond.notify()
 
     def enqueue_flush(self) -> _FlushBarrier:
         barrier = _FlushBarrier()
         with self._cond:
-            if self._disabled:
-                barrier.canceled = True
-                barrier.failed = True
-                barrier.complete()
-                return barrier
             self._queue.append((_FLUSH, barrier))
             self._ensure_worker_locked()
             self._cond.notify()
@@ -371,25 +156,26 @@ class _ExporterLane:
             self._cond.notify()
 
     def cancel_flush(self, barrier: _FlushBarrier) -> None:
-        """Stop waiting for a timed-out barrier while retaining one later flush."""
+        """Cancel a timed-out flush barrier so it cannot pile up behind a
+        blocked worker.
+
+        Under the lane lock: mark the barrier cancelled and, if its ``_FLUSH``
+        marker is still queued, remove that exact marker and complete the
+        barrier here. Removing it is what keeps queue/barrier state bounded
+        across many warm invocations behind a blocked exporter -- otherwise one
+        stale barrier per invocation would accumulate behind the stuck worker.
+
+        If the worker has already popped the marker (the flush is in flight or
+        about to run) the marker is no longer in the queue: we only set
+        ``canceled`` and leave completion to the worker, which skips the
+        now-pointless flush and completes the barrier itself. A synchronous
+        in-flight ``flush()`` is never interrupted.
+        """
         with self._cond:
             barrier.canceled = True
-            if not any(
-                kind == _FLUSH and payload is barrier for kind, payload in self._queue
-            ):
-                # The worker already owns this barrier. Do not erase a detached
-                # flush installed by a later invocation while this one was in flight.
-                return
-            # Keep at most one detached flush. Moving it to this barrier's
-            # position makes it cover all work scheduled before the latest
-            # timeout without accumulating one marker per warm invocation.
-            for index in range(len(self._queue) - 1, -1, -1):
-                kind, payload = self._queue[index]
-                if kind == _FLUSH and payload is None:
-                    del self._queue[index]
             for index, (kind, payload) in enumerate(self._queue):
                 if kind == _FLUSH and payload is barrier:
-                    self._queue[index] = (_FLUSH, None)
+                    del self._queue[index]
                     barrier.complete()
                     return
 
@@ -401,39 +187,53 @@ class _ExporterLane:
                 del self._queue[index]
                 self._queue.append((_RECORD, execution_arn))
                 return
-        # No token means the arn is currently in flight; a fresh token will be
-        # appended when it leaves flight (the next schedule sees it absent from
-        # ``_pending``), which yields the "export A then latest" behavior.
+        # No token means the ARN's last queued record is currently in flight.
+        # The next schedule sees it absent from ``_pending`` and appends a fresh
+        # FIFO plus token, preserving the in-flight record before new work.
 
-    def _enforce_pending_caps(self) -> None:
+    def _requeue_record_before_flush(self, execution_arn: str) -> None:
+        """Requeue an ARN behind peer records but before its drain barrier.
+
+        A record token represents the ARN's whole pending FIFO at the moment the
+        barrier is enqueued. Consuming one record must not move the remaining
+        pre-barrier records behind that barrier, or invocation end could flush
+        and return while part of its FIFO is still waiting.
+        """
+        for index, (kind, _) in enumerate(self._queue):
+            if kind == _FLUSH:
+                self._queue.insert(index, (_RECORD, execution_arn))
+                return
+        self._queue.append((_RECORD, execution_arn))
+
+    def _enforce_pending_execution_cap(self) -> None:
         while len(self._pending) > self._max_pending:
-            old_arn, _ = self._drop_oldest_pending()
+            old_arn, _ = self._pending.popitem(last=False)
+            self._remove_record_token(old_arn)
             _logger.warning(
-                "workflow-insight: export lane for %s reached its execution cap "
-                "(%d); dropping pending record for %s",
+                "workflow-insight: export lane for %s is full "
+                "(cap=%d); dropping pending records for %s",
                 type(self._exporter).__name__,
                 self._max_pending,
                 old_arn,
             )
-        while (
-            self._pending_bytes + self._inflight_bytes > self._max_pending_bytes
-            and self._pending
+
+    def _enforce_pending_record_cap(self) -> None:
+        while sum(len(records) for records in self._pending.values()) > (
+            self._max_pending_records
         ):
-            old_arn, dropped_size = self._drop_oldest_pending()
+            old_arn = next(iter(self._pending))
+            records = self._pending[old_arn]
+            records.popleft()
             _logger.warning(
-                "workflow-insight: export lane for %s reached its pending byte "
-                "budget (%d); dropping %d-byte pending record for %s",
+                "workflow-insight: export lane for %s reached its pending "
+                "record cap (%d); dropping oldest pending record for %s",
                 type(self._exporter).__name__,
-                self._max_pending_bytes,
-                dropped_size,
+                self._max_pending_records,
                 old_arn,
             )
-
-    def _drop_oldest_pending(self) -> tuple[str, int]:
-        old_arn, (_, old_size) = self._pending.popitem(last=False)
-        self._pending_bytes -= old_size
-        self._remove_record_token(old_arn)
-        return old_arn, old_size
+            if not records:
+                del self._pending[old_arn]
+                self._remove_record_token(old_arn)
 
     def _remove_record_token(self, execution_arn: str) -> None:
         for index, (kind, payload) in enumerate(self._queue):
@@ -441,33 +241,11 @@ class _ExporterLane:
                 del self._queue[index]
                 return
 
-    def _disable_locked(self, exc: Exception) -> None:
-        self._disabled = True
-        self._worker = None
-        self._pending.clear()
-        self._pending_bytes = 0
-        self._inflight_bytes = 0
-        for kind, payload in self._queue:
-            if kind == _FLUSH and payload is not None:
-                barrier: _FlushBarrier = payload
-                barrier.canceled = True
-                barrier.failed = True
-                barrier.complete()
-        self._queue.clear()
-        _logger.warning(
-            "workflow-insight: could not start worker for exporter %s; "
-            "disabling this lane: %s",
-            type(self._exporter).__name__,
-            exc,
-        )
-
     def _ensure_worker_locked(self) -> None:
         # Never create a replacement while a prior worker is alive (a blocked
         # worker keeps ``_worker`` non-None). A worker that exits cleanly nulls
         # ``_worker`` under the lock before returning, so this check is a
         # race-free "start iff there is no live worker".
-        if self._disabled:
-            return
         if self._worker is None or not self._worker.is_alive():
             worker = threading.Thread(
                 target=self._run_worker,
@@ -475,10 +253,7 @@ class _ExporterLane:
                 daemon=True,
             )
             self._worker = worker
-            try:
-                worker.start()
-            except Exception as exc:  # noqa: BLE001 - instrumentation must not break hooks
-                self._disable_locked(exc)
+            worker.start()
 
     # -- worker (single daemon thread) ---------------------------------------
 
@@ -495,38 +270,41 @@ class _ExporterLane:
                     return
                 kind, payload = self._queue.popleft()
                 record: dict[str, Any] | None = None
-                record_size = 0
                 if kind == _RECORD:
-                    pending = self._pending.pop(payload, None)
-                    if pending is None:
+                    pending = self._pending.get(payload)
+                    if not pending:
                         continue
-                    record, record_size = pending
-                    self._pending_bytes -= record_size
-                    self._inflight_bytes += record_size
+                    record = pending.popleft()
+                    if pending:
+                        # Round-robin across ARNs: one record per turn, then the
+                        # ARN goes behind all queue entries already waiting.
+                        self._pending.move_to_end(payload)
+                        self._requeue_record_before_flush(payload)
+                    else:
+                        del self._pending[payload]
 
             if kind == _RECORD and record is not None:
-                try:
-                    self._export_one(record)
-                finally:
-                    with self._cond:
-                        self._inflight_bytes -= record_size
+                self._export_one(record)
             else:  # _FLUSH
-                barrier: _FlushBarrier | None = payload
-                self._flush()
-                if barrier is not None:
-                    barrier.complete()
+                barrier: _FlushBarrier = payload
+                if not barrier.canceled:
+                    self._flush()
+                barrier.complete()
 
     def _export_one(self, record: dict[str, Any]) -> None:
         exporter = self._exporter
-        # Copy the record's built-in containers for lane isolation, but preserve
-        # custom values as opaque leaves for exporter-specific rendering. This
-        # keeps one lane's render/truncation mutations out of other lanes without
-        # requiring custom-renderable values to implement ``deepcopy``.
+        # Copy for exporter isolation: every lane shares the same canonical
+        # record, and truncation/export must never mutate what another lane
+        # sees. If the copy fails we must NOT fall back to the shared record --
+        # exporting the alias would let this lane's truncation mutate the object
+        # other lanes still read, breaking workflow isolation. Treat a copy
+        # failure like a render/truncation failure: log and skip this record for
+        # this lane, then continue processing the lane's queue.
         try:
-            local = _copy_record_containers(record)
-        except Exception as exc:  # noqa: BLE001 - malformed containers must not break the lane
+            local = copy.deepcopy(record)
+        except Exception as exc:  # noqa: BLE001 - a non-copyable payload must not alias the shared record or break the lane
             _logger.warning(
-                "workflow-insight: record container copy failed for exporter %s; "
+                "workflow-insight: record copy failed for exporter %s; "
                 "skipping export for this record: %s",
                 type(exporter).__name__,
                 exc,
@@ -572,13 +350,9 @@ class _ExporterLane:
         with self._cond:
             return len(self._pending)
 
-    def _pending_bytes_count(self) -> int:
+    def _pending_record_count(self) -> int:
         with self._cond:
-            return self._pending_bytes
-
-    def _retained_bytes_count(self) -> int:
-        with self._cond:
-            return self._pending_bytes + self._inflight_bytes
+            return sum(len(records) for records in self._pending.values())
 
     def _queue_len(self) -> int:
         with self._cond:
@@ -597,32 +371,25 @@ class _ExportScheduler:
         exporters: list[InsightExporter],
         *,
         max_pending_executions: int = _DEFAULT_MAX_PENDING_EXECUTIONS,
-        max_pending_bytes: int = _DEFAULT_MAX_PENDING_BYTES,
+        max_pending_records: int = _DEFAULT_MAX_PENDING_RECORDS,
+        max_pending_records_per_execution: int = (
+            _DEFAULT_MAX_PENDING_RECORDS_PER_EXECUTION
+        ),
     ) -> None:
-        self._max_pending_bytes = max(1, max_pending_bytes)
         self._lanes = [
             _ExporterLane(
                 exporter,
                 max_pending_executions=max_pending_executions,
-                max_pending_bytes=self._max_pending_bytes,
+                max_pending_records=max_pending_records,
+                max_pending_records_per_execution=max_pending_records_per_execution,
             )
             for exporter in exporters
         ]
 
     def schedule(self, execution_arn: str, record: dict[str, Any]) -> None:
         """Fan a canonical record out to every lane. Returns immediately."""
-        try:
-            record_size = _estimate_retained_size(record, self._max_pending_bytes)
-        except Exception as exc:  # noqa: BLE001 - inspection must never break a hook
-            _logger.warning(
-                "workflow-insight: retained-size inspection failed for %s; "
-                "rejecting this record safely: %s",
-                execution_arn,
-                exc,
-            )
-            record_size = self._max_pending_bytes + 1
         for lane in self._lanes:
-            lane.schedule(execution_arn, record, record_size)
+            lane.schedule(execution_arn, record)
 
     def end_invocation(self, timeout_seconds: float) -> bool:
         """Drain and flush every touched lane under one shared timeout.
@@ -642,8 +409,6 @@ class _ExportScheduler:
                 # _FLUSH marker out now, so a stale barrier per invocation cannot
                 # accumulate behind a blocked worker.
                 lane.cancel_flush(barrier)
-                degraded = True
-            elif barrier.failed:
                 degraded = True
         for lane in self._lanes:
             lane.request_stop_when_idle()

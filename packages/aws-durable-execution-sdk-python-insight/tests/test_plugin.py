@@ -365,15 +365,13 @@ def test_cold_resume_reports_prior_terminal_ops_with_fresh_plugin():
     assert rec["durationMs"] is not None and rec["durationMs"] >= 0
 
 
-# -- on-change schedules RUNNING records, coalescing intermediates (comment 2) --
+# -- on-change preserves ordinary RUNNING-record bursts (comment 2) -----------
 
 
-def test_on_change_schedules_running_and_delivers_terminal():
-    # Under the async scheduler, rapid cumulative RUNNING snapshots for one
-    # execution may coalesce (the design explicitly allows a lane to observe only
-    # a subset of intermediate records). The invariants that always hold: the
-    # terminal record is delivered last, every earlier record is RUNNING, and the
-    # terminal record carries the full, de-duplicated operation set.
+def test_on_change_schedules_running_on_each_change_and_delivers_terminal():
+    # The bounded FIFO preserves this ordinary burst without relying on the
+    # daemon worker receiving a turn between hooks: invocation start, both
+    # operation changes, then the terminal snapshot must all be observable.
     exporter = CaptureExporter()
     plugin = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
@@ -395,9 +393,7 @@ def test_on_change_schedules_running_and_delivers_terminal():
     plugin.on_invocation_end(_end(operations=_ops(op1, op2)))  # SUCCEEDED (terminal)
 
     statuses = [r["status"] for r in exporter.records]
-    assert statuses, "at least the terminal record must be delivered"
-    assert statuses[-1] == "SUCCEEDED"
-    assert set(statuses[:-1]) <= {"RUNNING"}
+    assert statuses == ["RUNNING", "RUNNING", "RUNNING", "SUCCEEDED"]
     final = exporter.records[-1]
     assert [op["name"] for op in final["operations"]] == ["s1", "s2"]
     # No duplicate operation entries within a record (no end/change double-count).
