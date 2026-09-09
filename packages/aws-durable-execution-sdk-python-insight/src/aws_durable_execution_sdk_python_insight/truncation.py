@@ -28,7 +28,7 @@ def json_byte_size(value: Any) -> int | None:
         return len(
             json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         )
-    except (TypeError, ValueError):
+    except Exception:  # noqa: BLE001 - sizing failure must never break instrumentation
         return None
 
 

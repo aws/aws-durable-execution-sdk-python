@@ -11,6 +11,7 @@ invariants are asserted deterministically rather than by timing luck.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -510,6 +511,61 @@ def test_pending_byte_budget_evicts_oldest_large_record():
     exported = exporter.exported_values()
     assert exported[0] == "inflight"
     assert exported[1] == "c" * 1_500
+
+
+def test_unmeasurable_record_does_not_evict_existing_backlog():
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter])
+    lane = scheduler._lanes[0]
+    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
+    assert _wait_until(exporter.started.is_set)
+    scheduler.schedule(ARN_B, _rec(ARN_B, "b1"))
+    scheduler.schedule(ARN_C, _rec(ARN_C, "c1"))
+
+    unmeasurable = _rec(ARN_D, "bad")
+    unmeasurable["payload"] = {"not-json"}
+    scheduler.schedule(ARN_D, unmeasurable)
+
+    assert lane._pending_count() == 2
+    exporter.release()
+    scheduler.end_invocation(5.0)
+    assert exporter.exported_values() == ["inflight", "b1", "c1"]
+
+
+def test_individually_over_budget_record_does_not_evict_existing_backlog():
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter], max_pending_bytes=2_000)
+    lane = scheduler._lanes[0]
+    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
+    assert _wait_until(exporter.started.is_set)
+    scheduler.schedule(ARN_B, _rec(ARN_B, "b" * 700))
+    scheduler.schedule(ARN_C, _rec(ARN_C, "c" * 700))
+    scheduler.schedule(ARN_D, _rec(ARN_D, "d" * 3_000))
+
+    assert lane._pending_count() == 2
+    assert lane._pending_bytes_count() <= 2_000
+    exporter.release()
+    scheduler.end_invocation(5.0)
+    exported = exporter.exported_values()
+    assert exported[0] == "inflight"
+    assert exported[1:] == ["b" * 700, "c" * 700]
+
+
+def test_record_sizing_exception_does_not_escape_schedule(monkeypatch):
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter])
+    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
+    assert _wait_until(exporter.started.is_set)
+
+    def fail_sizing(*args, **kwargs):
+        raise RecursionError("record nesting is too deep")
+
+    monkeypatch.setattr(json, "dumps", fail_sizing)
+    scheduler.schedule(ARN_B, _rec(ARN_B, "too-deep"))
+
+    assert scheduler._lanes[0]._pending_count() == 0
+    exporter.release()
+    scheduler.end_invocation(5.0)
 
 
 def test_cancelled_barrier_is_cleaned_up_and_worker_exits():

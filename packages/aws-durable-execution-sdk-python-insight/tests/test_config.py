@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import gc
 import threading
+import time
 
 import pytest
 
@@ -231,6 +232,37 @@ def test_exporter_instance_can_be_reused_after_owner_is_collected():
     config = WorkflowInsightConfig(exporters=[exporter])
     owner = workflow_insight(config)
     del owner
+    gc.collect()
+
+    replacement = workflow_insight(config)
+    assert replacement._exporters == [exporter]
+
+
+def test_exporter_ownership_persists_while_lane_worker_is_alive():
+    exporter = _StubExporter()
+    config = WorkflowInsightConfig(exporters=[exporter])
+    owner = workflow_insight(config)
+    lane = owner._scheduler._lanes[0]
+    owner._scheduler.schedule(
+        "arn:aws:lambda:us-east-1:1:function:f:1/durable-execution/e/i",
+        {"executionArn": "arn:e", "status": "RUNNING", "operations": []},
+    )
+    deadline = time.monotonic() + 5.0
+    while not lane._worker_alive() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert lane._worker_alive()
+
+    del owner
+    gc.collect()
+    with pytest.raises(ValueError, match="shared across Workflow Insight"):
+        workflow_insight(config)
+
+    lane.request_stop_when_idle()
+    deadline = time.monotonic() + 5.0
+    while lane._worker_alive() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert not lane._worker_alive()
+    del lane
     gc.collect()
 
     replacement = workflow_insight(config)
