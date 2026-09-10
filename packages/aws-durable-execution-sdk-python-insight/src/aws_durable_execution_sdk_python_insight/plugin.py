@@ -73,31 +73,32 @@ _STATUS_MAP: dict[InvocationStatus, str] = {
 }
 
 _exporter_owner_lock = threading.Lock()
-_exporter_owners: list[tuple[InsightExporter, weakref.ReferenceType[object]]] = []
+_exporter_owners: list[weakref.ReferenceType[Any]] = []
 
 
 def _claim_exporter_lanes(lanes: list[Any]) -> None:
     """Give each exporter object to at most one live scheduler lane."""
 
-    def release(lane_ref: weakref.ReferenceType[object]) -> None:
+    def release(lane_ref: weakref.ReferenceType[Any]) -> None:
         with _exporter_owner_lock:
             _exporter_owners[:] = [
-                entry for entry in _exporter_owners if entry[1] is not lane_ref
+                existing for existing in _exporter_owners if existing is not lane_ref
             ]
 
-    claims = [(lane._exporter, lane) for lane in lanes]
     with _exporter_owner_lock:
         _exporter_owners[:] = [
-            entry for entry in _exporter_owners if entry[1]() is not None
+            lane_ref for lane_ref in _exporter_owners if lane_ref() is not None
         ]
-        for exporter, _ in claims:
-            if any(existing is exporter for existing, _ in _exporter_owners):
-                raise ValueError(
-                    "the same exporter instance cannot be shared across "
-                    "Workflow Insight plugin instances"
-                )
-        for exporter, lane in claims:
-            _exporter_owners.append((exporter, weakref.ref(lane, release)))
+        for lane in lanes:
+            exporter = lane._exporter
+            for lane_ref in _exporter_owners:
+                owner = lane_ref()
+                if owner is not None and owner._exporter is exporter:
+                    raise ValueError(
+                        "the same exporter instance cannot be shared across "
+                        "Workflow Insight plugin instances"
+                    )
+        _exporter_owners.extend(weakref.ref(lane, release) for lane in lanes)
 
 
 def _parse_execution_arn(execution_arn: str) -> dict[str, str]:

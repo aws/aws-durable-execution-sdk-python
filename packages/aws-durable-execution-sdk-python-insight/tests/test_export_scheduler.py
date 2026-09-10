@@ -11,6 +11,7 @@ invariants are asserted deterministically rather than by timing luck.
 
 from __future__ import annotations
 
+import functools
 import threading
 import time
 from typing import Any
@@ -596,7 +597,7 @@ def test_non_json_record_reaches_exporter_without_evicting_backlog():
 
 def test_individually_over_budget_record_does_not_evict_existing_backlog():
     exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter], max_pending_bytes=3_500)
+    scheduler = _ExportScheduler([exporter], max_pending_bytes=3_000)
     lane = scheduler._lanes[0]
     scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
     assert _wait_until(exporter.started.is_set)
@@ -605,7 +606,7 @@ def test_individually_over_budget_record_does_not_evict_existing_backlog():
     scheduler.schedule(ARN_D, _rec(ARN_D, "d" * 3_000))
 
     assert lane._pending_count() == 2
-    assert lane._pending_bytes_count() <= 3_500
+    assert lane._pending_bytes_count() <= 3_000
     exporter.release()
     scheduler.end_invocation(5.0)
     exported = exporter.exported_values()
@@ -704,6 +705,42 @@ def test_record_sizing_exception_does_not_escape_schedule():
     exporter.release()
     scheduler.end_invocation(5.0)
     assert exporter.exported_values() == ["inflight", "custom-sized"]
+
+
+def test_retained_size_traverses_filtered_opaque_referents():
+    class HiddenList(list[Any]):
+        def __init__(self, value: Any) -> None:
+            super().__init__([value])
+            self.iterated = False
+
+        def __iter__(self):
+            self.iterated = True
+            return iter(())
+
+    backing_buffers = [bytearray(4_000) for _ in range(3)]
+    hidden = HiddenList(backing_buffers[2])
+    payloads = [
+        functools.partial(lambda value: value, backing_buffers[0]),
+        (value for value in (backing_buffers[1],)),
+        hidden,
+    ]
+
+    for payload in payloads:
+        exporter = BlockingExporter()
+        scheduler = _ExportScheduler([exporter], max_pending_bytes=2_500)
+        lane = scheduler._lanes[0]
+        scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
+        assert _wait_until(exporter.started.is_set)
+        record = _rec(ARN_B, "opaque-referent")
+        record["payload"] = payload
+        scheduler.schedule(ARN_B, record)
+
+        assert lane._pending_count() == 0
+        assert lane._pending_bytes_count() == 0
+        exporter.release()
+        scheduler.end_invocation(5.0)
+
+    assert hidden.iterated is False
 
 
 def test_timed_out_barrier_flushes_eventually_and_worker_exits():

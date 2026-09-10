@@ -14,6 +14,7 @@ from __future__ import annotations
 import gc
 import threading
 import time
+import weakref
 
 import pytest
 
@@ -267,6 +268,25 @@ def test_exporter_ownership_persists_while_lane_worker_is_alive():
 
     replacement = workflow_insight(config)
     assert replacement._exporters == [exporter]
+
+
+def test_exporter_plugin_cycle_is_not_rooted_by_ownership_registry():
+    exporter = _StubExporter()
+    plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    lane = plugin._scheduler._lanes[0]
+    exporter.plugin = plugin
+    exporter_ref = weakref.ref(exporter)
+    plugin_ref = weakref.ref(plugin)
+    lane_ref = weakref.ref(lane)
+
+    del lane
+    del plugin
+    del exporter
+    gc.collect()
+
+    assert exporter_ref() is None
+    assert plugin_ref() is None
+    assert lane_ref() is None
 
 
 def test_default_exporter_unaffected_by_instance_check():
