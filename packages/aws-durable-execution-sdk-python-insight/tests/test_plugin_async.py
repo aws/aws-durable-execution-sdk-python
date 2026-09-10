@@ -198,6 +198,23 @@ def test_oversized_timeout_rejected_before_exporter_worker_starts():
     assert not exporter.started.is_set()
 
 
+def test_worker_start_failure_does_not_skip_invocation_cleanup(monkeypatch):
+    exporter = _BufferedExporter()
+    plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    op = _step("s", "1")
+    plugin.on_invocation_start(_start({}))
+
+    def fail_start(self):
+        raise RuntimeError("cannot start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", fail_start)
+    plugin.on_invocation_end(_end(_ops(op)))
+
+    assert plugin._state == {}
+    assert exporter.published == []
+    assert plugin._scheduler._lanes[0]._disabled is True
+
+
 # -- a blocked exporter never blocks a hook ----------------------------------
 
 

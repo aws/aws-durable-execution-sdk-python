@@ -22,15 +22,13 @@ from __future__ import annotations
 
 import copy
 import logging
+import sys
 import threading
 import time
 from collections import OrderedDict, deque
 from typing import Any
 
-from aws_durable_execution_sdk_python_insight.truncation import (
-    json_byte_size,
-    truncate_record,
-)
+from aws_durable_execution_sdk_python_insight.truncation import truncate_record
 from aws_durable_execution_sdk_python_insight.types import InsightExporter
 
 
@@ -42,11 +40,40 @@ _logger = logging.getLogger("aws_durable_execution_sdk_python_insight")
 # bounded regardless of how long a worker stays blocked.
 _DEFAULT_MAX_PENDING_EXECUTIONS = 1024
 
-# Canonical JSON-byte estimate retained by one blocked lane. Lambda functions
+# Estimated Python object memory retained by one blocked lane. Lambda functions
 # can be configured with 128 MiB, so keep the instrumentation backlog well below
-# that floor. Python object overhead is higher than JSON bytes; this is a
-# conservative budget signal, not an exact heap measurement.
+# that floor. This is a conservative budget signal, not an exact heap measurement.
 _DEFAULT_MAX_PENDING_BYTES = 16_000_000
+
+
+def _estimate_retained_size(value: Any) -> int:
+    """Estimate retained Python memory without serializing or calling render()."""
+    total = 0
+    seen: set[int] = set()
+    stack: list[Any] = [value]
+    while stack:
+        item = stack.pop()
+        identity = id(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        try:
+            total += sys.getsizeof(item)
+        except Exception:  # noqa: BLE001 - estimation must never break a hook
+            total += 1_024
+            continue
+        if isinstance(item, dict):
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple, set, frozenset, deque)):
+            stack.extend(item)
+        else:
+            try:
+                stack.append(vars(item))
+            except Exception:  # noqa: BLE001 - custom objects are best-effort
+                pass
+    return total
+
 
 # Queue entry kinds.
 _RECORD = "record"
@@ -61,11 +88,12 @@ class _FlushBarrier:
     a later, still-blocked worker skips the now-pointless flush.
     """
 
-    __slots__ = ("_event", "canceled")
+    __slots__ = ("_event", "canceled", "failed")
 
     def __init__(self) -> None:
         self._event = threading.Event()
         self.canceled = False
+        self.failed = False
 
     def complete(self) -> None:
         self._event.set()
@@ -104,12 +132,13 @@ class _ExporterLane:
         self._cond = threading.Condition(threading.Lock())
         # Ordered work list: entries are (_RECORD, arn) or (_FLUSH, barrier).
         self._queue: deque[tuple[str, Any]] = deque()
-        # arn -> (latest pending record, canonical JSON-byte estimate). Insertion
+        # arn -> (latest pending record, retained-memory estimate). Insertion
         # order is both record age and fairness order because replacing an ARN
         # moves it to the back.
         self._pending: OrderedDict[str, tuple[dict[str, Any], int]] = OrderedDict()
         self._stop_when_idle = False
         self._worker: threading.Thread | None = None
+        self._disabled = False
 
     # -- producer API (checkpoint / invocation-end threads) -------------------
 
@@ -117,18 +146,12 @@ class _ExporterLane:
         self,
         execution_arn: str,
         record: dict[str, Any],
-        record_size: int | None,
+        record_size: int,
     ) -> None:
         with self._cond:
-            self._stop_when_idle = False
-            if record_size is None:
-                _logger.warning(
-                    "workflow-insight: cannot measure pending record for %s on "
-                    "%s; dropping this record",
-                    execution_arn,
-                    type(self._exporter).__name__,
-                )
+            if self._disabled:
                 return
+            self._stop_when_idle = False
             size = max(0, record_size)
             if size > self._max_pending_bytes:
                 _logger.warning(
@@ -160,6 +183,11 @@ class _ExporterLane:
     def enqueue_flush(self) -> _FlushBarrier:
         barrier = _FlushBarrier()
         with self._cond:
+            if self._disabled:
+                barrier.canceled = True
+                barrier.failed = True
+                barrier.complete()
+                return barrier
             self._queue.append((_FLUSH, barrier))
             self._ensure_worker_locked()
             self._cond.notify()
@@ -239,11 +267,32 @@ class _ExporterLane:
                 del self._queue[index]
                 return
 
+    def _disable_locked(self, exc: Exception) -> None:
+        self._disabled = True
+        self._worker = None
+        self._pending.clear()
+        self._pending_bytes = 0
+        for kind, payload in self._queue:
+            if kind == _FLUSH:
+                barrier: _FlushBarrier = payload
+                barrier.canceled = True
+                barrier.failed = True
+                barrier.complete()
+        self._queue.clear()
+        _logger.warning(
+            "workflow-insight: could not start worker for exporter %s; "
+            "disabling this lane: %s",
+            type(self._exporter).__name__,
+            exc,
+        )
+
     def _ensure_worker_locked(self) -> None:
         # Never create a replacement while a prior worker is alive (a blocked
         # worker keeps ``_worker`` non-None). A worker that exits cleanly nulls
         # ``_worker`` under the lock before returning, so this check is a
         # race-free "start iff there is no live worker".
+        if self._disabled:
+            return
         if self._worker is None or not self._worker.is_alive():
             worker = threading.Thread(
                 target=self._run_worker,
@@ -251,7 +300,10 @@ class _ExporterLane:
                 daemon=True,
             )
             self._worker = worker
-            worker.start()
+            try:
+                worker.start()
+            except Exception as exc:  # noqa: BLE001 - instrumentation must not break hooks
+                self._disable_locked(exc)
 
     # -- worker (single daemon thread) ---------------------------------------
 
@@ -376,7 +428,7 @@ class _ExportScheduler:
 
     def schedule(self, execution_arn: str, record: dict[str, Any]) -> None:
         """Fan a canonical record out to every lane. Returns immediately."""
-        record_size = json_byte_size(record)
+        record_size = _estimate_retained_size(record)
         for lane in self._lanes:
             lane.schedule(execution_arn, record, record_size)
 
@@ -398,6 +450,8 @@ class _ExportScheduler:
                 # _FLUSH marker out now, so a stale barrier per invocation cannot
                 # accumulate behind a blocked worker.
                 lane.cancel_flush(barrier)
+                degraded = True
+            elif barrier.failed:
                 degraded = True
         for lane in self._lanes:
             lane.request_stop_when_idle()

@@ -11,7 +11,6 @@ invariants are asserted deterministically rather than by timing luck.
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
@@ -165,6 +164,13 @@ class _Uncopyable(dict[str, str]):
         raise RuntimeError("uncopyable payload")
 
 
+class _Unsized:
+    """A payload whose custom ``__sizeof__`` raises."""
+
+    def __sizeof__(self) -> int:
+        raise RuntimeError("size unavailable")
+
+
 # -- lazy worker creation / one worker per exporter --------------------------
 
 
@@ -200,6 +206,25 @@ def test_one_worker_per_exporter():
     assert _wait_until(
         lambda: not any(lane._worker_alive() for lane in scheduler._lanes)
     )
+
+
+def test_worker_start_failure_disables_lane_and_fails_barrier(monkeypatch):
+    exporter = RecordingExporter()
+    scheduler = _ExportScheduler([exporter])
+    lane = scheduler._lanes[0]
+
+    def fail_start(self):
+        raise RuntimeError("cannot start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", fail_start)
+    scheduler.schedule(ARN_A, _rec(ARN_A, "a1"))
+
+    assert lane._disabled is True
+    assert lane._pending_count() == 0
+    assert lane._pending_bytes_count() == 0
+    assert lane._queue_len() == 0
+    assert scheduler.end_invocation(0.1) is False
+    assert exporter.exported_values() == []
 
 
 def test_repeated_scheduling_does_not_grow_threads():
@@ -496,7 +521,7 @@ def test_pending_execution_cap_evicts_oldest():
 
 def test_pending_byte_budget_evicts_oldest_large_record():
     exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter], max_pending_bytes=2_000)
+    scheduler = _ExportScheduler([exporter], max_pending_bytes=3_000)
     lane = scheduler._lanes[0]
     scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
     assert _wait_until(exporter.started.is_set)
@@ -505,7 +530,7 @@ def test_pending_byte_budget_evicts_oldest_large_record():
     scheduler.schedule(ARN_C, _rec(ARN_C, "c" * 1_500))
 
     assert lane._pending_count() == 1
-    assert lane._pending_bytes_count() <= 2_000
+    assert lane._pending_bytes_count() <= 3_000
     exporter.release()
     scheduler.end_invocation(5.0)
     exported = exporter.exported_values()
@@ -513,7 +538,7 @@ def test_pending_byte_budget_evicts_oldest_large_record():
     assert exported[1] == "c" * 1_500
 
 
-def test_unmeasurable_record_does_not_evict_existing_backlog():
+def test_non_json_record_reaches_exporter_without_evicting_backlog():
     exporter = BlockingExporter()
     scheduler = _ExportScheduler([exporter])
     lane = scheduler._lanes[0]
@@ -522,19 +547,19 @@ def test_unmeasurable_record_does_not_evict_existing_backlog():
     scheduler.schedule(ARN_B, _rec(ARN_B, "b1"))
     scheduler.schedule(ARN_C, _rec(ARN_C, "c1"))
 
-    unmeasurable = _rec(ARN_D, "bad")
-    unmeasurable["payload"] = {"not-json"}
-    scheduler.schedule(ARN_D, unmeasurable)
+    non_json = _rec(ARN_D, "custom")
+    non_json["payload"] = {"not-json"}
+    scheduler.schedule(ARN_D, non_json)
 
-    assert lane._pending_count() == 2
+    assert lane._pending_count() == 3
     exporter.release()
     scheduler.end_invocation(5.0)
-    assert exporter.exported_values() == ["inflight", "b1", "c1"]
+    assert exporter.exported_values() == ["inflight", "b1", "c1", "custom"]
 
 
 def test_individually_over_budget_record_does_not_evict_existing_backlog():
     exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter], max_pending_bytes=2_000)
+    scheduler = _ExportScheduler([exporter], max_pending_bytes=3_500)
     lane = scheduler._lanes[0]
     scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
     assert _wait_until(exporter.started.is_set)
@@ -543,7 +568,7 @@ def test_individually_over_budget_record_does_not_evict_existing_backlog():
     scheduler.schedule(ARN_D, _rec(ARN_D, "d" * 3_000))
 
     assert lane._pending_count() == 2
-    assert lane._pending_bytes_count() <= 2_000
+    assert lane._pending_bytes_count() <= 3_500
     exporter.release()
     scheduler.end_invocation(5.0)
     exported = exporter.exported_values()
@@ -551,21 +576,20 @@ def test_individually_over_budget_record_does_not_evict_existing_backlog():
     assert exported[1:] == ["b" * 700, "c" * 700]
 
 
-def test_record_sizing_exception_does_not_escape_schedule(monkeypatch):
+def test_record_sizing_exception_does_not_escape_schedule():
     exporter = BlockingExporter()
     scheduler = _ExportScheduler([exporter])
     scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
     assert _wait_until(exporter.started.is_set)
 
-    def fail_sizing(*args, **kwargs):
-        raise RecursionError("record nesting is too deep")
+    record = _rec(ARN_B, "custom-sized")
+    record["payload"] = _Unsized()
+    scheduler.schedule(ARN_B, record)
 
-    monkeypatch.setattr(json, "dumps", fail_sizing)
-    scheduler.schedule(ARN_B, _rec(ARN_B, "too-deep"))
-
-    assert scheduler._lanes[0]._pending_count() == 0
+    assert scheduler._lanes[0]._pending_count() == 1
     exporter.release()
     scheduler.end_invocation(5.0)
+    assert exporter.exported_values() == ["inflight", "custom-sized"]
 
 
 def test_cancelled_barrier_is_cleaned_up_and_worker_exits():
