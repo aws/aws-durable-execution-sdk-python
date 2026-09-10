@@ -11,7 +11,6 @@ invariants are asserted deterministically rather than by timing luck.
 
 from __future__ import annotations
 
-import logging
 import threading
 import time
 from typing import Any
@@ -164,6 +163,18 @@ class _Uncopyable(dict[str, str]):
         raise RuntimeError("uncopyable payload")
 
 
+class _SlottedPayload:
+    __slots__ = ("payload",)
+
+    def __init__(self, payload: Any) -> None:
+        self.payload = payload
+
+
+class _UnsizedSlottedPayload(_SlottedPayload):
+    def __sizeof__(self) -> int:
+        raise RuntimeError("size unavailable")
+
+
 class _Unsized:
     """A payload whose custom ``__sizeof__`` raises."""
 
@@ -286,58 +297,45 @@ def test_terminal_record_supersedes_pending_running():
 # -- copy failure isolation ---------------------------------------------------
 
 
-def test_deepcopy_failure_skips_record_and_lane_continues(caplog):
-    exporter = RecordingExporter()
+def test_uncopyable_custom_value_reaches_exporter_render():
+    class CustomRenderExporter(RecordingExporter):
+        def __init__(self) -> None:
+            super().__init__(max_record_size_bytes=10_000)
+            self.rendered_values: list[str] = []
+
+        def render(self, record: dict[str, Any]) -> Any:
+            value = record["payload"]["value"]
+            self.rendered_values.append(value)
+            return {"value": value}
+
+    exporter = CustomRenderExporter()
     scheduler = _ExportScheduler([exporter])
-    # A record whose deepcopy raises must be skipped for this lane -- never
-    # exported by aliasing the shared object -- and the lane must keep draining.
-    bad = _rec(ARN_A, "bad")
-    bad["payload"] = _Uncopyable()
-    good = _rec(ARN_B, "good")
-    with caplog.at_level(
-        logging.WARNING, logger="aws_durable_execution_sdk_python_insight"
-    ):
-        scheduler.schedule(ARN_A, bad)  # queued first: copy fails -> skipped
-        scheduler.schedule(ARN_B, good)  # queued behind it: must still export
-        # The good record delivering proves the lane continued past the failure;
-        # a single-lane worker drains FIFO, so "bad" was processed (and skipped)
-        # before "good" ran.
-        assert _wait_until(lambda: exporter.exported_values() == ["good"])
-        scheduler.end_invocation(5.0)
-    # The exporter was never called for the un-copyable record.
-    assert exporter.exported_values() == ["good"]
-    # The failure was logged through the module logger.
-    assert any(
-        "record copy failed" in record.getMessage()
-        for record in caplog.records
-        if record.name == "aws_durable_execution_sdk_python_insight"
-    )
+    record = _rec(ARN_A, "before-render")
+    record["payload"] = _Uncopyable()
+
+    scheduler.schedule(ARN_A, record)
+    scheduler.end_invocation(5.0)
+
+    assert exporter.rendered_values == ["safe"]
+    assert exporter.exported_values() == ["before-render"]
 
 
-def test_deepcopy_failure_does_not_alias_shared_record():
-    # Before the fix a copy failure aliased the shared record and passed it to
-    # truncate_record -> render, which could mutate the canonical object other
-    # lanes still read. With the fix the record is skipped before render, so it
-    # is never aliased or mutated in place.
+def test_uncopyable_custom_value_does_not_alias_record_containers():
     class MutatingRenderExporter(RecordingExporter):
         def render(self, record: dict[str, Any]) -> Any:
-            record["mutated"] = True  # would corrupt an aliased shared record
+            record["mutated"] = True
             return record
 
     exporter = MutatingRenderExporter()
     scheduler = _ExportScheduler([exporter])
-    bad = _rec(ARN_A, "bad")
-    bad["payload"] = _Uncopyable()
-    scheduler.schedule(ARN_A, bad)
-    # A good record behind it lets us deterministically wait for the lane to
-    # drain past the bad one (single lane drains FIFO).
-    scheduler.schedule(ARN_B, _rec(ARN_B, "good"))
-    assert _wait_until(lambda: exporter.exported_values() == ["good"])
+    record = _rec(ARN_A, "custom")
+    record["payload"] = _Uncopyable()
+
+    scheduler.schedule(ARN_A, record)
     scheduler.end_invocation(5.0)
-    # render never ran on the un-copyable record, so the canonical object was
-    # neither aliased into export nor mutated in place.
-    assert "mutated" not in bad
-    assert exporter.exported_values() == ["good"]
+
+    assert "mutated" not in record
+    assert exporter.exported_values() == ["custom"]
 
 
 # -- non-blocking hook return / fast-vs-slow isolation -----------------------
@@ -574,6 +572,47 @@ def test_individually_over_budget_record_does_not_evict_existing_backlog():
     exported = exporter.exported_values()
     assert exported[0] == "inflight"
     assert exported[1:] == ["b" * 700, "c" * 700]
+
+
+def test_over_budget_replacement_removes_superseded_same_arn_only():
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter], max_pending_bytes=3_500)
+    lane = scheduler._lanes[0]
+    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
+    assert _wait_until(exporter.started.is_set)
+    scheduler.schedule(ARN_A, _rec(ARN_A, "stale-running"))
+    scheduler.schedule(ARN_B, _rec(ARN_B, "unrelated"))
+    scheduler.schedule(
+        ARN_A,
+        _rec(ARN_A, "terminal" * 500, status="SUCCEEDED"),
+    )
+
+    assert lane._pending_count() == 1
+    assert lane._pending_bytes_count() <= 3_500
+    exporter.release()
+    scheduler.end_invocation(5.0)
+    assert exporter.exported_values() == ["inflight", "unrelated"]
+
+
+def test_retained_size_traverses_slots_after_shallow_size_failure():
+    for payload in (
+        _SlottedPayload("x" * 4_000),
+        _UnsizedSlottedPayload("x" * 4_000),
+    ):
+        exporter = BlockingExporter()
+        scheduler = _ExportScheduler([exporter], max_pending_bytes=2_500)
+        lane = scheduler._lanes[0]
+        scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
+        assert _wait_until(exporter.started.is_set)
+        record = _rec(ARN_B, "opaque")
+        record["payload"] = payload
+        scheduler.schedule(ARN_B, record)
+
+        assert lane._pending_count() == 0
+        assert lane._pending_bytes_count() == 0
+        exporter.release()
+        scheduler.end_invocation(5.0)
+        assert exporter.exported_values() == ["inflight"]
 
 
 def test_record_sizing_exception_does_not_escape_schedule():
