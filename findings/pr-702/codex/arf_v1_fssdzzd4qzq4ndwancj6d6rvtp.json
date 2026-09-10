@@ -1,0 +1,1 @@
+{"finding_digest":"2ca43ce47c8661c68ec06893e1fa359bf9af275599568f549e5af98df107e6dd","finding_id":"arf_v1_fssdzzd4qzq4ndwancj6d6rvtp","identity_key":"insight/plugin.py::_claim_exporter_lanes::weakref-callback-lock-reentrancy","pull_request_number":702,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
