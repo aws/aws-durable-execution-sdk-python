@@ -38,13 +38,9 @@ TimeoutSeconds: TypeAlias = int
 logger = logging.getLogger(__name__)
 
 
-def _is_in_var_dir(module_file: str = __file__) -> bool:
-    """Return True if this SDK is installed under /var/lang/.
-
-    Lambda bundled Python runtimes install packages at
-    /var/lang/lib/pythonX.Y/site-packages/.
-    """
-    return module_file.startswith("/var/lang/")
+def _is_bundled(version: str = __version__) -> bool:
+    """True if the managed runtime stamped a +bundled label onto this install."""
+    return "+bundled" in version
 
 
 # region model
@@ -1218,7 +1214,7 @@ class LambdaClient(DurableServiceClient):
                 config=Config(
                     connect_timeout=5,
                     read_timeout=50,
-                    user_agent_extra=f"aws-durable-execution-sdk-python/{__version__}{'-bundled' if _is_in_var_dir() else ''}",
+                    user_agent_extra=f"aws-durable-execution-sdk-python/{__version__.split('+')[0]}{'-bundled' if _is_bundled() else ''}",
                 ),
             )
         return cls(client=cls._cached_boto_client)
