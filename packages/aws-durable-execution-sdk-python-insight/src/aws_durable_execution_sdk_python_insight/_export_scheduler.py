@@ -20,10 +20,12 @@ Each exporter lane:
 from __future__ import annotations
 
 import copy
+import gc
 import logging
 import sys
 import threading
 import time
+import types
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -56,8 +58,17 @@ _DEFAULT_MAX_PENDING_RECORDS_PER_EXECUTION = 16
 _DEFAULT_MAX_PENDING_BYTES = 16_000_000
 
 
+_RETAINED_GRAPH_BOUNDARIES = (
+    type,
+    types.ModuleType,
+    types.FunctionType,
+    types.BuiltinFunctionType,
+    types.CodeType,
+)
+
+
 def _estimate_retained_size(value: Any, max_size: int | None = None) -> int:
-    """Estimate retained Python memory without serializing or calling render()."""
+    """Estimate a bounded retained graph without serializing or calling render()."""
     total = 0
     seen: set[int] = set()
     stack: list[Any] = [value]
@@ -74,33 +85,17 @@ def _estimate_retained_size(value: Any, max_size: int | None = None) -> int:
         if max_size is not None and total > max_size:
             return max_size + 1
         try:
-            if isinstance(item, memoryview):
-                stack.append(item.obj)
-            elif isinstance(item, dict):
-                stack.extend(item.keys())
-                stack.extend(item.values())
-            elif isinstance(item, (list, tuple, set, frozenset, deque)):
-                stack.extend(item)
-            else:
-                try:
-                    stack.append(vars(item))
-                except Exception:  # noqa: BLE001 - custom objects may use slots
-                    pass
-                for cls in type(item).__mro__:
-                    slots = vars(cls).get("__slots__", ())
-                    if isinstance(slots, str):
-                        slots = (slots,)
-                    for slot in slots:
-                        if slot in {"__dict__", "__weakref__"}:
-                            continue
-                        if slot.startswith("__") and not slot.endswith("__"):
-                            slot = f"_{cls.__name__.lstrip('_')}{slot}"
-                        try:
-                            stack.append(getattr(item, slot))
-                        except Exception:  # noqa: BLE001 - unset/custom slots are best-effort
-                            pass
-        except Exception:  # noqa: BLE001 - traversal must never break a hook
-            pass
+            referents = gc.get_referents(item)
+        except Exception:  # noqa: BLE001 - estimation must never break a hook
+            continue
+        for referent in referents:
+            # Type/module/function/code objects lead into process-global graphs,
+            # not memory retained specifically by this record. Bound methods,
+            # partial args, generator iterators, slots, buffers, and container
+            # subclasses remain traversable through their other referents.
+            if isinstance(referent, _RETAINED_GRAPH_BOUNDARIES):
+                continue
+            stack.append(referent)
     return total
 
 
