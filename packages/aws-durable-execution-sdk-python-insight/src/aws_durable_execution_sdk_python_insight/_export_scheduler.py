@@ -20,7 +20,8 @@ Each exporter lane:
 from __future__ import annotations
 
 import copy
-import gc
+import functools
+import itertools
 import logging
 import sys
 import threading
@@ -58,44 +59,149 @@ _DEFAULT_MAX_PENDING_RECORDS_PER_EXECUTION = 16
 _DEFAULT_MAX_PENDING_BYTES = 16_000_000
 
 
-_RETAINED_GRAPH_BOUNDARIES = (
+_UNSUPPORTED_RETAINED_GRAPH = object()
+_ATOMIC_RETAINED_TYPES = (
+    str,
+    bytes,
+    bytearray,
+    int,
+    float,
+    complex,
+    bool,
+    type(None),
+    range,
+    slice,
     type,
     types.ModuleType,
-    types.FunctionType,
-    types.BuiltinFunctionType,
     types.CodeType,
+    types.WrapperDescriptorType,
+    types.MethodDescriptorType,
 )
 
 
+class _RetainedChildren:
+    __slots__ = ("iterator",)
+
+    def __init__(self, items: Any) -> None:
+        self.iterator = iter(items)
+
+
+def _custom_retained_children(value: Any) -> list[Any]:
+    children: list[Any] = []
+    try:
+        children.append(object.__getattribute__(value, "__dict__"))
+    except Exception:  # noqa: BLE001 - custom objects may use slots only
+        pass
+    for cls in type(value).__mro__:
+        slots = vars(cls).get("__slots__", ())
+        if isinstance(slots, str):
+            slots = (slots,)
+        for slot in slots:
+            if slot in {"__dict__", "__weakref__"}:
+                continue
+            if slot.startswith("__") and not slot.endswith("__"):
+                slot = f"_{cls.__name__.lstrip('_')}{slot}"
+            try:
+                children.append(object.__getattribute__(value, slot))
+            except Exception:  # noqa: BLE001 - unset/custom slots are best-effort
+                pass
+    return children
+
+
+def _retained_children(value: Any) -> Any:
+    custom = _custom_retained_children(value)
+    if isinstance(value, dict):
+        return itertools.chain(dict.__iter__(value), dict.values(value), custom)
+    if isinstance(value, list):
+        return itertools.chain(list.__iter__(value), custom)
+    if isinstance(value, tuple):
+        return itertools.chain(tuple.__iter__(value), custom)
+    if isinstance(value, set):
+        return itertools.chain(set.__iter__(value), custom)
+    if isinstance(value, frozenset):
+        return itertools.chain(frozenset.__iter__(value), custom)
+    if isinstance(value, deque):
+        return itertools.chain(deque.__iter__(value), custom)
+    if isinstance(value, memoryview):
+        return (value.obj,)
+    if isinstance(value, functools.partial):
+        return (value.func, value.args, value.keywords)
+    if isinstance(value, types.FunctionType):
+        closure = []
+        for cell in value.__closure__ or ():
+            try:
+                closure.append(cell.cell_contents)
+            except ValueError:
+                pass
+        return itertools.chain(closure, (value.__defaults__, value.__kwdefaults__))
+    if isinstance(value, types.MethodType):
+        return (value.__self__, value.__func__)
+    if isinstance(value, types.BuiltinFunctionType):
+        owner = value.__self__
+        return () if owner is None or isinstance(owner, types.ModuleType) else (owner,)
+    if isinstance(value, types.MethodWrapperType):
+        return (value.__self__,)
+    if isinstance(value, types.GeneratorType):
+        frame = value.gi_frame
+        return () if frame is None else (frame.f_locals, value.gi_yieldfrom)
+    if isinstance(value, _ATOMIC_RETAINED_TYPES):
+        return ()
+    if custom:
+        return custom
+    return _UNSUPPORTED_RETAINED_GRAPH
+
+
+def _retained_shallow_size(value: Any) -> int:
+    try:
+        size = sys.getsizeof(value)
+    except Exception:  # noqa: BLE001 - estimation must never break a hook
+        size = 1_024
+    try:
+        if isinstance(value, dict):
+            size = max(size, dict.__sizeof__(value))
+        elif isinstance(value, list):
+            size = max(size, list.__sizeof__(value))
+        elif isinstance(value, tuple):
+            size = max(size, tuple.__sizeof__(value))
+        elif isinstance(value, set):
+            size = max(size, set.__sizeof__(value))
+        elif isinstance(value, frozenset):
+            size = max(size, frozenset.__sizeof__(value))
+        elif isinstance(value, deque):
+            size = max(size, deque.__sizeof__(value))
+    except Exception:  # noqa: BLE001 - base sizing remains best-effort
+        pass
+    return size
+
+
 def _estimate_retained_size(value: Any, max_size: int | None = None) -> int:
-    """Estimate a bounded retained graph without serializing or calling render()."""
+    """Estimate retained memory with bounded, non-overridable traversal."""
     total = 0
     seen: set[int] = set()
     stack: list[Any] = [value]
     while stack:
         item = stack.pop()
+        if isinstance(item, _RetainedChildren):
+            try:
+                child = next(item.iterator)
+            except StopIteration:
+                continue
+            except Exception:  # noqa: BLE001 - fail closed on malformed iterators
+                return max_size + 1 if max_size is not None else total + 1_024
+            stack.append(item)
+            stack.append(child)
+            continue
         identity = id(item)
         if identity in seen:
             continue
         seen.add(identity)
-        try:
-            total += sys.getsizeof(item)
-        except Exception:  # noqa: BLE001 - estimation must never break a hook
-            total += 1_024
+        total += _retained_shallow_size(item)
         if max_size is not None and total > max_size:
             return max_size + 1
-        try:
-            referents = gc.get_referents(item)
-        except Exception:  # noqa: BLE001 - estimation must never break a hook
-            continue
-        for referent in referents:
-            # Type/module/function/code objects lead into process-global graphs,
-            # not memory retained specifically by this record. Bound methods,
-            # partial args, generator iterators, slots, buffers, and container
-            # subclasses remain traversable through their other referents.
-            if isinstance(referent, _RETAINED_GRAPH_BOUNDARIES):
-                continue
-            stack.append(referent)
+        children = _retained_children(item)
+        if children is _UNSUPPORTED_RETAINED_GRAPH:
+            return max_size + 1 if max_size is not None else total + 1_024
+        stack.append(_RetainedChildren(children))
     return total
 
 

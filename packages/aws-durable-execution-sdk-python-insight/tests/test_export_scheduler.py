@@ -14,6 +14,7 @@ from __future__ import annotations
 import functools
 import threading
 import time
+import types
 from typing import Any
 
 from aws_durable_execution_sdk_python_insight._export_scheduler import (
@@ -234,6 +235,9 @@ class _TrackedLargeList(list[Any]):
     def __init__(self) -> None:
         super().__init__([None] * 10_000)
         self.iterated = False
+
+    def __sizeof__(self) -> int:
+        return 1
 
     def __iter__(self):
         self.iterated = True
@@ -919,6 +923,34 @@ def test_retained_size_traverses_filtered_opaque_referents():
         scheduler.end_invocation(5.0)
 
     assert hidden.iterated is False
+
+
+def test_retained_size_counts_closures_and_bound_builtin_owners():
+    closure_buffer = bytearray(4_000)
+
+    def closure() -> bytearray:
+        return closure_buffer
+
+    bound_owner = [bytearray(4_000)]
+    wrapper_owner = [bytearray(4_000)]
+    method_wrapper = wrapper_owner.__str__
+    assert isinstance(method_wrapper, types.MethodWrapperType)
+    payloads = [closure, bound_owner.append, method_wrapper]
+
+    for payload in payloads:
+        exporter = BlockingExporter()
+        scheduler = _ExportScheduler([exporter], max_pending_bytes=2_500)
+        lane = scheduler._lanes[0]
+        scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
+        assert _wait_until(exporter.started.is_set)
+        record = _rec(ARN_B, "retained-callable")
+        record["payload"] = payload
+        scheduler.schedule(ARN_B, record)
+
+        assert lane._pending_count() == 0
+        assert lane._pending_bytes_count() == 0
+        exporter.release()
+        scheduler.end_invocation(5.0)
 
 
 def test_timed_out_barrier_flushes_eventually_and_worker_exits():
