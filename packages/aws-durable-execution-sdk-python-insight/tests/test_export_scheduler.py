@@ -11,14 +11,9 @@ invariants are asserted deterministically rather than by timing luck.
 
 from __future__ import annotations
 
-import datetime
-import functools
 import threading
 import time
-import types
 from typing import Any
-
-import aws_durable_execution_sdk_python_insight._export_scheduler as scheduler_module
 
 from aws_durable_execution_sdk_python_insight._export_scheduler import (
     _ExportScheduler,
@@ -197,38 +192,6 @@ class _Uncopyable(dict[str, str]):
         raise RuntimeError("uncopyable payload")
 
 
-class _SlottedPayload:
-    __slots__ = ("payload",)
-
-    def __init__(self, payload: Any) -> None:
-        self.payload = payload
-
-
-class _UnsizedSlottedPayload(_SlottedPayload):
-    def __sizeof__(self) -> int:
-        raise RuntimeError("size unavailable")
-
-
-class _Unsized:
-    """A payload whose custom ``__sizeof__`` raises."""
-
-    def __sizeof__(self) -> int:
-        raise RuntimeError("size unavailable")
-
-
-class _TrackedLargeList(list[Any]):
-    def __init__(self) -> None:
-        super().__init__([None] * 10_000)
-        self.iterated = False
-
-    def __sizeof__(self) -> int:
-        return 1
-
-    def __iter__(self):
-        self.iterated = True
-        return super().__iter__()
-
-
 # -- lazy worker creation / one worker per exporter --------------------------
 
 
@@ -279,7 +242,6 @@ def test_worker_start_failure_disables_lane_and_fails_barrier(monkeypatch):
 
     assert lane._disabled is True
     assert lane._pending_count() == 0
-    assert lane._pending_bytes_count() == 0
     assert lane._queue_len() == 0
     assert scheduler.end_invocation(0.1) is False
     assert exporter.exported_values() == []
@@ -314,19 +276,20 @@ def test_same_execution_coalescing_exports_inflight_then_latest():
     scheduler.end_invocation(5.0)
 
 
-def test_different_executions_isolated_and_fair():
+def test_latest_pending_replaces_across_executions():
     exporter = BlockingExporter()
     scheduler = _ExportScheduler([exporter])
     scheduler.schedule(ARN_A, _rec(ARN_A, "a1"))
-    assert _wait_until(exporter.started.is_set)  # a1 in flight
-    scheduler.schedule(ARN_B, _rec(ARN_B, "b1"))  # queued: [B]
-    scheduler.schedule(ARN_B, _rec(ARN_B, "b2"))  # coalesce B -> b2
-    scheduler.schedule(ARN_A, _rec(ARN_A, "a2"))  # queued: [B, A]
+    assert _wait_until(exporter.started.is_set)
+
+    scheduler.schedule(ARN_B, _rec(ARN_B, "b1"))
+    scheduler.schedule(ARN_C, _rec(ARN_C, "c1"))
+    scheduler.schedule(ARN_D, _rec(ARN_D, "d1"))
+
+    assert scheduler._lanes[0]._pending_count() == 1
     exporter.release()
-    # a1 (in flight) first, then FIFO fairness B before the re-added A, each
-    # carrying its latest coalesced value.
-    assert _wait_until(lambda: exporter.exported_values() == ["a1", "b2", "a2"])
     scheduler.end_invocation(5.0)
+    assert exporter.exported_values() == ["a1", "d1"]
 
 
 def test_terminal_record_supersedes_pending_running():
@@ -546,278 +509,49 @@ def test_repeated_invocation_cycles_do_not_leak_threads():
     assert len(exporter.exported_values()) == 20
 
 
-# -- pending cap / cancelled barrier cleanup ---------------------------------
+# -- structurally bounded pending slot ----------------------------------------
 
 
-def test_pending_execution_cap_evicts_oldest():
-    exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter], max_pending_executions=2)
-    lane = scheduler._lanes[0]
-    scheduler.schedule(ARN_A, _rec(ARN_A, "a1"))
-    assert _wait_until(exporter.started.is_set)  # a1 in flight (not pending)
-    # Three distinct pending executions with cap 2 -> oldest (B) is evicted.
-    scheduler.schedule(ARN_B, _rec(ARN_B, "b1"))
-    scheduler.schedule(ARN_C, _rec(ARN_C, "c1"))
-    scheduler.schedule(ARN_D, _rec(ARN_D, "d1"))
-    assert _wait_until(lambda: lane._pending_count() == 2)
-    exporter.release()
-    scheduler.end_invocation(5.0)
-
-
-def test_pending_byte_budget_evicts_oldest_large_record():
-    exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter], max_pending_bytes=3_000)
-    lane = scheduler._lanes[0]
-    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
-    assert _wait_until(exporter.started.is_set)
-
-    scheduler.schedule(ARN_B, _rec(ARN_B, "b" * 1_500))
-    scheduler.schedule(ARN_C, _rec(ARN_C, "c" * 1_500))
-
-    assert lane._pending_count() == 1
-    assert lane._pending_bytes_count() <= 3_000
-    exporter.release()
-    scheduler.end_invocation(5.0)
-    exported = exporter.exported_values()
-    assert exported[0] == "inflight"
-    assert exported[1] == "c" * 1_500
-
-
-def test_non_json_record_reaches_exporter_without_evicting_backlog():
+def test_latest_pending_slot_stays_bounded_during_burst():
     exporter = BlockingExporter()
     scheduler = _ExportScheduler([exporter])
     lane = scheduler._lanes[0]
     scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
     assert _wait_until(exporter.started.is_set)
-    scheduler.schedule(ARN_B, _rec(ARN_B, "b1"))
-    scheduler.schedule(ARN_C, _rec(ARN_C, "c1"))
 
-    non_json = _rec(ARN_D, "custom")
-    non_json["payload"] = {"not-json"}
-    scheduler.schedule(ARN_D, non_json)
-
-    assert lane._pending_count() == 3
-    exporter.release()
-    scheduler.end_invocation(5.0)
-    assert exporter.exported_values() == ["inflight", "b1", "c1", "custom"]
-
-
-def test_individually_over_budget_record_does_not_evict_existing_backlog():
-    exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter], max_pending_bytes=5_000)
-    lane = scheduler._lanes[0]
-    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
-    assert _wait_until(exporter.started.is_set)
-    scheduler.schedule(ARN_B, _rec(ARN_B, "b" * 700))
-    scheduler.schedule(ARN_C, _rec(ARN_C, "c" * 700))
-    scheduler.schedule(ARN_D, _rec(ARN_D, "d" * 5_000))
-
-    assert lane._pending_count() == 2
-    assert lane._pending_bytes_count() <= 5_000
-    exporter.release()
-    scheduler.end_invocation(5.0)
-    exported = exporter.exported_values()
-    assert exported[0] == "inflight"
-    assert exported[1:] == ["b" * 700, "c" * 700]
-
-
-def test_over_budget_replacement_removes_superseded_same_arn_only():
-    exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter], max_pending_bytes=3_500)
-    lane = scheduler._lanes[0]
-    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
-    assert _wait_until(exporter.started.is_set)
-    scheduler.schedule(ARN_A, _rec(ARN_A, "stale-running"))
-    scheduler.schedule(ARN_B, _rec(ARN_B, "unrelated"))
-    scheduler.schedule(
-        ARN_A,
-        _rec(ARN_A, "terminal" * 500, status="SUCCEEDED"),
-    )
+    for index in range(100):
+        arn = f"{ARN_B}-{index}"
+        scheduler.schedule(arn, _rec(arn, f"pending-{index}"))
 
     assert lane._pending_count() == 1
-    assert lane._pending_bytes_count() <= 3_500
+    assert lane._queue_len() == 1
     exporter.release()
     scheduler.end_invocation(5.0)
-    assert exporter.exported_values() == ["inflight", "unrelated"]
+    assert exporter.exported_values() == ["inflight", "pending-99"]
 
 
-def test_retained_size_traverses_slots_after_shallow_size_failure():
-    for payload in (
-        _SlottedPayload("x" * 4_000),
-        _UnsizedSlottedPayload("x" * 4_000),
-    ):
-        exporter = BlockingExporter()
-        scheduler = _ExportScheduler([exporter], max_pending_bytes=2_500)
-        lane = scheduler._lanes[0]
-        scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
-        assert _wait_until(exporter.started.is_set)
-        record = _rec(ARN_B, "opaque")
-        record["payload"] = payload
-        scheduler.schedule(ARN_B, record)
+def test_schedule_does_not_inspect_custom_values():
+    inspected = threading.Event()
 
-        assert lane._pending_count() == 0
-        assert lane._pending_bytes_count() == 0
-        exporter.release()
-        scheduler.end_invocation(5.0)
-        assert exporter.exported_values() == ["inflight"]
+    class OpaqueValue:
+        def __sizeof__(self) -> int:
+            inspected.set()
+            raise AssertionError("checkpoint scheduling must not inspect values")
 
-
-def test_retained_size_saturates_before_traversing_large_shallow_container():
-    exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter], max_pending_bytes=2_500)
-    lane = scheduler._lanes[0]
-    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
-    assert _wait_until(exporter.started.is_set)
-
-    payload = _TrackedLargeList()
-    record = _rec(ARN_B, "large-shallow")
-    record["payload"] = payload
-    scheduler.schedule(ARN_B, record)
-
-    assert payload.iterated is False
-    assert lane._pending_count() == 0
-    assert lane._pending_bytes_count() == 0
-    exporter.release()
-    scheduler.end_invocation(5.0)
-
-
-def test_retained_size_counts_memoryview_backing_buffer():
-    exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter], max_pending_bytes=2_500)
-    lane = scheduler._lanes[0]
-    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
-    assert _wait_until(exporter.started.is_set)
-
-    record = _rec(ARN_B, "memoryview")
-    record["payload"] = memoryview(bytearray(4_000))
-    scheduler.schedule(ARN_B, record)
-
-    assert lane._pending_count() == 0
-    assert lane._pending_bytes_count() == 0
-    exporter.release()
-    scheduler.end_invocation(5.0)
-
-
-def test_record_sizing_exception_does_not_escape_schedule():
     exporter = BlockingExporter()
     scheduler = _ExportScheduler([exporter])
     scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
     assert _wait_until(exporter.started.is_set)
+    record = _rec(ARN_B, "opaque")
+    record["payload"] = OpaqueValue()
 
-    record = _rec(ARN_B, "custom-sized")
-    record["payload"] = _Unsized()
     scheduler.schedule(ARN_B, record)
 
+    assert inspected.is_set() is False
     assert scheduler._lanes[0]._pending_count() == 1
     exporter.release()
     scheduler.end_invocation(5.0)
-    assert exporter.exported_values() == ["inflight", "custom-sized"]
-
-
-def test_retained_size_traverses_filtered_opaque_referents():
-    class HiddenList(list[Any]):
-        def __init__(self, value: Any) -> None:
-            super().__init__([value])
-            self.iterated = False
-
-        def __iter__(self):
-            self.iterated = True
-            return iter(())
-
-    class PayloadPartial(functools.partial):
-        pass
-
-    backing_buffers = [bytearray(4_000) for _ in range(4)]
-    hidden = HiddenList(backing_buffers[2])
-    partial_with_payload = PayloadPartial(lambda value: value, "small")
-    partial_with_payload.payload = backing_buffers[3]
-    payloads = [
-        functools.partial(lambda value: value, backing_buffers[0]),
-        (value for value in (backing_buffers[1],)),
-        hidden,
-        partial_with_payload,
-    ]
-
-    for payload in payloads:
-        exporter = BlockingExporter()
-        scheduler = _ExportScheduler([exporter], max_pending_bytes=2_500)
-        lane = scheduler._lanes[0]
-        scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
-        assert _wait_until(exporter.started.is_set)
-        record = _rec(ARN_B, "opaque-referent")
-        record["payload"] = payload
-        scheduler.schedule(ARN_B, record)
-
-        assert lane._pending_count() == 0
-        assert lane._pending_bytes_count() == 0
-        exporter.release()
-        scheduler.end_invocation(5.0)
-
-    assert hidden.iterated is False
-
-
-def test_retained_size_counts_closures_and_bound_builtin_owners():
-    closure_buffer = bytearray(4_000)
-
-    def closure() -> bytearray:
-        return closure_buffer
-
-    bound_owner = [bytearray(4_000)]
-    wrapper_owner = [bytearray(4_000)]
-    method_wrapper = wrapper_owner.__str__
-    assert isinstance(method_wrapper, types.MethodWrapperType)
-    payloads = [closure, bound_owner.append, method_wrapper]
-
-    for payload in payloads:
-        exporter = BlockingExporter()
-        scheduler = _ExportScheduler([exporter], max_pending_bytes=2_500)
-        lane = scheduler._lanes[0]
-        scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
-        assert _wait_until(exporter.started.is_set)
-        record = _rec(ARN_B, "retained-callable")
-        record["payload"] = payload
-        scheduler.schedule(ARN_B, record)
-
-        assert lane._pending_count() == 0
-        assert lane._pending_bytes_count() == 0
-        exporter.release()
-        scheduler.end_invocation(5.0)
-
-
-def test_safe_opaque_datetime_reaches_custom_renderer():
-    class DateRenderExporter(RecordingExporter):
-        def __init__(self) -> None:
-            super().__init__(max_record_size_bytes=10_000)
-            self.rendered: list[str] = []
-
-        def render(self, record: dict[str, Any]) -> Any:
-            value = record["payload"].isoformat()
-            self.rendered.append(value)
-            return {"value": value}
-
-    exporter = DateRenderExporter()
-    scheduler = _ExportScheduler([exporter])
-    record = _rec(ARN_A, "date")
-    record["payload"] = datetime.date(2026, 9, 10)
-    scheduler.schedule(ARN_A, record)
-    scheduler.end_invocation(5.0)
-
-    assert exporter.rendered == ["2026-09-10"]
-    assert exporter.exported_values() == ["date"]
-
-
-def test_retained_size_inspection_failure_does_not_escape_schedule(monkeypatch):
-    def fail_estimate(value: Any, max_size: int | None = None) -> int:
-        raise RuntimeError("inspection failed")
-
-    monkeypatch.setattr(scheduler_module, "_estimate_retained_size", fail_estimate)
-    exporter = RecordingExporter()
-    scheduler = _ExportScheduler([exporter], max_pending_bytes=2_500)
-
-    scheduler.schedule(ARN_A, _rec(ARN_A, "rejected"))
-
-    assert scheduler._lanes[0]._pending_count() == 0
-    assert scheduler._lanes[0]._worker is None
+    assert exporter.exported_values() == ["inflight", "opaque"]
 
 
 def test_timed_out_barrier_flushes_eventually_and_worker_exits():
@@ -932,60 +666,6 @@ def test_cancel_flush_after_pop_lets_worker_complete_barrier():
     assert exporter.calls.count(("flush", None)) == 1
     lane.request_stop_when_idle()
     assert _wait_until(lambda: not lane._worker_alive())
-
-
-def test_retained_size_counts_slice_referents():
-    exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter], max_pending_bytes=2_500)
-    lane = scheduler._lanes[0]
-    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
-    assert _wait_until(exporter.started.is_set)
-
-    record = _rec(ARN_B, "slice")
-    record["payload"] = slice(bytearray(4_000), None)
-    scheduler.schedule(ARN_B, record)
-
-    assert lane._pending_count() == 0
-    assert lane._pending_bytes_count() == 0
-    exporter.release()
-    scheduler.end_invocation(5.0)
-
-
-def test_retained_size_does_not_dispatch_custom_sizeof():
-    called = threading.Event()
-
-    class CustomSized:
-        def __sizeof__(self) -> int:
-            called.set()
-            raise AssertionError("custom __sizeof__ must not run")
-
-    exporter = RecordingExporter()
-    scheduler = _ExportScheduler([exporter])
-    record = _rec(ARN_A, "custom-sized")
-    record["payload"] = CustomSized()
-
-    scheduler.schedule(ARN_A, record)
-    scheduler.end_invocation(5.0)
-
-    assert called.is_set() is False
-    assert exporter.exported_values() == ["custom-sized"]
-
-
-def test_inflight_record_remains_charged_until_export_returns():
-    exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter], max_pending_bytes=3_000)
-    lane = scheduler._lanes[0]
-    scheduler.schedule(ARN_A, _rec(ARN_A, "a" * 1_500))
-    assert _wait_until(exporter.started.is_set)
-
-    scheduler.schedule(ARN_B, _rec(ARN_B, "b" * 1_500))
-
-    assert lane._pending_count() == 0
-    assert lane._retained_bytes_count() <= 3_000
-    exporter.release()
-    scheduler.end_invocation(5.0)
-    assert exporter.exported_values() == ["a" * 1_500]
-    assert lane._retained_bytes_count() == 0
 
 
 def test_cancel_popped_barrier_preserves_later_detached_flush():

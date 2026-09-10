@@ -63,12 +63,11 @@ Behavior is validated cross-SDK by the `insight` conformance suite
 > `WorkflowInsightPlugin`: listing it twice or sharing it across plugin instances
 > raises `ValueError`. Separate instances of the same exporter class (e.g. two
 > `S3Exporter`s for different buckets) are fine. A blocked lane retains at most
-> 1,024 pending executions and 16 MB of estimated retained memory; it drops the
-> oldest pending snapshot when either bound is reached. Rapid cumulative
-> snapshots for one execution are coalesced, so a lane may skip intermediate
-> `on-change` records; the terminal record is always delivered under normal
-> completion. At invocation end the plugin drains and flushes the touched
-> exporters under a single shared deadline
+> one record in flight and one latest pending snapshot. Rapid cumulative
+> snapshots are coalesced, so a lane may skip intermediate `on-change` records;
+> the terminal record is always delivered under normal completion. At invocation
+> end the plugin drains and flushes the touched exporters under a single shared
+> deadline
 > (`WorkflowInsightConfig.export_timeout_seconds`, default `5.0`); on timeout the
 > workflow response is returned and record delivery degrades to best-effort.
 
