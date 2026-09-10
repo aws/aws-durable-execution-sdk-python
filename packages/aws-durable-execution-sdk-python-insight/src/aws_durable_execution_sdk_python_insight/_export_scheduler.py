@@ -25,7 +25,6 @@ import decimal
 import functools
 import itertools
 import logging
-import sys
 import threading
 import time
 import types
@@ -73,7 +72,6 @@ _ATOMIC_RETAINED_TYPES = (
     bool,
     type(None),
     range,
-    slice,
     type,
     types.ModuleType,
     types.CodeType,
@@ -135,6 +133,8 @@ def _retained_children(value: Any) -> Any:
         return itertools.chain(frozenset.__iter__(value), custom)
     if isinstance(value, deque):
         return itertools.chain(deque.__iter__(value), custom)
+    if isinstance(value, slice):
+        return itertools.chain((value.start, value.stop, value.step), custom)
     if isinstance(value, memoryview):
         return itertools.chain((value.obj,), custom)
     if isinstance(value, functools.partial):
@@ -175,26 +175,25 @@ def _retained_children(value: Any) -> Any:
 
 
 def _retained_shallow_size(value: Any) -> int:
-    try:
-        size = sys.getsizeof(value)
-    except Exception:  # noqa: BLE001 - estimation must never break a hook
-        size = 1_024
+    """Return shallow size without dispatching to user-defined ``__sizeof__``."""
     try:
         if isinstance(value, dict):
-            size = max(size, dict.__sizeof__(value))
-        elif isinstance(value, list):
-            size = max(size, list.__sizeof__(value))
-        elif isinstance(value, tuple):
-            size = max(size, tuple.__sizeof__(value))
-        elif isinstance(value, set):
-            size = max(size, set.__sizeof__(value))
-        elif isinstance(value, frozenset):
-            size = max(size, frozenset.__sizeof__(value))
-        elif isinstance(value, deque):
-            size = max(size, deque.__sizeof__(value))
-    except Exception:  # noqa: BLE001 - base sizing remains best-effort
-        pass
-    return size
+            return dict.__sizeof__(value)
+        if isinstance(value, list):
+            return list.__sizeof__(value)
+        if isinstance(value, tuple):
+            return tuple.__sizeof__(value)
+        if isinstance(value, set):
+            return set.__sizeof__(value)
+        if isinstance(value, frozenset):
+            return frozenset.__sizeof__(value)
+        if isinstance(value, deque):
+            return deque.__sizeof__(value)
+        if type(value) in _ATOMIC_RETAINED_TYPES + _SAFE_OPAQUE_RETAINED_TYPES:
+            return value.__sizeof__()
+        return object.__sizeof__(value)
+    except Exception:  # noqa: BLE001 - estimation must never break a hook
+        return 1_024
 
 
 def _estimate_retained_size(value: Any, max_size: int | None = None) -> int:
@@ -313,6 +312,7 @@ class _ExporterLane:
         self._max_pending_per_execution = max(1, max_pending_records_per_execution)
         self._max_pending_bytes = max(1, max_pending_bytes)
         self._pending_bytes = 0
+        self._inflight_bytes = 0
         # Explicit non-reentrant Lock rather than Condition()'s default RLock:
         # the lane never re-acquires ``_cond`` while already holding it (worker
         # I/O -- export/flush -- runs outside the lock and no locked helper
@@ -412,6 +412,12 @@ class _ExporterLane:
         """Stop waiting for a timed-out barrier while retaining one later flush."""
         with self._cond:
             barrier.canceled = True
+            if not any(
+                kind == _FLUSH and payload is barrier for kind, payload in self._queue
+            ):
+                # The worker already owns this barrier. Do not erase a detached
+                # flush installed by a later invocation while this one was in flight.
+                return
             # Keep at most one detached flush. Moving it to this barrier's
             # position makes it cover all work scheduled before the latest
             # timeout without accumulating one marker per warm invocation.
@@ -481,7 +487,10 @@ class _ExporterLane:
             )
 
     def _enforce_pending_byte_cap(self) -> None:
-        while self._pending_bytes > self._max_pending_bytes and self._pending:
+        while (
+            self._pending_bytes + self._inflight_bytes > self._max_pending_bytes
+            and self._pending
+        ):
             old_arn = self._oldest_pending_arn()
             dropped_size = self._drop_oldest_pending_record(old_arn)
             _logger.warning(
@@ -523,6 +532,7 @@ class _ExporterLane:
         self._worker = None
         self._pending.clear()
         self._pending_bytes = 0
+        self._inflight_bytes = 0
         for kind, payload in self._queue:
             if kind == _FLUSH and payload is not None:
                 barrier: _FlushBarrier = payload
@@ -571,6 +581,7 @@ class _ExporterLane:
                     return
                 kind, payload = self._queue.popleft()
                 record: dict[str, Any] | None = None
+                record_size = 0
                 if kind == _RECORD:
                     token: _RecordToken = payload
                     execution_arn, generation = token
@@ -578,7 +589,9 @@ class _ExporterLane:
                     if not pending or pending[0].generation != generation:
                         continue
                     pending_record = pending.popleft()
-                    self._pending_bytes -= pending_record.size
+                    record_size = pending_record.size
+                    self._pending_bytes -= record_size
+                    self._inflight_bytes += record_size
                     record = pending_record.value
                     if pending and pending[0].generation == generation:
                         # One record per ARN turn within this barrier generation.
@@ -587,7 +600,11 @@ class _ExporterLane:
                         del self._pending[execution_arn]
 
             if kind == _RECORD and record is not None:
-                self._export_one(record)
+                try:
+                    self._export_one(record)
+                finally:
+                    with self._cond:
+                        self._inflight_bytes -= record_size
             else:  # _FLUSH
                 barrier: _FlushBarrier | None = payload
                 self._flush()
@@ -657,6 +674,10 @@ class _ExporterLane:
     def _pending_bytes_count(self) -> int:
         with self._cond:
             return self._pending_bytes
+
+    def _retained_bytes_count(self) -> int:
+        with self._cond:
+            return self._pending_bytes + self._inflight_bytes
 
     def _queue_len(self) -> int:
         with self._cond:

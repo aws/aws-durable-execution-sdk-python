@@ -720,16 +720,16 @@ def test_non_json_record_reaches_exporter_without_evicting_backlog():
 
 def test_individually_over_budget_record_does_not_evict_existing_backlog():
     exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter], max_pending_bytes=3_000)
+    scheduler = _ExportScheduler([exporter], max_pending_bytes=5_000)
     lane = scheduler._lanes[0]
     scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
     assert _wait_until(exporter.started.is_set)
     scheduler.schedule(ARN_B, _rec(ARN_B, "b" * 700))
     scheduler.schedule(ARN_C, _rec(ARN_C, "c" * 700))
-    scheduler.schedule(ARN_D, _rec(ARN_D, "d" * 3_000))
+    scheduler.schedule(ARN_D, _rec(ARN_D, "d" * 5_000))
 
     assert lane._pending_count() == 2
-    assert lane._pending_bytes_count() <= 3_000
+    assert lane._pending_bytes_count() <= 5_000
     exporter.release()
     scheduler.end_invocation(5.0)
     exported = exporter.exported_values()
@@ -1114,3 +1114,79 @@ def test_cancel_flush_after_pop_lets_worker_complete_barrier():
     assert exporter.calls.count(("flush", None)) == 1
     lane.request_stop_when_idle()
     assert _wait_until(lambda: not lane._worker_alive())
+
+
+def test_retained_size_counts_slice_referents():
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter], max_pending_bytes=2_500)
+    lane = scheduler._lanes[0]
+    scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
+    assert _wait_until(exporter.started.is_set)
+
+    record = _rec(ARN_B, "slice")
+    record["payload"] = slice(bytearray(4_000), None)
+    scheduler.schedule(ARN_B, record)
+
+    assert lane._pending_count() == 0
+    assert lane._pending_bytes_count() == 0
+    exporter.release()
+    scheduler.end_invocation(5.0)
+
+
+def test_retained_size_does_not_dispatch_custom_sizeof():
+    called = threading.Event()
+
+    class CustomSized:
+        def __sizeof__(self) -> int:
+            called.set()
+            raise AssertionError("custom __sizeof__ must not run")
+
+    exporter = RecordingExporter()
+    scheduler = _ExportScheduler([exporter])
+    record = _rec(ARN_A, "custom-sized")
+    record["payload"] = CustomSized()
+
+    scheduler.schedule(ARN_A, record)
+    scheduler.end_invocation(5.0)
+
+    assert called.is_set() is False
+    assert exporter.exported_values() == ["custom-sized"]
+
+
+def test_inflight_record_remains_charged_until_export_returns():
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter], max_pending_bytes=3_000)
+    lane = scheduler._lanes[0]
+    scheduler.schedule(ARN_A, _rec(ARN_A, "a" * 1_500))
+    assert _wait_until(exporter.started.is_set)
+
+    scheduler.schedule(ARN_B, _rec(ARN_B, "b" * 1_500))
+
+    assert lane._pending_count() == 0
+    assert lane._retained_bytes_count() <= 3_000
+    exporter.release()
+    scheduler.end_invocation(5.0)
+    assert exporter.exported_values() == ["a" * 1_500]
+    assert lane._retained_bytes_count() == 0
+
+
+def test_cancel_popped_barrier_preserves_later_detached_flush():
+    exporter = BlockingFlushExporter()
+    scheduler = _ExportScheduler([exporter])
+    lane = scheduler._lanes[0]
+    scheduler.schedule(ARN_A, _rec(ARN_A, "a1"))
+    older = lane.enqueue_flush()
+    assert _wait_until(exporter.flush_started.is_set)
+
+    later = lane.enqueue_flush()
+    lane.cancel_flush(later)
+    assert lane._queued_flush_count() == 1
+    lane.cancel_flush(older)
+
+    assert lane._queued_flush_count() == 1
+    assert later.is_done()
+    exporter.release_flush()
+    assert _wait_until(older.is_done)
+    lane.request_stop_when_idle()
+    assert _wait_until(lambda: not lane._worker_alive())
+    assert exporter.calls.count(("flush", None)) == 2
