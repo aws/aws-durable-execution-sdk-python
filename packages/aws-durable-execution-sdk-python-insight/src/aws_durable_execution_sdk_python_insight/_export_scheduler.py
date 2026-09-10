@@ -324,17 +324,13 @@ class _ExporterLane:
             self._stop_when_idle = False
             size = max(0, record_size)
             if size > self._max_pending_bytes:
-                superseded = execution_arn in self._pending
-                if superseded:
-                    self._drop_pending_execution(execution_arn)
                 _logger.warning(
                     "workflow-insight: pending record for %s on %s exceeds the "
-                    "byte budget (%d > %d); dropping this record%s",
+                    "byte budget (%d > %d); dropping this record",
                     execution_arn,
                     type(self._exporter).__name__,
                     size,
                     self._max_pending_bytes,
-                    " and its superseded pending FIFO" if superseded else "",
                 )
                 return
             pending = self._pending.get(execution_arn)

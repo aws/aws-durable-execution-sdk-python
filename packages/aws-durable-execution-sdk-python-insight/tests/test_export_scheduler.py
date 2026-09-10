@@ -734,24 +734,25 @@ def test_individually_over_budget_record_does_not_evict_existing_backlog():
     assert exported[1:] == ["b" * 700, "c" * 700]
 
 
-def test_over_budget_replacement_removes_superseded_same_arn_only():
+def test_over_budget_record_preserves_accepted_same_arn_fifo():
     exporter = BlockingExporter()
     scheduler = _ExportScheduler([exporter], max_pending_bytes=3_500)
     lane = scheduler._lanes[0]
     scheduler.schedule(ARN_A, _rec(ARN_A, "inflight"))
     assert _wait_until(exporter.started.is_set)
-    scheduler.schedule(ARN_A, _rec(ARN_A, "stale-running"))
+    scheduler.schedule(ARN_A, _rec(ARN_A, "accepted-running"))
     scheduler.schedule(ARN_B, _rec(ARN_B, "unrelated"))
     scheduler.schedule(
         ARN_A,
         _rec(ARN_A, "terminal" * 500, status="SUCCEEDED"),
     )
 
-    assert lane._pending_count() == 1
+    assert lane._pending_count() == 2
+    assert lane._pending_record_count() == 2
     assert lane._pending_bytes_count() <= 3_500
     exporter.release()
     scheduler.end_invocation(5.0)
-    assert exporter.exported_values() == ["inflight", "unrelated"]
+    assert exporter.exported_values() == ["inflight", "accepted-running", "unrelated"]
 
 
 def test_retained_size_traverses_slots_after_shallow_size_failure():
