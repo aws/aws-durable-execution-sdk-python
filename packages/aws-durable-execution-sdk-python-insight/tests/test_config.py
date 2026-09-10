@@ -15,6 +15,7 @@ import gc
 import threading
 import time
 import weakref
+from typing import Any
 
 import pytest
 
@@ -292,6 +293,69 @@ def test_exporter_plugin_cycle_is_not_rooted_by_ownership_registry():
     assert exporter_ref() is None
     assert plugin_ref() is None
     assert lane_ref() is None
+
+
+def test_exporter_finalization_runs_after_ownership_lock_is_released():
+    owner_acquired = threading.Event()
+    ordinary_owner_released = threading.Event()
+    finalized = threading.Event()
+    finalizer_lock_results: list[bool] = []
+
+    class FinalizingExporter(_StubExporter):
+        def __del__(self) -> None:
+            acquired = insight_plugin_module._exporter_owner_lock.acquire(timeout=1.0)
+            finalizer_lock_results.append(acquired)
+            if acquired:
+                insight_plugin_module._exporter_owner_lock.release()
+            finalized.set()
+
+    class CoordinatedLaneRef:
+        def __init__(self, lane_ref: weakref.ReferenceType[Any]) -> None:
+            self._lane_ref = lane_ref
+
+        def __call__(self) -> Any:
+            owner = self._lane_ref()
+            owner_acquired.set()
+            assert ordinary_owner_released.wait(5.0)
+            return owner
+
+    with insight_plugin_module._exporter_owner_lock:
+        saved_owners = list(insight_plugin_module._exporter_owners)
+        insight_plugin_module._exporter_owners.clear()
+
+    exporter = FinalizingExporter()
+    plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    lane = plugin._scheduler._lanes[0]
+    lane_ref = weakref.ref(lane)
+    plugin_holder = [plugin]
+    coordinated_ref = CoordinatedLaneRef(lane_ref)
+    with insight_plugin_module._exporter_owner_lock:
+        insight_plugin_module._exporter_owners[:] = [coordinated_ref]  # type: ignore[list-item]
+
+    del lane
+    del plugin
+    del exporter
+
+    def release_ordinary_owner() -> None:
+        assert owner_acquired.wait(5.0)
+        plugin_holder.clear()
+        gc.collect()
+        ordinary_owner_released.set()
+
+    release_thread = threading.Thread(target=release_ordinary_owner)
+    release_thread.start()
+    try:
+        insight_plugin_module._claim_exporter_lanes([])
+        release_thread.join(5.0)
+        assert not release_thread.is_alive()
+        assert finalized.wait(5.0)
+        assert finalizer_lock_results == [True]
+        assert lane_ref() is None
+    finally:
+        ordinary_owner_released.set()
+        release_thread.join(5.0)
+        with insight_plugin_module._exporter_owner_lock:
+            insight_plugin_module._exporter_owners[:] = saved_owners
 
 
 def test_default_exporter_unaffected_by_instance_check():
