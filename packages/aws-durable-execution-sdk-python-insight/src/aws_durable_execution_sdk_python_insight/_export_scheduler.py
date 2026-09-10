@@ -21,6 +21,8 @@ Each exporter lane:
 from __future__ import annotations
 
 import copy
+import datetime
+import decimal
 import functools
 import itertools
 import logging
@@ -28,6 +30,7 @@ import sys
 import threading
 import time
 import types
+import uuid
 from collections import OrderedDict, deque
 from typing import Any
 
@@ -66,6 +69,16 @@ _ATOMIC_RETAINED_TYPES = (
     types.CodeType,
     types.WrapperDescriptorType,
     types.MethodDescriptorType,
+)
+
+
+_SAFE_OPAQUE_RETAINED_TYPES = (
+    datetime.date,
+    datetime.datetime,
+    datetime.time,
+    datetime.timedelta,
+    decimal.Decimal,
+    uuid.UUID,
 )
 
 
@@ -113,9 +126,9 @@ def _retained_children(value: Any) -> Any:
     if isinstance(value, deque):
         return itertools.chain(deque.__iter__(value), custom)
     if isinstance(value, memoryview):
-        return (value.obj,)
+        return itertools.chain((value.obj,), custom)
     if isinstance(value, functools.partial):
-        return (value.func, value.args, value.keywords)
+        return itertools.chain((value.func, value.args, value.keywords), custom)
     if isinstance(value, types.FunctionType):
         closure = []
         for cell in value.__closure__ or ():
@@ -123,19 +136,29 @@ def _retained_children(value: Any) -> Any:
                 closure.append(cell.cell_contents)
             except ValueError:
                 pass
-        return itertools.chain(closure, (value.__defaults__, value.__kwdefaults__))
+        return itertools.chain(
+            closure, (value.__defaults__, value.__kwdefaults__), custom
+        )
     if isinstance(value, types.MethodType):
-        return (value.__self__, value.__func__)
+        return itertools.chain((value.__self__, value.__func__), custom)
     if isinstance(value, types.BuiltinFunctionType):
         owner = value.__self__
-        return () if owner is None or isinstance(owner, types.ModuleType) else (owner,)
+        retained = (
+            () if owner is None or isinstance(owner, types.ModuleType) else (owner,)
+        )
+        return itertools.chain(retained, custom)
     if isinstance(value, types.MethodWrapperType):
-        return (value.__self__,)
+        return itertools.chain((value.__self__,), custom)
     if isinstance(value, types.GeneratorType):
         frame = value.gi_frame
-        return () if frame is None else (frame.f_locals, value.gi_yieldfrom)
-    if isinstance(value, _ATOMIC_RETAINED_TYPES):
-        return ()
+        generator_children = (
+            () if frame is None else (frame.f_locals, value.gi_yieldfrom)
+        )
+        return itertools.chain(generator_children, custom)
+    if type(value) in _ATOMIC_RETAINED_TYPES:
+        return custom
+    if type(value) in _SAFE_OPAQUE_RETAINED_TYPES:
+        return custom
     if custom:
         return custom
     return _UNSUPPORTED_RETAINED_GRAPH
@@ -568,7 +591,16 @@ class _ExportScheduler:
 
     def schedule(self, execution_arn: str, record: dict[str, Any]) -> None:
         """Fan a canonical record out to every lane. Returns immediately."""
-        record_size = _estimate_retained_size(record, self._max_pending_bytes)
+        try:
+            record_size = _estimate_retained_size(record, self._max_pending_bytes)
+        except Exception as exc:  # noqa: BLE001 - inspection must never break a hook
+            _logger.warning(
+                "workflow-insight: retained-size inspection failed for %s; "
+                "rejecting this record safely: %s",
+                execution_arn,
+                exc,
+            )
+            record_size = self._max_pending_bytes + 1
         for lane in self._lanes:
             lane.schedule(execution_arn, record, record_size)
 
