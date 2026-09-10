@@ -79,12 +79,6 @@ _exporter_owners: list[weakref.ReferenceType[Any]] = []
 def _claim_exporter_lanes(lanes: list[Any]) -> None:
     """Give each exporter object to at most one live scheduler lane."""
 
-    def release(lane_ref: weakref.ReferenceType[Any]) -> None:
-        with _exporter_owner_lock:
-            _exporter_owners[:] = [
-                existing for existing in _exporter_owners if existing is not lane_ref
-            ]
-
     with _exporter_owner_lock:
         _exporter_owners[:] = [
             lane_ref for lane_ref in _exporter_owners if lane_ref() is not None
@@ -98,7 +92,9 @@ def _claim_exporter_lanes(lanes: list[Any]) -> None:
                         "the same exporter instance cannot be shared across "
                         "Workflow Insight plugin instances"
                     )
-        _exporter_owners.extend(weakref.ref(lane, release) for lane in lanes)
+        # Callback-free weakrefs avoid lock re-entry during synchronous finalization.
+        # Dead entries are pruned at the start of every subsequent claim.
+        _exporter_owners.extend(weakref.ref(lane) for lane in lanes)
 
 
 def _parse_execution_arn(execution_arn: str) -> dict[str, str]:

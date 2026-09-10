@@ -18,6 +18,7 @@ import weakref
 
 import pytest
 
+import aws_durable_execution_sdk_python_insight.plugin as insight_plugin_module
 from aws_durable_execution_sdk_python_insight import (
     EmitMode,
     OperationDetail,
@@ -278,6 +279,10 @@ def test_exporter_plugin_cycle_is_not_rooted_by_ownership_registry():
     exporter_ref = weakref.ref(exporter)
     plugin_ref = weakref.ref(plugin)
     lane_ref = weakref.ref(lane)
+    assert all(
+        owner_ref.__callback__ is None
+        for owner_ref in insight_plugin_module._exporter_owners
+    )
 
     del lane
     del plugin
