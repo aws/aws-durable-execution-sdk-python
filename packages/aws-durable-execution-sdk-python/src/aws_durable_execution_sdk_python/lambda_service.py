@@ -38,13 +38,25 @@ TimeoutSeconds: TypeAlias = int
 logger = logging.getLogger(__name__)
 
 
-def _is_in_var_dir(module_file: str = __file__) -> bool:
-    """Return True if this SDK is installed under /var/lang/.
+_BUNDLED_LOCAL_LABEL = "+bundled"
 
-    Lambda bundled Python runtimes install packages at
-    /var/lang/lib/pythonX.Y/site-packages/.
+
+def _is_bundled(version: str) -> bool:
+    """True if the managed runtime stamped a +bundled label onto this install."""
+    return version.endswith(_BUNDLED_LOCAL_LABEL)
+
+
+def _user_agent_version(version: str) -> str:
+    """Return the version segment reported in the boto3 user agent.
+
+    The managed runtime appends ``+bundled`` to ``__version__`` at image build
+    time. The user agent reports that install as ``<public version>-bundled``.
+    The ``-bundled`` form predates the label and matches the JS SDK, so existing
+    telemetry queries keep working. Any other local label is reported unchanged.
     """
-    return module_file.startswith("/var/lang/")
+    if _is_bundled(version):
+        return f"{version.removesuffix(_BUNDLED_LOCAL_LABEL)}-bundled"
+    return version
 
 
 # region model
@@ -1218,7 +1230,7 @@ class LambdaClient(DurableServiceClient):
                 config=Config(
                     connect_timeout=5,
                     read_timeout=50,
-                    user_agent_extra=f"aws-durable-execution-sdk-python/{__version__}{'-bundled' if _is_in_var_dir() else ''}",
+                    user_agent_extra=f"aws-durable-execution-sdk-python/{_user_agent_version(__version__)}",
                 ),
             )
         return cls(client=cls._cached_boto_client)

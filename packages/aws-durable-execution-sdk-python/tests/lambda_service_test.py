@@ -40,7 +40,8 @@ from aws_durable_execution_sdk_python.lambda_service import (
     TimestampConverter,
     WaitDetails,
     WaitOptions,
-    _is_in_var_dir,
+    _is_bundled,
+    _user_agent_version,
 )
 
 
@@ -2225,74 +2226,54 @@ def test_lambda_client_initialize_client_no_endpoint(
     assert isinstance(client, LambdaClient)
 
 
-@patch(
-    "aws_durable_execution_sdk_python.lambda_service._is_in_var_dir",
-    return_value=True,
-)
 @patch("boto3.client")
-def test_lambda_client_user_agent_runtime_bundled(
-    mock_boto_client, _mock_is_in_var_dir, reset_lambda_client_cache
-):
-    """user_agent_extra includes -bundled when SDK is in /var/lang/."""
-    mock_client = Mock()
-    mock_boto_client.return_value = mock_client
+def test_lambda_client_user_agent_wiring(mock_boto_client, reset_lambda_client_cache):
+    """The user agent string is wired into the boto3 client config."""
+    mock_boto_client.return_value = Mock()
 
-    client = LambdaClient.initialize_client()
+    LambdaClient.initialize_client()
 
-    call_args = mock_boto_client.call_args
-    config = call_args[1]["config"]
+    config = mock_boto_client.call_args[1]["config"]
     assert (
         config.user_agent_extra
-        == f"aws-durable-execution-sdk-python/{__version__}-bundled"
+        == f"aws-durable-execution-sdk-python/{_user_agent_version(__version__)}"
     )
-    assert isinstance(client, LambdaClient)
-
-
-@patch(
-    "aws_durable_execution_sdk_python.lambda_service._is_in_var_dir",
-    return_value=False,
-)
-@patch("boto3.client")
-def test_lambda_client_user_agent_not_runtime_bundled(
-    mock_boto_client, _mock_is_in_var_dir, reset_lambda_client_cache
-):
-    """user_agent_extra omits -bundled when SDK is not in /var/lang."""
-    mock_client = Mock()
-    mock_boto_client.return_value = mock_client
-
-    client = LambdaClient.initialize_client()
-
-    call_args = mock_boto_client.call_args
-    config = call_args[1]["config"]
-    assert config.user_agent_extra == f"aws-durable-execution-sdk-python/{__version__}"
-    assert isinstance(client, LambdaClient)
 
 
 @pytest.mark.parametrize(
-    "path,expected",
+    "version,expected",
     [
-        # Lambda bundled runtime site-packages
-        (
-            "/var/lang/lib/python3.13/site-packages/aws_durable_execution_sdk_python/lambda_service.py",
-            True,
-        ),
-        (
-            "/var/lang/lib/python3.12/site-packages/aws_durable_execution_sdk_python/lambda_service.py",
-            True,
-        ),
-        # Customer deployment package
-        ("/var/task/aws_durable_execution_sdk_python/lambda_service.py", False),
-        # Lambda Layer
-        ("/opt/python/aws_durable_execution_sdk_python/lambda_service.py", False),
-        # Trailing-slash guard: /var/langsurprise must not match
-        ("/var/langsurprise/lib/python3.13/site-packages/x.py", False),
-        # Local dev
-        ("/Users/me/project/.venv/lib/python3.12/site-packages/x.py", False),
+        # +bundled stamp is stripped and reported as -bundled
+        ("1.7.0+bundled", "1.7.0-bundled"),
+        ("1.7.0.post0+bundled", "1.7.0.post0-bundled"),
+        # Any other local label is reported unchanged
+        ("2.0.0+acme.1", "2.0.0+acme.1"),
+        ("1.7.0", "1.7.0"),
+    ],
+)
+def test_user_agent_version(version, expected):
+    assert _user_agent_version(version) == expected
+
+
+@pytest.mark.parametrize(
+    "version,expected",
+    [
+        # Managed-runtime stamp
+        ("1.7.0+bundled", True),
+        ("1.7.0.post0+bundled", True),
+        # Public PyPI installs never carry the local label
+        ("1.7.0", False),
+        ("1.7.0.post0", False),
+        # A different local label must not match
+        ("1.7.0+local", False),
+        # A label beginning with 'bundled' must not match, only the exact suffix
+        ("1.7.0+bundleddebug", False),
+        ("1.7.0+bundled.1", False),
         ("", False),
     ],
 )
-def test_is_in_var_dir(path, expected):
-    assert _is_in_var_dir(path) is expected
+def test_is_bundled(version, expected):
+    assert _is_bundled(version) is expected
 
 
 def test_lambda_client_checkpoint_with_non_none_client_token():
