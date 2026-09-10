@@ -252,14 +252,14 @@ class _ExporterLane:
         # requiring custom-renderable values to implement ``deepcopy``.
         try:
             local = _copy_record_containers(record)
-        except Exception as exc:  # noqa: BLE001 - malformed containers must not break the lane
+        except Exception as exc:  # noqa: BLE001 - export remains best-effort
             _logger.warning(
                 "workflow-insight: record container copy failed for exporter %s; "
-                "skipping export for this record: %s",
+                "using the original record without lane isolation: %s",
                 type(exporter).__name__,
                 exc,
             )
-            return
+            local = record
         try:
             shaped = truncate_record(
                 local, exporter.max_record_size_bytes, exporter.render

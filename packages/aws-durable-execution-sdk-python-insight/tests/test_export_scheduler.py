@@ -713,3 +713,48 @@ def test_cancel_queued_barrier_preserves_later_detached_flush():
     assert _wait_until(lambda: not lane._worker_alive())
     assert exporter.published == ["a1", "a2"]
     assert exporter.flushed == 1
+
+
+def test_sizing_resource_failure_does_not_call_exporter(monkeypatch):
+    import aws_durable_execution_sdk_python_insight.truncation as truncation_module
+
+    def fail_dumps(*args: Any, **kwargs: Any) -> str:  # noqa: ARG001
+        raise MemoryError("sizing exhausted")
+
+    monkeypatch.setattr(truncation_module.json, "dumps", fail_dumps)
+    exporter = RecordingExporter(max_record_size_bytes=1_000)
+    scheduler = _ExportScheduler([exporter])
+
+    scheduler.schedule(ARN_A, _rec(ARN_A, "resource-failure"))
+    scheduler.end_invocation(5.0)
+
+    assert exporter.exported_values() == []
+
+
+def test_deeply_nested_record_falls_back_to_original_for_custom_render():
+    class DeepRenderExporter(RecordingExporter):
+        def __init__(self) -> None:
+            super().__init__(max_record_size_bytes=1_000)
+            self.rendered_depth = 0
+
+        def render(self, record: dict[str, Any]) -> Any:
+            value = record["payload"]
+            while isinstance(value, list):
+                self.rendered_depth += 1
+                value = value[0]
+            return {"value": value}
+
+    depth = 2_000
+    payload: Any = "leaf"
+    for _ in range(depth):
+        payload = [payload]
+    record = _rec(ARN_A, "deep")
+    record["payload"] = payload
+    exporter = DeepRenderExporter()
+    scheduler = _ExportScheduler([exporter])
+
+    scheduler.schedule(ARN_A, record)
+    scheduler.end_invocation(5.0)
+
+    assert exporter.rendered_depth == depth
+    assert exporter.exported_values() == ["deep"]
