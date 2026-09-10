@@ -149,11 +149,25 @@ class _ExporterLane:
     ) -> None:
         with self._cond:
             self._stop_when_idle = False
-            size = (
-                self._max_pending_bytes + 1
-                if record_size is None
-                else max(0, record_size)
-            )
+            if record_size is None:
+                _logger.warning(
+                    "workflow-insight: cannot measure pending record for %s on "
+                    "%s; dropping this record",
+                    execution_arn,
+                    type(self._exporter).__name__,
+                )
+                return
+            size = max(0, record_size)
+            if size > self._max_pending_bytes:
+                _logger.warning(
+                    "workflow-insight: pending record for %s on %s exceeds the "
+                    "byte budget (%d > %d); dropping this record",
+                    execution_arn,
+                    type(self._exporter).__name__,
+                    size,
+                    self._max_pending_bytes,
+                )
+                return
             pending = self._pending.get(execution_arn)
             if pending is None:
                 pending = deque()
