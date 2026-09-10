@@ -71,18 +71,54 @@ def _estimate_retained_size(value: Any) -> int:
             total += sys.getsizeof(item)
         except Exception:  # noqa: BLE001 - estimation must never break a hook
             total += 1_024
+        try:
+            if isinstance(item, dict):
+                stack.extend(item.keys())
+                stack.extend(item.values())
+            elif isinstance(item, (list, tuple, set, frozenset, deque)):
+                stack.extend(item)
+            else:
+                try:
+                    stack.append(vars(item))
+                except Exception:  # noqa: BLE001 - custom objects may use slots
+                    pass
+                for cls in type(item).__mro__:
+                    slots = vars(cls).get("__slots__", ())
+                    if isinstance(slots, str):
+                        slots = (slots,)
+                    for slot in slots:
+                        if slot in {"__dict__", "__weakref__"}:
+                            continue
+                        if slot.startswith("__") and not slot.endswith("__"):
+                            slot = f"_{cls.__name__.lstrip('_')}{slot}"
+                        try:
+                            stack.append(getattr(item, slot))
+                        except Exception:  # noqa: BLE001 - unset/custom slots are best-effort
+                            pass
+        except Exception:  # noqa: BLE001 - traversal must never break a hook
+            pass
+    return total
+
+
+def _copy_record_containers(record: dict[str, Any]) -> dict[str, Any]:
+    """Copy built-in containers while treating custom values as opaque leaves."""
+    memo: dict[int, Any] = {}
+    seen: set[int] = set()
+    stack: list[Any] = [record]
+    while stack:
+        item = stack.pop()
+        identity = id(item)
+        if identity in seen:
             continue
-        if isinstance(item, dict):
+        seen.add(identity)
+        if type(item) is dict:
             stack.extend(item.keys())
             stack.extend(item.values())
-        elif isinstance(item, (list, tuple, set, frozenset, deque)):
+        elif type(item) in {list, tuple, set, frozenset, deque}:
             stack.extend(item)
         else:
-            try:
-                stack.append(vars(item))
-            except Exception:  # noqa: BLE001 - custom objects are best-effort
-                pass
-    return total
+            memo[identity] = item
+    return copy.deepcopy(record, memo)
 
 
 # Queue entry kinds.
@@ -183,13 +219,17 @@ class _ExporterLane:
             self._stop_when_idle = False
             size = max(0, record_size)
             if size > self._max_pending_bytes:
+                superseded = execution_arn in self._pending
+                if superseded:
+                    self._drop_pending_execution(execution_arn)
                 _logger.warning(
                     "workflow-insight: pending record for %s on %s exceeds the "
-                    "byte budget (%d > %d); dropping this record",
+                    "byte budget (%d > %d); dropping this record%s",
                     execution_arn,
                     type(self._exporter).__name__,
                     size,
                     self._max_pending_bytes,
+                    " and its superseded pending FIFO" if superseded else "",
                 )
                 return
             pending = self._pending.get(execution_arn)
@@ -439,18 +479,15 @@ class _ExporterLane:
 
     def _export_one(self, record: dict[str, Any]) -> None:
         exporter = self._exporter
-        # Copy for exporter isolation: every lane shares the same canonical
-        # record, and truncation/export must never mutate what another lane
-        # sees. If the copy fails we must NOT fall back to the shared record --
-        # exporting the alias would let this lane's truncation mutate the object
-        # other lanes still read, breaking workflow isolation. Treat a copy
-        # failure like a render/truncation failure: log and skip this record for
-        # this lane, then continue processing the lane's queue.
+        # Copy the record's built-in containers for lane isolation, but preserve
+        # custom values as opaque leaves for exporter-specific rendering. This
+        # keeps one lane's render/truncation mutations out of other lanes without
+        # requiring custom-renderable values to implement ``deepcopy``.
         try:
-            local = copy.deepcopy(record)
-        except Exception as exc:  # noqa: BLE001 - a non-copyable payload must not alias the shared record or break the lane
+            local = _copy_record_containers(record)
+        except Exception as exc:  # noqa: BLE001 - malformed containers must not break the lane
             _logger.warning(
-                "workflow-insight: record copy failed for exporter %s; "
+                "workflow-insight: record container copy failed for exporter %s; "
                 "skipping export for this record: %s",
                 type(exporter).__name__,
                 exc,
