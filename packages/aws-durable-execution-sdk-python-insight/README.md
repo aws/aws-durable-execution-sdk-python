@@ -63,7 +63,7 @@ Behavior is validated cross-SDK by the `insight` conformance suite
 > `WorkflowInsightPlugin`: listing it twice or sharing it across plugin instances
 > raises `ValueError`. Separate instances of the same exporter class are fine.
 > Each lane keeps up to 16 pending snapshots per execution, 1,024 records total,
-> and 16 MB of estimated canonical JSON. When a bound fills, it drops the oldest
+> and 16 MB of estimated retained memory. When a bound fills, it drops the oldest
 > pending snapshot so recent progress and terminal snapshots are retained. At
 > invocation end the plugin drains and flushes the touched exporters under a
 > single shared deadline
