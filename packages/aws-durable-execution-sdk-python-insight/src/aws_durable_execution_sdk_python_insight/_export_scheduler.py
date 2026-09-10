@@ -142,27 +142,32 @@ class _ExporterLane:
             self._cond.notify()
 
     def cancel_flush(self, barrier: _FlushBarrier) -> None:
-        """Stop waiting for a timed-out barrier while retaining one later flush."""
+        """Stop waiting while retaining one flush at the latest covered point."""
         with self._cond:
             barrier.canceled = True
+            marker_indexes = {
+                index
+                for index, (kind, payload) in enumerate(self._queue)
+                if kind == _FLUSH and (payload is barrier or payload is None)
+            }
             if not any(
                 kind == _FLUSH and payload is barrier for kind, payload in self._queue
             ):
                 # The worker already owns this barrier. Do not erase a detached
                 # flush installed by a later invocation while this one was in flight.
                 return
-            # Keep at most one detached flush. Moving it to this barrier's
-            # position makes it cover all work scheduled before the latest
-            # timeout without accumulating one marker per warm invocation.
-            for index in range(len(self._queue) - 1, -1, -1):
-                kind, payload = self._queue[index]
-                if kind == _FLUSH and payload is None:
-                    del self._queue[index]
-            for index, (kind, payload) in enumerate(self._queue):
-                if kind == _FLUSH and payload is barrier:
-                    self._queue[index] = (_FLUSH, None)
-                    barrier.complete()
-                    return
+            # A flush covers every record before its queue position. Keep the
+            # rightmost canceled/detached marker so coalescing never narrows the
+            # set of records that will eventually be published.
+            rightmost = max(marker_indexes)
+            coalesced: deque[tuple[str, Any]] = deque()
+            for index, item in enumerate(self._queue):
+                if index == rightmost:
+                    coalesced.append((_FLUSH, None))
+                elif index not in marker_indexes:
+                    coalesced.append(item)
+            self._queue = coalesced
+            barrier.complete()
 
     # -- queue bookkeeping (must hold ``_cond``) ------------------------------
 

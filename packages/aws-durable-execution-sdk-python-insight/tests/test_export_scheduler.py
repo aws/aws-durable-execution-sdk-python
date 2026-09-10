@@ -688,3 +688,28 @@ def test_cancel_popped_barrier_preserves_later_detached_flush():
     lane.request_stop_when_idle()
     assert _wait_until(lambda: not lane._worker_alive())
     assert exporter.calls.count(("flush", None)) == 2
+
+
+def test_cancel_queued_barrier_preserves_later_detached_flush():
+    exporter = BlockingBufferedExporter()
+    scheduler = _ExportScheduler([exporter])
+    lane = scheduler._lanes[0]
+    scheduler.schedule(ARN_A, _rec(ARN_A, "a1"))
+    assert _wait_until(exporter.started.is_set)
+
+    older = lane.enqueue_flush()
+    scheduler.schedule(ARN_B, _rec(ARN_B, "a2"))
+    later = lane.enqueue_flush()
+    lane.cancel_flush(later)
+    lane.cancel_flush(older)
+
+    assert older.is_done()
+    assert later.is_done()
+    assert lane._queue_len() == 2
+    assert lane._queued_flush_count() == 1
+    exporter.release()
+    lane.request_stop_when_idle()
+
+    assert _wait_until(lambda: not lane._worker_alive())
+    assert exporter.published == ["a1", "a2"]
+    assert exporter.flushed == 1
