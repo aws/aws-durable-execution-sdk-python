@@ -56,7 +56,7 @@ _DEFAULT_MAX_PENDING_RECORDS_PER_EXECUTION = 16
 _DEFAULT_MAX_PENDING_BYTES = 16_000_000
 
 
-def _estimate_retained_size(value: Any) -> int:
+def _estimate_retained_size(value: Any, max_size: int | None = None) -> int:
     """Estimate retained Python memory without serializing or calling render()."""
     total = 0
     seen: set[int] = set()
@@ -71,8 +71,12 @@ def _estimate_retained_size(value: Any) -> int:
             total += sys.getsizeof(item)
         except Exception:  # noqa: BLE001 - estimation must never break a hook
             total += 1_024
+        if max_size is not None and total > max_size:
+            return max_size + 1
         try:
-            if isinstance(item, dict):
+            if isinstance(item, memoryview):
+                stack.append(item.obj)
+            elif isinstance(item, dict):
                 stack.extend(item.keys())
                 stack.extend(item.values())
             elif isinstance(item, (list, tuple, set, frozenset, deque)):
@@ -285,26 +289,19 @@ class _ExporterLane:
             self._cond.notify()
 
     def cancel_flush(self, barrier: _FlushBarrier) -> None:
-        """Cancel a timed-out flush barrier so it cannot pile up behind a
-        blocked worker.
-
-        Under the lane lock: mark the barrier cancelled and, if its ``_FLUSH``
-        marker is still queued, remove that exact marker and complete the
-        barrier here. Removing it is what keeps queue/barrier state bounded
-        across many warm invocations behind a blocked exporter -- otherwise one
-        stale barrier per invocation would accumulate behind the stuck worker.
-
-        If the worker has already popped the marker (the flush is in flight or
-        about to run) the marker is no longer in the queue: we only set
-        ``canceled`` and leave completion to the worker, which skips the
-        now-pointless flush and completes the barrier itself. A synchronous
-        in-flight ``flush()`` is never interrupted.
-        """
+        """Stop waiting for a timed-out barrier while retaining one later flush."""
         with self._cond:
             barrier.canceled = True
+            # Keep at most one detached flush. Moving it to this barrier's
+            # position makes it cover all work scheduled before the latest
+            # timeout without accumulating one marker per warm invocation.
+            for index in range(len(self._queue) - 1, -1, -1):
+                kind, payload = self._queue[index]
+                if kind == _FLUSH and payload is None:
+                    del self._queue[index]
             for index, (kind, payload) in enumerate(self._queue):
                 if kind == _FLUSH and payload is barrier:
-                    del self._queue[index]
+                    self._queue[index] = (_FLUSH, None)
                     barrier.complete()
                     return
 
@@ -407,7 +404,7 @@ class _ExporterLane:
         self._pending.clear()
         self._pending_bytes = 0
         for kind, payload in self._queue:
-            if kind == _FLUSH:
+            if kind == _FLUSH and payload is not None:
                 barrier: _FlushBarrier = payload
                 barrier.canceled = True
                 barrier.failed = True
@@ -472,10 +469,10 @@ class _ExporterLane:
             if kind == _RECORD and record is not None:
                 self._export_one(record)
             else:  # _FLUSH
-                barrier: _FlushBarrier = payload
-                if not barrier.canceled:
-                    self._flush()
-                barrier.complete()
+                barrier: _FlushBarrier | None = payload
+                self._flush()
+                if barrier is not None:
+                    barrier.complete()
 
     def _export_one(self, record: dict[str, Any]) -> None:
         exporter = self._exporter
@@ -564,20 +561,21 @@ class _ExportScheduler:
         ),
         max_pending_bytes: int = _DEFAULT_MAX_PENDING_BYTES,
     ) -> None:
+        self._max_pending_bytes = max(1, max_pending_bytes)
         self._lanes = [
             _ExporterLane(
                 exporter,
                 max_pending_executions=max_pending_executions,
                 max_pending_records=max_pending_records,
                 max_pending_records_per_execution=max_pending_records_per_execution,
-                max_pending_bytes=max_pending_bytes,
+                max_pending_bytes=self._max_pending_bytes,
             )
             for exporter in exporters
         ]
 
     def schedule(self, execution_arn: str, record: dict[str, Any]) -> None:
         """Fan a canonical record out to every lane. Returns immediately."""
-        record_size = _estimate_retained_size(record)
+        record_size = _estimate_retained_size(record, self._max_pending_bytes)
         for lane in self._lanes:
             lane.schedule(execution_arn, record, record_size)
 
