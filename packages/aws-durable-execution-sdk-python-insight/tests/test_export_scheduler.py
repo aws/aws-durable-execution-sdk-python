@@ -11,11 +11,14 @@ invariants are asserted deterministically rather than by timing luck.
 
 from __future__ import annotations
 
+import datetime
 import functools
 import threading
 import time
 import types
 from typing import Any
+
+import aws_durable_execution_sdk_python_insight._export_scheduler as scheduler_module
 
 from aws_durable_execution_sdk_python_insight._export_scheduler import (
     _ExportScheduler,
@@ -900,12 +903,18 @@ def test_retained_size_traverses_filtered_opaque_referents():
             self.iterated = True
             return iter(())
 
-    backing_buffers = [bytearray(4_000) for _ in range(3)]
+    class PayloadPartial(functools.partial):
+        pass
+
+    backing_buffers = [bytearray(4_000) for _ in range(4)]
     hidden = HiddenList(backing_buffers[2])
+    partial_with_payload = PayloadPartial(lambda value: value, "small")
+    partial_with_payload.payload = backing_buffers[3]
     payloads = [
         functools.partial(lambda value: value, backing_buffers[0]),
         (value for value in (backing_buffers[1],)),
         hidden,
+        partial_with_payload,
     ]
 
     for payload in payloads:
@@ -952,6 +961,42 @@ def test_retained_size_counts_closures_and_bound_builtin_owners():
         assert lane._pending_bytes_count() == 0
         exporter.release()
         scheduler.end_invocation(5.0)
+
+
+def test_safe_opaque_datetime_reaches_custom_renderer():
+    class DateRenderExporter(RecordingExporter):
+        def __init__(self) -> None:
+            super().__init__(max_record_size_bytes=10_000)
+            self.rendered: list[str] = []
+
+        def render(self, record: dict[str, Any]) -> Any:
+            value = record["payload"].isoformat()
+            self.rendered.append(value)
+            return {"value": value}
+
+    exporter = DateRenderExporter()
+    scheduler = _ExportScheduler([exporter])
+    record = _rec(ARN_A, "date")
+    record["payload"] = datetime.date(2026, 9, 10)
+    scheduler.schedule(ARN_A, record)
+    scheduler.end_invocation(5.0)
+
+    assert exporter.rendered == ["2026-09-10"]
+    assert exporter.exported_values() == ["date"]
+
+
+def test_retained_size_inspection_failure_does_not_escape_schedule(monkeypatch):
+    def fail_estimate(value: Any, max_size: int | None = None) -> int:
+        raise RuntimeError("inspection failed")
+
+    monkeypatch.setattr(scheduler_module, "_estimate_retained_size", fail_estimate)
+    exporter = RecordingExporter()
+    scheduler = _ExportScheduler([exporter], max_pending_bytes=2_500)
+
+    scheduler.schedule(ARN_A, _rec(ARN_A, "rejected"))
+
+    assert scheduler._lanes[0]._pending_count() == 0
+    assert scheduler._lanes[0]._worker is None
 
 
 def test_timed_out_barrier_flushes_eventually_and_worker_exits():
