@@ -55,10 +55,12 @@ and `top-level` vs `full-tree` operation detail all mirror the JS plugin.
 Behavior is validated cross-SDK by the `insight` conformance suite
 (`aws-durable-execution-conformance-tests-insight`).
 
-> **Note (`on-change` emission).** In `on-change` mode, exporter calls currently
-> run synchronously on the SDK checkpoint path, so a slow exporter can delay
-> workflow progress. Asynchronous scheduling/coalescing is deferred and tracked
-> in [issue #687](https://github.com/aws/aws-durable-execution-sdk-python/issues/687).
+> **Note (asynchronous export).** Export rendering, truncation, `export()`, and
+> `flush()` run on one lazy background worker per plugin. Checkpoint hooks only
+> replace the latest pending snapshot and wake the worker. Consecutive
+> `on-change` snapshots may coalesce while an export is in flight. An invocation
+> that emits a record drains the latest snapshot and flushes exporters before it
+> returns; invocations that emit nothing do not start or flush the worker.
 
 ## Requirements
 
