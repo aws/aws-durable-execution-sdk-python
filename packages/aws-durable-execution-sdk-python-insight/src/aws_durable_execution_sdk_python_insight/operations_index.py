@@ -14,7 +14,23 @@ seen occurrence (the runtime appends newer operations to the end of the array).
 
 from __future__ import annotations
 
-from typing import Any
+from enum import StrEnum
+from typing import Any, Literal
+
+
+class OperationsFormat(StrEnum):
+    """How an exporter renders operations in the emitted record."""
+
+    # the canonical ``operations`` array (lossless; default)
+    ARRAY = "array"
+    # replace it with the name-keyed ``operationsByName`` summary map
+    BY_NAME = "by-name"
+    # include both the array and the map
+    BOTH = "both"
+
+
+# Accepted string inputs, kept in lockstep with the enum values above.
+OperationsFormatInput = Literal["array", "by-name", "both"]
 
 
 def build_operations_by_name(
@@ -96,3 +112,21 @@ def with_operations_by_name(record: dict[str, Any]) -> dict[str, Any]:
     out = {key: value for key, value in record.items() if key != "operations"}
     out["operationsByName"] = build_operations_by_name(record.get("operations", []))
     return out
+
+
+def apply_operations_format(
+    record: dict[str, Any], operations_format: OperationsFormat | OperationsFormatInput
+) -> dict[str, Any]:
+    """Render ``operations`` as an array, a name-keyed map, or both.
+
+    ``"array"`` returns the record unchanged. ``"by-name"`` replaces the array
+    with ``operationsByName``. ``"both"`` keeps the array and adds the map.
+    """
+    fmt = OperationsFormat(operations_format)
+    if fmt == OperationsFormat.BY_NAME:
+        return with_operations_by_name(record)
+    if fmt == OperationsFormat.BOTH:
+        out = dict(record)
+        out["operationsByName"] = build_operations_by_name(record.get("operations", []))
+        return out
+    return record
