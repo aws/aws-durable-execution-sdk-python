@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import json
+import queue
 import threading
 import time
 import unittest.mock
@@ -51,6 +52,8 @@ from aws_durable_execution_sdk_python.plugin import (
     UserFunctionOutcome,
 )
 from aws_durable_execution_sdk_python.state import (
+    _BLOCKED_CALLER_WAIT_SECONDS,
+    _STOP_SIGNAL_POLL_SECONDS,
     CheckpointBatcherConfig,
     CheckpointedResult,
     ExecutionState,
@@ -3878,18 +3881,16 @@ def test_create_checkpoint_caller_remains_blocked_on_background_failure():
     caller_thread.join(timeout=1.0)
 
 
-def test_create_checkpoint_multiple_sync_calls_all_block():
-    """Test that multiple synchronous checkpoint calls all block correctly.
+PROCESSOR_DELAY_SECONDS = 0.15
 
-    Verifies that when multiple threads call create_checkpoint synchronously,
-    they all block until their respective completion events are signaled.
-    """
+
+def test_create_checkpoint_multiple_sync_calls_all_block():
+    """Every synchronous caller stays blocked until its batch has been collected."""
     mock_lambda_client = Mock(spec=LambdaClient)
     mock_lambda_client.checkpoint.return_value = CheckpointOutput(
         checkpoint_token="new_token",  # noqa: S106
         new_execution_state=CheckpointUpdatedExecutionState(
-            operations=[],
-            next_marker=None,
+            operations=[], next_marker=None
         ),
     )
 
@@ -3903,57 +3904,265 @@ def test_create_checkpoint_multiple_sync_calls_all_block():
 
     num_callers = 3
     completion_events = [CompletionEvent() for _ in range(num_callers)]
-    start_times = [None] * num_callers
-    end_times = [None] * num_callers
+    return_times: list[float | None] = [None] * num_callers
 
-    def call_checkpoint(index):
-        """Call synchronous checkpoint."""
-        operation_update = OperationUpdate(
-            operation_id=f"test_op_{index}",
-            operation_type=OperationType.STEP,
-            action=OperationAction.START,
+    # Recorded inside the processor thread, so both are on the same clock as the
+    # caller return times and neither depends on when a caller thread started.
+    delay_started_at: list[float] = []
+    batch_collected_at: list[float] = []
+    collected_batch_size: list[int] = []
+
+    def call_checkpoint(index: int) -> None:
+        state.create_checkpoint(
+            OperationUpdate(
+                operation_id=f"test_op_{index}",
+                operation_type=OperationType.STEP,
+                action=OperationAction.START,
+            ),
+            is_sync=True,
         )
-        start_times[index] = time.time()
-        state.create_checkpoint(operation_update, is_sync=True)
-        end_times[index] = time.time()
+        return_times[index] = time.monotonic()
         completion_events[index].set()
 
-    def background_processor():
-        """Process all checkpoints with delay."""
-        time.sleep(0.15)  # Delay to verify blocking
+    def background_processor() -> None:
+        delay_started_at.append(time.monotonic())
+        time.sleep(PROCESSOR_DELAY_SECONDS)
         batch = state._collect_checkpoint_batch()
-        if batch:
-            # Signal all completion events
-            for queued_op in batch:
-                if queued_op.completion_event:
-                    queued_op.completion_event.set()
+        batch_collected_at.append(time.monotonic())
+        collected_batch_size.append(len(batch))
+        # Release the callers only after the collection time is recorded, so the
+        # ordering the assertions check cannot be observed out of order.
+        for queued_op in batch:
+            if queued_op.completion_event:
+                queued_op.completion_event.set()
 
-    # Start background processor
     processor_thread = threading.Thread(daemon=True, target=background_processor)
     processor_thread.start()
 
-    # Start multiple caller threads
     caller_threads = []
     for i in range(num_callers):
         thread = threading.Thread(daemon=True, target=call_checkpoint, args=(i,))
         thread.start()
         caller_threads.append(thread)
 
-    # Wait for all threads
     for thread in caller_threads:
-        thread.join(timeout=2.0)
-    processor_thread.join(timeout=1.0)
+        thread.join(timeout=5.0)
+    processor_thread.join(timeout=5.0)
 
-    # Verify all calls completed
-    for i, event in enumerate(completion_events):
-        assert event.is_set(), f"Caller {i} did not complete"
+    assert len(batch_collected_at) == 1, "processor did not collect exactly one batch"
 
-    # Verify all calls blocked for at least the delay time
+    # All three callers enqueued during the delay, so one batch carries all three.
+    # This also confirms the collector drains queued work rather than flushing one
+    # item at a time.
+    assert collected_batch_size[0] == num_callers
+
     for i in range(num_callers):
-        elapsed = end_times[i] - start_times[i]
-        assert elapsed >= 0.15, (
-            f"Caller {i} expected blocking for at least 0.15s, got {elapsed}s"
+        assert completion_events[i].is_set(), f"Caller {i} did not complete"
+        assert return_times[i] is not None
+
+        # 1. No caller returned before the batch that carries it was collected.
+        #    This is what "synchronous" means, and it is exact.
+        assert return_times[i] >= batch_collected_at[0], (
+            f"Caller {i} returned before its batch was collected"
         )
+
+        # 2. Every caller stayed blocked across the processor's whole delay, so
+        #    the callers really did block rather than pass through.
+        assert return_times[i] >= delay_started_at[0] + PROCESSOR_DELAY_SECONDS, (
+            f"Caller {i} returned before the processor delay elapsed"
+        )
+
+
+class _RecordingQueue(queue.Queue):
+    """Records the timeout of every timed get on the checkpoint queue.
+
+    The collector's waiting policy is fully described by the timeouts it passes.
+    So a test can assert the policy exactly, without measuring elapsed time. A
+    wall-clock assertion would be both flaky and imprecise: it would pass on a
+    slow machine that still performed the long wait.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.timeouts: list[float] = []
+        self.expired_timeouts: list[float] = []
+
+    def get(self, block=True, timeout=None):  # noqa: FBT002
+        if timeout is not None:
+            self.timeouts.append(timeout)
+        try:
+            return super().get(block, timeout)
+        except queue.Empty:
+            if timeout is not None:
+                self.expired_timeouts.append(timeout)
+            raise
+
+
+def _issue710_state() -> ExecutionState:
+    return ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=Mock(),
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+
+
+def _issue710_update(action, op_id: str = "step"):
+    return OperationUpdate(
+        operation_id=op_id, operation_type=OperationType.STEP, action=action
+    )
+
+
+def _issue710_instrument(state) -> _RecordingQueue:
+    recording = _RecordingQueue()
+    state._checkpoint_queue = recording
+    return recording
+
+
+def _assert_short_wait(recording: _RecordingQueue) -> None:
+    """Assert the collector stopped waiting after the blocked-caller interval."""
+    assert recording.expired_timeouts, "collector never reached an empty queue"
+    assert max(recording.expired_timeouts) <= _BLOCKED_CALLER_WAIT_SECONDS, (
+        f"collector waited {max(recording.expired_timeouts)}s on an empty queue "
+        f"while a caller was blocked; expected at most "
+        f"{_BLOCKED_CALLER_WAIT_SECONDS}s"
+    )
+
+
+def _assert_full_wait(recording: _RecordingQueue) -> None:
+    """Assert the collector kept the full batching window."""
+    assert recording.expired_timeouts == [_STOP_SIGNAL_POLL_SECONDS], (
+        f"expected one expired wait of {_STOP_SIGNAL_POLL_SECONDS}s, got "
+        f"{recording.expired_timeouts}"
+    )
+
+
+def test_collect_batch_shortens_wait_once_it_holds_a_sync_checkpoint():
+    """A batch with a blocked caller must not hold the full batching window.
+
+    A synchronous caller is blocked until the batch is persisted. A blocked
+    caller cannot enqueue more work. So holding the full window delays that
+    caller for work that may never arrive.
+    """
+    state = _issue710_state()
+    recording = _issue710_instrument(state)
+
+    waiter = CompletionEvent()
+    recording.put(QueuedOperation(_issue710_update(OperationAction.SUCCEED), waiter))
+
+    batch = state._collect_checkpoint_batch()
+
+    assert [q.operation_update.action for q in batch] == [OperationAction.SUCCEED]
+    assert batch[0].completion_event is waiter
+    assert not waiter.is_set(), "the collector must not settle the waiter"
+    _assert_short_wait(recording)
+
+
+def test_collect_batch_coalesces_async_start_with_sync_succeed():
+    """An async START must still batch with its sync SUCCEED into one API call.
+
+    Flushing START on its own would double the checkpoint call count for a
+    sequential workflow, so the shortened wait must not do that.
+    """
+    state = _issue710_state()
+    recording = _issue710_instrument(state)
+
+    waiter = CompletionEvent()
+    recording.put(QueuedOperation(_issue710_update(OperationAction.START), None))
+    recording.put(QueuedOperation(_issue710_update(OperationAction.SUCCEED), waiter))
+
+    batch = state._collect_checkpoint_batch()
+
+    assert [q.operation_update.action for q in batch] == [
+        OperationAction.START,
+        OperationAction.SUCCEED,
+    ]
+    assert batch[-1].completion_event is waiter
+    _assert_short_wait(recording)
+
+
+def test_collect_batch_drains_queued_work_before_flushing():
+    """Everything already queued still joins the batch; only future work is skipped."""
+    state = _issue710_state()
+    recording = _issue710_instrument(state)
+
+    waiter = CompletionEvent()
+    recording.put(
+        QueuedOperation(_issue710_update(OperationAction.SUCCEED, "a"), waiter)
+    )
+    for op_id in ("b", "c", "d"):
+        recording.put(
+            QueuedOperation(_issue710_update(OperationAction.START, op_id), None)
+        )
+
+    batch = state._collect_checkpoint_batch()
+
+    assert [q.operation_update.operation_id for q in batch] == ["a", "b", "c", "d"]
+    _assert_short_wait(recording)
+
+
+def test_collect_batch_shortens_wait_for_sync_checkpoint_from_overflow_queue():
+    """The shortened wait must also apply to a sync checkpoint taken from overflow.
+
+    A size-limited batch pushes the remainder to the overflow queue. A
+    synchronous checkpoint can therefore enter a later batch through overflow
+    rather than through the main queue, so that path must set the flag too.
+    """
+    state = _issue710_state()
+    recording = _issue710_instrument(state)
+
+    waiter = CompletionEvent()
+    state._overflow_queue.put(
+        QueuedOperation(_issue710_update(OperationAction.SUCCEED), waiter)
+    )
+
+    batch = state._collect_checkpoint_batch()
+
+    assert len(batch) == 1
+    assert batch[0].completion_event is waiter
+    _assert_short_wait(recording)
+
+
+def test_collect_batch_keeps_full_window_for_sync_empty_checkpoint():
+    """An empty synchronous checkpoint must NOT shorten the batching window.
+
+    The branch resubmitter issues one empty checkpoint per branch on resume. So a
+    wide map resuming at once produces hundreds of them simultaneously, every one
+    of them synchronous. Shortening the window on the first would split them
+    across several requests, which is exactly the coalescing issue #325 added.
+    """
+    state = _issue710_state()
+    recording = _issue710_instrument(state)
+
+    waiter = CompletionEvent()
+    recording.put(QueuedOperation(None, waiter))
+
+    batch = state._collect_checkpoint_batch()
+
+    assert len(batch) == 1
+    assert batch[0].operation_update is None
+    assert batch[0].completion_event is waiter
+    _assert_full_wait(recording)
+
+
+def test_collect_batch_keeps_full_window_for_async_only_batch():
+    """Asynchronous-only batching is deliberately unchanged.
+
+    No caller is blocked on an asynchronous checkpoint. So holding the window
+    costs no caller latency and can still reduce the API call count. This test
+    pins that boundary, so a future change cannot remove async batching by
+    accident while claiming to fix issue #710.
+    """
+    state = _issue710_state()
+    recording = _issue710_instrument(state)
+
+    recording.put(QueuedOperation(_issue710_update(OperationAction.START), None))
+
+    batch = state._collect_checkpoint_batch()
+
+    assert [q.operation_update.action for q in batch] == [OperationAction.START]
+    _assert_full_wait(recording)
 
 
 def test_create_checkpoint_sync_with_empty_checkpoint():

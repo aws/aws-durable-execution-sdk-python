@@ -47,6 +47,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# How long the checkpoint collector waits on an empty queue before it re-checks
+# the shutdown signal. The collector cannot block indefinitely, because
+# stop_checkpointing() must be observed promptly. So every wait is expressed in
+# slices of at most this length.
+_STOP_SIGNAL_POLL_SECONDS = 0.1
+
+# How long the collector waits on an empty queue once the batch already holds a
+# synchronous checkpoint that carries an operation update.
+#
+# Such a checkpoint has a caller thread blocked until the batch is persisted. So
+# the full poll interval would delay that caller by 100 ms for work that may
+# never arrive. A short wait instead serves the case that does arrive: branch
+# threads start one at a time, so sibling branches reach the queue microseconds
+# to a millisecond after the first. Measured on a 200-branch parallel fan-out,
+# this value reduced the checkpoint call count from 7 to 5 while adding 1.08 ms
+# to each sequential step.
+_BLOCKED_CALLER_WAIT_SECONDS = 0.001
+
 
 @dataclass(frozen=True)
 class CheckpointBatcherConfig:
@@ -54,7 +72,18 @@ class CheckpointBatcherConfig:
 
     Attributes:
         max_batch_size_bytes: Maximum batch size in bytes (default: 750KB)
-        max_batch_time_seconds: Maximum time to wait before flushing batch (default: 1.0 second)
+        max_batch_time_seconds: How long a batch may keep accumulating before it
+            is flushed (default: 1.0 second). This bounds the total collection
+            window, not the idle wait. The collector waits for the next operation
+            in slices of at most 0.1 seconds so it can observe the shutdown
+            signal, and it flushes as soon as one slice finds the queue empty. So
+            an idle queue flushes after about 0.1 seconds however large this
+            value is, and the value only takes effect while operations keep
+            arriving. A batch that already holds a synchronous checkpoint carrying
+            an operation update ignores this bound and waits only
+            _BLOCKED_CALLER_WAIT_SECONDS, because a caller is blocked on it. Empty
+            synchronous checkpoints still observe this bound, so concurrent branch
+            resumes stay coalesced.
         max_batch_operations: Maximum number of operations per batch (default: 250)
     """
 
@@ -1025,6 +1054,25 @@ class ExecutionState:
         operation if queues are empty, then collects additional operations within the time
         window.
 
+        The collector waits three different lengths on an empty queue, depending on what
+        the batch already holds.
+
+        1. A batch holding a synchronous checkpoint that carries an operation update waits
+           _BLOCKED_CALLER_WAIT_SECONDS. That checkpoint has a caller blocked until the
+           batch is persisted, and a blocked caller cannot enqueue more work. So the full
+           window would delay that caller for work that may never arrive. The short wait
+           still admits a sibling branch whose thread started microseconds later.
+        2. A batch holding only an empty synchronous checkpoint waits the full window. The
+           branch resubmitter issues one empty checkpoint per branch on resume, so a wide
+           map resuming at once produces hundreds simultaneously. Flushing early would
+           split them across several requests.
+        3. A batch with no synchronous checkpoint waits the full window. No caller is
+           blocked, so a larger batch means fewer API calls at no latency cost.
+
+        In every case operations already queued are drained into the batch first. So an
+        asynchronous step START still travels in the same request as the synchronous
+        SUCCEED that follows it.
+
         Empty checkpoints (operation_update=None) are coalesced: the first empty checkpoint
         counts toward the batch operation limit, but subsequent empty checkpoints do not.
         All empty checkpoints remain in the batch so their completion events are signaled.
@@ -1037,6 +1085,17 @@ class ExecutionState:
         """
         batch: list[QueuedOperation] = []
         has_empty_checkpoint = False
+        # True once the batch holds a synchronous checkpoint that carries an
+        # operation update, meaning a caller thread is blocked until this batch is
+        # persisted. A blocked caller cannot enqueue more work. So waiting past
+        # that point cannot enlarge the batch and only delays that caller.
+        #
+        # An empty synchronous checkpoint deliberately does not count. The branch
+        # resubmitter issues one per branch on resume, so a wide map resuming at
+        # once produces hundreds of them simultaneously. Flushing on the first
+        # would split them across several requests, which is the coalescing that
+        # issue #325 added and that map_with_concurrent_waits_int_test guards.
+        has_blocked_caller = False
         total_size = 0
         effective_operation_count = 0  # Operations that count toward batch limit
 
@@ -1060,6 +1119,8 @@ class ExecutionState:
                         self._overflow_queue.put(overflow_op)
                         break
                     batch.append(overflow_op)
+                    if overflow_op.completion_event is not None:
+                        has_blocked_caller = True
                     total_size += op_size
                     effective_operation_count += 1
         except queue.Empty:
@@ -1071,8 +1132,8 @@ class ExecutionState:
             while not self._checkpointing_stopped.is_set():
                 try:
                     first_op = self._checkpoint_queue.get(
-                        timeout=0.1
-                    )  # Check stop signal every 100ms
+                        timeout=_STOP_SIGNAL_POLL_SECONDS
+                    )
                     self._checkpoint_queue.task_done()
                     batch.append(first_op)
 
@@ -1080,6 +1141,8 @@ class ExecutionState:
                         has_empty_checkpoint = True
                     else:
                         total_size += self._calculate_operation_size(first_op)
+                        if first_op.completion_event is not None:
+                            has_blocked_caller = True
 
                     effective_operation_count = 1
                     break
@@ -1101,14 +1164,23 @@ class ExecutionState:
         ):
             remaining_time = min(
                 batch_deadline - time.time(),
-                0.1,  # Check stop signal every 100ms
+                _STOP_SIGNAL_POLL_SECONDS,
             )
 
             if remaining_time <= 0:
                 break
 
             try:
-                additional_op = self._checkpoint_queue.get(timeout=remaining_time)
+                if has_blocked_caller:
+                    # A caller is blocked on this batch, so the full poll
+                    # interval would delay it for work that may never arrive.
+                    # Wait only long enough for a sibling branch whose thread
+                    # started microseconds later to reach the queue.
+                    additional_op = self._checkpoint_queue.get(
+                        timeout=min(_BLOCKED_CALLER_WAIT_SECONDS, remaining_time)
+                    )
+                else:
+                    additional_op = self._checkpoint_queue.get(timeout=remaining_time)
                 self._checkpoint_queue.task_done()
 
                 if additional_op.operation_update is None:  # Empty checkpoint
@@ -1130,6 +1202,8 @@ class ExecutionState:
                         )
                         break
                     batch.append(additional_op)
+                    if additional_op.completion_event is not None:
+                        has_blocked_caller = True
                     total_size += op_size
                     effective_operation_count += 1
 
