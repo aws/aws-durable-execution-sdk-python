@@ -33,7 +33,6 @@ from __future__ import annotations
 import datetime
 import json
 import math
-import sys
 import threading
 from typing import Any, Callable
 
@@ -47,10 +46,10 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationType,
 )
 
+from aws_durable_execution_sdk_python_insight._export_scheduler import _ExportScheduler
 from aws_durable_execution_sdk_python_insight.exporters.lambda_log_exporter import (
     LambdaLogExporter,
 )
-from aws_durable_execution_sdk_python_insight.truncation import truncate_record
 from aws_durable_execution_sdk_python_insight.types import (
     ContentConfig,
     EmitMode,
@@ -205,6 +204,7 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         self._exporters: list[InsightExporter] = (
             list(config.exporters) if config.exporters else [LambdaLogExporter()]
         )
+        self._scheduler = _ExportScheduler(self._exporters)
         self._state: dict[str, _ExecutionState] = {}
         self._lock = threading.Lock()
 
@@ -322,6 +322,7 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
                 output_raw=info.execution_result if is_terminal else None,
                 error=info.error if is_terminal else None,
             )
+            self._scheduler.drain()
 
         # Clear state after EVERY invocation end, including PENDING/RETRY. The
         # next invocation rebuilds it from InvocationStartInfo.operations, so a
@@ -435,21 +436,7 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
             record["error"] = {"name": error.type, "message": error.message}
         record["operations"] = self._build_operations(operations)
 
-        for exporter in self._exporters:
-            try:
-                shaped = truncate_record(
-                    record, exporter.max_record_size_bytes, exporter.render
-                )
-                exporter.export(shaped)
-            except Exception as exc:  # noqa: BLE001 - one exporter must not break others / the execution
-                # NOTE (parity gap, same as JS Promise.allSettled): exporter
-                # failures are swallowed so instrumentation never breaks the
-                # execution. A silently broken exporter is indistinguishable
-                # from success; we at least log to stderr.
-                print(
-                    f"[workflow-insight] exporter {type(exporter).__name__} failed: {exc}",
-                    file=sys.stderr,
-                )  # noqa: T201
+        self._scheduler.schedule(record)
 
 
 def workflow_insight(config: WorkflowInsightConfig) -> WorkflowInsightPlugin:
