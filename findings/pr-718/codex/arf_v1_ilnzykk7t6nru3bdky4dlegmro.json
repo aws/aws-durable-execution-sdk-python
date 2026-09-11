@@ -1,0 +1,1 @@
+{"finding_digest":"42db9c295f9f9b1a6c2356383590cc8b8898a7c9c5e8f9a593b42e8f0c024b58","finding_id":"arf_v1_ilnzykk7t6nru3bdky4dlegmro","identity_key":"github/workflows/ecr-release.yml::preflight-exists::registry-errors-fail-open","pull_request_number":718,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
