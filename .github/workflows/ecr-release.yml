@@ -13,9 +13,122 @@ env:
   ecr_repository_name: durable-functions/aws-durable-execution-emulator
 
 jobs:
+  preflight:
+    # Decide whether to publish before building anything.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # ECR Public reads require an assumed role
+    outputs:
+      should_build: ${{ steps.plan.outputs.should_build }}
+      should_update_latest: ${{ steps.plan.outputs.should_update_latest }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Parse testing version from the release tag
+        id: tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          tag_version="$(python .github/scripts/parse_testing_version.py)"
+          if [[ -z "$tag_version" ]]; then
+            echo "Release tag does not name the testing package. Nothing to publish."
+          else
+            echo "tag names testing version: $tag_version"
+          fi
+
+      - name: Require the ECR upload role secret
+        if: steps.tag.outputs.tag_version != ''
+        env:
+          ECR_UPLOAD_IAM_ROLE_ARN: ${{ secrets.ECR_UPLOAD_IAM_ROLE_ARN }}
+        run: |
+          if [[ -z "$ECR_UPLOAD_IAM_ROLE_ARN" ]]; then
+            echo "::error::Secret ECR_UPLOAD_IAM_ROLE_ARN is not set. Restore it before releasing."
+            exit 1
+          fi
+
+      - name: Verify the tag version matches the source
+        id: verify
+        if: steps.tag.outputs.tag_version != ''
+        shell: bash
+        env:
+          TAG_VERSION: ${{ steps.tag.outputs.tag_version }}
+          ABOUT_PATH: ${{ env.package_path }}/src/aws_durable_execution_sdk_python_testing/__about__.py
+        run: |
+          source_version="$(grep "^__version__" "$ABOUT_PATH" | cut -d'"' -f2)"
+          echo "source version: $source_version"
+          if [[ "$TAG_VERSION" != "$source_version" ]]; then
+            echo "::error::Release tag names testing-v$TAG_VERSION but __about__.py is $source_version. Aborting before any publish."
+            exit 1
+          fi
+          echo "version=$source_version" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS Credentials
+        if: steps.tag.outputs.tag_version != ''
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ secrets.ECR_UPLOAD_IAM_ROLE_ARN }}
+          aws-region: ${{ env.aws_region }}
+
+      - name: Check whether the image tag already exists
+        id: exists
+        if: steps.tag.outputs.tag_version != ''
+        shell: bash
+        env:
+          VERSION: ${{ steps.verify.outputs.version }}
+          ECR_REPOSITORY: ${{ env.ecr_repository_name }}
+        run: |
+          repo_name="${ECR_REPOSITORY##*/}"
+          if err="$(aws ecr-public describe-images \
+              --region "${{ env.aws_region }}" \
+              --repository-name "$repo_name" \
+              --image-ids imageTag="v${VERSION}" 2>&1 >/dev/null)"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$err" == *ImageNotFoundException* || "$err" == *ReferencedImagesNotFoundException* ]]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::describe-images failed for v$VERSION: $err"
+            exit 1
+          fi
+
+      - name: Emit release plan
+        id: plan
+        shell: bash
+        env:
+          TAG_VERSION: ${{ steps.tag.outputs.tag_version }}
+          VERSION: ${{ steps.verify.outputs.version }}
+          EXISTS: ${{ steps.exists.outputs.exists }}
+        run: |
+          echo "## Emulator image release plan" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ -z "$TAG_VERSION" ]]; then
+            echo "- decision: **skip** (release does not name the testing package)" >> "$GITHUB_STEP_SUMMARY"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "should_update_latest=false" >> "$GITHUB_OUTPUT"
+            echo "version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "- testing version: $VERSION" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$EXISTS" == "true" ]]; then
+            echo "- image tag v$VERSION: already present in public ECR" >> "$GITHUB_STEP_SUMMARY"
+            echo "- decision: **skip build**, reconcile latest and verify (version already published)" >> "$GITHUB_STEP_SUMMARY"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "- image tag v$VERSION: not present in public ECR" >> "$GITHUB_STEP_SUMMARY"
+            echo "- decision: **publish**" >> "$GITHUB_STEP_SUMMARY"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "should_update_latest=true" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
   build-and-upload-image-to-ecr:
-    # Only publish when the release includes a new testing package version.
-    if: contains(github.event.release.tag_name, 'testing-v')
+    needs: preflight
+    if: needs.preflight.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -24,7 +137,7 @@ jobs:
       full_image_arm64: ${{ steps.build-publish.outputs.full_image_arm64 }}
       full_image_x86_64: ${{ steps.build-publish.outputs.full_image_x86_64 }}
       ecr_registry_repository: ${{ steps.build-publish.outputs.ecr_registry_repository }}
-      version: ${{ steps.version.outputs.VERSION }}
+      version: ${{ needs.preflight.outputs.version }}
     strategy:
       matrix:
         include:
@@ -56,13 +169,6 @@ jobs:
         working-directory: ${{ env.package_path }}
         run: hatch build
 
-      - name: Get version from __about__.py
-        id: version
-        run: |
-          VERSION=$(grep "^__version__" "${{ env.package_path }}/src/aws_durable_execution_sdk_python_testing/__about__.py" | cut -d'"' -f2)
-          echo "VERSION=$VERSION"
-          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
-
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
@@ -81,7 +187,7 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr-public.outputs.registry }}
           ECR_REPOSITORY: ${{ env.ecr_repository_name }}
-          PER_ARCH_IMAGE_TAG: v${{ steps.version.outputs.VERSION }}-${{ matrix.arch }}
+          PER_ARCH_IMAGE_TAG: v${{ needs.preflight.outputs.version }}-${{ matrix.arch }}
         run: |
           docker build --platform "${{ matrix.platform }}" --provenance false "${{ env.package_path }}" -f "${{ env.package_path }}/Dockerfile" -t "$ECR_REGISTRY/$ECR_REPOSITORY:$PER_ARCH_IMAGE_TAG"
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$PER_ARCH_IMAGE_TAG"
@@ -91,9 +197,20 @@ jobs:
   create-ecr-manifest-per-arch:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       id-token: write
-    needs: [build-and-upload-image-to-ecr]
+    needs: [preflight, build-and-upload-image-to-ecr]
+    if: always() && needs.preflight.outputs.should_update_latest == 'true' && needs.build-and-upload-image-to-ecr.result != 'failure' && needs.build-and-upload-image-to-ecr.result != 'cancelled'
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
@@ -101,36 +218,170 @@ jobs:
           aws-region: ${{ env.aws_region }}
 
       - name: Login to Amazon ECR
+        id: login-ecr-public
         uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
         with:
           registry-type: public
 
-      - name: Create and push explicit version manifest
+      - name: Create the version manifest
+        id: version-manifest
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          BUILT_THIS_RUN: ${{ needs.build-and-upload-image-to-ecr.result == 'success' }}
+          ECR_REGISTRY: ${{ steps.login-ecr-public.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.ecr_repository_name }}
         run: |
-          docker manifest create "${{ needs.build-and-upload-image-to-ecr.outputs.ecr_registry_repository }}:v${{ needs.build-and-upload-image-to-ecr.outputs.version }}" \
-            "${{ needs.build-and-upload-image-to-ecr.outputs.full_image_x86_64 }}" \
-            "${{ needs.build-and-upload-image-to-ecr.outputs.full_image_arm64 }}"
-          docker manifest annotate "${{ needs.build-and-upload-image-to-ecr.outputs.ecr_registry_repository }}:v${{ needs.build-and-upload-image-to-ecr.outputs.version }}" \
-            "${{ needs.build-and-upload-image-to-ecr.outputs.full_image_arm64 }}" \
-            --arch arm64 \
-            --os linux
-          docker manifest annotate "${{ needs.build-and-upload-image-to-ecr.outputs.ecr_registry_repository }}:v${{ needs.build-and-upload-image-to-ecr.outputs.version }}" \
-            "${{ needs.build-and-upload-image-to-ecr.outputs.full_image_x86_64 }}" \
-            --arch amd64 \
-            --os linux
-          docker manifest push "${{ needs.build-and-upload-image-to-ecr.outputs.ecr_registry_repository }}:v${{ needs.build-and-upload-image-to-ecr.outputs.version }}"
+          repo_name="${ECR_REPOSITORY##*/}"
+          base="$ECR_REGISTRY/$ECR_REPOSITORY"
+          image_x86_64="$base:v$VERSION-x86_64"
+          image_arm64="$base:v$VERSION-arm64"
 
-      - name: Create and push latest manifest
+          # Recovery path: build was skipped because the version already exists.
+          # The per-arch images must still be present to rebuild the manifests.
+          if [[ "$BUILT_THIS_RUN" != "true" ]]; then
+            echo "v$VERSION already published, reconciling without rebuilding." >> "$GITHUB_STEP_SUMMARY"
+            for tag in "v$VERSION-x86_64" "v$VERSION-arm64"; do
+              if ! aws ecr-public describe-images \
+                  --region "${{ env.aws_region }}" \
+                  --repository-name "$repo_name" \
+                  --image-ids imageTag="$tag" >/dev/null 2>&1; then
+                echo "::error::v$VERSION exists but per-arch image $tag is missing, cannot reconcile. Rebuild manually."
+                exit 1
+              fi
+            done
+          fi
+
+          docker manifest create "$base:v$VERSION" "$image_x86_64" "$image_arm64"
+          docker manifest annotate "$base:v$VERSION" "$image_arm64" --arch arm64 --os linux
+          docker manifest annotate "$base:v$VERSION" "$image_x86_64" --arch amd64 --os linux
+          docker manifest push "$base:v$VERSION"
+
+  update-latest-manifest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    needs: [preflight, create-ecr-manifest-per-arch]
+    if: always() && needs.create-ecr-manifest-per-arch.result == 'success'
+    # Serialize the latest update so two releases do not race it.
+    concurrency:
+      group: ecr-release-latest
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ secrets.ECR_UPLOAD_IAM_ROLE_ARN }}
+          aws-region: ${{ env.aws_region }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr-public
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+        with:
+          registry-type: public
+
+      - name: Advance latest to the newest published version
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr-public.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.ecr_repository_name }}
         run: |
-          docker manifest create "${{ needs.build-and-upload-image-to-ecr.outputs.ecr_registry_repository }}" \
-            "${{ needs.build-and-upload-image-to-ecr.outputs.full_image_arm64 }}" \
-            "${{ needs.build-and-upload-image-to-ecr.outputs.full_image_x86_64 }}"
-          docker manifest annotate "${{ needs.build-and-upload-image-to-ecr.outputs.ecr_registry_repository }}" \
-            "${{ needs.build-and-upload-image-to-ecr.outputs.full_image_arm64 }}" \
-            --arch arm64 \
-            --os linux
-          docker manifest annotate "${{ needs.build-and-upload-image-to-ecr.outputs.ecr_registry_repository }}" \
-            "${{ needs.build-and-upload-image-to-ecr.outputs.full_image_x86_64 }}" \
-            --arch amd64 \
-            --os linux
-          docker manifest push "${{ needs.build-and-upload-image-to-ecr.outputs.ecr_registry_repository }}"
+          python -m pip install --upgrade packaging
+          repo_name="${ECR_REPOSITORY##*/}"
+          base="$ECR_REGISTRY/$ECR_REPOSITORY"
+
+          if ! existing_tags="$(aws ecr-public describe-images \
+            --region "${{ env.aws_region }}" \
+            --repository-name "$repo_name" \
+            --query 'imageDetails[].imageTags[]' --output text)"; then
+            echo "::error::Could not list existing tags in public ECR to decide the latest update."
+            exit 1
+          fi
+          newest="$(python .github/scripts/latest_testing_version.py $existing_tags)"
+          if [[ -z "$newest" ]]; then
+            echo "::error::No published version tags found in public ECR."
+            exit 1
+          fi
+
+          docker manifest create "$base" "$base:$newest-x86_64" "$base:$newest-arm64"
+          docker manifest annotate "$base" "$base:$newest-arm64" --arch arm64 --os linux
+          docker manifest annotate "$base" "$base:$newest-x86_64" --arch amd64 --os linux
+          docker manifest push "$base"
+          echo "latest now points at $newest." >> "$GITHUB_STEP_SUMMARY"
+
+  verify-publish:
+    needs: [preflight, update-latest-manifest]
+    if: always() && needs.preflight.outputs.should_update_latest == 'true' && needs.update-latest-manifest.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ secrets.ECR_UPLOAD_IAM_ROLE_ARN }}
+          aws-region: ${{ env.aws_region }}
+
+      - name: Verify the version and latest tags on public ECR
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          ECR_REPOSITORY: ${{ env.ecr_repository_name }}
+        run: |
+          repo_name="${ECR_REPOSITORY##*/}"
+          python -m pip install --upgrade packaging
+          digest_for() {
+            aws ecr-public describe-images \
+              --region "${{ env.aws_region }}" \
+              --repository-name "$repo_name" \
+              --image-ids imageTag="$1" \
+              --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true
+          }
+          list_tags() {
+            aws ecr-public describe-images \
+              --region "${{ env.aws_region }}" \
+              --repository-name "$repo_name" \
+              --query 'imageDetails[].imageTags[]' --output text
+          }
+          publish_verified() {
+            local v; v="$(digest_for "v${VERSION}")"
+            [[ -z "$v" || "$v" == "None" ]] && return 1
+            local tags newest
+            tags="$(list_tags)" || return 1
+            newest="$(python .github/scripts/latest_testing_version.py $tags)"
+            [[ "$(digest_for latest)" == "$(digest_for "$newest")" ]]
+          }
+          for attempt in $(seq 1 10); do
+            if publish_verified; then
+              echo "v$VERSION published and latest points at the newest version in public ECR."
+              exit 0
+            fi
+            echo "attempt $attempt: v$VERSION not fully visible in public ECR yet, retrying."
+            sleep 15
+          done
+          final_version="$(digest_for "v${VERSION}")"
+          if [[ -z "$final_version" || "$final_version" == "None" ]]; then
+            echo "::error::v$VERSION did not become visible in public ECR after publishing."
+          else
+            newest="$(python .github/scripts/latest_testing_version.py $(list_tags))"
+            echo "::error::v$VERSION is published but latest does not point at the newest version $newest."
+          fi
+          exit 1
