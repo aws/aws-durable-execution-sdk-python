@@ -57,7 +57,7 @@ class S3Exporter:
         # string so an invalid scheme fails at construction rather than silently
         # falling through to no partitioning.
         self.partitioning = S3Partitioning(partitioning)
-        self.max_record_size_bytes = (
+        self.max_record_size_bytes: int | None = (
             5_000_000 if max_record_size_bytes is None else max_record_size_bytes
         )
         if client is not None:

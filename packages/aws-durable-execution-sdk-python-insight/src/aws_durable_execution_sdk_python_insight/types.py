@@ -49,7 +49,9 @@ class InsightExporter(Protocol):
     """A destination that receives one curated Workflow Insight record.
 
     ``max_record_size_bytes`` bounds the serialized record body (the plugin's
-    size limiter measures ``render(record)``); ``None`` disables truncation.
+    size limiter measures ``render(record)``). First-party exporters default it
+    to their destination's practical limit; an exporter whose value is ``None``
+    is never truncated.
     ``render`` maps the canonical record dict to the exact shape the exporter
     serializes (identity for array exporters, the ``operationsByName`` expansion
     for point-access exporters).
