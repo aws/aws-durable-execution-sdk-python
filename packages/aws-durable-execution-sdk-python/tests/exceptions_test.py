@@ -65,12 +65,19 @@ def test_checkpoint_error():
     assert error.termination_reason == TerminationReason.CHECKPOINT_FAILED
 
 
-def test_checkpoint_error_classification_invalid_token_invocation():
-    """Test 4xx InvalidParameterValueException with Invalid Checkpoint Token is invocation error."""
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Invalid checkpoint token: token expired",
+        "Invalid Checkpoint Token: token expired",
+    ],
+)
+def test_checkpoint_error_classification_invalid_token_invocation(message: str):
+    """Service emits lowercase 'checkpoint token'; match case-insensitively as invocation."""
     error_response = {
         "Error": {
             "Code": "InvalidParameterValueException",
-            "Message": "Invalid Checkpoint Token: token expired",
+            "Message": message,
         },
         "ResponseMetadata": {"HTTPStatusCode": 400},
     }
