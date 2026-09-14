@@ -1,0 +1,1 @@
+{"finding_digest":"adf3cc735d2f3e21997e17f3a9d402d2095b710a2bb436ad9a58549115e8ccac","finding_id":"arf_v1_vxz4y425f47cdgl6c7z2tvac2i","identity_key":"core/state.py::_collect_checkpoint_batch::mixed-empty-checkpoint-coalescing","pull_request_number":725,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
