@@ -6,11 +6,12 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import pytest
 
@@ -60,6 +61,7 @@ class CapturedRequest:
     path: str
     headers: dict[str, str]
     body: bytes
+    header_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -88,6 +90,10 @@ def http_capture() -> Iterator[HttpCapture]:
                     path=self.path,
                     headers={k.lower(): v for k, v in self.headers.items()},
                     body=body,
+                    header_counts={
+                        k.lower(): len(self.headers.get_all(k) or [])
+                        for k in self.headers
+                    },
                 )
             )
             if capture.delay_seconds:
@@ -222,3 +228,153 @@ def test_redirects_are_not_followed(http_capture: HttpCapture, status: int) -> N
     assert [r.path for r in http_capture.requests] == ["/insight"]
     assert http_capture.requests[0].method == "POST"
     assert http_capture.requests[0].body
+
+
+@pytest.fixture
+def trickle_server() -> Iterator[Callable[[bytes, bytes], str]]:
+    """Start a server that sends ``immediate`` at once, then ``trickled`` one
+    byte every 200 ms.
+
+    Each trickled byte arrives well inside any per-read socket timeout, so only
+    a whole-request deadline can end the exchange early. Returns the URL.
+    """
+    listeners: list[socket.socket] = []
+    threads: list[threading.Thread] = []
+    stop = threading.Event()
+
+    def start(immediate: bytes, trickled: bytes) -> str:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(10)
+        listeners.append(listener)
+
+        def serve() -> None:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            with conn:
+                conn.settimeout(10)
+                try:
+                    conn.recv(65536)  # the request; content is irrelevant
+                    if immediate:
+                        conn.sendall(immediate)
+                    for byte in trickled:
+                        if stop.is_set():
+                            return
+                        conn.sendall(bytes([byte]))
+                        time.sleep(0.2)
+                except OSError:
+                    return
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        threads.append(thread)
+        return f"http://127.0.0.1:{listener.getsockname()[1]}"
+
+    try:
+        yield start
+    finally:
+        stop.set()
+        for listener in listeners:
+            listener.close()
+        for thread in threads:
+            thread.join(timeout=5)
+
+
+def test_timeout_is_a_whole_request_deadline(
+    trickle_server: Callable[[bytes, bytes], str],
+) -> None:
+    url = trickle_server(b"", b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+    exporter = HttpExporter(url=url, timeout_ms=500)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match=r"exceeded 0\.5s"):
+        exporter.export(_record())
+    elapsed = time.monotonic() - started
+    # ~40 bytes at 200 ms each would take ~8 s without a deadline
+    assert 0.4 <= elapsed < 5.0, elapsed
+
+
+def test_deadline_applies_while_reading_an_error_body(
+    trickle_server: Callable[[bytes, bytes], str],
+) -> None:
+    # Headers arrive at once; the body trickles. The exporter must report the
+    # deadline, not the 500.
+    url = trickle_server(
+        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 40\r\n\r\n",
+        b"x" * 40,
+    )
+    exporter = HttpExporter(url=url, timeout_ms=500)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match=r"exceeded 0\.5s"):
+        exporter.export(_record())
+    assert time.monotonic() - started < 5.0
+
+
+def test_deadline_applies_when_name_resolution_is_slow(
+    http_capture: HttpCapture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Name resolution outlives the deadline: no socket exists when the timer
+    # fires, so the connect path itself must refuse to proceed, promptly, and
+    # no request may reach the server.
+    real_getaddrinfo = socket.getaddrinfo
+
+    def slow_getaddrinfo(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(0.8)
+        return real_getaddrinfo(*args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", slow_getaddrinfo)
+    exporter = HttpExporter(url=http_capture.url, timeout_ms=300)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match=r"exceeded 0\.3s"):
+        exporter.export(_record())
+    assert time.monotonic() - started < 2.0
+    assert http_capture.requests == []
+
+
+def test_deadline_interrupts_a_stalled_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A peer that never completes the handshake. The in-flight socket is
+    # registered with the deadline, so the timer's shutdown ends the attempt at
+    # the deadline instead of after the per-address socket timeout.
+    shut: set[int] = set()
+    real_shutdown = socket.socket.shutdown
+
+    def marking_shutdown(self: socket.socket, how: int) -> None:
+        shut.add(id(self))
+        real_shutdown(self, how)
+
+    def stalled_connect(self: socket.socket, address: Any) -> None:
+        give_up = time.monotonic() + 5
+        while time.monotonic() < give_up:
+            if id(self) in shut:
+                msg = "connection aborted by deadline"
+                raise ConnectionAbortedError(msg)
+            time.sleep(0.02)
+        msg = "test peer never answered"
+        raise TimeoutError(msg)
+
+    monkeypatch.setattr(socket.socket, "shutdown", marking_shutdown)
+    monkeypatch.setattr(socket.socket, "connect", stalled_connect)
+    # 2000 ms socket timeout would be the old bound; the deadline is 300 ms.
+    exporter = HttpExporter(url="http://127.0.0.1:9/", timeout_ms=300)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match=r"exceeded 0\.3s"):
+        exporter.export(_record())
+    elapsed = time.monotonic() - started
+    assert 0.25 <= elapsed < 2.0, elapsed
+
+
+def test_custom_header_case_is_merged_not_duplicated(http_capture: HttpCapture) -> None:
+    HttpExporter(
+        url=http_capture.url, headers={"content-type": "application/x-ndjson"}
+    ).export(_record())
+    req = http_capture.requests[0]
+    assert req.header_counts["content-type"] == 1
+    assert req.headers["content-type"] == "application/x-ndjson"
+
+
+def test_unsupported_url_scheme_is_rejected() -> None:
+    with pytest.raises(ValueError, match="Unsupported URL"):
+        HttpExporter(url="ftp://127.0.0.1/insight").export(_record())

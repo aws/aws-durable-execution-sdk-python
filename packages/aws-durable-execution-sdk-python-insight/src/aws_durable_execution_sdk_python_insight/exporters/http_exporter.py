@@ -33,8 +33,11 @@ HttpMethodInput = Literal["POST", "PUT"]
 class HttpExporter:
     """Sends each record as a JSON body to any HTTP endpoint.
 
-    The endpoint must answer 2xx; any other status raises. ``timeout_ms``
-    bounds the whole request (default 10 seconds). ``max_record_size_bytes``
+    The endpoint must answer 2xx; any other status raises. ``timeout_ms`` is a
+    deadline for the whole request (connect, send, response headers and any
+    error body; default 10 seconds); on expiry the connection is shut down and
+    ``TimeoutError`` is raised. Name resolution is not interruptible.
+    ``max_record_size_bytes``
     has no default because a generic endpoint has no known limit.
     """
 
