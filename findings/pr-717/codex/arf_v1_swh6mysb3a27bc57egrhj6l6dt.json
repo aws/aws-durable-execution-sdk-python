@@ -1,0 +1,1 @@
+{"finding_digest":"958fe66241d835f08bbf21a274f97e1ccca8663f7d3a7afea5f3cf1c686acdad","finding_id":"arf_v1_swh6mysb3a27bc57egrhj6l6dt","identity_key":"core/lambda_service.py::initialize_client::nonbundled-local-version-preservation","pull_request_number":717,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
