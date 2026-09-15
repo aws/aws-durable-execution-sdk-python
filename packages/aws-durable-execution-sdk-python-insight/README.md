@@ -57,10 +57,14 @@ Behavior is validated cross-SDK by the `insight` conformance suite
 
 > **Note (asynchronous export).** Export rendering, truncation, `export()`, and
 > `flush()` run on one lazy background worker per plugin. Checkpoint hooks only
-> replace the latest pending snapshot and wake the worker. Consecutive
-> `on-change` snapshots may coalesce while an export is in flight. An invocation
-> that emits a record drains the latest snapshot and flushes exporters before it
-> returns; invocations that emit nothing do not start or flush the worker.
+> replace that execution's latest pending snapshot and wake the worker.
+> Consecutive `on-change` snapshots for one execution coalesce whenever the
+> worker has not yet claimed the previous one, including when no export is
+> running, so under fast in-memory checkpoints (the local runner) a burst may
+> deliver only its first and latest snapshots. Snapshots from different
+> executions never coalesce with each other. An invocation that emits a record
+> drains every pending snapshot and flushes exporters before it returns;
+> invocations that emit nothing do not start or flush the worker.
 
 ## Requirements
 
