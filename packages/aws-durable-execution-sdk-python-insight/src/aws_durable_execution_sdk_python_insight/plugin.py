@@ -160,7 +160,7 @@ def _apply_result_override(
 
 
 class _ExecutionState:
-    __slots__ = ("start_time", "parsed_arn", "cached_input", "operations")
+    __slots__ = ("start_time", "parsed_arn", "cached_input", "operations", "closed")
 
     def __init__(self, start_time: Any, parsed_arn: dict[str, str]) -> None:
         self.start_time = start_time
@@ -169,6 +169,10 @@ class _ExecutionState:
         # operation_id -> OperationInfo, adopted verbatim from the SDK's
         # authoritative snapshot (invocation start/end and operation-change).
         self.operations: dict[str, OperationInfo] = {}
+        # Set by on_invocation_end before it emits. An operation-change hook
+        # from a checkpoint that completes during the end-of-invocation drain
+        # is dropped, so no RUNNING snapshot can follow the final record.
+        self.closed = False
 
 
 class WorkflowInsightPlugin(DurableInstrumentationPlugin):
@@ -230,6 +234,23 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         with self._lock:
             self._state.pop(execution_arn, None)
 
+    def _open_state(self, execution_arn: str) -> _ExecutionState | None:
+        """Return the execution's state only while its invocation is open.
+
+        Unlike ``_ensure_state`` this never creates state: an operation-change
+        hook always follows an invocation start, so missing state means the
+        invocation already ended and its state was discarded.
+        """
+        with self._lock:
+            state = self._state.get(execution_arn)
+            if state is None or state.closed:
+                return None
+            return state
+
+    def _close_state(self, state: _ExecutionState) -> None:
+        with self._lock:
+            state.closed = True
+
     def _adopt_operations(
         self, state: _ExecutionState, operations: dict[str, OperationInfo]
     ) -> None:
@@ -270,7 +291,11 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         arn = info.execution_arn
         if not arn or not self._sampled_in(arn):
             return
-        state = self._ensure_state(arn)
+        state = self._open_state(arn)
+        if state is None:
+            # The invocation already ended (or is draining its final record);
+            # a snapshot from a checkpoint that completed late is stale.
+            return
         # Replace state with the full operations snapshot carried by the hook.
         self._adopt_operations(state, info.operations)
         # on-change mode exports an updated RUNNING record on each change so
@@ -297,6 +322,10 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         # Refresh from the fresh end-of-invocation snapshot before emitting so
         # the terminal record reflects the final operation map.
         self._adopt_operations(state, info.operations)
+        # Close before emitting: an operation-change hook arriving from a
+        # checkpoint that completes during the drain below is rejected, so no
+        # RUNNING snapshot can follow (or replace) the final record.
+        self._close_state(state)
         status = _STATUS_MAP.get(info.status, "RUNNING")
         is_terminal = status in ("SUCCEEDED", "FAILED")
         is_failure = status == "FAILED"

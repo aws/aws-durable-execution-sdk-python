@@ -13,8 +13,10 @@ from aws_durable_execution_sdk_python_insight._export_scheduler import (
 )
 
 
-def _record(value: str) -> dict[str, Any]:
-    return {"status": "RUNNING", "value": value, "operations": []}
+def _record(
+    value: str, *, arn: str = "exec-a", status: str = "RUNNING"
+) -> dict[str, Any]:
+    return {"executionArn": arn, "status": status, "value": value, "operations": []}
 
 
 def _wait_until(predicate, timeout: float = 5.0) -> bool:
@@ -105,17 +107,94 @@ def test_drain_flushes_after_export() -> None:
     assert capture.calls == [("export", "terminal"), ("flush", None)]
 
 
-def test_worker_start_failure_never_escapes_hook(monkeypatch) -> None:
+def test_worker_start_failure_exports_inline_on_drain(monkeypatch) -> None:
     def fail_start(self) -> None:  # noqa: ARG001
         raise RuntimeError("cannot start")
 
     monkeypatch.setattr(threading.Thread, "start", fail_start)
-    scheduler = _ExportScheduler([CaptureExporter()])
+    capture = CaptureExporter()
+    scheduler = _ExportScheduler([capture])
 
-    scheduler.schedule(_record("dropped"))
+    scheduler.schedule(_record("kept"))
+    assert scheduler._pending_count() == 1
     scheduler.drain()
 
+    # Nothing is dropped and nothing escapes the hook: drain() exported the
+    # pending record on the calling thread and flushed.
+    assert capture.calls == [("export", "kept"), ("flush", None)]
     assert scheduler._pending_count() == 0
+    assert not scheduler._worker_alive()
+
+
+def test_pending_is_keyed_per_execution() -> None:
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter])
+    scheduler.schedule(_record("a-first", arn="exec-a"))
+    assert exporter.started.wait(5.0)
+
+    # While the worker is blocked: two more snapshots for A (coalesce to the
+    # latest) and one for B (kept in its own slot, never displaced by A).
+    scheduler.schedule(_record("a-middle", arn="exec-a"))
+    scheduler.schedule(_record("b-only", arn="exec-b"))
+    scheduler.schedule(_record("a-latest", arn="exec-a"))
+    assert scheduler._pending_count() == 2
+
+    exporter.release.set()
+    scheduler.drain()
+    assert exporter.calls == [
+        ("export", "a-first"),
+        ("export", "a-latest"),
+        ("export", "b-only"),
+        ("flush", None),
+    ]
+
+
+def test_running_never_supersedes_pending_terminal_of_same_execution() -> None:
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter])
+    scheduler.schedule(_record("x-inflight", arn="exec-x"))
+    assert exporter.started.wait(5.0)
+
+    scheduler.schedule(_record("a-terminal", arn="exec-a", status="SUCCEEDED"))
+    # A late RUNNING snapshot for A (an operation-change hook from a checkpoint
+    # completing during the drain) must not replace A's terminal record.
+    scheduler.schedule(_record("a-late-running", arn="exec-a"))
+    assert scheduler._pending_count() == 1
+
+    exporter.release.set()
+    scheduler.drain()
+    assert exporter.calls == [
+        ("export", "x-inflight"),
+        ("export", "a-terminal"),
+        ("flush", None),
+    ]
+
+
+def test_concurrent_executions_each_deliver_their_terminal_record() -> None:
+    capture = CaptureExporter()
+    scheduler = _ExportScheduler([capture])
+    rounds = 50
+    barrier = threading.Barrier(2)
+
+    def drive(arn: str) -> None:
+        for i in range(rounds):
+            barrier.wait()
+            scheduler.schedule(_record(f"{arn}-running-{i}", arn=arn))
+            scheduler.schedule(
+                _record(f"{arn}-terminal-{i}", arn=arn, status="SUCCEEDED")
+            )
+            scheduler.drain()
+
+    threads = [threading.Thread(target=drive, args=(arn,)) for arn in ("a", "b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30.0)
+    assert not any(thread.is_alive() for thread in threads)
+
+    exported = {value for kind, value in capture.calls if kind == "export"}
+    expected = {f"{arn}-terminal-{i}" for arn in ("a", "b") for i in range(rounds)}
+    assert expected <= exported, sorted(expected - exported)
 
 
 def test_superseded_record_finalizes_after_lane_unlock() -> None:

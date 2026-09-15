@@ -1,7 +1,17 @@
 # SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Latest-pending asynchronous export scheduling for Workflow Insight."""
+"""Latest-pending asynchronous export scheduling for Workflow Insight.
+
+One pending slot is kept **per execution** (keyed by ``executionArn``). Each
+record is a complete snapshot of its execution, so a newer snapshot for the same
+execution supersedes an older one that has not been exported yet, while records
+for different executions never displace each other. The plugin already tracks
+state per execution, and the local test runner drives independent executions
+concurrently through one shared plugin instance, so a single plugin-wide slot
+would silently drop one execution's terminal record whenever another execution
+scheduled a snapshot first.
+"""
 
 from __future__ import annotations
 
@@ -15,70 +25,81 @@ from aws_durable_execution_sdk_python_insight.types import InsightExporter
 
 _logger = logging.getLogger("aws_durable_execution_sdk_python_insight")
 
+_TERMINAL_STATUSES = frozenset({"SUCCEEDED", "FAILED"})
+
+
+def _is_terminal(record: dict[str, Any]) -> bool:
+    return record.get("status") in _TERMINAL_STATUSES
+
 
 class _ExportScheduler:
-    """Run all exporters on one lazy worker with one latest pending record."""
+    """Run all exporters on one lazy worker with one pending record per execution."""
 
     def __init__(self, exporters: list[InsightExporter]) -> None:
         self._exporters = exporters
         self._condition = threading.Condition(threading.Lock())
-        self._pending: dict[str, Any] | None = None
+        # executionArn -> latest pending snapshot for that execution. Insertion
+        # ordered, so the worker exports executions in first-arrival order;
+        # replacing an entry keeps its position.
+        self._pending: dict[str, dict[str, Any]] = {}
         self._flush_requested = False
         self._flush_event: threading.Event | None = None
         self._worker: threading.Thread | None = None
-        self._disabled = False
+        self._start_failure_logged = False
 
     def schedule(self, record: dict[str, Any]) -> None:
-        """Replace the pending snapshot and return without running exporters."""
+        """Replace this execution's pending snapshot and return without exporting."""
+        key = str(record.get("executionArn", ""))
         displaced: dict[str, Any] | None = None
-        failed_pending: dict[str, Any] | None = None
         start_error: Exception | None = None
         with self._condition:
-            if self._disabled:
+            displaced = self._pending.get(key)
+            # A terminal snapshot is final. A RUNNING snapshot for the same
+            # execution that arrives after it (an operation-change hook from a
+            # checkpoint completing during the end-of-invocation drain) must not
+            # replace it, or the execution would be reported as still running.
+            if (
+                displaced is not None
+                and _is_terminal(displaced)
+                and not _is_terminal(record)
+            ):
                 return
-            displaced = self._pending
-            self._pending = record
-            failed_pending, start_error = self._ensure_worker_locked()
+            self._pending[key] = record
+            start_error = self._ensure_worker_locked()
             self._condition.notify()
-        # Releasing either record may run custom finalizers, so do it unlocked.
-        del displaced, failed_pending
-        if start_error is not None:
-            _logger.warning(
-                "workflow-insight: could not start export worker; disabling "
-                "asynchronous export: %s",
-                start_error,
-            )
+        # Releasing the displaced record may run custom finalizers, so do it unlocked.
+        del displaced
+        self._log_start_failure(start_error)
 
     def drain(self) -> None:
-        """Wait until the latest pending record is exported and exporters flush."""
-        failed_pending: dict[str, Any] | None = None
+        """Wait until every pending record is exported and exporters flush.
+
+        Records scheduled by any execution are exported before the flush, so a
+        drain issued at one execution's invocation end also delivers snapshots
+        that a concurrently running execution scheduled earlier.
+        """
         start_error: Exception | None = None
         with self._condition:
-            if self._disabled:
-                return
             if not self._flush_requested:
                 self._flush_requested = True
                 self._flush_event = threading.Event()
             flush_event = self._flush_event
             assert flush_event is not None
-            failed_pending, start_error = self._ensure_worker_locked()
-            started = not self._disabled
+            start_error = self._ensure_worker_locked()
+            worker_running = self._worker is not None
             self._condition.notify()
-        del failed_pending
-        if start_error is not None:
-            _logger.warning(
-                "workflow-insight: could not start export worker; disabling "
-                "asynchronous export: %s",
-                start_error,
-            )
-        if started:
+        self._log_start_failure(start_error)
+        if worker_running:
             flush_event.wait()
+            return
+        # No worker could be started. Export and flush on the calling thread so
+        # nothing scheduled is dropped; this is the invocation-end path, which
+        # already waits for delivery.
+        self._pump(flush_event)
 
-    def _ensure_worker_locked(
-        self,
-    ) -> tuple[dict[str, Any] | None, Exception | None]:
+    def _ensure_worker_locked(self) -> Exception | None:
         if self._worker is not None and self._worker.is_alive():
-            return None, None
+            return None
         worker = threading.Thread(
             target=self._run,
             name=f"workflow-insight-export-{id(self)}",
@@ -88,32 +109,45 @@ class _ExportScheduler:
         try:
             worker.start()
         except Exception as exc:  # noqa: BLE001 - instrumentation must not escape hooks
-            self._disabled = True
+            # Leave the pending records in place: drain() exports them inline,
+            # and a later schedule() retries starting a worker.
             self._worker = None
-            failed_pending = self._pending
-            self._pending = None
-            failed_event = self._flush_event
-            self._flush_event = None
-            self._flush_requested = False
-            if failed_event is not None:
-                failed_event.set()
-            return failed_pending, exc
-        return None, None
+            return exc
+        return None
+
+    def _log_start_failure(self, start_error: Exception | None) -> None:
+        if start_error is None or self._start_failure_logged:
+            return
+        self._start_failure_logged = True
+        _logger.warning(
+            "workflow-insight: could not start export worker; records are "
+            "exported inline at invocation end instead: %s",
+            start_error,
+        )
+
+    def _pop_pending_locked(self) -> dict[str, Any] | None:
+        if not self._pending:
+            return None
+        key = next(iter(self._pending))
+        return self._pending.pop(key)
+
+    def _take_flush_locked(self) -> threading.Event | None:
+        flush_event = self._flush_event
+        self._flush_event = None
+        self._flush_requested = False
+        return flush_event
 
     def _run(self) -> None:
         while True:
             record: dict[str, Any] | None = None
             flush_event: threading.Event | None = None
             with self._condition:
-                while self._pending is None and not self._flush_requested:
+                while not self._pending and not self._flush_requested:
                     self._condition.wait()
-                if self._pending is not None:
-                    record = self._pending
-                    self._pending = None
-                else:
-                    flush_event = self._flush_event
-                    self._flush_event = None
-                    self._flush_requested = False
+                record = self._pop_pending_locked()
+                if record is None:
+                    # Every pending record is exported: honor the flush request.
+                    flush_event = self._take_flush_locked()
 
             if record is not None:
                 self._export(record)
@@ -123,9 +157,24 @@ class _ExportScheduler:
             if flush_event is not None:
                 flush_event.set()
             with self._condition:
-                if self._pending is None and not self._flush_requested:
+                if not self._pending and not self._flush_requested:
                     self._worker = None
                     return
+
+    def _pump(self, flush_event: threading.Event) -> None:
+        """Export every pending record, then flush, on the calling thread."""
+        while True:
+            with self._condition:
+                record = self._pop_pending_locked()
+                if record is None:
+                    # Another inline drain may already have taken the request;
+                    # flushing twice is harmless, losing a record is not.
+                    self._take_flush_locked()
+            if record is None:
+                break
+            self._export(record)
+        self._flush()
+        flush_event.set()
 
     def _export(self, record: dict[str, Any]) -> None:
         for exporter in self._exporters:
@@ -159,4 +208,4 @@ class _ExportScheduler:
 
     def _pending_count(self) -> int:
         with self._condition:
-            return int(self._pending is not None)
+            return len(self._pending)

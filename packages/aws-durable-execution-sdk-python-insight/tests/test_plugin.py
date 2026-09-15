@@ -13,7 +13,11 @@ map on ``InvocationStartInfo`` / ``InvocationEndInfo`` / ``OperationChangeInfo``
 from __future__ import annotations
 
 import datetime
+import threading
+import time
 from typing import Any
+
+import pytest
 
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
@@ -400,6 +404,132 @@ def test_on_change_schedules_running_and_delivers_terminal():
     assert [op["name"] for op in final["operations"]] == ["s1", "s2"]
     ids = [op["id"] for op in final["operations"]]
     assert len(ids) == len(set(ids))
+
+
+# -- several executions in flight on one plugin ------------------------------
+
+
+class BlockingExporter(CaptureExporter):
+    """Blocks the first export until released, so tests can observe the
+    scheduler while a record is in flight."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def export(self, record: dict[str, Any]) -> None:
+        if not self.started.is_set():
+            self.started.set()
+            self.release.wait(5.0)
+        super().export(record)
+
+
+def _drive_to_success(plugin, arn: str, barrier: threading.Barrier) -> None:
+    op = _step("s", op_id="1")
+    barrier.wait()
+    plugin.on_invocation_start(_start(arn, operations={}))
+    plugin.on_operation_change(
+        OperationChangeInfo(
+            execution_arn=arn, updated_operations=_ops(op), operations=_ops(op)
+        )
+    )
+    plugin.on_invocation_end(_end(arn, operations=_ops(op)))
+
+
+@pytest.mark.parametrize("emit_mode", ["on-complete", "on-change"])
+def test_concurrent_executions_on_one_plugin_each_deliver_terminal_record(
+    emit_mode,
+):
+    # The local runner drives independent executions concurrently through one
+    # shared plugin. Every execution's terminal record must reach the exporter;
+    # one execution scheduling a snapshot must never displace another's.
+    exporter = CaptureExporter()
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], emit_mode=emit_mode)
+    )
+    rounds = 50
+    for _ in range(rounds):
+        barrier = threading.Barrier(2)
+        threads = [
+            threading.Thread(target=_drive_to_success, args=(plugin, arn, barrier))
+            for arn in (ARN, ARN_B)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10.0)
+        assert not any(thread.is_alive() for thread in threads)
+
+    terminal = [r for r in exporter.records if r["status"] == "SUCCEEDED"]
+    per_arn = {arn: 0 for arn in (ARN, ARN_B)}
+    for record in terminal:
+        per_arn[record["executionArn"]] += 1
+    assert per_arn == {ARN: rounds, ARN_B: rounds}
+    assert plugin._state == {}
+
+
+def test_late_operation_change_during_drain_cannot_follow_terminal_record():
+    # on-change mode, with the exporter blocked on the RUNNING record emitted
+    # at invocation start. on_invocation_end schedules SUCCEEDED and blocks in
+    # drain(); an operation-change hook that arrives meanwhile (a checkpoint
+    # completing late) must be dropped, not exported as a trailing RUNNING.
+    exporter = BlockingExporter()
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
+    )
+    op = _step("s", op_id="1")
+    plugin.on_invocation_start(_start(operations={}))
+    assert exporter.started.wait(5.0)
+
+    ender = threading.Thread(
+        target=plugin.on_invocation_end, args=(_end(operations=_ops(op)),)
+    )
+    ender.start()
+    deadline = time.monotonic() + 5.0
+    while plugin._scheduler._pending_count() == 0 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert plugin._scheduler._pending_count() == 1
+
+    plugin.on_operation_change(
+        OperationChangeInfo(
+            execution_arn=ARN, updated_operations=_ops(op), operations=_ops(op)
+        )
+    )
+
+    exporter.release.set()
+    ender.join(5.0)
+    assert not ender.is_alive()
+
+    assert [r["status"] for r in exporter.records] == ["RUNNING", "SUCCEEDED"]
+    assert plugin._state == {}
+
+
+def test_operation_change_after_invocation_end_is_ignored():
+    exporter = CaptureExporter()
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
+    )
+    op = _step("s", op_id="1")
+    plugin.on_invocation_start(_start(operations={}))
+    # Deliver the start RUNNING snapshot before the end hook schedules SUCCEEDED,
+    # otherwise the terminal snapshot may legitimately supersede it in the
+    # execution's pending slot and the record list would depend on timing.
+    plugin._scheduler.drain()
+    plugin.on_invocation_end(_end(operations=_ops(op)))
+    assert plugin._state == {}
+
+    # A hook for an execution whose invocation already ended must not recreate
+    # state or emit anything.
+    plugin.on_operation_change(
+        OperationChangeInfo(
+            execution_arn=ARN, updated_operations=_ops(op), operations=_ops(op)
+        )
+    )
+    plugin._scheduler.drain()
+
+    assert [r["status"] for r in exporter.records] == ["RUNNING", "SUCCEEDED"]
+    assert plugin._state == {}
 
 
 # -- no cross-execution contamination (comment 3) ----------------------------
