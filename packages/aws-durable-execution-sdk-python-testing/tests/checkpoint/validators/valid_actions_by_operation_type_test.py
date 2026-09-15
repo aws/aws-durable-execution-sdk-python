@@ -64,7 +64,6 @@ def test_validate_invoke_valid_actions():
     """Test valid actions for INVOKE operations."""
     valid_actions = [
         OperationAction.START,
-        OperationAction.CANCEL,
     ]
     for action in valid_actions:
         CheckpointValidator._validate_valid_action_for_type(

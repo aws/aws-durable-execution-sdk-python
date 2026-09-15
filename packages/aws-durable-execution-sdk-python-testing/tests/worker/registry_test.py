@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from unittest.mock import Mock
 
+from aws_durable_execution_sdk_python_testing.stores.memory import (
+    InMemoryExecutionStore,
+)
 from aws_durable_execution_sdk_python_testing.worker.registry import ExecutionRegistry
 from aws_durable_execution_sdk_python_testing.worker.task import (
     ExecutionTask,
@@ -84,3 +88,19 @@ def test_shutdown_stops_all_lanes_and_drops_workers() -> None:
     for worker in workers:
         with pytest.raises(RuntimeError):
             worker.submit(_EchoTask("x"))
+
+
+def test_registry_refuses_work_after_shutdown():
+    """A lane created after shutdown would outlive the runner. So submit
+    and get_or_create raise instead of creating one."""
+    from aws_durable_execution_sdk_python_testing.worker.checkpoint_tasks import (
+        CallableTask,
+    )
+
+    registry = ExecutionRegistry(InMemoryExecutionStore(), Mock())
+    registry.shutdown()
+
+    with pytest.raises(RuntimeError, match="shut down"):
+        registry.get_or_create("arn-1")
+    with pytest.raises(RuntimeError, match="shut down"):
+        registry.submit("arn-1", CallableTask(lambda: None))
