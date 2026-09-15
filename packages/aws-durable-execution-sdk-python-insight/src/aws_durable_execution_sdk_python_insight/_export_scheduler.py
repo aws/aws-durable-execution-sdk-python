@@ -17,27 +17,38 @@ _logger = logging.getLogger("aws_durable_execution_sdk_python_insight")
 
 
 class _ExportScheduler:
-    """Run all exporters on one lazy worker with one latest pending record."""
+    """Run all exporters on one lazy worker with one pending record per execution.
+
+    The pending map is keyed by ``executionArn`` so a snapshot only ever
+    replaces its own execution's pending snapshot. Several executions may be in
+    flight on one plugin instance (the local runner drives independent
+    executions concurrently through a shared ``workflow_insight(...)``), and a
+    single shared slot let execution B's ``RUNNING`` snapshot displace
+    execution A's terminal snapshot before the worker claimed it.
+    """
 
     def __init__(self, exporters: list[InsightExporter]) -> None:
         self._exporters = exporters
         self._condition = threading.Condition(threading.Lock())
-        self._pending: dict[str, Any] | None = None
+        # executionArn -> latest pending snapshot, in first-arrival order.
+        self._pending: dict[str, dict[str, Any]] = {}
         self._flush_requested = False
         self._flush_event: threading.Event | None = None
         self._worker: threading.Thread | None = None
         self._disabled = False
 
     def schedule(self, record: dict[str, Any]) -> None:
-        """Replace the pending snapshot and return without running exporters."""
+        """Replace this execution's pending snapshot and return without exporting."""
         displaced: dict[str, Any] | None = None
-        failed_pending: dict[str, Any] | None = None
+        failed_pending: dict[str, dict[str, Any]] | None = None
         start_error: Exception | None = None
+        arn = str(record.get("executionArn", ""))
         with self._condition:
             if self._disabled:
                 return
-            displaced = self._pending
-            self._pending = record
+            displaced = self._pending.get(arn)
+            # Assigning an existing key keeps its first-arrival position.
+            self._pending[arn] = record
             failed_pending, start_error = self._ensure_worker_locked()
             self._condition.notify()
         # Releasing either record may run custom finalizers, so do it unlocked.
@@ -50,8 +61,8 @@ class _ExportScheduler:
             )
 
     def drain(self) -> None:
-        """Wait until the latest pending record is exported and exporters flush."""
-        failed_pending: dict[str, Any] | None = None
+        """Wait until every pending record is exported and exporters flush."""
+        failed_pending: dict[str, dict[str, Any]] | None = None
         start_error: Exception | None = None
         with self._condition:
             if self._disabled:
@@ -76,7 +87,7 @@ class _ExportScheduler:
 
     def _ensure_worker_locked(
         self,
-    ) -> tuple[dict[str, Any] | None, Exception | None]:
+    ) -> tuple[dict[str, dict[str, Any]] | None, Exception | None]:
         if self._worker is not None and self._worker.is_alive():
             return None, None
         worker = threading.Thread(
@@ -91,7 +102,7 @@ class _ExportScheduler:
             self._disabled = True
             self._worker = None
             failed_pending = self._pending
-            self._pending = None
+            self._pending = {}
             failed_event = self._flush_event
             self._flush_event = None
             self._flush_requested = False
@@ -105,11 +116,13 @@ class _ExportScheduler:
             record: dict[str, Any] | None = None
             flush_event: threading.Event | None = None
             with self._condition:
-                while self._pending is None and not self._flush_requested:
+                while not self._pending and not self._flush_requested:
                     self._condition.wait()
-                if self._pending is not None:
-                    record = self._pending
-                    self._pending = None
+                if self._pending:
+                    # Export every pending execution before honoring a flush, so
+                    # drain() means everything scheduled so far was delivered.
+                    arn = next(iter(self._pending))
+                    record = self._pending.pop(arn)
                 else:
                     flush_event = self._flush_event
                     self._flush_event = None
@@ -123,7 +136,7 @@ class _ExportScheduler:
             if flush_event is not None:
                 flush_event.set()
             with self._condition:
-                if self._pending is None and not self._flush_requested:
+                if not self._pending and not self._flush_requested:
                     self._worker = None
                     return
 
@@ -159,4 +172,4 @@ class _ExportScheduler:
 
     def _pending_count(self) -> int:
         with self._condition:
-            return int(self._pending is not None)
+            return len(self._pending)

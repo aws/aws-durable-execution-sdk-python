@@ -13,8 +13,13 @@ from aws_durable_execution_sdk_python_insight._export_scheduler import (
 )
 
 
-def _record(value: str) -> dict[str, Any]:
-    return {"status": "RUNNING", "value": value, "operations": []}
+def _record(value: str, arn: str = "exec-a") -> dict[str, Any]:
+    return {
+        "executionArn": arn,
+        "status": "RUNNING",
+        "value": value,
+        "operations": [],
+    }
 
 
 def _wait_until(predicate, timeout: float = 5.0) -> bool:
@@ -157,3 +162,94 @@ def test_drain_waits_for_blocked_exporter() -> None:
 
     assert not drain_thread.is_alive()
     assert exporter.calls == [("export", "terminal"), ("flush", None)]
+
+
+# -- pending map is keyed per execution (#719 review, issue 1) ----------------
+
+
+def test_pending_is_keyed_per_execution() -> None:
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter])
+    scheduler.schedule(_record("a-first", arn="exec-a"))
+    assert exporter.started.wait(5.0)
+
+    # B's snapshot must not displace A's pending terminal snapshot.
+    scheduler.schedule(_record("a-terminal", arn="exec-a"))
+    scheduler.schedule(_record("b-running", arn="exec-b"))
+    assert scheduler._pending_count() == 2
+
+    exporter.release.set()
+    scheduler.drain()
+    assert exporter.calls == [
+        ("export", "a-first"),
+        ("export", "a-terminal"),
+        ("export", "b-running"),
+        ("flush", None),
+    ]
+
+
+def test_drain_delivers_every_pending_execution_before_flush() -> None:
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter])
+    scheduler.schedule(_record("a", arn="exec-a"))
+    assert exporter.started.wait(5.0)
+    scheduler.schedule(_record("b", arn="exec-b"))
+    scheduler.schedule(_record("c", arn="exec-c"))
+
+    exporter.release.set()
+    scheduler.drain()
+
+    exported = [value for kind, value in exporter.calls if kind == "export"]
+    assert exported == ["a", "b", "c"]
+    assert exporter.calls[-1] == ("flush", None)
+
+
+def test_concurrent_executions_each_deliver_terminal_record() -> None:
+    rounds = 50
+    exporter = CaptureExporter()
+    scheduler = _ExportScheduler([exporter])
+
+    def drive(arn: str) -> None:
+        for i in range(rounds):
+            scheduler.schedule(_record(f"{arn}-running-{i}", arn=arn))
+            scheduler.schedule(_record(f"{arn}-terminal-{i}", arn=arn))
+            scheduler.drain()
+
+    threads = [threading.Thread(target=drive, args=(arn,)) for arn in ("a", "b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30.0)
+    assert not any(thread.is_alive() for thread in threads)
+
+    exported = [
+        value
+        for kind, value in exporter.calls
+        if kind == "export" and value is not None
+    ]
+    for arn in ("a", "b"):
+        terminals = [v for v in exported if v.startswith(f"{arn}-terminal-")]
+        assert terminals == [f"{arn}-terminal-{i}" for i in range(rounds)]
+
+
+# -- coalescing contract (#719 review, issue 2) -------------------------------
+
+
+def test_same_execution_coalesces_to_first_and_latest_while_blocked() -> None:
+    exporter = BlockingExporter()
+    scheduler = _ExportScheduler([exporter])
+    scheduler.schedule(_record("first"))
+    assert exporter.started.wait(5.0)
+
+    scheduler.schedule(_record("second"))
+    scheduler.schedule(_record("third"))
+    scheduler.schedule(_record("latest"))
+    assert scheduler._pending_count() == 1
+
+    exporter.release.set()
+    scheduler.drain()
+    assert exporter.calls == [
+        ("export", "first"),
+        ("export", "latest"),
+        ("flush", None),
+    ]
