@@ -23,6 +23,9 @@ from aws_durable_execution_sdk_python_testing.checkpoint.processors.context impo
 from aws_durable_execution_sdk_python_testing.checkpoint.processors.execution import (
     ExecutionProcessor,
 )
+from aws_durable_execution_sdk_python_testing.checkpoint.processors.invoke import (
+    ChainedInvokeProcessor,
+)
 from aws_durable_execution_sdk_python_testing.checkpoint.processors.step import (
     StepProcessor,
 )
@@ -40,6 +43,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from aws_durable_execution_sdk_python.lambda_service import (
+        ErrorObject,
         OperationUpdate,
     )
 
@@ -69,13 +73,28 @@ class CheckpointRequestDispatcher:
         OperationType.CONTEXT: ContextProcessor(),
         OperationType.CALLBACK: CallbackProcessor(),
         OperationType.EXECUTION: ExecutionProcessor(),
+        OperationType.CHAINED_INVOKE: ChainedInvokeProcessor(),
     }
 
     def __init__(
         self,
         processors: MutableMapping[OperationType, OperationProcessor] | None = None,
+        *,
+        chained_invoke_preflight: Callable[[str], ErrorObject | None] | None = None,
     ):
-        self.processors = processors if processors else self._DEFAULT_PROCESSORS
+        """``chained_invoke_preflight`` resolves a chained-invoke target at
+        checkpoint time (see :class:`ChainedInvokeProcessor`); it replaces
+        the default CHAINED_INVOKE processor and is ignored when explicit
+        ``processors`` are given."""
+        if processors:
+            self.processors = processors
+        elif chained_invoke_preflight is not None:
+            self.processors = dict(self._DEFAULT_PROCESSORS)
+            self.processors[OperationType.CHAINED_INVOKE] = ChainedInvokeProcessor(
+                chained_invoke_preflight
+            )
+        else:
+            self.processors = self._DEFAULT_PROCESSORS
 
     def apply_updates(
         self,
@@ -112,6 +131,7 @@ class CheckpointRequestDispatcher:
         """
         collector = ExecutionNotifier()
         op_map = {op.operation_id: op for op in execution.operations}
+        stored_updates: list[OperationUpdate] = []
 
         for update in updates:
             processor = self.processors.get(update.operation_type)
@@ -128,8 +148,11 @@ class CheckpointRequestDispatcher:
                 now=now,
             )
             if updated_op is None:
+                stored_updates.append(update)
                 continue
 
+            stored = processor.stored_update(update, current_op, updated_op)
+            stored_updates.append(stored)
             if update.operation_id in op_map:
                 for i, op in enumerate(execution.operations):  # pragma: no branch
                     if op.operation_id == update.operation_id:
@@ -140,12 +163,12 @@ class CheckpointRequestDispatcher:
 
             op_map[update.operation_id] = updated_op
             execution.operation_size_bytes[update.operation_id] = (
-                _estimate_payload_size(update)
+                _estimate_payload_size(stored)
             )
             touch(update.operation_id)
 
-        execution.updates.extend(updates)
-        execution.update_timestamps.extend(now for _ in updates)
+        execution.updates.extend(stored_updates)
+        execution.update_timestamps.extend(now for _ in stored_updates)
 
         return collector.effects
 

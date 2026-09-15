@@ -52,6 +52,9 @@ class _NoOpInvoker:
     def update_endpoint(self, *args: Any, **kwargs: Any) -> None:  # noqa: ARG002
         return None
 
+    def inherit_endpoint(self, *args: Any, **kwargs: Any) -> None:  # noqa: ARG002
+        return None
+
 
 def _assert_no_percent_encoding_in_error(exc: ClientError, arn: str) -> None:
     """Fail the test if a ResourceNotFoundException carries a %2F-form ARN.

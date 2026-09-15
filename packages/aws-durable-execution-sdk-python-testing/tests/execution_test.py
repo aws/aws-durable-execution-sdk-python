@@ -1,5 +1,7 @@
 """Unit tests for execution module."""
 
+import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import patch, Mock
 
@@ -1220,6 +1222,9 @@ def test_execution_round_trip_preserves_new_fields():
     execution.operation_last_touched_seq = {"op-A": 2, "op-B": 7}
     execution.operation_size_bytes = {"op-A": 42, "op-B": 100}
     execution.needs_reinvoke = True
+    execution.chained_invoke_children = {"invoke-1": "child-arn"}
+    execution.parent_execution_arn = "parent-arn"
+    execution.region = "eu-west-1"
     execution.last_checkpoint = CheckpointIdempotencyRecord(
         client_token="c1",
         inbound_checkpoint_token="tok-in",
@@ -1230,6 +1235,9 @@ def test_execution_round_trip_preserves_new_fields():
 
     rehydrated = Execution.from_json_dict(execution.to_json_dict())
 
+    assert rehydrated.chained_invoke_children == {"invoke-1": "child-arn"}
+    assert rehydrated.parent_execution_arn == "parent-arn"
+    assert rehydrated.region == "eu-west-1"
     assert rehydrated.seq_counter == 7
     assert rehydrated.token_sequence == 3
     assert rehydrated.handler_seen_seq == 5
@@ -1270,6 +1278,9 @@ def test_execution_from_old_format_dict_uses_safe_defaults():
     assert execution.operation_size_bytes == {}
     assert execution.needs_reinvoke is False
     assert execution.last_checkpoint is None
+    assert execution.chained_invoke_children == {}
+    assert execution.parent_execution_arn is None
+    assert execution.region is None
 
 
 def test_checkpoint_idempotency_record_equality():
@@ -1325,6 +1336,56 @@ def test_advance_token_sequence_returns_new_value_and_leaves_seq_counter():
 
 
 # endregion # region OperationPaginatorState
+
+
+def test_complete_chained_invoke_sizes_the_operation_by_its_result():
+    execution = Execution(
+        "test-arn",
+        _make_start_input(),
+        [
+            Operation(
+                operation_id="invoke-1",
+                operation_type=OperationType.CHAINED_INVOKE,
+                status=OperationStatus.STARTED,
+            )
+        ],
+    )
+    execution.operation_size_bytes["invoke-1"] = 3
+
+    execution.complete_chained_invoke(
+        "invoke-1", OperationStatus.SUCCEEDED, result="x" * 1000
+    )
+    assert execution.operation_size_bytes["invoke-1"] == 1000
+
+    execution.operations[0] = replace(
+        execution.operations[0], status=OperationStatus.STARTED
+    )
+    error = ErrorObject.from_message("boom")
+    execution.complete_chained_invoke("invoke-1", OperationStatus.FAILED, error=error)
+    assert execution.operation_size_bytes["invoke-1"] == len(
+        json.dumps(error.to_dict())
+    )
+
+
+def _chained_invoke_execution(status: OperationStatus) -> Execution:
+    return Execution(
+        "test-arn",
+        _make_start_input(),
+        [
+            Operation(
+                operation_id="invoke-1",
+                operation_type=OperationType.CHAINED_INVOKE,
+                status=status,
+            )
+        ],
+    )
+
+
+def test_complete_chained_invoke_rejects_a_terminal_operation():
+    execution = _chained_invoke_execution(OperationStatus.SUCCEEDED)
+
+    with pytest.raises(IllegalStateException, match="not active"):
+        execution.complete_chained_invoke("invoke-1", OperationStatus.FAILED)
 
 
 def _make_execution_with_ops(
@@ -1605,8 +1666,10 @@ def test_complete_wait_records_updated_operation_id():
     assert execution.updated_operation_ids == ["wait-1"]
 
 
-def test_record_invocation_completion_clears_updated_operation_ids():
-    """Updated IDs are scoped to the next completed invocation."""
+def test_record_invocation_completion_keeps_updated_operation_ids():
+    """An operation that changes while the handler runs is reported on the
+    next invocation. So completing the invocation keeps the list; only
+    delivering the state in an input resets it."""
     start_input = StartDurableExecutionInput(
         account_id="123456789012",
         function_name="test-function",
@@ -1621,5 +1684,26 @@ def test_record_invocation_completion_clears_updated_operation_ids():
 
     now = datetime(2023, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
     execution.record_invocation_completion(now, now, "request-1")
+    assert execution.updated_operation_ids == ["wait-1"]
 
+    execution.mark_state_delivered()
     assert execution.updated_operation_ids == []
+
+
+def test_function_arn_is_qualified_with_the_executed_version():
+    execution = Execution.new(_make_start_input())
+    execution.region = "ap-southeast-2"
+
+    assert execution.executed_version() == "$LATEST"
+    assert (
+        execution.function_arn("us-west-2")
+        == "arn:aws:lambda:ap-southeast-2:123456789012:function:test-function:$LATEST"
+    )
+
+
+def test_function_arn_falls_back_to_the_default_region_when_none_was_recorded():
+    """An execution stored before the runner recorded regions has none."""
+    execution = Execution.new(_make_start_input())
+    assert execution.region is None
+
+    assert execution.function_arn("us-west-2").startswith("arn:aws:lambda:us-west-2:")

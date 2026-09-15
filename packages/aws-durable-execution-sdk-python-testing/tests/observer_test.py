@@ -27,6 +27,7 @@ class MockExecutionObserver(ExecutionObserver):
         self.on_timed_out_calls = []
         self.on_stopped_calls = []
         self.on_callback_created_calls = []
+        self.on_chained_invoke_started_calls = []
 
     def on_completed(self, execution_arn: str, result: str | None = None) -> None:
         self.on_completed_calls.append((execution_arn, result))
@@ -49,6 +50,18 @@ class MockExecutionObserver(ExecutionObserver):
     ) -> None:
         self.on_callback_created_calls.append(
             (execution_arn, operation_id, callback_options, callback_token)
+        )
+
+    def on_chained_invoke_started(
+        self,
+        execution_arn: str,
+        operation_id: str,
+        function_name: str,
+        tenant_id: str | None,
+        payload: str | None,
+    ) -> None:
+        self.on_chained_invoke_started_calls.append(
+            (execution_arn, operation_id, function_name, tenant_id, payload)
         )
 
 

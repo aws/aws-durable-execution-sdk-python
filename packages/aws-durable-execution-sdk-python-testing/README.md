@@ -12,6 +12,7 @@
 
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Testing functions that invoke other functions](#testing-functions-that-invoke-other-functions)
 - [Architecture](#architecture)
 - [Documentation](#documentation)
 - [Developer Guide](#developers)
@@ -111,6 +112,55 @@ def test_my_durable_functions():
     three_result: StepOperation = result.get_step("three")
     assert three_result.result == '"5 6"'
 ```
+## Testing functions that invoke other functions
+
+A durable function can call another function with `context.invoke`. The
+runner needs to know each target's kind: a durable target runs as a
+child durable execution with its own history, while a plain (non-durable)
+target is one invocation whose return value is the result. An unknown
+target fails the operation with `ResourceNotFoundException`.
+
+### In-process runner
+
+Register each target with the runner. `register_durable_function` marks a
+durable target, and takes its execution timeout and retention;
+`register_function` marks a plain one. The runner has one handler per
+registered name, not versions: an invoke of `child:prod` runs the handler
+registered as `child:prod` if there is one, otherwise the one registered
+as `child`.
+
+```python
+from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.execution import durable_execution
+from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
+
+@durable_execution
+def process_payment(event: dict, context: DurableContext) -> dict:
+    return {"charged": event["amount"]}
+
+def lookup_price(event: dict, context) -> dict:
+    return {"price": 25}
+
+@durable_execution
+def place_order(event: dict, context: DurableContext) -> dict:
+    price = context.invoke("lookup-price", {"sku": event["sku"]}, name="price")
+    payment = context.invoke(
+        "process-payment", {"amount": price["price"]}, name="payment"
+    )
+    return {"sku": event["sku"], "charged": payment["charged"]}
+
+def test_place_order_invokes_both_functions():
+    with DurableFunctionTestRunner(handler=place_order) as runner:
+        runner.register_durable_function(
+            "process-payment", process_payment, execution_timeout=60
+        )
+        runner.register_function("lookup-price", lookup_price)
+        result = runner.run(input='{"sku": "book-1"}')
+
+    assert result.result == '{"sku": "book-1", "charged": 25}'
+    assert result.get_invoke("payment").status.value == "SUCCEEDED"
+```
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for framework

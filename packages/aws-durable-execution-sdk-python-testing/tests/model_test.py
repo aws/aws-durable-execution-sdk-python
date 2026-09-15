@@ -70,6 +70,7 @@ from aws_durable_execution_sdk_python_testing.model import (
     WaitStartedDetails,
     WaitSucceededDetails,
     events_to_operations,
+    executed_version,
 )
 
 
@@ -3665,3 +3666,49 @@ def test_invocation_completed_details_from_json_dict_invalid_timestamp():
         match="StartTimestamp and EndTimestamp cannot be null",
     ):
         InvocationCompletedDetails.from_json_dict(json_dict)
+
+
+@pytest.mark.parametrize(
+    ("qualifier", "version"),
+    [
+        (None, "$LATEST"),
+        ("$LATEST", "$LATEST"),
+        ("7", "7"),
+        ("prod", "$LATEST"),
+        ("$LATEST.PUBLISHED", "$LATEST.PUBLISHED"),
+    ],
+)
+def test_executed_version_reports_what_lambda_would_run(qualifier, version):
+    """A numeric qualifier and $LATEST.PUBLISHED are reported as given;
+    anything else runs $LATEST here, since the runner keeps no versions or
+    aliases."""
+    assert executed_version(qualifier) == version
+
+
+def test_execution_summary_reports_the_execution_identity():
+    """The summary's FunctionArn is the execution's own region, account and
+    qualified name, not a fixed placeholder."""
+    from aws_durable_execution_sdk_python_testing.execution import (
+        Execution as StoredExecution,
+    )
+
+    stored = StoredExecution.new(
+        StartDurableExecutionInput(
+            account_id="210987654321",
+            function_name="orders",
+            function_qualifier="3",
+            execution_name="run-1",
+            execution_timeout_seconds=60,
+            execution_retention_period_days=1,
+            invocation_id="inv-1",
+        )
+    )
+    stored.region = "eu-west-1"
+    stored.start()
+
+    summary = Execution.from_execution(stored, "RUNNING", "us-west-2")
+
+    assert (
+        summary.function_arn
+        == "arn:aws:lambda:eu-west-1:210987654321:function:orders:3"
+    )
