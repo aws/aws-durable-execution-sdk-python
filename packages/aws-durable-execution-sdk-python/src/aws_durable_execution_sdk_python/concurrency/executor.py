@@ -8,6 +8,7 @@ import queue
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
 from aws_durable_execution_sdk_python.concurrency.models import (
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.state import (
         CheckpointedResult,
         ExecutionState,
+        ScheduledRefresh,
     )
 
 
@@ -84,6 +86,20 @@ def _branch_error_object(err: Exception) -> ErrorObject:
             stack_trace=err.stack_trace,
         )
     return ErrorObject.from_exception(err)
+
+
+@dataclass
+class ResumeWave(Generic[CallableType, ResultType]):
+    """Branches suspended until one time, and the refresh that resumes them.
+
+    The refresh is a delayed empty checkpoint requested when the first branch
+    suspends. Its response shows the waits complete, so the wave resumes one
+    round trip after its time.
+    """
+
+    resume_at: float
+    refresh: ScheduledRefresh
+    branches: list[Branch[CallableType, ResultType]] = field(default_factory=list)
 
 
 class ConcurrentExecutor(Generic[CallableType, ResultType]):
@@ -252,7 +268,9 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
 
         events: queue.Queue[BranchEvent[ResultType]] = queue.Queue()
         pending: deque[Branch[CallableType, ResultType]] = deque(self.branches)
-        timed_resumes: list[tuple[float, int]] = []
+        # The heap orders resume times. The dict groups the branches under each.
+        resume_times: list[float] = []
+        waves: dict[float, ResumeWave[CallableType, ResultType]] = {}
         branch_by_index: dict[int, Branch[CallableType, ResultType]] = {
             branch.index: branch for branch in self.branches
         }
@@ -317,19 +335,20 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                     running += 1
                     needs_snapshot_rebuild = True
 
-                # Resume due timed suspends in-process. One checkpoint
-                # refresh serves the whole due wave; a failure is terminal
+                # Resume due waves in-process. A refresh failure is terminal
                 # for the execution and propagates from this thread.
                 now: float = time.time()
-                due: list[Branch[CallableType, ResultType]] = []
-                while timed_resumes and timed_resumes[0][0] <= now:
-                    _, index = heapq.heappop(timed_resumes)
-                    due.append(branch_by_index[index])
-                if due:
-                    execution_state.create_checkpoint()
-                    for branch in due:
+                resumed = False
+                while resume_times and resume_times[0] <= now:
+                    wave = waves.pop(heapq.heappop(resume_times))
+                    wave.refresh.wait()
+                    # Branches joined the wave in event order. Resume in index
+                    # order so scheduling stays deterministic.
+                    for branch in sorted(wave.branches, key=lambda b: b.index):
                         submit(branch)
                         running += 1
+                    resumed = True
+                if resumed:
                     continue
 
                 if running == 0:
@@ -340,18 +359,18 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                         raise retryable_error
                     # Every in-flight branch is suspended and no slot is
                     # free (or no work remains): suspend the parent.
-                    if timed_resumes:
+                    if resume_times:
                         raise TimedSuspendExecution(
                             "All concurrent work complete or suspended pending retry.",
-                            timed_resumes[0][0],
+                            resume_times[0],
                         )
                     raise SuspendExecution(
                         "All concurrent work complete or suspended and pending external callback."
                     )
 
                 timeout: float | None = None
-                if timed_resumes:
-                    timeout = max(timed_resumes[0][0] - time.time(), 0)
+                if resume_times:
+                    timeout = max(resume_times[0] - time.time(), 0)
                 try:
                     event: BranchEvent[ResultType] = events.get(timeout=timeout)
                 except queue.Empty:
@@ -383,7 +402,13 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                         needs_snapshot_rebuild = True
                     case BranchEventKind.SUSPENDED_UNTIL if event.resume_at is not None:
                         applied.suspend_until(event.resume_at)
-                        heapq.heappush(timed_resumes, (event.resume_at, event.index))
+                        if event.resume_at not in waves:
+                            waves[event.resume_at] = ResumeWave(
+                                event.resume_at,
+                                execution_state.schedule_refresh(event.resume_at),
+                            )
+                            heapq.heappush(resume_times, event.resume_at)
+                        waves[event.resume_at].branches.append(applied)
                         running -= 1
                         needs_snapshot_rebuild = True
                     case BranchEventKind.ORPHANED:
@@ -402,6 +427,9 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                         msg = f"Unhandled branch event: {event}"
                         raise InvalidStateError(msg)
         finally:
+            # Nothing will wait for a refresh whose wave never resumed.
+            for wave in waves.values():
+                wave.refresh.cancel()
             # Shutdown without waiting for running threads for early return
             # when completion criteria are met (e.g., min_successful).
             # Running threads continue in the background of this invocation
