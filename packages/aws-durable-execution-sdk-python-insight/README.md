@@ -183,7 +183,12 @@ OTelExporter(endpoint="https://otlp.vendor.com/v1/logs", headers={"x-api-key": "
 
 `POST` (or `method="PUT"`) the record as JSON to `url` with
 `Content-Type: application/json` plus `headers`; a non-2xx status raises.
-`timeout_ms` defaults to 10000. No IAM.
+`timeout_ms` defaults to 10000 and currently applies to each socket operation
+(the connect, each write of the request, and each read of the status line,
+headers, and a non-2xx error body; a 2xx body is never read) rather than to the
+whole request, so an endpoint that consumes or responds slowly can hold the
+export open longer than `timeout_ms`; a future release may enforce it as a
+whole-request deadline. No IAM.
 
 ```python
 HttpExporter(url="https://hooks.example.com/insight", headers={"Authorization": "Bearer ..."})

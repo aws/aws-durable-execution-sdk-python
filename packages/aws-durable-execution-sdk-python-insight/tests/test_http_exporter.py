@@ -181,7 +181,7 @@ def test_non_2xx_response_raises(http_capture: HttpCapture) -> None:
         exporter.export(_record())
 
 
-def test_timeout_is_enforced(http_capture: HttpCapture) -> None:
+def test_timeout_applies_to_a_silent_peer(http_capture: HttpCapture) -> None:
     http_capture.delay_seconds = 1.0
     exporter = HttpExporter(url=http_capture.url, timeout_ms=100)
     with pytest.raises(TimeoutError):
