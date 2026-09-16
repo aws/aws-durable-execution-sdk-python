@@ -34,8 +34,17 @@ class HttpExporter:
     """Sends each record as a JSON body to any HTTP endpoint.
 
     The endpoint must answer 2xx; any other status raises. ``timeout_ms``
-    bounds the whole request (default 10 seconds). ``max_record_size_bytes``
-    has no default because a generic endpoint has no known limit.
+    (default 10 seconds) is currently applied to each blocking socket
+    operation, not to the request as a whole: the connect, each write while
+    sending the request (headers and the record body), and each read of the
+    status line and headers, plus of the error body on a non-2xx response. A
+    successful response body is never read. An endpoint that stops reading or
+    goes silent fails at ``timeout_ms``, but one that keeps consuming or
+    sending bytes slowly can hold the request open for longer. A future
+    release may enforce ``timeout_ms`` as a deadline for the whole request, so
+    do not rely on a request being allowed to exceed it. Size the function
+    timeout with this in mind. ``max_record_size_bytes`` has no default because
+    a generic endpoint has no known limit.
     """
 
     def __init__(

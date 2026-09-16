@@ -89,7 +89,11 @@ def http_send(
     message. Redirects are not followed: a 3xx is returned like any other
     failure. ``error_text`` is the first ``_MAX_ERROR_BODY_BYTES`` of a non-2xx
     response body and empty on success; a success body is never read. Network
-    errors and timeouts propagate.
+    errors and timeouts propagate. ``timeout`` is ``urllib``'s per-socket-
+    operation timeout: it bounds the connect, each write of the request, and
+    each read of the status line, headers, and any error body separately, not
+    the request as a whole. A peer that keeps consuming or sending bytes
+    slowly can outlive it.
     """
     request = urllib.request.Request(url, data=body, method=method)
     for key, value in headers.items():
