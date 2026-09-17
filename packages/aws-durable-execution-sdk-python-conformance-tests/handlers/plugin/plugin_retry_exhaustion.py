@@ -99,7 +99,7 @@ def always_fail(_step_context: StepContext) -> str:
     raise RuntimeError(msg)
 
 
-@durable_execution(plugins=[RetryExhaustionPlugin()])
+@durable_execution(plugins=[lambda _info: RetryExhaustionPlugin()])
 def handler(_event: Any, context: DurableContext) -> str:
     retry_config = RetryStrategyConfig(
         max_attempts=2,

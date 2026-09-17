@@ -90,7 +90,7 @@ def step_b(step_context: StepContext) -> str:
     return "Operation succeeded"
 
 
-@durable_execution(plugins=[ReplayFlagPlugin()])
+@durable_execution(plugins=[lambda _info: ReplayFlagPlugin()])
 def handler(_event: Any, context: DurableContext) -> str:
     context.step(step_a())
     retry_config = RetryStrategyConfig(

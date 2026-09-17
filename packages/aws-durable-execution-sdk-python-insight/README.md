@@ -42,6 +42,12 @@ def handler(event, context):
     ...
 ```
 
+`workflow_insight()` returns a plugin *factory*, which is what the SDK's
+`plugins` argument takes: the SDK calls it once per invocation to build that
+invocation's plugin instance. The factory holds the resolved configuration and
+the exporters, so configuration is per handler while record state is per
+invocation.
+
 With no exporter configured, records are written to the function's own
 CloudWatch log group as single JSON lines (the `LambdaLogExporter` default),
 carrying the name-keyed `operationsByName` summary. The `S3Exporter` writes the
@@ -56,8 +62,8 @@ Behavior is validated cross-SDK by the `insight` conformance suite
 (`aws-durable-execution-conformance-tests-insight`).
 
 > **Note (asynchronous export).** Export rendering, truncation, `export()`, and
-> `flush()` run on one lazy background worker per plugin. Checkpoint hooks only
-> replace the latest pending snapshot and wake the worker. Consecutive
+> `flush()` run on one lazy background worker per registered factory. Checkpoint
+> hooks only replace the latest pending snapshot and wake the worker. Consecutive
 > `on-change` snapshots may coalesce while an export is in flight. An invocation
 > that emits a record drains the latest snapshot and flushes exporters before it
 > returns; invocations that emit nothing do not start or flush the worker.

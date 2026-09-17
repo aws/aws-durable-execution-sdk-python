@@ -96,6 +96,12 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     use newly generated span IDs. Operation attributes and links to the Workflow
     span provide execution-scoped correlation across invocations.
 
+    Lifetime: one instance per invocation. The SDK builds it from
+    :class:`~aws_durable_execution_sdk_python_otel.plugin_factory.InvocationOtelPluginFactory`
+    before the first hook fires and drops it when the invocation scope exits, so
+    every field below is per-invocation state that no other invocation can
+    observe.
+
     Args:
         config: Shared plugin configuration (the same OtelPluginConfig accepted
             by ExecutionOtelPlugin). When omitted, defaults are used (X-Ray
@@ -120,7 +126,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
 
         When ``enrich_logger`` is enabled (default), the plugin installs a
         logging filter that stamps the active OTel trace context onto every
-        emitted log record.
+        emitted log record. The filter is installed on the root logger's
+        handlers, which outlive this instance, so installing rebinds an
+        already-present filter to this invocation's plugin rather than stacking a
+        second one.
         """
         self._config = config or OtelPluginConfig()
         self._context_extractor: ContextExtractor = (
@@ -137,7 +146,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._sampling_delegate: Sampler | None = None
         self._bind_sdk_tracer()
 
-        # per invocation status:
+        # Per-invocation state. The SDK builds one plugin instance per
+        # invocation through InvocationOtelPluginFactory and drops it when the
+        # invocation scope exits, so these are ordinary instance fields that
+        # never have to be cleared for reuse.
         self._execution_arn = ""
         self._execution_trace_id: int | None = None
         self._execution_start_time: datetime.datetime | None = None
@@ -166,7 +178,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             # Install the root-logger filter so every log record is stamped with
             # the active span context. The Lambda runtime attaches its root
             # handler before the handler module is imported (and thus before the
-            # plugin is constructed), so the handlers are available here.
+            # plugin is constructed), so the handlers are available here. On a
+            # warm environment the handler already carries the filter a previous
+            # invocation's plugin installed, and this rebinds it to this one.
             install_log_filter(self)
 
     def _bind_sdk_tracer(self) -> bool:
@@ -266,11 +280,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             context.detach(token)  # type: ignore[arg-type]
 
     def _detach_remaining_contexts(self) -> None:
-        """Release scopes still open, newest first, so nothing outlives the plugin.
+        """Release scopes still open, newest first, so nothing outlives the invocation.
 
         Reached when a lifecycle end hook never fires -- for example a user
-        function that suspends, or a warm invocation that starts before the
-        previous one was cleaned up.
+        function that suspends.
         """
         with self._operation_spans_lock:
             keys = list(reversed(self._context_tokens))
@@ -513,7 +526,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         """Called at the start of each invocation. Creates the invocation span."""
         logger.debug("Durable invocation started: %s", info)
-        self._reset_state()
         if info.execution_start_time is None:
             logger.warning(
                 "InvocationOtelPlugin requires InvocationStartInfo.execution_start_time "
@@ -652,7 +664,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         """Called at the end of each invocation. Ends the invocation span and flushes."""
         logger.debug("Durable invocation ended: %s", info)
         if not self._tracing_enabled:
-            self._reset_state()
+            self._release_invocation_scope()
             return
 
         # Spans are registered parent-first, so close pending spans in reverse
@@ -700,27 +712,30 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         if info.status in _TERMINAL_INVOCATION_STATUSES:
             self._export_workflow_span(info)
 
-        self._reset_state()
+        self._release_invocation_scope()
 
         # Flush before Lambda freeze
         if hasattr(self._provider, "force_flush"):
             self._provider.force_flush()
 
-    def _reset_state(self) -> None:
-        """Clear per-invocation state for warm Lambda environment reuse."""
+    def _release_invocation_scope(self) -> None:
+        """Release what this invocation attached, and stop instrumenting.
+
+        Not a state reset. The instance serves exactly one invocation and is
+        dropped afterwards, so its fields never have to be cleared for a warm
+        environment's next invocation. Two things still have to happen at the
+        invocation boundary:
+
+        * The OpenTelemetry context stack belongs to the thread, not to the
+          plugin, so any scope this plugin attached and did not release must be
+          detached here or it would stay current on a warm environment's thread
+          after the invocation returns.
+        * ``_tracing_enabled`` is cleared so a hook that arrives after the
+          invocation end -- one dispatched off the checkpointing path, for
+          instance -- cannot start a span after the invocation span was ended and
+          the provider flushed.
+        """
         self._detach_remaining_contexts()
-        self._execution_arn = ""
-        self._execution_trace_id = None
-        self._extracted_context = None
-        self._execution_trace_context = None
-        self._sampling_intent = None
-        self._execution_start_time = None
-        self._workflow_span = None
-        self._span_time_floor_ns = None
-        with self._operation_spans_lock:
-            self._operation_spans = {}
-            self._context_operation_replays = {}
-            self._incomplete_attempt_span_keys = set()
         self._tracing_enabled = False
 
     def on_operation_start(self, info: OperationStartInfo) -> None:

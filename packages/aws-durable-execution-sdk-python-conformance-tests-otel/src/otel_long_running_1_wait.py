@@ -14,7 +14,7 @@ from aws_durable_execution_sdk_python import (
     durable_step,
 )
 from aws_durable_execution_sdk_python.config import Duration
-from common import long_delay_seconds, otel_plugin, require_scenario
+from common import long_delay_seconds, otel_plugin_factory, require_scenario
 
 
 @durable_step
@@ -22,7 +22,7 @@ def complete_after_long_wait(_step_context: StepContext) -> str:
     return "resumed"
 
 
-@durable_execution(plugins=[otel_plugin()])
+@durable_execution(plugins=[otel_plugin_factory()])
 def handler(event: dict[str, Any], context: DurableContext) -> str:
     require_scenario(event, "long-wait")
     context.wait(

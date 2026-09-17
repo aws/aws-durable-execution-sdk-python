@@ -8,6 +8,13 @@ Drives the plugin with the SDK's real hook dataclasses and a capturing exporter
 exercised end to end, nothing about SDK behavior is mocked). Operations reach the
 plugin the way the real SDK delivers them: as the point-in-time ``operations``
 map on ``InvocationStartInfo`` / ``InvocationEndInfo`` / ``OperationChangeInfo``.
+
+``workflow_insight()`` returns a factory, so these tests hold two things where
+they used to hold one: the handler-lifetime factory (``factory``, carrying the
+resolved config, the exporters and the export scheduler) and the per-invocation
+instance the SDK builds from it (``plugin``). ``_invocation()`` does what the SDK
+does -- build the instance from the invocation's start info, then dispatch that
+same info to its first hook.
 """
 
 from __future__ import annotations
@@ -41,7 +48,11 @@ from aws_durable_execution_sdk_python_insight import (
     WorkflowInsightConfig,
     workflow_insight,
 )
-from aws_durable_execution_sdk_python_insight.plugin import _resolve_sampling_rate
+from aws_durable_execution_sdk_python_insight._export_scheduler import _ExportState
+from aws_durable_execution_sdk_python_insight.plugin import (
+    WorkflowInsightPlugin,
+    _resolve_sampling_rate,
+)
 
 ARN = "arn:aws:lambda:us-west-2:123456789012:function:my-fn:$LATEST/durable-execution/exec-1/inv-1"
 ARN_B = "arn:aws:lambda:us-west-2:123456789012:function:my-fn:$LATEST/durable-execution/exec-2/inv-1"
@@ -138,8 +149,20 @@ def _end(
     )
 
 
+def _invocation(factory, info: InvocationStartInfo) -> WorkflowInsightPlugin:
+    """Enter one invocation the way the SDK does.
+
+    The SDK builds one plugin instance per invocation from that invocation's
+    start info and dispatches the very same object to its first hook. A test that
+    drives hooks directly does both.
+    """
+    plugin = factory(info)
+    plugin.on_invocation_start(info)
+    return plugin
+
+
 def _run(
-    plugin,
+    factory,
     *,
     ops,
     status=InvocationStatus.SUCCEEDED,
@@ -150,10 +173,13 @@ def _run(
     """Single-invocation drive: the full operation map is present in both the
     start and the end snapshot (the terminal record is built from the end one)."""
     operations = _ops(*ops)
-    plugin.on_invocation_start(_start(operations=operations, input_value=input_value))
+    plugin = _invocation(
+        factory, _start(operations=operations, input_value=input_value)
+    )
     plugin.on_invocation_end(
         _end(operations=operations, status=status, result=result, error=error)
     )
+    return plugin
 
 
 # -- existing record-building coverage ---------------------------------------
@@ -161,8 +187,8 @@ def _run(
 
 def test_basic_success_record():
     exporter = CaptureExporter()
-    plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
-    _run(plugin, ops=[_step("greet")])
+    factory = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    _run(factory, ops=[_step("greet")])
     assert len(exporter.records) == 1
     rec = exporter.records[0]
     assert rec["recordType"] == "WorkflowInsight"
@@ -185,17 +211,17 @@ def test_basic_success_record():
 
 def test_on_failure_success_emits_nothing():
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], emit_mode="on-failure")
     )
-    _run(plugin, ops=[_step("greet")], status=InvocationStatus.SUCCEEDED)
+    _run(factory, ops=[_step("greet")], status=InvocationStatus.SUCCEEDED)
     assert exporter.records == []
     # No record, but the invocation end still flushed once: a sampled-in
     # invocation end flushes whether or not this emit mode produced a record
     # (JS/Java cadence), because the exporter may be buffering another
     # execution's records.
     assert exporter.flush_count == 1
-    assert _wait_until(lambda: not plugin._scheduler._worker_alive())
+    assert _wait_until(lambda: not factory._scheduler._worker_alive())
 
 
 def test_invocation_end_that_emits_no_record_still_flushes_exactly_once():
@@ -205,8 +231,8 @@ def test_invocation_end_that_emits_no_record_still_flushes_exactly_once():
     # rhythm in every SDK, so this end must still flush -- exactly once, not
     # twice, and not zero times.
     exporter = CaptureExporter()
-    plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
-    plugin.on_invocation_start(_start(operations={}))
+    factory = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    plugin = _invocation(factory, _start(operations={}))
     plugin.on_invocation_end(
         _end(operations={}, status=InvocationStatus.PENDING, result=None)
     )
@@ -214,7 +240,7 @@ def test_invocation_end_that_emits_no_record_still_flushes_exactly_once():
     assert exporter.flush_count == 1
     # The worker retires, so no later flush can arrive after the invocation
     # returned.
-    assert _wait_until(lambda: not plugin._scheduler._worker_alive())
+    assert _wait_until(lambda: not factory._scheduler._worker_alive())
     assert exporter.flush_count == 1
 
 
@@ -223,23 +249,23 @@ def test_sampled_out_invocation_end_neither_exports_nor_flushes():
     # out execution exports nothing and must not flush either, so instrumenting
     # a fraction of executions costs the rest nothing.
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], sampling_rate=0)
     )
     op = _step("s", op_id="1")
-    plugin.on_invocation_start(_start(operations={}))
+    plugin = _invocation(factory, _start(operations={}))
     plugin.on_invocation_end(_end(operations=_ops(op)))
     assert exporter.records == []
     assert exporter.flush_count == 0
-    assert not plugin._scheduler._worker_alive()
+    assert not factory._scheduler._worker_alive()
 
 
 def test_sampling_zero_emits_nothing():
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], sampling_rate=0)
     )
-    _run(plugin, ops=[_step("greet")])
+    _run(factory, ops=[_step("greet")])
     assert exporter.records == []
 
 
@@ -251,22 +277,22 @@ def test_resolve_sampling_rate_nan_fails_open_to_one():
 
 def test_nan_sampling_rate_emits_instead_of_silently_disabling():
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], sampling_rate=float("nan"))
     )
-    _run(plugin, ops=[_step("greet")])
+    _run(factory, ops=[_step("greet")])
     # A NaN rate must not disable instrumentation: the record is still emitted.
     assert len(exporter.records) == 1
 
 
 def test_content_omit_input_output_without_drop_flags():
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(
             exporters=[exporter], content=ContentConfig(input=False, output=False)
         )
     )
-    _run(plugin, ops=[_step("greet")])
+    _run(factory, ops=[_step("greet")])
     rec = exporter.records[0]
     assert "input" not in rec and "output" not in rec
     assert "droppedInput" not in rec and "droppedOutput" not in rec
@@ -274,7 +300,7 @@ def test_content_omit_input_output_without_drop_flags():
 
 def test_result_opt_in():
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(
             exporters=[exporter],
             content=ContentConfig(
@@ -284,14 +310,14 @@ def test_result_opt_in():
             ),
         )
     )
-    _run(plugin, ops=[_step("compute", result="42")], result="42")
+    _run(factory, ops=[_step("compute", result="42")], result="42")
     op = exporter.records[0]["operations"][0]
     assert op["result"] == 42  # checkpointed JSON string parsed
 
 
 def test_include_errors_false_drops_op_error_keeps_record_error():
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(
             exporters=[exporter],
             content=ContentConfig(operations=ContentOperations(include_errors=False)),
@@ -302,7 +328,7 @@ def test_include_errors_false_drops_op_error_keeps_record_error():
         message="boom", type="InsightTestError", data=None, stack_trace=None
     )
     _run(
-        plugin,
+        factory,
         ops=[_step("failing-step", status=OperationStatus.FAILED, error=op_err)],
         status=InvocationStatus.FAILED,
         result=None,
@@ -315,7 +341,7 @@ def test_include_errors_false_drops_op_error_keeps_record_error():
 
 def test_top_level_only_drops_children():
     exporter = CaptureExporter()
-    plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    factory = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
     parent = _step(
         "parallel-work",
         op_id="p",
@@ -323,14 +349,14 @@ def test_top_level_only_drops_children():
         sub_type=OperationSubType.PARALLEL,
     )
     child = _step("branch-a-step", parent_id="p", op_id="c")
-    _run(plugin, ops=[parent, child])
+    _run(factory, ops=[parent, child])
     names = [op["name"] for op in exporter.records[0]["operations"]]
     assert names == ["parallel-work"]
 
 
 def test_full_tree_includes_children_with_parent_id():
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], operation_detail="full-tree")
     )
     parent = _step(
@@ -340,7 +366,7 @@ def test_full_tree_includes_children_with_parent_id():
         sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
     )
     child = _step("child-step", parent_id="p", op_id="c")
-    _run(plugin, ops=[parent, child])
+    _run(factory, ops=[parent, child])
     ops = {op["name"]: op for op in exporter.records[0]["operations"]}
     assert set(ops) == {"parent-context", "child-step"}
     assert ops["child-step"]["parentId"] == "p"
@@ -348,9 +374,9 @@ def test_full_tree_includes_children_with_parent_id():
 
 def test_unnamed_operation_dropped():
     exporter = CaptureExporter()
-    plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    factory = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
     unnamed = _step(None, op_id="u")  # type: ignore[arg-type]
-    _run(plugin, ops=[_step("named-step"), unnamed])
+    _run(factory, ops=[_step("named-step"), unnamed])
     names = [op["name"] for op in exporter.records[0]["operations"]]
     assert names == ["named-step"]
 
@@ -359,9 +385,10 @@ def test_unnamed_operation_dropped():
 
 
 def test_cold_resume_reports_prior_terminal_ops_with_fresh_plugin():
-    # Invocation 1 (plugin A): a step completes, then a wait suspends -> PENDING.
+    # Invocation 1 (environment A): a step completes, then a wait suspends ->
+    # PENDING.
     exporter1 = CaptureExporter()
-    plugin1 = workflow_insight(WorkflowInsightConfig(exporters=[exporter1]))
+    factory1 = workflow_insight(WorkflowInsightConfig(exporters=[exporter1]))
     step = _step("greet", op_id="op-step")
     wait_pending = _step(
         "pause",
@@ -371,7 +398,7 @@ def test_cold_resume_reports_prior_terminal_ops_with_fresh_plugin():
         status=OperationStatus.PENDING,
         end_time=None,
     )
-    plugin1.on_invocation_start(_start(operations={}))
+    plugin1 = _invocation(factory1, _start(operations={}))
     plugin1.on_invocation_end(
         _end(
             operations=_ops(step, wait_pending),
@@ -380,12 +407,15 @@ def test_cold_resume_reports_prior_terminal_ops_with_fresh_plugin():
         )
     )
     assert exporter1.records == []  # on-complete emits nothing for a suspend
-    assert plugin1._state == {}  # and retains nothing
+    # And nothing is retained: the instance that served the suspending invocation
+    # is dropped by the SDK, and the scheduler holds no execution either.
+    assert _wait_until(lambda: _scheduler_is_empty(factory1))
 
-    # Invocation 2 on a *fresh* plugin instance (new Lambda environment): the
-    # resume start snapshot carries the prior terminal step + resolved wait.
+    # Invocation 2 in a *fresh* Lambda environment -- a new factory, and so also a
+    # new instance: the resume start snapshot carries the prior terminal step +
+    # resolved wait.
     exporter2 = CaptureExporter()
-    plugin2 = workflow_insight(WorkflowInsightConfig(exporters=[exporter2]))
+    factory2 = workflow_insight(WorkflowInsightConfig(exporters=[exporter2]))
     step_done = _step("greet", op_id="op-step")
     wait_done = _step(
         "pause",
@@ -395,8 +425,8 @@ def test_cold_resume_reports_prior_terminal_ops_with_fresh_plugin():
         status=OperationStatus.SUCCEEDED,
     )
     resume_ops = _ops(step_done, wait_done)
-    plugin2.on_invocation_start(
-        _start(operations=resume_ops, is_first=False, execution_start_time=T0)
+    plugin2 = _invocation(
+        factory2, _start(operations=resume_ops, is_first=False, execution_start_time=T0)
     )
     plugin2.on_invocation_end(
         _end(operations=resume_ops, is_first=False, execution_start_time=T0)
@@ -416,13 +446,13 @@ def test_cold_resume_reports_prior_terminal_ops_with_fresh_plugin():
 
 def test_on_change_schedules_running_and_delivers_terminal():
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
     )
     op1 = _step("s1", op_id="1")
     op2 = _step("s2", op_id="2")
 
-    plugin.on_invocation_start(_start(operations={}))
+    plugin = _invocation(factory, _start(operations={}))
     plugin.on_operation_change(
         OperationChangeInfo(
             execution_arn=ARN, updated_operations=_ops(op1), operations=_ops(op1)
@@ -451,15 +481,17 @@ def test_on_change_schedules_running_and_delivers_terminal():
 def test_concurrent_executions_do_not_cross_contaminate():
     # A and B both suspend; B is the most-recently started (the old insertion-
     # order heuristic would have attributed A's resume to B). A then resumes to
-    # a terminal state. Its record must contain only A's data.
+    # a terminal state. Its record must contain only A's data. Each invocation
+    # gets its own instance from the one shared factory, which is what the SDK
+    # does for concurrent executions in one environment.
     exporter = CaptureExporter()
-    plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    factory = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
     a_op = _step("a-step", op_id="a1")
     b_op = _step("b-step", op_id="b1")
 
-    plugin.on_invocation_start(_start(arn=ARN, operations={}, input_value="A"))
-    plugin.on_invocation_start(_start(arn=ARN_B, operations={}, input_value="B"))
-    plugin.on_invocation_end(
+    a_first = _invocation(factory, _start(arn=ARN, operations={}, input_value="A"))
+    b_first = _invocation(factory, _start(arn=ARN_B, operations={}, input_value="B"))
+    b_first.on_invocation_end(
         _end(
             arn=ARN_B,
             operations=_ops(b_op),
@@ -467,7 +499,7 @@ def test_concurrent_executions_do_not_cross_contaminate():
             result=None,
         )
     )
-    plugin.on_invocation_end(
+    a_first.on_invocation_end(
         _end(
             arn=ARN,
             operations=_ops(a_op),
@@ -478,10 +510,11 @@ def test_concurrent_executions_do_not_cross_contaminate():
     assert exporter.records == []  # both suspended, nothing terminal yet
 
     a_done = _step("a-step", op_id="a1")
-    plugin.on_invocation_start(
-        _start(arn=ARN, operations=_ops(a_done), is_first=False, input_value="A")
+    a_resume = _invocation(
+        factory,
+        _start(arn=ARN, operations=_ops(a_done), is_first=False, input_value="A"),
     )
-    plugin.on_invocation_end(
+    a_resume.on_invocation_end(
         _end(arn=ARN, operations=_ops(a_done), is_first=False, result='"A-done"')
     )
 
@@ -492,22 +525,25 @@ def test_concurrent_executions_do_not_cross_contaminate():
     assert [op["name"] for op in rec["operations"]] == ["a-step"]
 
 
-# -- state lifecycle: clear after every invocation end (comment 4) -----------
+# -- nothing retained after an invocation end (comment 4) --------------------
 
 
-def test_state_cleared_after_pending_and_retry():
+def test_nothing_retained_after_pending_and_retry():
     exporter = CaptureExporter()
-    plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    factory = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
     op = _step("s", op_id="1")
 
-    plugin.on_invocation_start(_start(operations={}))
-    plugin.on_invocation_end(
+    suspend = _invocation(factory, _start(operations={}))
+    suspend.on_invocation_end(
         _end(operations=_ops(op), status=InvocationStatus.PENDING, result=None)
     )
-    assert plugin._state == {}  # no leak after suspend
+    # The instance that served the suspending invocation is dropped by the SDK,
+    # so the only thing that could retain anything for this execution is the
+    # scheduler, and it holds nothing either.
+    assert _wait_until(lambda: _scheduler_is_empty(factory))
 
-    plugin.on_invocation_start(_start(operations=_ops(op), is_first=False))
-    plugin.on_invocation_end(
+    retry = _invocation(factory, _start(operations=_ops(op), is_first=False))
+    retry.on_invocation_end(
         _end(
             operations=_ops(op),
             status=InvocationStatus.RETRY,
@@ -515,17 +551,17 @@ def test_state_cleared_after_pending_and_retry():
             is_first=False,
         )
     )
-    assert plugin._state == {}  # no leak after retry
+    assert _wait_until(lambda: _scheduler_is_empty(factory))
     assert exporter.records == []  # on-complete emits nothing for non-terminal
 
 
 def test_sampled_out_processes_nothing_and_retains_no_state():
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], sampling_rate=0)
     )
     op = _step("s", op_id="1")
-    plugin.on_invocation_start(_start(operations={}))
+    plugin = _invocation(factory, _start(operations={}))
     plugin.on_operation_change(
         OperationChangeInfo(
             execution_arn=ARN, updated_operations=_ops(op), operations=_ops(op)
@@ -533,33 +569,35 @@ def test_sampled_out_processes_nothing_and_retains_no_state():
     )
     plugin.on_invocation_end(_end(operations=_ops(op)))
     assert exporter.records == []
-    assert plugin._state == {}
+    # A sampled-out invocation adopts no operations and schedules nothing.
+    assert plugin._operations == {}
+    assert _scheduler_is_empty(factory)
 
 
 # -- default exporter parity with JS (comment 6) -----------------------------
 
 
 def test_default_exporter_when_config_omits_exporters():
-    plugin = workflow_insight(WorkflowInsightConfig())
-    assert len(plugin._exporters) == 1
-    assert isinstance(plugin._exporters[0], LambdaLogExporter)
+    factory = workflow_insight(WorkflowInsightConfig())
+    assert len(factory._exporters) == 1
+    assert isinstance(factory._exporters[0], LambdaLogExporter)
 
 
 def test_default_exporter_when_exporters_explicitly_empty():
-    plugin = workflow_insight(WorkflowInsightConfig(exporters=[]))
-    assert len(plugin._exporters) == 1
-    assert isinstance(plugin._exporters[0], LambdaLogExporter)
+    factory = workflow_insight(WorkflowInsightConfig(exporters=[]))
+    assert len(factory._exporters) == 1
+    assert isinstance(factory._exporters[0], LambdaLogExporter)
 
 
 def test_explicit_exporters_are_preserved():
     exporter = CaptureExporter()
-    plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
-    assert plugin._exporters == [exporter]
+    factory = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    assert factory._exporters == [exporter]
 
 
 def test_default_exporter_actually_emits_to_stdout(capsys):
-    plugin = workflow_insight(WorkflowInsightConfig())
-    _run(plugin, ops=[_step("greet")])
+    factory = workflow_insight(WorkflowInsightConfig())
+    _run(factory, ops=[_step("greet")])
     out = capsys.readouterr().out
     assert '"recordType":"WorkflowInsight"' in out  # compact JSON via LambdaLogExporter
     assert '"operationsByName"' in out
@@ -576,11 +614,11 @@ def _last_record_for_end_status(status, *, emit_mode="on-change", result=None):
     emit nothing for a non-terminal end.
     """
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], emit_mode=emit_mode)
     )
     op = _step("s", op_id="1")
-    plugin.on_invocation_start(_start(operations={}))
+    plugin = _invocation(factory, _start(operations={}))
     plugin.on_invocation_end(_end(operations=_ops(op), status=status, result=result))
     return exporter.records[-1]
 
@@ -612,11 +650,11 @@ def test_succeeded_end_is_terminal_with_end_time_and_duration():
 def test_failed_end_is_terminal_with_end_time_and_duration():
     err = ErrorObject(message="boom", type="StepError", data=None, stack_trace=None)
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
     )
     op = _step("s", op_id="1", status=OperationStatus.FAILED)
-    plugin.on_invocation_start(_start(operations={}))
+    plugin = _invocation(factory, _start(operations={}))
     plugin.on_invocation_end(
         _end(
             operations=_ops(op),
@@ -660,12 +698,13 @@ class ConcurrentCaptureExporter:
 
 
 def test_concurrent_executions_each_deliver_their_terminal_record():
-    # One plugin instance serves every execution its environment hosts, and LMI
-    # runs several at once. Drive the real hooks concurrently: every execution's
-    # terminal record must arrive exactly once.
+    # One factory (one scheduler) serves every execution its environment hosts,
+    # and LMI runs several at once. Drive the real hooks concurrently, each
+    # execution on its own instance: every execution's terminal record must
+    # arrive exactly once.
     executions = 5
     exporter = ConcurrentCaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
     )
     arns = [
@@ -677,7 +716,7 @@ def test_concurrent_executions_each_deliver_their_terminal_record():
     def run(arn: str) -> None:
         op = _step("s", op_id="1")
         ready.wait(10.0)
-        plugin.on_invocation_start(_start(arn=arn, operations={}))
+        plugin = _invocation(factory, _start(arn=arn, operations={}))
         plugin.on_operation_change(
             OperationChangeInfo(
                 execution_arn=arn, updated_operations=_ops(op), operations=_ops(op)
@@ -698,9 +737,9 @@ def test_concurrent_executions_each_deliver_their_terminal_record():
         if record["status"] == "SUCCEEDED"
     ]
     assert sorted(terminal) == sorted(arns)  # each exactly once, none lost
-    assert plugin._state == {}
-    # Nothing per-execution is retained in the scheduler either.
-    assert _wait_until(lambda: _scheduler_is_empty(plugin))
+    # Nothing per-execution is retained: each instance is dropped by the SDK with
+    # its invocation, and the scheduler holds no execution either.
+    assert _wait_until(lambda: _scheduler_is_empty(factory))
 
 
 def _wait_until(predicate, timeout: float = 5.0) -> bool:
@@ -712,10 +751,25 @@ def _wait_until(predicate, timeout: float = 5.0) -> bool:
     return predicate()
 
 
-def _scheduler_is_empty(plugin) -> bool:
-    scheduler = plugin._scheduler
+def _scheduler_is_empty(factory) -> bool:
+    scheduler = factory._scheduler
     with scheduler._condition:
-        return not scheduler._pending and not scheduler._lanes
+        # One structure: the queue of executions with a record waiting. An
+        # execution's export bookkeeping lives on the per-invocation instance
+        # itself, which the SDK drops when the invocation scope exits, so an
+        # empty queue means the scheduler retains nothing.
+        return not scheduler._pending
+
+
+def _force_drain(factory) -> None:
+    """Push everything this factory's instances scheduled out to the exporters.
+
+    drain() takes the per-execution object, which in production is the plugin
+    instance itself. These tests present a bare ``_ExportState`` instead, exactly
+    as an execution that scheduled nothing of its own would: the flush it requests
+    is held back until every record pending when it was called has been exported.
+    """
+    factory._scheduler.drain(_ExportState())
 
 
 class PinnedWorkerExporter:
@@ -764,7 +818,7 @@ def test_reentrant_finalizer_in_a_hook_does_not_deadlock():
                 )
             )
 
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(
             exporters=[exporter],
             emit_mode="on-change",
@@ -772,6 +826,8 @@ def test_reentrant_finalizer_in_a_hook_does_not_deadlock():
         )
     )
     op = _step("s", op_id="1")
+    start = _start(operations={})
+    plugin = factory(start)
     holder["plugin"] = plugin
     holder["ops"] = _ops(op)
     change = OperationChangeInfo(
@@ -779,7 +835,7 @@ def test_reentrant_finalizer_in_a_hook_does_not_deadlock():
     )
     try:
         # The first emit pins the single worker inside export()...
-        plugin.on_invocation_start(_start(operations={}))
+        plugin.on_invocation_start(start)
         assert exporter.entered.wait(5.0)
         # ...so this emit stays this execution's pending record...
         plugin.on_operation_change(change)
@@ -822,7 +878,7 @@ def test_change_hook_reaching_the_lock_after_invocation_end_emits_nothing():
         release_terminal.wait(10.0)
         return value
 
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(
             exporters=[exporter],
             emit_mode="on-change",
@@ -830,7 +886,7 @@ def test_change_hook_reaching_the_lock_after_invocation_end_emits_nothing():
         )
     )
     op = _step("s", op_id="1")
-    plugin.on_invocation_start(_start(operations={}))
+    plugin = _invocation(factory, _start(operations={}))
 
     end_returned = threading.Event()
 
@@ -864,13 +920,12 @@ def test_change_hook_reaching_the_lock_after_invocation_end_emits_nothing():
     change_thread.join(5.0)
     assert end_returned.is_set()
     assert change_returned.is_set()
-    plugin._scheduler.drain(ARN)
+    _force_drain(factory)
 
     statuses = [record["status"] for record in exporter.snapshot()]
     assert "SUCCEEDED" in statuses
     # Nothing at all after the terminal record.
     assert statuses[statuses.index("SUCCEEDED") + 1 :] == []
-    assert plugin._state == {}
 
 
 def test_invocation_end_waits_for_an_in_flight_change_hook_emit():
@@ -894,7 +949,7 @@ def test_invocation_end_waits_for_an_in_flight_change_hook_emit():
             release_change.wait(10.0)
         return value
 
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(
             exporters=[exporter],
             emit_mode="on-change",
@@ -902,7 +957,7 @@ def test_invocation_end_waits_for_an_in_flight_change_hook_emit():
         )
     )
     op = _step("s", op_id="1")
-    plugin.on_invocation_start(_start(operations={}))
+    plugin = _invocation(factory, _start(operations={}))
 
     change_returned = threading.Event()
 
@@ -934,24 +989,25 @@ def test_invocation_end_waits_for_an_in_flight_change_hook_emit():
     end_thread.join(10.0)
     assert change_returned.is_set()
     assert end_returned.is_set()
-    plugin._scheduler.drain(ARN)
+    _force_drain(factory)
 
     statuses = [record["status"] for record in exporter.snapshot()]
     assert "SUCCEEDED" in statuses
     assert statuses[statuses.index("SUCCEEDED") + 1 :] == []
-    assert plugin._state == {}
 
 
 def test_operation_change_after_invocation_end_emits_nothing():
     # A checkpoint that completed just before the invocation ended still delivers
-    # its operation-change hook. It must not recreate state, must not fabricate a
-    # start time, and must not append a RUNNING record after the terminal one.
+    # its operation-change hook. It reaches the instance for the invocation that
+    # just ended -- there is no registry it could recreate an entry in -- and must
+    # find the gate closed: no fabricated start time, and no RUNNING record after
+    # the terminal one.
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
     )
     op = _step("s", op_id="1")
-    plugin.on_invocation_start(_start(operations={}))
+    plugin = _invocation(factory, _start(operations={}))
     plugin.on_invocation_end(_end(operations=_ops(op)))
     before = list(exporter.records)
     assert before and before[-1]["status"] == "SUCCEEDED"
@@ -961,7 +1017,7 @@ def test_operation_change_after_invocation_end_emits_nothing():
             execution_arn=ARN, updated_operations=_ops(op), operations=_ops(op)
         )
     )
-    plugin._scheduler.drain(ARN)
+    _force_drain(factory)
 
     assert exporter.records == before  # nothing emitted after the terminal record
     assert [record["status"] for record in exporter.records][-1] == "SUCCEEDED"
@@ -969,70 +1025,56 @@ def test_operation_change_after_invocation_end_emits_nothing():
     assert {record["startTime"] for record in exporter.records} == {
         "2026-01-01T00:00:00Z"
     }
-    assert plugin._state == {}  # and no state entry recreated
 
 
-def test_late_invocation_start_finds_the_closed_gate_shut(monkeypatch):
-    # on_invocation_end sets `closed` and emits the terminal record while holding
-    # the execution's lock, RELEASES the lock, and only then discards the state.
-    # A concurrent on_invocation_start that already resolved that state reference
-    # gets the lock inside that window and finds a state that is closed but not
-    # yet gone; the gate has to shut it out.
-    #
-    # In production that window is sub-microsecond, so it is entered here
-    # deterministically: the late hook runs from inside _discard_state, which is
-    # exactly where the window sits.
+def test_invocation_start_after_the_gate_closed_changes_nothing():
+    # Each invocation gets its own instance and exactly one invocation-start hook,
+    # so a start hook arriving on a closed instance is no longer reachable through
+    # a state registry -- there is none, and no instance can be handed to a second
+    # invocation. The `closed` gate is what holds that contract from the plugin's
+    # side: a start hook that arrives after the invocation ended must not re-seed
+    # the closed instance and must emit nothing.
     exporter = CaptureExporter()
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
     )
     op = _step("s", op_id="1")
-    plugin.on_invocation_start(_start(operations={}, input_value="World"))
-    state = plugin._state[ARN]
-    real_discard = plugin._discard_state
-    late = threading.Event()
-
-    def discard_after_a_late_start(arn: str) -> None:
-        if not late.is_set():
-            late.set()
-            assert state.closed  # the window: closed, emitted, lock free, state alive
-            plugin.on_invocation_start(
-                _start(
-                    operations=_ops(_step("late", op_id="2")),
-                    input_value="late-input",
-                    execution_start_time=T1,
-                )
-            )
-        real_discard(arn)
-
-    monkeypatch.setattr(plugin, "_discard_state", discard_after_a_late_start)
+    plugin = _invocation(factory, _start(operations={}, input_value="World"))
     plugin.on_invocation_end(_end(operations=_ops(op)))
-    plugin._scheduler.drain(ARN)
+    assert plugin._closed
 
-    assert late.is_set()  # the late hook really did run inside the window
+    plugin.on_invocation_start(
+        _start(
+            operations=_ops(_step("late", op_id="2")),
+            input_value="late-input",
+            execution_start_time=T1,
+        )
+    )
+    _force_drain(factory)
+
     statuses = [record["status"] for record in exporter.records]
     assert "SUCCEEDED" in statuses
     # Nothing follows the terminal record...
     assert statuses[statuses.index("SUCCEEDED") + 1 :] == []
-    # ...and the closed state was not re-seeded on the way out. A late start that
-    # got past the gate adopts its own operation snapshot, input and start time,
-    # which is the observable effect of the gate: the emission it would also have
-    # produced is stopped a second time by the re-check in _emit, so these are
-    # what pin the hook's own check.
-    assert state.cached_input == "World"
-    assert state.start_time == T0
-    assert [info.name for info in state.operations.values()] == ["s"]
-    assert plugin._state == {}
+    # ...and the closed instance was not re-seeded. A late start that got past the
+    # gate would adopt its own operation snapshot; the emission it would also have
+    # produced is stopped a second time by the re-check in _emit, so the adopted
+    # state is what pins the hook's own check. Input and start time are fixed by
+    # the constructor from the invocation's own start info, so no later hook can
+    # move them at all.
+    assert plugin._cached_input == "World"
+    assert plugin._start_time == T0
+    assert [info.name for info in plugin._operations.values()] == ["s"]
 
 
 def test_reentrant_invocation_end_stops_the_outer_running_record():
     # The gate at the top of each hook is a check-then-act, and _emit is the act.
     # Between them _emit runs customer code while holding the execution's lock --
     # here a content transform -- and the lock is reentrant, so that customer code
-    # can run on_invocation_end to completion on this same thread: `closed` set,
-    # terminal record scheduled, state discarded and drained. The outer frame then
-    # resumes with a fully built RUNNING record, which must NOT reach the
-    # exporters after the terminal one. One hook call, no concurrency.
+    # can run on_invocation_end to completion on this same thread: `_closed` set,
+    # terminal record scheduled and drained. The outer frame then resumes with a
+    # fully built RUNNING record, which must NOT reach the exporters after the
+    # terminal one. One hook call, one instance, no concurrency.
     exporter = ConcurrentCaptureExporter()
     holder: dict[str, Any] = {}
     reentered = threading.Event()
@@ -1043,13 +1085,15 @@ def test_reentrant_invocation_end_stops_the_outer_running_record():
             holder["plugin"].on_invocation_end(_end(operations=_ops(_step("s"))))
         return value
 
-    plugin = workflow_insight(
+    factory = workflow_insight(
         WorkflowInsightConfig(
             exporters=[exporter],
             emit_mode="on-change",
             content=ContentConfig(input=reentering_input),
         )
     )
+    start = _start(operations={})
+    plugin = factory(start)
     holder["plugin"] = plugin
 
     # On a bounded thread, so a regression that makes the lock non-reentrant
@@ -1057,7 +1101,7 @@ def test_reentrant_invocation_end_stops_the_outer_running_record():
     returned = threading.Event()
 
     def hook() -> None:
-        plugin.on_invocation_start(_start(operations={}))
+        plugin.on_invocation_start(start)
         returned.set()
 
     thread = threading.Thread(target=hook, daemon=True)
@@ -1071,11 +1115,11 @@ def test_reentrant_invocation_end_stops_the_outer_running_record():
     assert reentered.is_set()  # the re-entrant end hook really did run
     # Force everything the plugin scheduled to reach the exporters, so a record
     # that slipped past the gate is observed here rather than left pending.
-    plugin._scheduler.drain(ARN)
+    _force_drain(factory)
 
     statuses = [record["status"] for record in exporter.snapshot()]
     assert statuses == ["SUCCEEDED"], (
         "a non-terminal record reached the exporters after the terminal one for "
         f"the same execution: {statuses}"
     )
-    assert _wait_until(lambda: not plugin._scheduler._worker_alive())
+    assert _wait_until(lambda: not factory._scheduler._worker_alive())

@@ -187,7 +187,9 @@ def greet(_step_context: StepContext, name: str) -> str:
     return f"Hello, {name}!"
 
 
-@durable_execution(plugins=[FaultyPlugin(), HealthyPlugin()])
+@durable_execution(
+    plugins=[lambda _info: FaultyPlugin(), lambda _info: HealthyPlugin()]
+)
 def handler(event: Any, context: DurableContext) -> str:
     result: str = context.step(greet(event))
     return result

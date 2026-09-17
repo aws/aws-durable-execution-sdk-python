@@ -83,7 +83,7 @@ def greet(_step_context: StepContext) -> str:
     return "task-a"
 
 
-@durable_execution(plugins=[OperationChangeShapePlugin()])
+@durable_execution(plugins=[lambda _info: OperationChangeShapePlugin()])
 def handler(_event: Any, context: DurableContext) -> str:
     result: str = context.step(greet(), name="greet")
     return result

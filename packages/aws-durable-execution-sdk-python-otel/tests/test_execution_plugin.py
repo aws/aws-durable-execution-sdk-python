@@ -73,9 +73,16 @@ def _assert_otel_context_balanced():
 
 def _create_plugin(
     context_extractor=lambda _: None,
+    exporter: InMemorySpanExporter | None = None,
 ) -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
-    """Create an ExecutionOtelPlugin wired to an in-memory exporter."""
-    exporter = InMemorySpanExporter()
+    """Create an ExecutionOtelPlugin wired to an in-memory exporter.
+
+    One plugin instance serves exactly one invocation, so a test that spans
+    invocations creates a plugin per invocation and passes the same ``exporter``
+    to each -- the way the SDK's factory hands successive invocations distinct
+    instances that publish to one provider.
+    """
+    exporter = exporter if exporter is not None else InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     plugin = ExecutionOtelPlugin(
@@ -721,7 +728,13 @@ def test_suspended_operation_held_as_non_recording_placeholder():
 
 
 def test_suspend_then_resume_operation_exports_one_deterministic_span():
-    """An operation spanning invocations exports one deterministic span."""
+    """An operation spanning invocations exports one deterministic span.
+
+    Each invocation gets its own plugin instance, so nothing about the operation
+    is carried in memory from one invocation to the next: the single exported
+    span and its ID come from the deterministic derivation off the execution ARN,
+    and the replay guard is the hook's own ``is_replayed`` flag.
+    """
     plugin, exporter = _create_plugin()
     operation_id = "wait-across-invocations"
 
@@ -745,6 +758,7 @@ def test_suspend_then_resume_operation_exports_one_deterministic_span():
     assert not [s for s in exporter.get_finished_spans() if s.name == "long-wait"]
 
     # Invocation N+1: the still-open operation is replayed, then completes.
+    plugin, _ = _create_plugin(exporter=exporter)
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_operation_start(
         OperationStartInfo(
@@ -785,6 +799,7 @@ def test_suspend_then_resume_operation_exports_one_deterministic_span():
 
     # ReplayChildren/virtual child completion callbacks are replay-only and
     # must not re-export the terminal deterministic span in a later invocation.
+    plugin, _ = _create_plugin(exporter=exporter)
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_operation_end(
         OperationEndInfo(
@@ -836,7 +851,8 @@ def test_suspended_child_context_exports_one_span_on_replay():
     # Nothing exported for the suspended context.
     assert not [s for s in exporter.get_finished_spans() if s.name == context_id]
 
-    # Invocation 2: the context replays and completes.
+    # Invocation 2: the context replays and completes, in a fresh plugin instance.
+    plugin, _ = _create_plugin(exporter=exporter)
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_operation_start(
         OperationStartInfo(
@@ -903,10 +919,12 @@ def test_checkpointless_context_end_uses_a_non_negative_duration():
 
 
 def test_virtual_context_replay_uses_unique_linked_segments():
-    plugin, exporter = _create_plugin()
+    exporter = InMemorySpanExporter()
     context_id = "flat-branch"
 
     for _ in range(2):
+        # Each invocation is served by its own plugin instance.
+        plugin, _ = _create_plugin(exporter=exporter)
         plugin.on_invocation_start(_invocation_start_info())
         # Virtual contexts have no durable START hook.
         plugin.on_user_function_start(_context_start_info(context_id))
@@ -1401,15 +1419,21 @@ def test_invocation_end_releases_scope_of_suspended_user_function():
     assert plugin._context_tokens == {}
 
 
-def test_warm_invocation_reuse_restores_ambient_span_each_time():
-    """Verify repeated invocations leave the ambient Lambda span current."""
-    plugin, _ = _create_plugin()
+def test_successive_invocations_restore_ambient_span_each_time():
+    """Verify each invocation's own plugin leaves the ambient Lambda span current.
+
+    The SDK builds a plugin per invocation, so this drives three invocations
+    through three instances against one warm environment. What is asserted is
+    that no instance leaves a context attached behind it -- state carried in the
+    instance is irrelevant, because the instance is gone.
+    """
     ambient_provider = TracerProvider()
     ambient = ambient_provider.get_tracer("ambient").start_span("AmbientLambda")
     token = otel_context.attach(trace.set_span_in_context(ambient))
     try:
         warm_context = otel_context.get_current()
         for index in range(3):
+            plugin, _ = _create_plugin()
             plugin.on_invocation_start(_invocation_start_info())
             operation_id = f"step-{index}"
             plugin.on_user_function_start(_step_start_info(operation_id))

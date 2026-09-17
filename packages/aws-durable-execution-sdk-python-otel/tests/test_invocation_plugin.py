@@ -77,17 +77,26 @@ def _assert_otel_context_balanced():
     )
 
 
-def _create_plugin() -> tuple[InvocationOtelPlugin, InMemorySpanExporter]:
+def _create_plugin(
+    exporter: InMemorySpanExporter | None = None,
+) -> tuple[InvocationOtelPlugin, InMemorySpanExporter]:
     """Create a plugin wired to an in-memory span exporter."""
-    return _create_plugin_with_sampler()
+    return _create_plugin_with_sampler(exporter=exporter)
 
 
 def _create_plugin_with_sampler(
     sampler: Sampler | None = None,
     context_extractor=lambda _: None,
+    exporter: InMemorySpanExporter | None = None,
 ) -> tuple[InvocationOtelPlugin, InMemorySpanExporter]:
-    """Create a plugin wired to an in-memory span exporter."""
-    exporter = InMemorySpanExporter()
+    """Create a plugin wired to an in-memory span exporter.
+
+    One plugin instance serves exactly one invocation, so a test that spans
+    invocations creates a plugin per invocation and passes the same ``exporter``
+    to each -- the way the SDK's factory hands successive invocations distinct
+    instances that publish to one provider.
+    """
+    exporter = exporter if exporter is not None else InMemorySpanExporter()
     trace_provider = TracerProvider(sampler=sampler)
     trace_provider.add_span_processor(SimpleSpanProcessor(exporter))
     plugin = InvocationOtelPlugin(
@@ -1759,12 +1768,14 @@ def test_checkpointed_context_first_span_uses_deterministic_id():
 
 
 def test_virtual_context_replay_uses_unique_linked_segments():
-    plugin, exporter = _create_plugin()
+    exporter = InMemorySpanExporter()
     operation_id = "flat-branch"
     span_name = f"step-{operation_id}"
     workflow_span_id = derive_workflow_span_id(EXECUTION_ARN)
 
     for _ in range(2):
+        # Each invocation is served by its own plugin instance.
+        plugin, _ = _create_plugin(exporter=exporter)
         plugin.on_invocation_start(_invocation_start_info())
         # Virtual contexts have no durable START hook.
         plugin.on_user_function_start(
@@ -1937,15 +1948,21 @@ def test_ambient_span_is_current_again_after_full_lifecycle():
         ambient.end()
 
 
-def test_warm_invocation_reuse_does_not_accumulate_scopes():
-    """Verify repeated invocations on one plugin instance stay balanced."""
-    plugin, _ = _create_plugin()
+def test_successive_invocations_do_not_accumulate_scopes():
+    """Verify each invocation's own plugin leaves the warm environment balanced.
+
+    The SDK builds a plugin per invocation, so this drives three invocations
+    through three instances. What is asserted is that no instance leaves a
+    context attached behind it; state carried in the instance is irrelevant,
+    because the instance is gone.
+    """
     ambient_provider = TracerProvider()
     ambient = ambient_provider.get_tracer("ambient").start_span("AmbientLambda")
     token = otel_context.attach(trace.set_span_in_context(ambient))
     try:
         warm_context = otel_context.get_current()
         for index in range(3):
+            plugin, _ = _create_plugin()
             plugin.on_invocation_start(_invocation_start_info())
             operation_id = f"step-{index}"
             plugin.on_user_function_start(_user_function_start_info(operation_id))

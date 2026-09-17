@@ -65,7 +65,7 @@ class ExternalUpdatePlugin(DurableInstrumentationPlugin):
         )
 
 
-@durable_execution(plugins=[ExternalUpdatePlugin()])
+@durable_execution(plugins=[lambda _info: ExternalUpdatePlugin()])
 def handler(_event: Any, context: DurableContext) -> str:
     context.wait(Duration.from_seconds(2))
     return "Wait completed"

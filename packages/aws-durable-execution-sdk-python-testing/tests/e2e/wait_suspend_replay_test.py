@@ -37,7 +37,12 @@ _WAIT_NAME: str = "suspend-wait"
 
 
 class RecordingWaitPlugin(DurableInstrumentationPlugin):
-    """Records end notifications for the wait and counts invocations."""
+    """Records end notifications for the wait and counts invocations.
+
+    State is class-level on purpose: the SDK builds a fresh instance per
+    invocation, and this test spans two invocations, so what it asserts on has
+    to outlive any single instance.
+    """
 
     invocation_count: ClassVar[int] = 0
     wait_end_infos: ClassVar[list[OperationEndInfo]] = []
@@ -61,7 +66,9 @@ def _wait_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
     return "done"
 
 
-wait_handler = durable_execution(_wait_handler, plugins=[RecordingWaitPlugin()])
+wait_handler = durable_execution(
+    _wait_handler, plugins=[lambda _info: RecordingWaitPlugin()]
+)
 
 
 def test_wait_completed_during_suspend_is_delivered_as_new() -> None:

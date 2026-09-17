@@ -57,6 +57,7 @@ from aws_durable_execution_sdk_python.state import (
     QueuedOperation,
 )
 from aws_durable_execution_sdk_python.threading import CompletionEvent
+from tests.test_helpers import plugin_factory, plugin_invocation
 
 
 def test_checkpointed_result_create_from_operation_step():
@@ -4531,7 +4532,7 @@ def test_execution_state_accepts_plugin_executor_parameter():
     """Test that ExecutionState can be created with a plugin_executor parameter."""
     mock_client = Mock(spec=LambdaClient)
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
 
     state = ExecutionState(
         durable_execution_arn="test_arn",
@@ -4564,8 +4565,8 @@ def test_plugin_executor_on_operation_action_called_on_checkpoint():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -4598,8 +4599,8 @@ def test_plugin_executor_on_operation_action_called_on_checkpoint():
 def test_async_operation_start_precedes_user_function_start():
     """Async START notifies plugins before the user function begins."""
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -4619,7 +4620,12 @@ def test_async_operation_start_precedes_user_function_start():
         )
         plugin_executor.on_user_function_start(operation_identifier, attempt=1)
 
-    assert plugin.calls[:2] == [
+    # Drop the per-invocation instance's own invocation-start hook, which now
+    # always precedes the operation hooks under test.
+    operation_calls = [
+        call for call in plugin.calls if not call.startswith("invocation_")
+    ]
+    assert operation_calls[:2] == [
         f"operation_start:{operation_id}",
         f"user_function_start:{operation_id}",
     ]
@@ -4649,8 +4655,8 @@ def test_existing_operation_start_is_reported_as_replayed():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -4697,8 +4703,8 @@ def test_plugin_executor_on_operation_update_called_for_terminal_operations():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -4747,8 +4753,8 @@ def test_plugin_executor_not_called_for_non_terminal_operations():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -4805,8 +4811,8 @@ def test_plugin_executor_called_for_multiple_updates_in_batch():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         config = CheckpointBatcherConfig(
             max_batch_time_seconds=0.2,
             max_batch_operations=10,
@@ -4877,7 +4883,7 @@ def test_plugin_executor_on_operation_change_called_for_status_changes():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
     with plugin_executor.run():
         plugin_executor.on_invocation_start(
             execution_arn="test_arn",
@@ -4926,8 +4932,8 @@ def test_operation_start_plugin_hook_fires_before_checkpoint_failure():
     mock_client.checkpoint.side_effect = RuntimeError("API error")
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -4984,8 +4990,8 @@ def test_plugin_executor_exception_does_not_break_checkpointing():
             raise RuntimeError("plugin exploded")
 
     exploding_plugin = _ExplodingPlugin()
-    plugin_executor = PluginExecutor(plugins=[exploding_plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(exploding_plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -5027,8 +5033,8 @@ def test_wrap_user_function_suspend_fires_incomplete_end_hook():
         def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
             captured.append(info)
 
-    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -5082,8 +5088,8 @@ def test_plugin_executor_not_called_for_pending_operations():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -5149,8 +5155,8 @@ def test_emit_operation_replay_hook_skips_terminal_operation(
         def on_operation_end(self, info):
             captured.append(("end", info.operation_id, info.is_replayed, info.status))
 
-    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -5184,8 +5190,8 @@ def test_emit_operation_replay_hook_fires_only_start_for_non_terminal_operation(
         def on_operation_end(self, info):
             captured.append(("end", info.operation_id, info.is_replayed, info.status))
 
-    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -5207,8 +5213,8 @@ def test_emit_operation_replay_hook_skips_execution_and_ready():
         def on_operation_start(self, info):
             captured.append(info.operation_id)
 
-    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -5328,7 +5334,7 @@ def _wrapping_state(plugin: _RecordingPlugin) -> ExecutionState:
         initial_checkpoint_token="token123",  # noqa: S106
         operations={},
         service_client=Mock(spec=LambdaClient),
-        plugin_executor=PluginExecutor(plugins=[plugin]),
+        plugin_executor=PluginExecutor(plugins=[plugin_factory(plugin)]),
     )
 
 
@@ -5362,10 +5368,13 @@ def test_wrap_user_function_reports_incomplete_when_no_outcome(raised):
     def user_function():
         raise raised
 
-    with state._plugin_executor.run(), pytest.raises(type(raised)):
+    with plugin_invocation(state._plugin_executor), pytest.raises(type(raised)):
         _wrapped(state, user_function)()
 
     assert plugin.calls == [
+        # The plugin instance is built for this invocation, so its
+        # invocation-start hook always precedes the operation hooks.
+        "invocation_start",
         "user_function_start:step-1",
         "user_function_end:step-1",
     ]
@@ -5380,10 +5389,13 @@ def test_wrap_user_function_does_not_report_incomplete_on_success():
     plugin = _RecordingPlugin()
     state = _wrapping_state(plugin)
 
-    with state._plugin_executor.run():
+    with plugin_invocation(state._plugin_executor):
         assert _wrapped(state, lambda: "done")() == "done"
 
     assert plugin.calls == [
+        # The plugin instance is built for this invocation, so its
+        # invocation-start hook always precedes the operation hooks.
+        "invocation_start",
         "user_function_start:step-1",
         "user_function_end:step-1",
     ]
@@ -5400,10 +5412,16 @@ def test_wrap_user_function_does_not_report_incomplete_on_failure():
     def user_function():
         raise ValueError("boom")
 
-    with state._plugin_executor.run(), pytest.raises(ValueError, match="boom"):
+    with (
+        plugin_invocation(state._plugin_executor),
+        pytest.raises(ValueError, match="boom"),
+    ):
         _wrapped(state, user_function)()
 
     assert plugin.calls == [
+        # The plugin instance is built for this invocation, so its
+        # invocation-start hook always precedes the operation hooks.
+        "invocation_start",
         "user_function_start:step-1",
         "user_function_end:step-1",
     ]
@@ -5427,7 +5445,7 @@ def test_wrap_user_function_incomplete_runs_on_the_user_function_thread():
         initial_checkpoint_token="token123",  # noqa: S106
         operations={},
         service_client=Mock(spec=LambdaClient),
-        plugin_executor=PluginExecutor(plugins=[plugin]),
+        plugin_executor=PluginExecutor(plugins=[plugin_factory(plugin)]),
     )
 
     def user_function():
@@ -5440,7 +5458,10 @@ def test_wrap_user_function_incomplete_runs_on_the_user_function_thread():
         with contextlib.suppress(SuspendExecution):
             _wrapped(state, user_function)()
 
-    with state._plugin_executor.run(), ThreadPoolExecutor(max_workers=1) as worker:
+    with (
+        plugin_invocation(state._plugin_executor),
+        ThreadPoolExecutor(max_workers=1) as worker,
+    ):
         worker.submit(run_on_worker).result()
 
     assert hook_threads == worker_threads

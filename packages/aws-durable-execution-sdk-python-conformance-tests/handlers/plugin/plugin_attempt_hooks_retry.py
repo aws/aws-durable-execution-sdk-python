@@ -89,7 +89,7 @@ def unreliable_operation(step_context: StepContext) -> str:
     return "Operation succeeded"
 
 
-@durable_execution(plugins=[AttemptPlugin()])
+@durable_execution(plugins=[lambda _info: AttemptPlugin()])
 def handler(_event: Any, context: DurableContext) -> str:
     retry_config = RetryStrategyConfig(
         max_attempts=3,

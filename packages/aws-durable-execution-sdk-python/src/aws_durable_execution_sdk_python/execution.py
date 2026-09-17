@@ -27,7 +27,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationUpdate,
 )
 from aws_durable_execution_sdk_python.plugin import (
-    DurableInstrumentationPlugin,
+    DurableInstrumentationPluginFactory,
     PluginExecutor,
 )
 from aws_durable_execution_sdk_python.plugin_discovery import (
@@ -169,7 +169,7 @@ def durable_execution(
     func: Callable[[Any, DurableContext], Any] | None = None,
     *,
     boto3_client: Boto3LambdaClient | None = None,
-    plugins: list[DurableInstrumentationPlugin] | None = None,
+    plugins: list[DurableInstrumentationPluginFactory] | None = None,
 ) -> Callable[[Any, LambdaContext], Any]:
     """
     Decorator to create a durable execution handler.
@@ -177,7 +177,10 @@ def durable_execution(
     Args:
         func: The user function to decorate
         boto3_client: Optional boto3 Lambda client to use
-        plugins: Optional list of instrumentation plugins to use
+        plugins: Optional list of instrumentation plugin factories. Each factory
+            is called once per invocation with that invocation's
+            ``InvocationStartInfo``, and the instance it returns serves only that
+            invocation.
     """
     # Decorator called with parameters
     if func is None:

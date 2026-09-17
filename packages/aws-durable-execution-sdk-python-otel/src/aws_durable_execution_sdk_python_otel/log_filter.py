@@ -51,12 +51,28 @@ class OtelContextLogFilter(logging.Filter):
     The filter never caches identifiers and always returns ``True`` so it never
     drops a record.
 
+    The plugin it reads is rebindable, because a plugin instance serves exactly
+    one invocation while the handler it is attached to outlives the invocation.
+
     Args:
         plugin: The OTel plugin instance that resolves the current span context.
     """
 
     def __init__(self, plugin: _SpanContextProvider) -> None:
         super().__init__()
+        self._plugin = plugin
+
+    def bind(self, plugin: _SpanContextProvider) -> None:
+        """Point the filter at the plugin serving the current invocation.
+
+        A logging handler lives as long as the Lambda environment, but a plugin
+        instance lives for one invocation. Without rebinding, the filter
+        installed by the first invocation's plugin would keep asking that
+        already-discarded instance for a span context -- it reports none once its
+        invocation ended, so log correlation would stop after the first
+        invocation, and the dead instance would be kept reachable for the life of
+        the environment.
+        """
         self._plugin = plugin
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -83,9 +99,10 @@ def install_log_filter(
     filters run for every record reaching the handler.
 
     This is safe to call on every invocation: if a handler already has an
-    OtelContextLogFilter, it is left as-is, so warm Lambda reuse will not stack
-    duplicate filters. A single shared filter instance is reused across all
-    handlers.
+    OtelContextLogFilter, that filter is rebound to ``plugin`` and left in place,
+    so a warm Lambda environment neither stacks duplicate filters nor keeps
+    reading a previous invocation's plugin. A single shared filter instance is
+    reused across all handlers.
 
     Args:
         plugin: The OTel plugin that resolves the current span context.
@@ -105,7 +122,9 @@ def install_log_filter(
             None,
         )
         if existing is not None:
-            # Reuse the already-installed filter so a single instance is shared.
+            # Reuse the already-installed filter so a single instance is shared,
+            # and point it at this invocation's plugin.
+            existing.bind(plugin)
             context_filter = existing
             continue
         if context_filter is None:

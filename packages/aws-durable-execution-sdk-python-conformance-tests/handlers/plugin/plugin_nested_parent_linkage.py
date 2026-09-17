@@ -66,7 +66,7 @@ def child_operation(ctx: DurableContext, name: str) -> str:
     return ctx.step(greet(name))
 
 
-@durable_execution(plugins=[ParentLinkagePlugin()])
+@durable_execution(plugins=[lambda _info: ParentLinkagePlugin()])
 def handler(event: Any, context: DurableContext) -> str:
     result: str = context.run_in_child_context(child_operation(str(event)))
     return result

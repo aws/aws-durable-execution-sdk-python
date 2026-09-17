@@ -57,7 +57,7 @@ class SuspensionPlugin(DurableInstrumentationPlugin):
         )
 
 
-@durable_execution(plugins=[SuspensionPlugin()])
+@durable_execution(plugins=[lambda _info: SuspensionPlugin()])
 def handler(_event: Any, context: DurableContext) -> str:
     context.wait(Duration.from_seconds(2))
     return "Wait completed"

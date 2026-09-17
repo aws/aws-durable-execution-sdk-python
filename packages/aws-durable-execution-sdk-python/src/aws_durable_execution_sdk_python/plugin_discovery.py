@@ -4,13 +4,11 @@ import logging
 import os
 from collections.abc import Mapping, Sequence
 from importlib import metadata
+from typing import cast
 
-from aws_durable_execution_sdk_python.__about__ import __version__
 from aws_durable_execution_sdk_python.exceptions import PluginLoadError
 from aws_durable_execution_sdk_python.plugin import (
-    DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION,
-    DurableInstrumentationPlugin,
-    DurableInstrumentationPluginProvider,
+    DurableInstrumentationPluginFactory,
 )
 
 
@@ -56,98 +54,62 @@ def _qualified_type_name(value: object) -> str:
     return f"{value_type.__module__}.{value_type.__qualname__}"
 
 
-def _qualified_class_name(value_type: type[object]) -> str:
-    return f"{value_type.__module__}.{value_type.__qualname__}"
-
-
-def _load_provider(
+def _load_factory(
     plugin_name: str, entry_point: metadata.EntryPoint
-) -> DurableInstrumentationPluginProvider:
+) -> DurableInstrumentationPluginFactory:
+    """Resolve an entry point to a plugin factory.
+
+    Only two things can still be checked here. The entry point has to import,
+    and what it resolves to has to be callable. Nothing more is knowable without
+    calling the factory, and calling it at load time is precisely what this
+    design avoids: the instance belongs to an invocation, and there is no
+    invocation yet. A factory that then misbehaves at invocation time is
+    contained by :meth:`PluginExecutor._create_plugins`.
+    """
     try:
-        provider = entry_point.load()
+        factory = entry_point.load()
     except Exception as error:
         raise PluginLoadError(
-            f"Failed to load durable instrumentation plugin provider "
+            f"Failed to load durable instrumentation plugin factory "
             f"'{plugin_name}' from '{entry_point.value}' "
             f"({_distribution_name(entry_point)}): {error}"
         ) from error
 
-    if not isinstance(provider, DurableInstrumentationPluginProvider):
+    if not callable(factory):
         raise PluginLoadError(
             f"Durable instrumentation plugin entry point '{plugin_name}' must "
-            "resolve to DurableInstrumentationPluginProvider, but resolved to "
-            f"{_qualified_type_name(provider)}."
+            "resolve to a callable plugin factory, but resolved to "
+            f"{_qualified_type_name(factory)}."
         )
 
-    if provider.plugin_api_version != DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION:
-        raise PluginLoadError(
-            f"Durable instrumentation plugin provider '{plugin_name}' declares "
-            f"plugin API version {provider.plugin_api_version}, but "
-            f"aws-durable-execution-sdk-python {__version__} supports plugin API "
-            f"version {DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION}. Install "
-            "compatible SDK and plugin package versions."
-        )
-
-    declared_plugin_type: object = provider.plugin_type
-    if not isinstance(declared_plugin_type, type) or not issubclass(
-        declared_plugin_type, DurableInstrumentationPlugin
-    ):
-        declared_type_name = (
-            _qualified_class_name(declared_plugin_type)
-            if isinstance(declared_plugin_type, type)
-            else _qualified_type_name(declared_plugin_type)
-        )
-        raise PluginLoadError(
-            f"Durable instrumentation plugin provider '{plugin_name}' declares "
-            f"invalid plugin type {declared_type_name}; "
-            "expected a DurableInstrumentationPlugin subclass."
-        )
-
-    return provider
-
-
-def _create_plugin(
-    plugin_name: str,
-    entry_point: metadata.EntryPoint,
-    provider: DurableInstrumentationPluginProvider,
-) -> DurableInstrumentationPlugin:
-    try:
-        plugin = provider.factory()
-    except Exception as error:
-        raise PluginLoadError(
-            f"Failed to create durable instrumentation plugin '{plugin_name}' "
-            f"from '{entry_point.value}' ({_distribution_name(entry_point)}): "
-            f"{error}"
-        ) from error
-
-    if type(plugin) is not provider.plugin_type:
-        raise PluginLoadError(
-            f"Durable instrumentation plugin provider '{plugin_name}' returned "
-            f"{_qualified_type_name(plugin)}; expected "
-            f"{_qualified_class_name(provider.plugin_type)}."
-        )
-
-    return plugin
+    return cast(DurableInstrumentationPluginFactory, factory)
 
 
 def load_configured_plugins(
-    explicit_plugins: Sequence[DurableInstrumentationPlugin] | None,
+    explicit_plugins: Sequence[DurableInstrumentationPluginFactory] | None,
     *,
     environment: Mapping[str, str] | None = None,
-) -> list[DurableInstrumentationPlugin]:
-    """Combine explicit plugins with providers selected through the environment.
+) -> list[DurableInstrumentationPluginFactory]:
+    """Combine explicit plugin factories with those selected through the environment.
 
-    Explicit plugins retain their order. Dynamically selected plugins follow in
-    configured order. When discovery creates a plugin whose concrete type is
-    already registered, the first registration wins, so explicit registration
-    takes precedence.
+    Explicit factories retain their order. Dynamically selected factories follow
+    in configured order. Every returned factory is called once per invocation.
+
+    A factory already registered explicitly is not registered a second time
+    through the environment. The check is by factory identity, which is what is
+    knowable here: the old shape declared a ``plugin_type`` and could dedup on
+    it, but a factory is opaque until called, and calling it at load time is what
+    this design avoids. Identity still covers the case the plugin packages
+    document -- the same provider callable both passed to the decorator and named
+    in ``DURABLE_EXECUTION_PLUGINS``. Two *different* factories that happen to
+    build the same plugin type will now both be registered.
     """
 
-    resolved_plugins = list(explicit_plugins or [])
+    resolved_factories = list(explicit_plugins or [])
     resolved_environment = os.environ if environment is None else environment
     plugin_names = _parse_configured_plugin_names(resolved_environment)
     if not plugin_names:
-        return resolved_plugins
+        return resolved_factories
 
     try:
         discovered_entry_points = list(
@@ -162,10 +124,6 @@ def load_configured_plugins(
     entry_points_by_name: dict[str, list[metadata.EntryPoint]] = {}
     for entry_point in discovered_entry_points:
         entry_points_by_name.setdefault(entry_point.name, []).append(entry_point)
-
-    registered_types: dict[type[DurableInstrumentationPlugin], str] = {
-        type(plugin): "the decorator's plugins argument" for plugin in resolved_plugins
-    }
 
     for plugin_name in plugin_names:
         matching_entry_points = entry_points_by_name.get(plugin_name, [])
@@ -190,20 +148,15 @@ def load_configured_plugins(
                 "duplicate provider package."
             )
 
-        entry_point = matching_entry_points[0]
-        provider = _load_provider(plugin_name, entry_point)
-        if existing_registration := registered_types.get(provider.plugin_type):
+        factory = _load_factory(plugin_name, matching_entry_points[0])
+        if any(factory is registered for registered in resolved_factories):
             logger.warning(
-                "Skipping dynamically configured plugin '%s' because %s is "
-                "already registered by %s.",
+                "Skipping dynamically configured plugin '%s' because the same "
+                "plugin factory is already registered.",
                 plugin_name,
-                _qualified_class_name(provider.plugin_type),
-                existing_registration,
             )
             continue
 
-        plugin = _create_plugin(plugin_name, entry_point, provider)
-        resolved_plugins.append(plugin)
-        registered_types[provider.plugin_type] = f"dynamic provider '{plugin_name}'"
+        resolved_factories.append(factory)
 
-    return resolved_plugins
+    return resolved_factories

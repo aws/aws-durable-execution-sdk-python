@@ -83,7 +83,7 @@ def branch1(_ctx: DurableContext) -> str:
     return "task-2"
 
 
-@durable_execution(plugins=[ParallelBranchPlugin()])
+@durable_execution(plugins=[lambda _info: ParallelBranchPlugin()])
 def handler(_event: Any, context: DurableContext) -> list:
     result = context.parallel(
         [branch0, branch1],

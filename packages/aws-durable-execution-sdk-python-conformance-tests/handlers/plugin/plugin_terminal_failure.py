@@ -58,7 +58,7 @@ def failing_step(_step_context: StepContext) -> str:
     raise RuntimeError(msg)
 
 
-@durable_execution(plugins=[TerminalFailurePlugin()])
+@durable_execution(plugins=[lambda _info: TerminalFailurePlugin()])
 def handler(_event: Any, context: DurableContext) -> str:
     result: str = context.step(
         failing_step(),

@@ -3,10 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-execution latest-pending asynchronous export scheduling for Workflow Insight.
 
-One plugin instance serves every execution its environment hosts, and Lambda
-Managed Instances makes concurrent executions in one environment routine, so the
-pending record is keyed by execution ARN: coalescing happens only within a single
-execution and one execution's record can never displace another's.
+One scheduler serves every execution its environment hosts -- it is owned by the
+handler-lifetime plugin factory, because serializing export is a cross-execution
+job -- and Lambda Managed Instances makes concurrent executions in one
+environment routine. So the pending record and the bookkeeping that goes with it
+live on the per-execution object the caller passes in, which is the caller's own
+per-invocation plugin instance (:class:`_ExportState` is mixed into it):
+coalescing happens only within a single execution and one execution's record can
+never displace another's. The scheduler holds those objects; it has no notion of
+an execution ARN and nothing to look up.
 
 Export itself stays strictly serialized -- one worker thread, one ``export()`` at
 a time -- so exporters never see concurrent calls. Parallel export is a later
@@ -26,22 +31,47 @@ from aws_durable_execution_sdk_python_insight.types import InsightExporter
 _logger = logging.getLogger("aws_durable_execution_sdk_python_insight")
 
 
-class _Lane:
-    """Per-execution export bookkeeping. One lane per execution ARN."""
+class _ExportState:
+    """One execution's export bookkeeping, and its slot in the export queue.
 
-    __slots__ = ("scheduled_seq", "exported_seq", "exported_at", "waiters")
+    Mixed into the per-invocation plugin instance, so one object carries both an
+    execution's hook-facing state and its export bookkeeping. Those used to live
+    in three ARN-keyed structures -- the plugin's execution registry, the
+    scheduler's pending record and its per-execution lane -- three views of one
+    execution that had to agree about whether it still had work outstanding. In
+    Java the same shape produced a defect where two of the views disagreed. There
+    is one view now, and the scheduler holds the object itself.
+
+    Every field here is guarded by ``_ExportScheduler._condition``. They belong to
+    the scheduler: nothing outside it reads or writes them, and it never touches
+    the hook-facing state on the same object.
+    """
 
     def __init__(self) -> None:
-        # Newest sequence number scheduled for this execution.
+        # Newest sequence number the scheduler assigned to this execution.
         self.scheduled_seq = 0
+        # This execution's latest record, waiting for the export worker, or None
+        # when nothing of its own is outstanding. A repeat emission replaces it,
+        # which is what per-execution coalescing means; the scheduler's queue
+        # holds this object exactly while this field is set.
+        self.pending_record: dict[str, Any] | None = None
         # Newest sequence number already handed to every exporter.
         self.exported_seq = 0
         # Value of the scheduler's export counter when that export finished, so
         # a waiter can tell whether a completed flush covered its own record.
         self.exported_at = 0
-        # drain() calls currently blocked on this lane; the lane is only
-        # forgotten once nobody is waiting on it.
+        # drain() calls currently parked on this execution. Nothing depends on
+        # it: a waiter holds this object directly, so the bookkeeping it waits
+        # on can no longer be reclaimed from under it. It is kept because it is
+        # the only way to observe that a drain really parked rather than raced
+        # past.
         self.waiters = 0
+
+
+# What a caller has to release once it is back outside the lock: the records the
+# `_disabled` latch dropped, each with the execution object that was carrying it.
+# Both can run customer finalizers.
+_Dropped = list[tuple[_ExportState, dict[str, Any] | None]]
 
 
 class _ExportScheduler:
@@ -50,11 +80,12 @@ class _ExportScheduler:
     def __init__(self, exporters: list[InsightExporter]) -> None:
         self._exporters = exporters
         self._condition = threading.Condition(threading.Lock())
-        # execution ARN -> (sequence, latest record), oldest arrival first. A
-        # repeat schedule for an ARN replaces the value and keeps the position,
-        # so coalescing never lets one execution jump the queue.
-        self._pending: dict[str, tuple[int, dict[str, Any]]] = {}
-        self._lanes: dict[str, _Lane] = {}
+        # Executions with a record waiting, oldest arrival first -- an ordered
+        # set, keyed by the execution object itself. A repeat schedule for an
+        # execution replaces the record the object carries and keeps the object's
+        # position, so coalescing never lets one execution jump the queue. An
+        # execution is in here exactly while its `pending_record` is set.
+        self._pending: dict[_ExportState, None] = {}
         self._seq = 0
         self._export_count = 0
         # Highest export counter value covered by a completed flush.
@@ -86,19 +117,21 @@ class _ExportScheduler:
         self._worker: threading.Thread | None = None
         self._disabled = False
 
-    def schedule(self, execution_arn: str, record: dict[str, Any]) -> None:
+    def schedule(self, execution: _ExportState, record: dict[str, Any]) -> None:
         """Replace this execution's pending snapshot; never runs exporters inline."""
-        displaced: tuple[int, dict[str, Any]] | None = None
-        failed_pending: dict[str, tuple[int, dict[str, Any]]] | None = None
+        displaced: dict[str, Any] | None = None
+        failed_pending: _Dropped | None = None
         start_error: Exception | None = None
         with self._condition:
             if self._disabled:
                 return
             self._seq += 1
-            lane = self._lane_locked(execution_arn)
-            lane.scheduled_seq = self._seq
-            displaced = self._pending.get(execution_arn)
-            self._pending[execution_arn] = (self._seq, record)
+            execution.scheduled_seq = self._seq
+            displaced = execution.pending_record
+            execution.pending_record = record
+            # Re-queuing an execution that is already queued is a no-op that
+            # keeps its arrival position.
+            self._pending[execution] = None
             failed_pending, start_error = self._ensure_worker_locked()
             self._condition.notify_all()
         # Releasing either record may run custom finalizers, so do it unlocked.
@@ -110,7 +143,7 @@ class _ExportScheduler:
                 start_error,
             )
 
-    def drain(self, execution_arn: str) -> None:
+    def drain(self, execution: _ExportState) -> None:
         """Wait until this execution's latest record is exported and exporters flush.
 
         Returns once the calling execution's own record has reached every exporter
@@ -122,21 +155,25 @@ class _ExportScheduler:
         Java have. Concurrent calls can share one flush, since they all started
         before it completed.
 
+        The caller passes the execution object rather than an ARN, so there is
+        nothing to look up and nothing to create: an execution that never
+        scheduled a record simply carries zeroed bookkeeping, which is exactly
+        "nothing of my own is outstanding, flush and return".
+
         Two paths return without exporting or flushing anything, because the
         permanent ``_disabled`` latch means no record will ever be exported: the
         latch was already set when this call started, or it is set while this call
         is parked. Failing to start the export worker sets that latch, so a drain
         that hits a worker-start failure also returns without a flush.
         """
-        failed_pending: dict[str, tuple[int, dict[str, Any]]] | None = None
+        failed_pending: _Dropped | None = None
         start_error: Exception | None = None
         with self._condition:
             if self._disabled:
                 return
-            lane = self._lane_locked(execution_arn)
-            lane.waiters += 1
+            execution.waiters += 1
             try:
-                want_seq = lane.scheduled_seq
+                want_seq = execution.scheduled_seq
                 # A drain always flushes, so require a flush that covers every
                 # export completed before this call as well as our own.
                 want_flush = self._export_count
@@ -148,10 +185,11 @@ class _ExportScheduler:
                     # Export counter value a flush has to cover to release us:
                     # our own record's export plus everything already exported
                     # when this call started. Recomputed every pass, because
-                    # lane.exported_at only becomes ours once our record is out.
-                    need = max(lane.exported_at, want_flush)
+                    # execution.exported_at only becomes ours once our record is
+                    # out.
+                    need = max(execution.exported_at, want_flush)
                     if (
-                        lane.exported_seq >= want_seq
+                        execution.exported_seq >= want_seq
                         and self._flushed_through >= need
                         and self._flushes_completed > want_flushes
                     ):
@@ -182,8 +220,7 @@ class _ExportScheduler:
                     self._condition.notify_all()
                     self._condition.wait()
             finally:
-                lane.waiters -= 1
-                self._forget_lane_locked(execution_arn, lane)
+                execution.waiters -= 1
         del failed_pending
         if start_error is not None:
             _logger.warning(
@@ -194,30 +231,7 @@ class _ExportScheduler:
 
     # -- internals ------------------------------------------------------------
 
-    def _lane_locked(self, execution_arn: str) -> _Lane:
-        lane = self._lanes.get(execution_arn)
-        if lane is None:
-            lane = _Lane()
-            self._lanes[execution_arn] = lane
-        return lane
-
-    def _forget_lane_locked(self, execution_arn: str, lane: _Lane) -> None:
-        # Keep the lane while anything still depends on it; bookkeeping for a
-        # fully exported execution with no waiters is safe to drop, because a
-        # later drain then only needs a flush covering the exports so far.
-        if self._lanes.get(execution_arn) is not lane:
-            return
-        if lane.waiters:
-            return
-        if execution_arn in self._pending:
-            return
-        if lane.exported_seq < lane.scheduled_seq:
-            return
-        del self._lanes[execution_arn]
-
-    def _ensure_worker_locked(
-        self,
-    ) -> tuple[dict[str, tuple[int, dict[str, Any]]] | None, Exception | None]:
+    def _ensure_worker_locked(self) -> tuple[_Dropped | None, Exception | None]:
         if self._worker is not None and self._worker.is_alive():
             return None, None
         worker = threading.Thread(
@@ -231,12 +245,19 @@ class _ExportScheduler:
         except Exception as exc:  # noqa: BLE001 - instrumentation must not escape hooks
             self._disabled = True
             self._worker = None
-            failed_pending = self._pending
+            # Nothing is retained once the plugin has given up on asynchronous
+            # export for good: the queue is the scheduler's only per-execution
+            # structure, so emptying it drops every reference it holds. Both the
+            # records and the execution objects go back to the CALLER to release
+            # outside the lock -- a record can carry customer objects whose
+            # finalizers run arbitrary code, and so can an execution whose hook
+            # state the plugin has already discarded.
+            failed_pending = [
+                (execution, execution.pending_record) for execution in self._pending
+            ]
+            for execution, _ in failed_pending:
+                execution.pending_record = None
             self._pending = {}
-            # Lanes hold plain counters, never customer objects, so they can be
-            # dropped under the lock. Nothing is retained once the plugin has
-            # given up on asynchronous export for good.
-            self._lanes = {}
             self._flush_requested = False
             self._flush_barrier = 0
             self._flush_in_flight = 0
@@ -249,7 +270,7 @@ class _ExportScheduler:
     def _blocking_pending_locked(self) -> bool:
         """True while a record scheduled at or before the flush barrier is pending."""
         barrier = self._flush_barrier
-        return any(seq <= barrier for seq, _ in self._pending.values())
+        return any(execution.scheduled_seq <= barrier for execution in self._pending)
 
     def _run(self) -> None:
         # The worker slot must be empty whenever no worker is running, or
@@ -271,7 +292,7 @@ class _ExportScheduler:
 
     def _run_loop(self) -> None:
         while True:
-            arn: str | None = None
+            execution: _ExportState | None = None
             seq = 0
             record: dict[str, Any] | None = None
             flush_covers = 0
@@ -287,36 +308,39 @@ class _ExportScheduler:
                         self._flush_in_flight = flush_covers
                         break
                     if self._pending:
-                        arn, (seq, record) = next(iter(self._pending.items()))
-                        del self._pending[arn]
+                        execution = next(iter(self._pending))
+                        del self._pending[execution]
+                        record = execution.pending_record
+                        execution.pending_record = None
+                        seq = execution.scheduled_seq
                         break
                     self._condition.wait()
 
             if record is not None:
-                # Popping the record consumed this execution's pending slot, so
-                # nothing will ever export that snapshot again. The lane must
-                # therefore advance whatever export() did: skip it and
-                # lane.exported_seq never reaches a waiter's want_seq, so a drain
-                # parked on this execution is never released. _export() already
-                # contains every Exception, but a BaseException from a customer
-                # exporter unwinds through here. Count the attempt in a finally
-                # and let the exception continue out to the wrapper -- and into
-                # the thread's traceback -- with nothing swallowed.
+                assert execution is not None
+                # Taking the record consumed this execution's pending slot, so
+                # nothing will ever export that snapshot again. The bookkeeping
+                # must therefore advance whatever export() did: skip it and
+                # execution.exported_seq never reaches a waiter's want_seq, so a
+                # drain parked on this execution is never released. _export()
+                # already contains every Exception, but a BaseException from a
+                # customer exporter unwinds through here. Count the attempt in a
+                # finally and let the exception continue out to the wrapper --
+                # and into the thread's traceback -- with nothing swallowed.
+                #
+                # The record and its bookkeeping are one object, so there is no
+                # second lookup left to come back empty: publishing cannot miss.
                 try:
                     self._export(record)
                 finally:
                     # Release the exported record before re-locking: a custom
                     # finalizer may re-enter schedule().
                     del record
-                    assert arn is not None
                     with self._condition:
                         self._export_count += 1
-                        lane = self._lanes.get(arn)
-                        if lane is not None:
-                            if seq > lane.exported_seq:
-                                lane.exported_seq = seq
-                            lane.exported_at = self._export_count
-                            self._forget_lane_locked(arn, lane)
+                        if seq > execution.exported_seq:
+                            execution.exported_seq = seq
+                        execution.exported_at = self._export_count
                         self._condition.notify_all()
                 continue
 

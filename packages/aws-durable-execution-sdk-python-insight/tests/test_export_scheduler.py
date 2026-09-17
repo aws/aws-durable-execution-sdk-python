@@ -10,12 +10,44 @@ from typing import Any
 
 from aws_durable_execution_sdk_python_insight._export_scheduler import (
     _ExportScheduler,
+    _ExportState,
 )
 
 
 ARN = "arn:aws:lambda:us-west-2:123456789012:function:my-fn:$LATEST/durable-execution/exec-{}/inv-1"
 ARN_A = ARN.format("a")
 ARN_B = ARN.format("b")
+
+
+class _ArnScheduler(_ExportScheduler):
+    """Supplies the ARN -> execution map that the SDK's plugin lifecycle provides.
+
+    ``schedule()`` and ``drain()`` take the per-execution object: the scheduler
+    holds the object the caller already has -- in production the caller's own
+    per-invocation plugin instance, which carries its export bookkeeping as an
+    ``_ExportState`` -- instead of resolving an ARN to bookkeeping of its own, so
+    it does not know what an ARN is. These tests drive the scheduler directly, so
+    they own an ARN map of their own and are otherwise unchanged.
+    """
+
+    def __init__(self, exporters: list[Any]) -> None:
+        super().__init__(exporters)
+        self.executions: dict[str, _ExportState] = {}
+        self._executions_lock = threading.Lock()
+
+    def _execution(self, execution_arn: str) -> _ExportState:
+        with self._executions_lock:
+            execution = self.executions.get(execution_arn)
+            if execution is None:
+                execution = _ExportState()
+                self.executions[execution_arn] = execution
+            return execution
+
+    def schedule(self, execution_arn: str, record: dict[str, Any]) -> None:  # type: ignore[override]
+        super().schedule(self._execution(execution_arn), record)
+
+    def drain(self, execution_arn: str) -> None:  # type: ignore[override]
+        super().drain(self._execution(execution_arn))
 
 
 def _record(value: str) -> dict[str, Any]:
@@ -87,7 +119,7 @@ class BaseExceptionExporter(CaptureExporter):
 
 def test_latest_pending_coalesces_within_one_execution() -> None:
     exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter])
+    scheduler = _ArnScheduler([exporter])
     scheduler.schedule(ARN_A, _record("first"))
     assert exporter.started.wait(5.0)
 
@@ -110,7 +142,7 @@ def test_latest_pending_coalesces_within_one_execution() -> None:
 def test_exporter_failure_does_not_block_other_exporters() -> None:
     failing = FailingExporter()
     capture = CaptureExporter()
-    scheduler = _ExportScheduler([failing, capture])
+    scheduler = _ArnScheduler([failing, capture])
 
     scheduler.schedule(ARN_A, _record("terminal"))
 
@@ -127,7 +159,7 @@ def test_base_exception_from_export_still_releases_drain() -> None:
     # invocation thread, parks forever. Every wait here is bounded so a
     # regression fails instead of hanging the suite.
     exporter = BaseExceptionExporter()
-    scheduler = _ExportScheduler([exporter])
+    scheduler = _ArnScheduler([exporter])
     scheduler.schedule(ARN_A, _record("terminal"))
     returned = threading.Event()
 
@@ -149,7 +181,7 @@ def test_base_exception_from_export_still_releases_drain() -> None:
 
 def test_drain_flushes_after_export() -> None:
     capture = CaptureExporter()
-    scheduler = _ExportScheduler([capture])
+    scheduler = _ArnScheduler([capture])
 
     scheduler.schedule(ARN_A, _record("terminal"))
 
@@ -162,7 +194,7 @@ def test_worker_start_failure_never_escapes_hook(monkeypatch) -> None:
         raise RuntimeError("cannot start")
 
     monkeypatch.setattr(threading.Thread, "start", fail_start)
-    scheduler = _ExportScheduler([CaptureExporter()])
+    scheduler = _ArnScheduler([CaptureExporter()])
 
     scheduler.schedule(ARN_A, _record("dropped"))
     scheduler.drain(ARN_A)
@@ -171,7 +203,7 @@ def test_worker_start_failure_never_escapes_hook(monkeypatch) -> None:
 
 
 def test_superseded_record_finalizes_after_lane_unlock() -> None:
-    scheduler = _ExportScheduler([BlockingExporter()])
+    scheduler = _ArnScheduler([BlockingExporter()])
     exporter = scheduler._exporters[0]
     assert isinstance(exporter, BlockingExporter)
     scheduler.schedule(ARN_A, _record("inflight"))
@@ -197,7 +229,7 @@ def test_superseded_record_finalizes_after_lane_unlock() -> None:
 
 def test_drain_waits_for_blocked_exporter() -> None:
     exporter = BlockingExporter()
-    scheduler = _ExportScheduler([exporter])
+    scheduler = _ArnScheduler([exporter])
     scheduler.schedule(ARN_A, _record("terminal"))
     assert exporter.started.wait(5.0)
     drain_thread = threading.Thread(target=scheduler.drain, args=(ARN_A,))
@@ -286,14 +318,13 @@ def _execution_record(arn: str, status: str) -> dict[str, Any]:
 
 def _scheduler_is_empty(scheduler: _ExportScheduler) -> bool:
     with scheduler._condition:
-        return not scheduler._pending and not scheduler._lanes
+        return not scheduler._pending
 
 
-def _drain_waiters(scheduler: _ExportScheduler, arn: str) -> int:
-    """How many drain() calls are currently parked on this execution's lane."""
+def _drain_waiters(scheduler: _ArnScheduler, arn: str) -> int:
+    """How many drain() calls are currently parked on this execution."""
     with scheduler._condition:
-        lane = scheduler._lanes.get(arn)
-        return 0 if lane is None else lane.waiters
+        return scheduler._execution(arn).waiters
 
 
 def test_drain_stays_parked_until_a_flush_covering_its_record_completes() -> None:
@@ -303,7 +334,7 @@ def test_drain_stays_parked_until_a_flush_covering_its_record_completes() -> Non
     # inside flush() makes that deterministic -- while the gate is held the flush
     # provably cannot have completed, so a drain that returns is a violation.
     exporter = FlushGateEventLogExporter()
-    scheduler = _ExportScheduler([exporter])
+    scheduler = _ArnScheduler([exporter])
     scheduler.schedule(ARN_A, _execution_record(ARN_A, "SUCCEEDED"))
     returned = threading.Event()
 
@@ -338,7 +369,7 @@ def test_no_redundant_flush_runs_after_drain_returned() -> None:
     # been consumed and the coverage is not published yet) and that second flush
     # calls the exporters after drain(), and with it the invocation, returned.
     exporter = FlushGateEventLogExporter()
-    scheduler = _ExportScheduler([exporter])
+    scheduler = _ArnScheduler([exporter])
     scheduler.schedule(ARN_A, _execution_record(ARN_A, "SUCCEEDED"))
     returned = threading.Event()
     flushes_at_return: list[int] = []
@@ -381,7 +412,7 @@ def test_drain_with_nothing_to_export_still_flushes_exactly_once() -> None:
     # until some other execution happened to flush. It has to flush once and
     # return.
     capture = CaptureExporter()
-    scheduler = _ExportScheduler([capture])
+    scheduler = _ArnScheduler([capture])
     returned = threading.Event()
 
     def drain() -> None:
@@ -405,7 +436,7 @@ def test_drain_never_rides_on_a_flush_that_finished_before_it_started() -> None:
     # a flush that completed after it was called, so that one invocation end
     # means one flush.
     capture = CaptureExporter()
-    scheduler = _ExportScheduler([capture])
+    scheduler = _ArnScheduler([capture])
     scheduler.schedule(ARN_A, _record("terminal"))
 
     scheduler.drain(ARN_A)
@@ -426,7 +457,7 @@ def test_disabled_latch_retains_no_lanes_or_pending_records(monkeypatch) -> None
         raise RuntimeError("cannot start")
 
     monkeypatch.setattr(threading.Thread, "start", fail_start)
-    scheduler = _ExportScheduler([CaptureExporter()])
+    scheduler = _ArnScheduler([CaptureExporter()])
 
     scheduler.schedule(ARN_A, _record("dropped"))
     scheduler.drain(ARN_A)
@@ -436,7 +467,13 @@ def test_disabled_latch_retains_no_lanes_or_pending_records(monkeypatch) -> None
     with scheduler._condition:
         assert scheduler._disabled
         assert scheduler._pending == {}
-        assert scheduler._lanes == {}
+        # ...and no execution kept the record it was carrying. The per-execution
+        # bookkeeping that used to need clearing in a second map is on these
+        # objects now, so the queue and the records are one thing to release.
+        assert all(
+            execution.pending_record is None
+            for execution in scheduler.executions.values()
+        )
         assert scheduler._flush_requested is False
         assert scheduler._flush_in_flight == 0
 
@@ -454,7 +491,7 @@ def test_disabled_latch_clears_a_published_flush_in_flight_marker(monkeypatch) -
     # asserts the same field, but reaches the latch with the marker already at 0,
     # so it holds whether or not the latch clears it; this one arms the marker
     # first.
-    scheduler = _ExportScheduler([CaptureExporter()])
+    scheduler = _ArnScheduler([CaptureExporter()])
     with scheduler._condition:
         scheduler._flush_in_flight = 7
 
@@ -479,7 +516,7 @@ def test_every_concurrent_execution_delivers_its_terminal_record_once() -> None:
     # different execution's record.
     executions = 10
     exporter = EventLogExporter()
-    scheduler = _ExportScheduler([exporter])
+    scheduler = _ArnScheduler([exporter])
     arns = [ARN.format(index) for index in range(executions)]
     ready = threading.Barrier(executions)
 
@@ -511,7 +548,7 @@ def test_blocked_export_never_loses_another_executions_terminal_record() -> None
     # records. Neither may be dropped, and each drain must be released by its own
     # record reaching the exporters -- not by another execution's flush.
     exporter = GatedEventLogExporter()
-    scheduler = _ExportScheduler([exporter])
+    scheduler = _ArnScheduler([exporter])
     scheduler.schedule(ARN_A, _execution_record(ARN_A, "RUNNING"))
     assert exporter.first_export_started.wait(5.0)
 

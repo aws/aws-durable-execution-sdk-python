@@ -39,8 +39,14 @@ processors, and exporter.
 
 1. Add the [ADOT Lambda Layer](#1-adot-lambda-layer) to your function and set `AWS_LAMBDA_EXEC_WRAPPER=/opt/otel-instrument`
 2. Enable [X-Ray Active Tracing](#2-aws-x-ray-active-tracing) on the function
-3. Pass `InvocationOtelPlugin` to your handler's `plugins` list
+3. Pass `InvocationOtelPluginFactory()` to your handler's `plugins` list
 4. Add X-Ray write permissions
+
+The SDK's `plugins` list takes plugin *factories*, not plugin instances: it calls
+each factory once per invocation and the plugin it returns serves that one
+invocation. `InvocationOtelPluginFactory` and `ExecutionOtelPluginFactory` are
+the factories for the two bundled plugins; each takes the optional
+`OtelPluginConfig` that every plugin it builds will use.
 
 Alternatively, install this package in the function artifact or a Lambda layer
 and select either OTel plugin by entry-point name:
@@ -50,9 +56,10 @@ DURABLE_EXECUTION_PLUGINS=otel-invocation
 DURABLE_EXECUTION_PLUGINS=otel-execution
 ```
 
-`otel-invocation` creates `InvocationOtelPlugin`; `otel-execution` creates
-`ExecutionOtelPlugin`. The SDK discovers the selected package entry point at
-cold start, so the handler does not need to import or explicitly register the
+`otel-invocation` names a default-configured `InvocationOtelPluginFactory`;
+`otel-execution` names a default-configured `ExecutionOtelPluginFactory`. The SDK
+discovers the selected package entry point at cold start and calls it once per
+invocation, so the handler does not need to import or explicitly register the
 plugin.
 
 ### 1. ADOT Lambda Layer
@@ -161,10 +168,10 @@ lambda_.Function(
 ```python
 from aws_durable_execution_sdk_python import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
-from aws_durable_execution_sdk_python_otel import InvocationOtelPlugin
+from aws_durable_execution_sdk_python_otel import InvocationOtelPluginFactory
 
 
-@durable_execution(plugins=[InvocationOtelPlugin()])
+@durable_execution(plugins=[InvocationOtelPluginFactory()])
 def handler(event: dict, context: DurableContext) -> dict:
     result = context.step(lambda _: fetch_data(event["id"]), name="fetch-data")
 
@@ -199,12 +206,12 @@ See the [ADOT sampling configuration](https://aws-otel.github.io/docs/getting-st
 
 ```python
 from aws_durable_execution_sdk_python_otel import (
-    InvocationOtelPlugin,
+    InvocationOtelPluginFactory,
     OtelPluginConfig,
     xray_context_extractor,
 )
 
-plugin = InvocationOtelPlugin(
+plugin_factory = InvocationOtelPluginFactory(
     OtelPluginConfig(
         # Use a custom context extractor (default: xray_context_extractor).
         context_extractor=xray_context_extractor,
@@ -217,6 +224,9 @@ plugin = InvocationOtelPlugin(
     )
 )
 ```
+
+The config is resolved once and shared by every plugin the factory builds, so
+configuration is per handler while plugin state is per invocation.
 
 ### Context Extractors
 
@@ -232,17 +242,19 @@ context:
 
 ```python
 from aws_durable_execution_sdk_python_otel import (
-    InvocationOtelPlugin,
+    InvocationOtelPluginFactory,
     OtelPluginConfig,
     w3c_client_context_extractor,
     xray_context_extractor,
 )
 
 # Default: X-Ray trace header (recommended for most Lambda deployments).
-InvocationOtelPlugin(OtelPluginConfig(context_extractor=xray_context_extractor))
+InvocationOtelPluginFactory(OtelPluginConfig(context_extractor=xray_context_extractor))
 
 # W3C Trace Context via clientContext (placeholder for backend propagation support).
-InvocationOtelPlugin(OtelPluginConfig(context_extractor=w3c_client_context_extractor))
+InvocationOtelPluginFactory(
+    OtelPluginConfig(context_extractor=w3c_client_context_extractor)
+)
 ```
 
 Custom extractors should return `ExtractedContext`, not an OpenTelemetry
@@ -339,12 +351,15 @@ After deploying your function with the plugin configured:
 
 ## API Reference
 
-### `InvocationOtelPlugin`
+### `InvocationOtelPluginFactory`
 
-Invocation-rooted view. Implements `DurableInstrumentationPlugin` from `aws_durable_execution_sdk_python`.
+Factory for the invocation-rooted plugin, and what belongs in the SDK's `plugins`
+list. Satisfies `DurableInstrumentationPluginFactory` from
+`aws_durable_execution_sdk_python`: calling it with an `InvocationStartInfo`
+returns the `InvocationOtelPlugin` for that invocation.
 
 ```python
-InvocationOtelPlugin(
+InvocationOtelPluginFactory(
     OtelPluginConfig(
         tracer_provider=None,
         context_extractor=None,
@@ -356,13 +371,36 @@ InvocationOtelPlugin(
 ```
 
 Pass `tracer_provider=...` when the application owns the OpenTelemetry SDK
-provider. When omitted, the globally configured provider is used.
+provider. When omitted, the globally configured provider is used, resolved per
+invocation so a provider installed after the handler module is imported is still
+picked up.
+
+`INVOCATION_OTEL_PLUGIN_FACTORY` is the default-configured instance the
+`otel-invocation` entry point names.
+
+### `ExecutionOtelPluginFactory`
+
+Factory for the execution-rooted plugin, with the same construction and config as
+`InvocationOtelPluginFactory`. `EXECUTION_OTEL_PLUGIN_FACTORY` is the
+default-configured instance the `otel-execution` entry point names.
+
+### `InvocationOtelPlugin`
+
+Invocation-rooted view. Implements `DurableInstrumentationPlugin` from
+`aws_durable_execution_sdk_python`. One instance serves exactly one invocation:
+the SDK builds it from the factory before the first hook fires and drops it when
+the invocation ends, so it holds its span registry and context tokens in ordinary
+instance state. Construct it directly only when driving the hooks yourself; in a
+handler, register the factory instead.
 
 ### `ExecutionOtelPlugin`
 
 Execution-rooted view. Uses the same execution ancestor and sampling behavior as
 `InvocationOtelPlugin`, but parents operation spans under Workflow and links
-them to Invocation.
+them to Invocation. Also one instance per invocation; the identities that must
+agree across invocations (the trace ID, the Workflow span ID, and each
+operation's span ID) are derived deterministically from the execution ARN rather
+than carried in memory.
 
 ### `DeterministicIdGenerator`
 

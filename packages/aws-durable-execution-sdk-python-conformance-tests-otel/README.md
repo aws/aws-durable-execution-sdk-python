@@ -35,9 +35,9 @@ tests/                      # contract tests for the templates and handlers
 
 The 20 invocation and 20 execution requirements reuse the same scenario
 handlers; the view is selected per function through the `OTEL_PLUGIN_MODE`
-environment variable, which `common.otel_plugin()` reads to pick
-`InvocationOtelPlugin` or `ExecutionOtelPlugin`. `template.yaml` deploys only the
-view named by its `OtelSuite` parameter.
+environment variable, which `common.otel_plugin_factory()` reads to pick
+`InvocationOtelPluginFactory` or `ExecutionOtelPluginFactory`. `template.yaml`
+deploys only the view named by its `OtelSuite` parameter.
 
 ## Scenarios
 
@@ -183,7 +183,8 @@ write access; the runner identity needs list, read, and cleanup access.
    `test-requirements/<suite>/<id>.yaml`. New requirement IDs must be registered
    there first.
 2. Add `src/otel_<n>_<name>.py` exporting `handler`. Select the plugin with
-   `common.otel_plugin()` and guard the input with `common.require_scenario()`.
+   `common.otel_plugin_factory()` and guard the input with
+   `common.require_scenario()`.
    Use the SDK's real API; never hand-roll behavior to force an expected result.
 3. Register the function in `template.yaml` (or `template-long-running.yaml`)
    with `Handler: <module>.handler` and `TestDescription: ["<id>"]`, and add a

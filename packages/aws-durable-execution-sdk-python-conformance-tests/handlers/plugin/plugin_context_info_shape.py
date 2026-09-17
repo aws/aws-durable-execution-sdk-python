@@ -94,7 +94,7 @@ def branch_b(_context: DurableContext) -> str:
     return "b-done"
 
 
-@durable_execution(plugins=[ContextInfoShapePlugin()])
+@durable_execution(plugins=[lambda _info: ContextInfoShapePlugin()])
 def handler(_event: Any, context: DurableContext) -> list[str]:
     result: BatchResult[str] = context.parallel(
         [

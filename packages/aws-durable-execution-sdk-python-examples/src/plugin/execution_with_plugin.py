@@ -51,7 +51,7 @@ def add_numbers_in_child(child_context: DurableContext, a: int, b: int):
     return result
 
 
-@durable_execution(plugins=[MyPlugin()])
+@durable_execution(plugins=[lambda _info: MyPlugin()])
 def handler(_event: Any, context: DurableContext) -> int:
     result: int = context.run_in_child_context(
         add_numbers_in_child(6, 4),

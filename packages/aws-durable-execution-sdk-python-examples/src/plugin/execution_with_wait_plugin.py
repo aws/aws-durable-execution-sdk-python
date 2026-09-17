@@ -42,7 +42,7 @@ class RecordingWaitPlugin(DurableInstrumentationPlugin):
         )
 
 
-@durable_execution(plugins=[RecordingWaitPlugin()])
+@durable_execution(plugins=[lambda _info: RecordingWaitPlugin()])
 def handler(_event: Any, context: DurableContext) -> dict[str, Any]:
     context.wait(Duration.from_seconds(1), name="plugin-wait")
     return {

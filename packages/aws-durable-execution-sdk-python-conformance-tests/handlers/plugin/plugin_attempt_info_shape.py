@@ -86,7 +86,7 @@ def flaky(step_context: StepContext) -> str:
     return "ok"
 
 
-@durable_execution(plugins=[AttemptInfoShapePlugin()])
+@durable_execution(plugins=[lambda _info: AttemptInfoShapePlugin()])
 def handler(_event: Any, context: DurableContext) -> str:
     retry_config = RetryStrategyConfig(
         max_attempts=3,

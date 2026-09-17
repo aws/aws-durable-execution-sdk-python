@@ -63,7 +63,7 @@ def greet(_step_context: StepContext, name: str) -> str:
     return f"Hello, {name}!"
 
 
-@durable_execution(plugins=[OperationChangePlugin()])
+@durable_execution(plugins=[lambda _info: OperationChangePlugin()])
 def handler(event: Any, context: DurableContext) -> str:
     result: str = context.step(greet(event))
     return result

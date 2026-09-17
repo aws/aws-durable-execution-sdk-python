@@ -47,7 +47,7 @@ class FirstInvocationPlugin(DurableInstrumentationPlugin):
         )
 
 
-@durable_execution(plugins=[FirstInvocationPlugin()])
+@durable_execution(plugins=[lambda _info: FirstInvocationPlugin()])
 def handler(_event: Any, context: DurableContext) -> str:
     context.wait(Duration.from_seconds(2))
     return "Wait completed"

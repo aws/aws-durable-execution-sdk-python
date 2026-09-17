@@ -40,15 +40,21 @@ DURABLE_EXECUTION_PLUGINS=otel-invocation,example_audit
 The SDK resolves those names from the `aws_durable_execution.plugins` Python
 entry-point group when the decorated handler is initialized. An unset or blank
 variable preserves the existing behavior. The decorator's `plugins` argument
-remains supported; explicit plugins run first and take precedence when a
-dynamic provider creates the same concrete plugin type.
+remains supported; explicit factories run first, and a factory passed to the
+decorator is not registered a second time through the environment.
 
-Provider packages expose a versioned factory:
+A plugin is registered as a *factory*, not as an instance. A factory is any
+callable taking the invocation's `InvocationStartInfo` and returning a
+`DurableInstrumentationPlugin`; the SDK calls it once per invocation, so the
+instance it returns serves that one invocation only and can hold per-execution
+state in ordinary attributes.
+
+Provider packages expose such a factory:
 
 ```python
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
-    DurableInstrumentationPluginProvider,
+    InvocationStartInfo,
 )
 
 
@@ -56,26 +62,20 @@ class AuditPlugin(DurableInstrumentationPlugin):
     pass
 
 
-AUDIT_PLUGIN_PROVIDER = DurableInstrumentationPluginProvider(
-    plugin_type=AuditPlugin,
-    factory=AuditPlugin,
-    plugin_api_version=1,
-)
+def audit_plugin_factory(info: InvocationStartInfo) -> AuditPlugin:
+    return AuditPlugin()
 ```
 
-Register the provider in the package's `pyproject.toml`:
+Register the factory in the package's `pyproject.toml`:
 
 ```toml
 [project.entry-points."aws_durable_execution.plugins"]
-example_audit = "example_audit:AUDIT_PLUGIN_PROVIDER"
+example_audit = "example_audit:audit_plugin_factory"
 ```
 
-Set `plugin_api_version` to the literal API version the provider implements.
-Update it only after verifying the provider against that API version.
-
 Provider names must be unique across installed distributions. Missing,
-ambiguous, incompatible, or invalid providers raise `PluginLoadError` during
-handler initialization with the provider and distribution details.
+ambiguous, or non-callable providers raise `PluginLoadError` during handler
+initialization with the provider and distribution details.
 
 ## 🚀 Quick Start
 

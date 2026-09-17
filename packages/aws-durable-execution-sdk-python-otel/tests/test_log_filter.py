@@ -177,6 +177,37 @@ def test_install_log_filter_is_idempotent():
         target.removeHandler(handler)
 
 
+def test_install_log_filter_rebinds_to_the_current_invocations_plugin():
+    """A later invocation's plugin takes over the already-installed filter.
+
+    The handler outlives the invocation but a plugin instance does not, so
+    without rebinding the filter would keep reading the first invocation's
+    discarded plugin and stop correlating logs after that invocation.
+    """
+    first_plugin, _ = _create_plugin()
+    second_plugin, _ = _create_plugin()
+    target = logging.getLogger("test.rebind")
+    handler = logging.NullHandler()
+    target.addHandler(handler)
+    try:
+        installed = install_log_filter(first_plugin, target_logger=target)
+        rebound = install_log_filter(second_plugin, target_logger=target)
+
+        assert rebound is installed
+        assert installed is not None
+        assert installed._plugin is second_plugin
+
+        second_plugin.on_invocation_start(_invocation_start_info())
+        record = _make_record()
+        installed.filter(record)
+
+        expected = second_plugin.get_current_span_context()
+        assert expected is not None
+        assert record.spanId == format(expected.span_id, "016x")
+    finally:
+        target.removeHandler(handler)
+
+
 def test_install_log_filter_reuses_single_instance_across_handlers():
     """A single filter instance is shared across all handlers."""
     plugin, _ = _create_plugin()

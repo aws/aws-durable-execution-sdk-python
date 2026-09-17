@@ -68,7 +68,7 @@ class WaitOperationPlugin(DurableInstrumentationPlugin):
         )
 
 
-@durable_execution(plugins=[WaitOperationPlugin()])
+@durable_execution(plugins=[lambda _info: WaitOperationPlugin()])
 def handler(_event: Any, context: DurableContext) -> str:
     context.wait(Duration.from_seconds(2))
     return "Wait completed"

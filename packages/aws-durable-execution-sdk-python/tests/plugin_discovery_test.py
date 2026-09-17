@@ -2,22 +2,26 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
-from typing import cast
 from unittest.mock import Mock, patch
 
 import pytest
 
 from aws_durable_execution_sdk_python.exceptions import PluginLoadError
 from aws_durable_execution_sdk_python.plugin import (
-    DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION,
     DurableInstrumentationPlugin,
-    DurableInstrumentationPluginProvider,
+    InvocationStartInfo,
 )
 from aws_durable_execution_sdk_python.plugin_discovery import (
     PLUGIN_ENTRY_POINT_GROUP,
     PLUGIN_ENVIRONMENT_VARIABLE,
     load_configured_plugins,
+)
+
+
+INVOCATION_START_INFO = InvocationStartInfo(
+    request_id="req-1",
+    execution_arn="arn:exec",
+    is_first_invocation=True,
 )
 
 
@@ -27,6 +31,14 @@ class _PluginA(DurableInstrumentationPlugin):
 
 class _PluginB(DurableInstrumentationPlugin):
     pass
+
+
+def _plugin_a_factory(info: InvocationStartInfo) -> _PluginA:
+    return _PluginA()
+
+
+def _plugin_b_factory(info: InvocationStartInfo) -> _PluginB:
+    return _PluginB()
 
 
 class _FakeDistribution:
@@ -59,32 +71,10 @@ class _FakeEntryPoint:
         return self._loaded_value
 
 
-def _provider(
-    factory: Callable[[], object],
-    *,
-    plugin_type: type[DurableInstrumentationPlugin] = _PluginA,
-    plugin_api_version: int = DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION,
-) -> DurableInstrumentationPluginProvider:
-    return DurableInstrumentationPluginProvider(
-        plugin_type=plugin_type,
-        factory=cast(Callable[[], DurableInstrumentationPlugin], factory),
-        plugin_api_version=plugin_api_version,
-    )
-
-
-def test_plugin_provider_requires_authored_api_version() -> None:
-    with pytest.raises(TypeError, match="plugin_api_version"):
-        DurableInstrumentationPluginProvider(
-            plugin_type=_PluginA,
-            factory=_PluginA,
-        )  # type: ignore[call-arg]
-
-
 @pytest.mark.parametrize("configured_value", [None, "", "   "])
-def test_unconfigured_discovery_preserves_explicit_plugins(
+def test_unconfigured_discovery_preserves_explicit_factories(
     configured_value: str | None,
 ) -> None:
-    explicit_plugin = _PluginA()
     environment = (
         {}
         if configured_value is None
@@ -95,16 +85,16 @@ def test_unconfigured_discovery_preserves_explicit_plugins(
         "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points"
     ) as entry_points:
         result = load_configured_plugins(
-            [explicit_plugin],
+            [_plugin_a_factory],
             environment=environment,
         )
 
-    assert result == [explicit_plugin]
+    assert result == [_plugin_a_factory]
     entry_points.assert_not_called()
 
 
 def test_discovery_uses_process_environment_by_default() -> None:
-    entry_point = _FakeEntryPoint("a", _provider(_PluginA))
+    entry_point = _FakeEntryPoint("a", _plugin_a_factory)
 
     with (
         patch.dict(
@@ -119,25 +109,36 @@ def test_discovery_uses_process_environment_by_default() -> None:
     ):
         result = load_configured_plugins(None)
 
-    assert len(result) == 1
-    assert isinstance(result[0], _PluginA)
+    assert result == [_plugin_a_factory]
     entry_points.assert_called_once_with(group=PLUGIN_ENTRY_POINT_GROUP)
 
 
+def test_discovery_returns_factories_without_calling_them() -> None:
+    """Discovery resolves factories only; instances belong to an invocation.
+
+    Nothing is constructed at load time, so no plugin instance exists outside
+    the invocation that will use it.
+    """
+    factory = Mock(return_value=_PluginA())
+    entry_point = _FakeEntryPoint("a", factory)
+
+    with patch(
+        "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+        return_value=[entry_point],
+    ):
+        result = load_configured_plugins(
+            None,
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
+        )
+
+    assert result == [factory]
+    factory.assert_not_called()
+
+
 def test_discovery_preserves_configured_order() -> None:
-    factory_calls: list[str] = []
-
-    def create_a() -> _PluginA:
-        factory_calls.append("a")
-        return _PluginA()
-
-    def create_b() -> _PluginB:
-        factory_calls.append("b")
-        return _PluginB()
-
     entry_points = [
-        _FakeEntryPoint("b", _provider(create_b, plugin_type=_PluginB)),
-        _FakeEntryPoint("a", _provider(create_a)),
+        _FakeEntryPoint("b", _plugin_b_factory),
+        _FakeEntryPoint("a", _plugin_a_factory),
     ]
 
     with patch(
@@ -149,8 +150,83 @@ def test_discovery_preserves_configured_order() -> None:
             environment={PLUGIN_ENVIRONMENT_VARIABLE: " a, b "},
         )
 
-    assert [type(plugin) for plugin in result] == [_PluginA, _PluginB]
-    assert factory_calls == ["a", "b"]
+    assert result == [_plugin_a_factory, _plugin_b_factory]
+    assert [type(factory(INVOCATION_START_INFO)) for factory in result] == [
+        _PluginA,
+        _PluginB,
+    ]
+
+
+def test_explicit_factories_precede_discovered_factories() -> None:
+    entry_point = _FakeEntryPoint("b", _plugin_b_factory)
+
+    with patch(
+        "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+        return_value=[entry_point],
+    ):
+        result = load_configured_plugins(
+            [_plugin_a_factory],
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "b"},
+        )
+
+    assert result == [_plugin_a_factory, _plugin_b_factory]
+
+
+def test_explicit_registration_wins_over_the_same_discovered_factory(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same callable passed explicitly and named in the env registers once.
+
+    This is the narrowed form of the old type-based precedence rule. Dedup by
+    declared plugin type is gone with the provider object; identity still covers
+    the documented double-registration case.
+    """
+    entry_point = _FakeEntryPoint("a", _plugin_a_factory)
+
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry_point],
+        ),
+        caplog.at_level(
+            logging.WARNING,
+            logger="aws_durable_execution_sdk_python.plugin_discovery",
+        ),
+    ):
+        result = load_configured_plugins(
+            [_plugin_a_factory],
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
+        )
+
+    assert result == [_plugin_a_factory]
+    assert "already registered" in caplog.text
+
+
+def test_distinct_factories_for_one_plugin_type_are_both_registered() -> None:
+    """Type-level dedup is gone: two distinct factories both register.
+
+    Recorded deliberately. The provider object declared a ``plugin_type`` that
+    discovery could compare without constructing anything; a factory is opaque
+    until called, and calling it at load time would build an instance outside any
+    invocation. Callers that both pass a factory and name a different one in the
+    environment now get both plugins.
+    """
+
+    def another_plugin_a_factory(info: InvocationStartInfo) -> _PluginA:
+        return _PluginA()
+
+    entry_point = _FakeEntryPoint("a", another_plugin_a_factory)
+
+    with patch(
+        "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+        return_value=[entry_point],
+    ):
+        result = load_configured_plugins(
+            [_plugin_a_factory],
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
+        )
+
+    assert result == [_plugin_a_factory, another_plugin_a_factory]
 
 
 @pytest.mark.parametrize("configured_value", ["a,,b", ",a", "a,"])
@@ -177,7 +253,7 @@ def test_discovery_rejects_duplicate_configured_names() -> None:
 
 
 def test_discovery_reports_missing_provider_and_available_names() -> None:
-    entry_point = _FakeEntryPoint("available", _provider(_PluginA))
+    entry_point = _FakeEntryPoint("available", _plugin_a_factory)
 
     with (
         patch(
@@ -216,12 +292,12 @@ def test_discovery_rejects_ambiguous_provider_name() -> None:
     entry_points = [
         _FakeEntryPoint(
             "duplicate",
-            _provider(_PluginA),
+            _plugin_a_factory,
             distribution_name="package-a",
         ),
         _FakeEntryPoint(
             "duplicate",
-            _provider(_PluginB),
+            _plugin_b_factory,
             distribution_name="package-b",
         ),
     ]
@@ -256,10 +332,10 @@ def test_discovery_wraps_entry_point_enumeration_failure() -> None:
         )
 
 
-def test_discovery_wraps_provider_load_failure() -> None:
+def test_discovery_wraps_factory_load_failure() -> None:
     entry_point = _FakeEntryPoint(
         "a",
-        _provider(_PluginA),
+        _plugin_a_factory,
         load_error=ImportError("missing dependency"),
     )
 
@@ -275,114 +351,54 @@ def test_discovery_wraps_provider_load_failure() -> None:
             environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
         )
 
-    assert "Failed to load durable instrumentation plugin provider 'a'" in str(
+    assert "Failed to load durable instrumentation plugin factory 'a'" in str(
         error.value
     )
     assert "test-plugin-package" in str(error.value)
     assert isinstance(error.value.__cause__, ImportError)
 
 
-def test_discovery_rejects_invalid_provider_type() -> None:
-    entry_point = _FakeEntryPoint("a", _PluginA)
-
-    with (
-        patch(
-            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
-            return_value=[entry_point],
-        ),
-        pytest.raises(
-            PluginLoadError,
-            match="must resolve to DurableInstrumentationPluginProvider",
-        ),
-    ):
-        load_configured_plugins(
-            None,
-            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
-        )
-
-
-def test_discovery_rejects_incompatible_plugin_api_version() -> None:
+def test_discovery_names_unknown_distribution_in_load_failure() -> None:
     entry_point = _FakeEntryPoint(
         "a",
-        _provider(_PluginA, plugin_api_version=99),
-    )
-
-    with (
-        patch(
-            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
-            return_value=[entry_point],
-        ),
-        pytest.raises(PluginLoadError) as error,
-    ):
-        load_configured_plugins(
-            None,
-            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
-        )
-
-    assert "declares plugin API version 99" in str(error.value)
-    assert (
-        f"supports plugin API version {DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION}"
-        in str(error.value)
-    )
-
-
-def test_discovery_rejects_invalid_declared_plugin_type() -> None:
-    provider = DurableInstrumentationPluginProvider(
-        plugin_type=cast(type[DurableInstrumentationPlugin], object),
-        factory=_PluginA,
-        plugin_api_version=DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION,
-    )
-    entry_point = _FakeEntryPoint("a", provider)
-
-    with (
-        patch(
-            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
-            return_value=[entry_point],
-        ),
-        pytest.raises(
-            PluginLoadError,
-            match="declares invalid plugin type builtins.object",
-        ),
-    ):
-        load_configured_plugins(
-            None,
-            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
-        )
-
-
-def test_discovery_rejects_non_class_declared_plugin_type() -> None:
-    provider = DurableInstrumentationPluginProvider(
-        plugin_type=cast(type[DurableInstrumentationPlugin], _PluginA()),
-        factory=_PluginA,
-        plugin_api_version=DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION,
-    )
-    entry_point = _FakeEntryPoint("a", provider)
-
-    with (
-        patch(
-            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
-            return_value=[entry_point],
-        ),
-        pytest.raises(
-            PluginLoadError,
-            match="declares invalid plugin type .*_PluginA",
-        ),
-    ):
-        load_configured_plugins(
-            None,
-            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
-        )
-
-
-def test_discovery_wraps_plugin_factory_failure() -> None:
-    def fail_factory() -> _PluginA:
-        raise RuntimeError("factory failed")
-
-    entry_point = _FakeEntryPoint(
-        "a",
-        _provider(fail_factory),
+        _plugin_a_factory,
         distribution_name=None,
+        load_error=ImportError("missing dependency"),
     )
+
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry_point],
+        ),
+        pytest.raises(PluginLoadError, match="unknown distribution"),
+    ):
+        load_configured_plugins(
+            None,
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("resolved_value", "expected_type_name"),
+    [
+        (_PluginA(), "_PluginA"),
+        (object(), "builtins.object"),
+        ("not-a-factory", "builtins.str"),
+        (None, "builtins.NoneType"),
+    ],
+)
+def test_discovery_rejects_non_callable_entry_point(
+    resolved_value: object,
+    expected_type_name: str,
+) -> None:
+    """A plugin *instance* at the entry point is now the common mistake.
+
+    The old shape resolved to a provider object, so this replaces the
+    provider-type check with the only check that still means something: the
+    resolved value has to be callable. The message names what it actually was.
+    """
+    entry_point = _FakeEntryPoint("a", resolved_value)
 
     with (
         patch(
@@ -396,84 +412,30 @@ def test_discovery_wraps_plugin_factory_failure() -> None:
             environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
         )
 
-    assert "Failed to create durable instrumentation plugin 'a'" in str(error.value)
-    assert "unknown distribution" in str(error.value)
-    assert isinstance(error.value.__cause__, RuntimeError)
+    assert "must resolve to a callable plugin factory, but resolved to" in str(
+        error.value
+    )
+    assert expected_type_name in str(error.value)
 
 
-def test_discovery_rejects_invalid_plugin_type() -> None:
-    entry_point = _FakeEntryPoint("a", _provider(lambda: object()))
+def test_discovery_accepts_a_plugin_class_as_factory() -> None:
+    """A class taking the info is callable, so it is a factory in its own right."""
 
-    with (
-        patch(
-            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
-            return_value=[entry_point],
-        ),
-        pytest.raises(
-            PluginLoadError,
-            match="expected .*_PluginA",
-        ),
+    class _InfoAwarePlugin(DurableInstrumentationPlugin):
+        def __init__(self, info: InvocationStartInfo) -> None:
+            self.info = info
+
+    entry_point = _FakeEntryPoint("a", _InfoAwarePlugin)
+
+    with patch(
+        "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+        return_value=[entry_point],
     ):
-        load_configured_plugins(
+        result = load_configured_plugins(
             None,
             environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
         )
 
-
-def test_explicit_plugin_registration_takes_precedence(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    explicit_plugin = _PluginA()
-    factory = Mock(return_value=_PluginA())
-    entry_point = _FakeEntryPoint("a", _provider(factory))
-
-    with (
-        patch(
-            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
-            return_value=[entry_point],
-        ),
-        caplog.at_level(
-            logging.WARNING,
-            logger="aws_durable_execution_sdk_python.plugin_discovery",
-        ),
-    ):
-        result = load_configured_plugins(
-            [explicit_plugin],
-            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
-        )
-
-    assert result == [explicit_plugin]
-    factory.assert_not_called()
-    assert "already registered by the decorator's plugins argument" in caplog.text
-
-
-def test_first_dynamic_registration_wins_for_duplicate_plugin_type(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    first_factory = Mock(return_value=_PluginA())
-    second_factory = Mock(return_value=_PluginA())
-    entry_points = [
-        _FakeEntryPoint("first", _provider(first_factory)),
-        _FakeEntryPoint("second", _provider(second_factory)),
-    ]
-
-    with (
-        patch(
-            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
-            return_value=entry_points,
-        ),
-        caplog.at_level(
-            logging.WARNING,
-            logger="aws_durable_execution_sdk_python.plugin_discovery",
-        ),
-    ):
-        result = load_configured_plugins(
-            None,
-            environment={PLUGIN_ENVIRONMENT_VARIABLE: "first,second"},
-        )
-
-    assert len(result) == 1
-    assert isinstance(result[0], _PluginA)
-    first_factory.assert_called_once_with()
-    second_factory.assert_not_called()
-    assert "already registered by dynamic provider 'first'" in caplog.text
+    plugin = result[0](INVOCATION_START_INFO)
+    assert isinstance(plugin, _InfoAwarePlugin)
+    assert plugin.info is INVOCATION_START_INFO

@@ -91,7 +91,7 @@ def wait_long(ctx: DurableContext) -> str:
     return "long-done"
 
 
-@durable_execution(plugins=[WaitReplayFlagPlugin()])
+@durable_execution(plugins=[lambda _info: WaitReplayFlagPlugin()])
 def handler(_event: Any, context: DurableContext) -> list:
     result = context.parallel(
         [wait_short, wait_long],

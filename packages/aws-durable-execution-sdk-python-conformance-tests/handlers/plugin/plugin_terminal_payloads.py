@@ -73,7 +73,7 @@ def step_b(_step_context: StepContext) -> str:
     raise RuntimeError(msg)
 
 
-@durable_execution(plugins=[TerminalPayloadPlugin()])
+@durable_execution(plugins=[lambda _info: TerminalPayloadPlugin()])
 def handler(_event: Any, context: DurableContext) -> str:
     context.step(step_a())
     result: str = context.step(

@@ -60,6 +60,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     WaitDetails,
 )
 from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
+from tests.test_helpers import plugin_factory
 
 
 LARGE_RESULT = "large_success" * 1024 * 1024
@@ -3482,24 +3483,24 @@ class _FailingPlugin(DurableInstrumentationPlugin):
 
 
 def test_durable_execution_loads_plugins_when_handler_is_initialized():
-    """Configured plugins are resolved once while the decorator initializes."""
-    explicit_plugin = _RecordingPlugin()
-    resolved_plugin = _RecordingPlugin()
+    """Configured factories are resolved once while the decorator initializes."""
+    explicit_factory = plugin_factory(_RecordingPlugin())
+    resolved_factory = plugin_factory(_RecordingPlugin())
 
     with (
         warnings.catch_warnings(),
         patch(
             "aws_durable_execution_sdk_python.execution.load_configured_plugins",
-            return_value=[explicit_plugin, resolved_plugin],
+            return_value=[explicit_factory, resolved_factory],
         ) as load_plugins,
     ):
         warnings.simplefilter("error", FutureWarning)
 
-        @durable_execution(plugins=[explicit_plugin])
+        @durable_execution(plugins=[explicit_factory])
         def test_handler(event: Any, context: DurableContext) -> dict:
             return {"result": "success"}
 
-    load_plugins.assert_called_once_with([explicit_plugin])
+    load_plugins.assert_called_once_with([explicit_factory])
     assert callable(test_handler)
 
 
@@ -3514,7 +3515,7 @@ def test_durable_execution_with_plugins_success():
 
     plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"result": "success"}
 
@@ -3545,7 +3546,7 @@ def test_durable_execution_forwards_execution_input_to_plugins():
 
     plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"echoed": event["name"]}
 
@@ -3573,7 +3574,7 @@ def test_durable_execution_surfaces_empty_input_as_empty_mapping():
 
     plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> str:
         return "ok"
 
@@ -3608,7 +3609,7 @@ def test_durable_execution_isolates_execution_input_from_handler():
         def on_invocation_end(self, info):
             observed["end_input"] = dict(info.execution_input)
 
-    @durable_execution(plugins=[_MutatingPlugin()])
+    @durable_execution(plugins=[plugin_factory(_MutatingPlugin())])
     def test_handler(event: Any, context: DurableContext) -> dict:
         observed["handler_saw"] = dict(event)
         # Direction B: handler mutates its event after the start hook fired.
@@ -3642,7 +3643,7 @@ def test_durable_execution_isolates_nested_execution_input():
         def on_invocation_start(self, info):
             info.execution_input["outer"]["inner"].append("from_plugin")
 
-    @durable_execution(plugins=[_NestedMutatingPlugin()])
+    @durable_execution(plugins=[plugin_factory(_NestedMutatingPlugin())])
     def test_handler(event: Any, context: DurableContext) -> dict:
         observed["handler_saw"] = deepcopy(event)
         return {"ok": True}
@@ -3668,7 +3669,7 @@ def test_durable_execution_with_plugins_failure():
 
     plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         msg = "user error"
         raise ValueError(msg)
@@ -3694,7 +3695,7 @@ def test_durable_execution_with_plugins_pending():
 
     plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         raise SuspendExecution("test")
 
@@ -3717,7 +3718,7 @@ def test_durable_execution_with_plugins_retryable_error():
 
     plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         msg = "Retriable error"
         raise InvocationError(msg)
@@ -3744,7 +3745,7 @@ def test_durable_execution_with_multiple_plugins():
     plugin1 = _RecordingPlugin()
     plugin2 = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin1, plugin2])
+    @durable_execution(plugins=[plugin_factory(plugin1), plugin_factory(plugin2)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"result": "success"}
 
@@ -3772,7 +3773,9 @@ def test_durable_execution_with_failing_plugin_does_not_break_execution():
     failing_plugin = _FailingPlugin()
     recording_plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[failing_plugin, recording_plugin])
+    @durable_execution(
+        plugins=[plugin_factory(failing_plugin), plugin_factory(recording_plugin)]
+    )
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"result": "success"}
 
@@ -3784,6 +3787,80 @@ def test_durable_execution_with_failing_plugin_does_not_break_execution():
     # Execution should still succeed despite the failing plugin
     assert result["Status"] == InvocationStatus.SUCCEEDED.value
     # The recording plugin should still have been called
+    assert "invocation_start" in recording_plugin.calls
+    assert "invocation_end:SUCCEEDED" in recording_plugin.calls
+
+
+def test_durable_execution_builds_a_plugin_per_invocation():
+    """One handler, two invocations, two instances -- and no crosstalk.
+
+    This is the LMI-driven property: a plugin may hold per-execution state in
+    ordinary instance attributes because the instance never outlives the
+    invocation it was built for.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    built: list[_RecordingPlugin] = []
+    factory_arns: list[str | None] = []
+
+    def build_plugin(info) -> _RecordingPlugin:
+        factory_arns.append(info.execution_arn)
+        plugin = _RecordingPlugin()
+        built.append(plugin)
+        return plugin
+
+    @durable_execution(plugins=[build_plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    for _ in range(2):
+        result = test_handler(
+            _make_invocation_input(mock_client),
+            _make_lambda_context(),
+        )
+        assert result["Status"] == InvocationStatus.SUCCEEDED.value
+
+    assert len(built) == 2
+    assert built[0] is not built[1]
+    # The factory saw the execution it was being built for.
+    assert factory_arns == [
+        "arn:test:execution/exec1",
+        "arn:test:execution/exec1",
+    ]
+    # Each instance recorded exactly one invocation's worth of hooks.
+    for plugin in built:
+        assert plugin.calls.count("invocation_start") == 1
+        assert plugin.calls.count("invocation_end:SUCCEEDED") == 1
+
+
+def test_durable_execution_with_failing_plugin_factory_does_not_break_execution():
+    """A factory that raises is contained exactly as a failing hook is."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    recording_plugin = _RecordingPlugin()
+
+    def exploding_factory(info) -> DurableInstrumentationPlugin:
+        raise RuntimeError("factory boom")
+
+    @durable_execution(plugins=[exploding_factory, plugin_factory(recording_plugin)])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    # The other plugin is unaffected.
     assert "invocation_start" in recording_plugin.calls
     assert "invocation_end:SUCCEEDED" in recording_plugin.calls
 
@@ -3843,7 +3920,7 @@ def test_durable_execution_decorator_with_plugins_and_boto3_client():
 
     # When using DurableExecutionInvocationInputWithClient, boto3_client is ignored
     # but we verify the decorator accepts both parameters
-    @durable_execution(boto3_client=None, plugins=[plugin])
+    @durable_execution(boto3_client=None, plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"result": "success"}
 

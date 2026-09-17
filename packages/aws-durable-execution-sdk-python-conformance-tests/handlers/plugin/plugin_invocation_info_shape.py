@@ -58,7 +58,7 @@ class InvocationInfoShapePlugin(DurableInstrumentationPlugin):
         _emit(record, info.execution_arn)
 
 
-@durable_execution(plugins=[InvocationInfoShapePlugin()])
+@durable_execution(plugins=[lambda _info: InvocationInfoShapePlugin()])
 def handler(event: Any, context: DurableContext) -> str:
     context.wait(Duration.from_seconds(2))
     return f"done-{event}"

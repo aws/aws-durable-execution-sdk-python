@@ -66,10 +66,13 @@ def _insight_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG00
 
 def test_terminal_record_includes_prior_step_and_completed_wait() -> None:
     capture = _CaptureExporter()
-    plugin = workflow_insight(WorkflowInsightConfig(exporters=[capture]))
+    factory = workflow_insight(WorkflowInsightConfig(exporters=[capture]))
     # Functional form (not the decorator-factory form) so the wrapped handler's
-    # static type stays a plain 2-arg callable for the runner.
-    handler = durable_execution(_insight_handler, plugins=[plugin])
+    # static type stays a plain 2-arg callable for the runner. `factory` is the
+    # plugin factory the SDK calls once per invocation, so the two invocations
+    # this test drives run on two instances -- which is what makes the assertions
+    # below about the resuming invocation meaningful.
+    handler = durable_execution(_insight_handler, plugins=[factory])
 
     with DurableFunctionTestRunner(handler=handler, execution_timeout=15) as runner:
         result: DurableFunctionTestResult = runner.run(input="{}")

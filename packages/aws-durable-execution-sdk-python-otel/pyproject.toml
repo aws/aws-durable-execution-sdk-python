@@ -26,8 +26,8 @@ dependencies = [
 ]
 
 [project.entry-points."aws_durable_execution.plugins"]
-otel-invocation = "aws_durable_execution_sdk_python_otel.plugin_provider:INVOCATION_OTEL_PLUGIN_PROVIDER"
-otel-execution = "aws_durable_execution_sdk_python_otel.plugin_provider:EXECUTION_OTEL_PLUGIN_PROVIDER"
+otel-invocation = "aws_durable_execution_sdk_python_otel.plugin_factory:INVOCATION_OTEL_PLUGIN_FACTORY"
+otel-execution = "aws_durable_execution_sdk_python_otel.plugin_factory:EXECUTION_OTEL_PLUGIN_FACTORY"
 
 [project.optional-dependencies]
 # Lambda telemetry layers provide a version-aligned OpenTelemetry distribution.

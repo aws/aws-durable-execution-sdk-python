@@ -28,8 +28,6 @@ from aws_durable_execution_sdk_python.types import LambdaContext
 
 logger = logging.getLogger(__name__)
 
-DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION = 1
-
 
 class InvocationStatus(Enum):
     """Invocation outcomes exposed to instrumentation plugins."""
@@ -451,25 +449,47 @@ class DurableInstrumentationPlugin:
         pass
 
 
-@dataclass(frozen=True)
-class DurableInstrumentationPluginProvider:
-    """Versioned factory exposed through the plugin entry-point group."""
+DurableInstrumentationPluginFactory = Callable[
+    [InvocationStartInfo], DurableInstrumentationPlugin
+]
+"""Builds one plugin instance for one invocation.
 
-    plugin_type: type[DurableInstrumentationPlugin]
-    factory: Callable[[], DurableInstrumentationPlugin]
-    plugin_api_version: int
+Called once per invocation with that invocation's :class:`InvocationStartInfo` --
+the same object the instance's ``on_invocation_start`` then receives -- before any
+hook fires. The instance serves only that invocation and is dropped when it
+returns, so a plugin can hold per-execution state in ordinary instance
+attributes without keying it by execution ARN.
+
+A plain ``Callable`` alias rather than a ``Protocol``: the shape has exactly one
+call signature and no other members, so a Protocol would only add a name. The
+alias is also the more permissive of the two, because ``Callable`` parameters are
+positional-only -- a factory may name its parameter whatever reads best
+(``lambda info: ...``, ``def build(invocation): ...``), where a ``__call__``
+Protocol would pin that name. Anything callable satisfies it: a lambda, a
+module-level function, a ``functools.partial``, or a class whose ``__init__``
+takes the info.
+"""
+
+
+def _factory_name(factory: object) -> str:
+    """Best available name for a factory, for log messages."""
+    return getattr(factory, "__qualname__", None) or type(factory).__name__
 
 
 class PluginExecutor:
-    def __init__(self, plugins: list[DurableInstrumentationPlugin] | None):
-        self._plugins = plugins or []
+    def __init__(self, plugins: list[DurableInstrumentationPluginFactory] | None):
+        # Factories live for the life of the handler; the instances they build do
+        # not. _plugins is populated in on_invocation_start and emptied when the
+        # invocation scope exits, so one instance never spans two invocations.
+        self._plugin_factories = list(plugins or [])
+        self._plugins: list[DurableInstrumentationPlugin] = []
         self._executor: ThreadPoolExecutor | None = None
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
 
     @contextlib.contextmanager
     def run(self):
-        if self._plugins:
+        if self._plugin_factories:
             self._executor = ThreadPoolExecutor(
                 max_workers=1,
                 thread_name_prefix="plugin-executor",
@@ -482,6 +502,37 @@ class PluginExecutor:
             # Shut down the thread pool, waiting for pending tasks to complete.
             if self._executor:
                 self._executor.shutdown(wait=True)
+            # Drop this invocation's plugin instances. After the pool has
+            # drained, so no queued dispatch still holds one: nothing reachable
+            # from this handler-lifetime executor outlives the invocation.
+            self._plugins = []
+
+    def _create_plugins(self, info: InvocationStartInfo) -> None:
+        """Build this invocation's plugin instances from its start info.
+
+        Called once per invocation, before the first hook is dispatched. A
+        factory that raises or returns ``None`` is contained exactly as a failing
+        hook is -- logged and skipped -- so a broken plugin cannot disrupt the
+        execution. The remaining factories still produce their instances.
+        """
+        plugins: list[DurableInstrumentationPlugin] = []
+        for factory in self._plugin_factories:
+            try:
+                plugin = factory(info)
+            except Exception:
+                # log and ignore the exception
+                logger.exception(
+                    "Plugin factory %s exception ignored", _factory_name(factory)
+                )
+                continue
+            if plugin is None:
+                logger.error(
+                    "Plugin factory %s returned None; plugin ignored",
+                    _factory_name(factory),
+                )
+                continue
+            plugins.append(plugin)
+        self._plugins = plugins
 
     @staticmethod
     def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> None:
@@ -535,11 +586,13 @@ class PluginExecutor:
         plugin that stashes the info and reads it later still sees the state as
         of its own hook.
 
-        Skipped entirely when no plugins are registered -- ``durable_execution()``
+        Skipped entirely when no plugins are configured -- ``durable_execution()``
         passes a provider unconditionally, so without this gate a plugin-free
-        execution would pay for a view nothing can read.
+        execution would pay for a view nothing can read. The gate reads the
+        factory list, not the instances: this runs while the start info is being
+        built, before any instance exists.
         """
-        if not self._plugins or operations_provider is None:
+        if not self._plugin_factories or operations_provider is None:
             return {}
         try:
             return _to_operation_info_map(operations_provider())
@@ -572,7 +625,9 @@ class PluginExecutor:
                 ``UpdatedOperationIds`` -- those updated while suspended.
         """
         aws_request_id = lambda_context.aws_request_id if lambda_context else None
-        self._operations_provider = operations_provider if self._plugins else None
+        self._operations_provider = (
+            operations_provider if self._plugin_factories else None
+        )
         operations = self._snapshot_operation_infos(operations_provider)
         self._invocation_status = InvocationStartInfo(
             execution_arn=execution_arn,
@@ -587,6 +642,9 @@ class PluginExecutor:
                 if operation_id in operations
             },
         )
+        # Build this invocation's plugin instances from the very info their first
+        # hook receives, and before that hook is dispatched.
+        self._create_plugins(self._invocation_status)
         self.execute_plugins(self._invocation_status, sync=True)
 
     def _snapshot_execution_input(self, execution_input: Any) -> Any:
@@ -602,12 +660,12 @@ class PluginExecutor:
         The copy is eager rather than deferred: the handler starts running
         immediately after this hook, so a lazily-taken snapshot could already
         have observed the handler's mutations. It is skipped when no plugins are
-        registered, so non-plugin executions pay nothing.
+        configured, so non-plugin executions pay nothing.
 
         The snapshot is shared by all plugins for this invocation; plugins should
         still treat it as read-only with respect to each other.
         """
-        if not self._plugins or execution_input is None:
+        if not self._plugin_factories or execution_input is None:
             return execution_input
         try:
             return copy.deepcopy(execution_input)

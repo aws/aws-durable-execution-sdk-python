@@ -28,9 +28,11 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     derive_workflow_span_id,
 )
-from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
-from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
+from aws_durable_execution_sdk_python_otel.plugin_factory import (
+    ExecutionOtelPluginFactory,
+    InvocationOtelPluginFactory,
+)
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -138,18 +140,20 @@ def _checkpoint_store(initial_operations: list[Operation]):
 
 
 @pytest.mark.parametrize(
-    "plugin_type",
-    [InvocationOtelPlugin, ExecutionOtelPlugin],
+    "factory_type",
+    [InvocationOtelPluginFactory, ExecutionOtelPluginFactory],
 )
 def test_otel_wait_resume_spans_share_default_xray_execution_trace(
     monkeypatch: pytest.MonkeyPatch,
-    plugin_type: type[InvocationOtelPlugin] | type[ExecutionOtelPlugin],
+    factory_type: type[InvocationOtelPluginFactory] | type[ExecutionOtelPluginFactory],
 ) -> None:
     monkeypatch.setenv("_X_AMZN_TRACE_ID", XRAY_TRACE_HEADER)
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    plugin = plugin_type(
+    # The SDK takes a factory and calls it once per invocation, so the two
+    # invocations below are served by two plugin instances sharing this provider.
+    factory = factory_type(
         OtelPluginConfig(
             tracer_provider=provider,
             enrich_logger=False,
@@ -164,7 +168,7 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
         context.wait(Duration.from_seconds(1), name="otel-wait")
         return context.step(complete_after_resume(), name="otel-after-resume")
 
-    handler = durable_execution(handler_impl, plugins=[plugin])
+    handler = durable_execution(handler_impl, plugins=[factory])
 
     initial_operations = [_execution_operation()]
     first_checkpoint, first_operations = _checkpoint_store(initial_operations)
@@ -226,7 +230,7 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
     after_resume = next(span for span in spans if span.name == "otel-after-resume")
 
     assert len(invocations) >= 2
-    if plugin_type is InvocationOtelPlugin:
+    if factory_type is InvocationOtelPluginFactory:
         assert len(waits) >= 2  # one segment per invocation
     else:
         assert len(waits) == 1  # one span per operation
@@ -238,7 +242,7 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
     }
 
     assert after_resume.parent is not None
-    if plugin_type is InvocationOtelPlugin:
+    if factory_type is InvocationOtelPluginFactory:
         assert after_resume.parent.span_id in {
             span.context.span_id for span in invocations
         }
