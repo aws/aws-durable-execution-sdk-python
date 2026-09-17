@@ -61,7 +61,40 @@ class InsightExporter(Protocol):
 
     def export(self, record: dict[str, Any]) -> None: ...  # pragma: no cover
 
-    def flush(self) -> None: ...  # pragma: no cover
+    def flush(self) -> None:  # pragma: no cover
+        """Push any records this exporter is buffering to their destination.
+
+        Only an exporter that buffers needs a body here; one that writes
+        synchronously inside ``export()`` can leave it empty. The method itself is
+        *not* optional: it is part of this protocol, so an exporter without it
+        fails the static protocol check, and at run time the plugin's call raises
+        ``AttributeError``, which is caught and logged as an exporter failure on
+        every flush.
+
+        When the plugin calls it:
+
+        * Once per sampled-in invocation end, after that invocation's own record
+          -- if the emit mode produced one -- has been handed to every exporter.
+          An execution that is sampled out neither exports nor flushes.
+          Invocation ends that overlap in one environment may share a single
+          flush, so the call count is at most one per sampled-in invocation end.
+        * Never concurrently with ``export()`` on the same plugin instance: one
+          worker thread runs both, one call at a time.
+
+        A flush may cover records belonging to other executions running in the
+        same environment, so it is not a per-execution barrier.
+
+        It must return promptly. The invocation that triggered it cannot return
+        until it does, so a slow flush is billed to the customer's invocation.
+
+        Failures are isolated: an ``Exception`` is logged, never retried, never
+        propagated into the execution, and never prevents another exporter from
+        flushing. A ``BaseException`` (``asyncio.CancelledError`` is one) is not
+        contained -- it skips the remaining exporters for that flush and ends the
+        export worker -- but it still never reaches the execution, and the
+        waiting invocation is released by a replacement worker running the flush
+        it asked for.
+        """
 
 
 @dataclass(frozen=True)

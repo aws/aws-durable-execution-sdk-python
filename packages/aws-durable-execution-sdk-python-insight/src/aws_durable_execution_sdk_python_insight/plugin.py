@@ -160,7 +160,14 @@ def _apply_result_override(
 
 
 class _ExecutionState:
-    __slots__ = ("start_time", "parsed_arn", "cached_input", "operations")
+    __slots__ = (
+        "start_time",
+        "parsed_arn",
+        "cached_input",
+        "operations",
+        "closed",
+        "lock",
+    )
 
     def __init__(self, start_time: Any, parsed_arn: dict[str, str]) -> None:
         self.start_time = start_time
@@ -169,6 +176,21 @@ class _ExecutionState:
         # operation_id -> OperationInfo, adopted verbatim from the SDK's
         # authoritative snapshot (invocation start/end and operation-change).
         self.operations: dict[str, OperationInfo] = {}
+        # Set once the invocation this state belongs to has ended. A hook that
+        # arrives afterwards (an operation-change for a checkpoint that
+        # completed just before the end) must emit nothing (mirrors the Java
+        # ExecutionState.closed flag).
+        self.closed = False
+        # Guards `closed`, the operations rebind and record emission for this
+        # execution, so a late hook can never slip a RUNNING record in after the
+        # terminal one. Per execution, so concurrent executions never contend.
+        # Reentrant on purpose: `_emit` runs the scheduler's `schedule()` inside
+        # this hold, and `schedule()` releases the record it displaces, which can
+        # run a customer finalizer that re-enters a hook for this same execution
+        # on this same thread. A plain lock self-deadlocks the invocation thread
+        # there. (Java holds no such lock: its ExecutionState carries no
+        # operations map, and `cachedInput` is a bare volatile field.)
+        self.lock = threading.RLock()
 
 
 class WorkflowInsightPlugin(DurableInstrumentationPlugin):
@@ -226,18 +248,25 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
                 self._state[execution_arn] = state
             return state
 
+    def _get_state(self, execution_arn: str) -> _ExecutionState | None:
+        # Lookup only. A hook that must never fabricate state (an
+        # operation-change arriving after the invocation ended, whose state has
+        # been discarded) uses this instead of _ensure_state.
+        with self._lock:
+            return self._state.get(execution_arn)
+
     def _discard_state(self, execution_arn: str) -> None:
         with self._lock:
             self._state.pop(execution_arn, None)
 
-    def _adopt_operations(
+    def _adopt_operations_locked(
         self, state: _ExecutionState, operations: dict[str, OperationInfo]
     ) -> None:
         # Adopt the authoritative point-in-time snapshot. Copy so plugin state
         # never aliases the SDK-owned map, and rebind the attribute so a
         # concurrent reader holding the prior reference iterates a stable dict.
-        with self._lock:
-            state.operations = dict(operations)
+        # Callers hold state.lock.
+        state.operations = dict(operations)
 
     # -- hooks ----------------------------------------------------------------
 
@@ -246,44 +275,57 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         if not arn or not self._sampled_in(arn):
             return
         state = self._ensure_state(arn)
-        # Always adopt the service-provided execution start time when present,
-        # including a cold resume in a fresh environment (never the resume time,
-        # which would corrupt duration and the date partition).
-        if info.execution_start_time is not None:
-            state.start_time = info.execution_start_time
-        state.cached_input = info.execution_input
-        # Seed the operation map from the full snapshot on every invocation. On a
-        # cold resume this rebuilds prior (terminal) operations that a fresh
-        # plugin instance never saw via per-operation hooks.
-        self._adopt_operations(state, info.operations)
-        if self._emit_mode == EmitMode.ON_CHANGE:
-            self._emit(
-                arn,
-                state,
-                status="RUNNING",
-                end_time=None,
-                output_raw=None,
-                error=None,
-            )
+        with state.lock:
+            if state.closed:
+                return
+            # Always adopt the service-provided execution start time when
+            # present, including a cold resume in a fresh environment (never the
+            # resume time, which would corrupt duration and the date partition).
+            if info.execution_start_time is not None:
+                state.start_time = info.execution_start_time
+            state.cached_input = info.execution_input
+            # Seed the operation map from the full snapshot on every invocation.
+            # On a cold resume this rebuilds prior (terminal) operations that a
+            # fresh plugin instance never saw via per-operation hooks.
+            self._adopt_operations_locked(state, info.operations)
+            if self._emit_mode == EmitMode.ON_CHANGE:
+                self._emit(
+                    arn,
+                    state,
+                    status="RUNNING",
+                    end_time=None,
+                    output_raw=None,
+                    error=None,
+                )
 
     def on_operation_change(self, info: OperationChangeInfo) -> None:
         arn = info.execution_arn
         if not arn or not self._sampled_in(arn):
             return
-        state = self._ensure_state(arn)
-        # Replace state with the full operations snapshot carried by the hook.
-        self._adopt_operations(state, info.operations)
-        # on-change mode exports an updated RUNNING record on each change so
-        # mid-invocation progress is observable, not only at start/end.
-        if self._emit_mode == EmitMode.ON_CHANGE:
-            self._emit(
-                arn,
-                state,
-                status="RUNNING",
-                end_time=None,
-                output_raw=None,
-                error=None,
-            )
+        # Never create state here. A change hook for a checkpoint that completed
+        # just before the invocation ended still arrives after on_invocation_end
+        # discarded the state; recreating it would fabricate start_time = now,
+        # emit a RUNNING record after the terminal one, and leave a state entry
+        # behind for an execution this environment no longer runs.
+        state = self._get_state(arn)
+        if state is None:
+            return
+        with state.lock:
+            if state.closed:
+                return
+            # Replace state with the full operations snapshot carried by the hook.
+            self._adopt_operations_locked(state, info.operations)
+            # on-change mode exports an updated RUNNING record on each change so
+            # mid-invocation progress is observable, not only at start/end.
+            if self._emit_mode == EmitMode.ON_CHANGE:
+                self._emit(
+                    arn,
+                    state,
+                    status="RUNNING",
+                    end_time=None,
+                    output_raw=None,
+                    error=None,
+                )
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         arn = info.execution_arn
@@ -294,41 +336,66 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
             self._discard_state(arn)
             return
         state = self._ensure_state(arn)
-        # Refresh from the fresh end-of-invocation snapshot before emitting so
-        # the terminal record reflects the final operation map.
-        self._adopt_operations(state, info.operations)
-        status = _STATUS_MAP.get(info.status, "RUNNING")
-        is_terminal = status in ("SUCCEEDED", "FAILED")
-        is_failure = status == "FAILED"
+        with state.lock:
+            if not state.closed:
+                # Close the gate before emitting so a concurrent late hook for
+                # this execution cannot append a RUNNING record after the
+                # terminal one.
+                state.closed = True
+                # Refresh from the fresh end-of-invocation snapshot before
+                # emitting so the terminal record reflects the final operation
+                # map.
+                self._adopt_operations_locked(state, info.operations)
+                status = _STATUS_MAP.get(info.status, "RUNNING")
+                is_terminal = status in ("SUCCEEDED", "FAILED")
+                is_failure = status == "FAILED"
 
-        if self._emit_mode == EmitMode.ON_CHANGE:
-            should_emit = True
-        elif self._emit_mode == EmitMode.ON_FAILURE:
-            should_emit = is_failure
-        else:  # on-complete
-            should_emit = is_terminal
+                if self._emit_mode == EmitMode.ON_CHANGE:
+                    should_emit = True
+                elif self._emit_mode == EmitMode.ON_FAILURE:
+                    should_emit = is_failure
+                else:  # on-complete
+                    should_emit = is_terminal
 
-        if should_emit:
-            # Only terminal (SUCCEEDED/FAILED) records carry an end time; a
-            # PENDING/RETRY invocation end maps to RUNNING (still in flight) and
-            # must omit endTime/durationMs. Passing end_time=None makes _emit
-            # drop both fields. Output and error likewise belong only to a
-            # terminal record.
-            self._emit(
-                arn,
-                state,
-                status=status,
-                end_time=datetime.datetime.now(datetime.UTC) if is_terminal else None,
-                output_raw=info.execution_result if is_terminal else None,
-                error=info.error if is_terminal else None,
-            )
-            self._scheduler.drain()
+                if should_emit:
+                    # Only terminal (SUCCEEDED/FAILED) records carry an end time;
+                    # a PENDING/RETRY invocation end maps to RUNNING (still in
+                    # flight) and must omit endTime/durationMs. Passing
+                    # end_time=None makes _emit drop both fields. Output and
+                    # error likewise belong only to a terminal record.
+                    self._emit(
+                        arn,
+                        state,
+                        status=status,
+                        end_time=datetime.datetime.now(datetime.UTC)
+                        if is_terminal
+                        else None,
+                        output_raw=info.execution_result if is_terminal else None,
+                        error=info.error if is_terminal else None,
+                        # This is the emit that closed the gate, so it always runs
+                        # with `closed` already set and must never drop itself.
+                        closing=True,
+                    )
 
         # Clear state after EVERY invocation end, including PENDING/RETRY. The
         # next invocation rebuilds it from InvocationStartInfo.operations, so a
         # suspended execution that never resumes in this environment (or that was
-        # sampled out) leaks nothing and state stays bounded.
+        # sampled out) leaks nothing and state stays bounded. Done before the
+        # drain so a late hook for this execution finds no state to update while
+        # the terminal record is still in flight.
         self._discard_state(arn)
+        # Drain on EVERY sampled-in invocation end, emitted record or not: JS and
+        # Java flush once per sampled-in invocation end regardless, and a
+        # buffering exporter has to see the same rhythm in all three languages
+        # (an on-failure/on-complete mode that emits nothing for this invocation
+        # may still be holding records another execution handed it). A sampled-out
+        # execution returns above, so it neither exports nor flushes.
+        #
+        # The drain covers this execution only: it returns once this execution's
+        # own record, if any, reached the exporters and a flush that completed
+        # after this call is done, without waiting on records scheduled after the
+        # call by other executions.
+        self._scheduler.drain(arn)
 
     # -- emission -------------------------------------------------------------
 
@@ -383,6 +450,7 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
         end_time: Any,
         output_raw: str | None,
         error: Any,
+        closing: bool = False,
     ) -> None:
         arn = state.parsed_arn
         start_time = state.start_time
@@ -436,7 +504,31 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin):
             record["error"] = {"name": error.type, "message": error.message}
         record["operations"] = self._build_operations(operations)
 
-        self._scheduler.schedule(record)
+        # INVARIANT: no record for an execution reaches the scheduler after that
+        # execution's closing record -- the exporters never see a RUNNING record
+        # follow the terminal one for the same execution.
+        #
+        # Re-check the gate here, because each hook's own `if state.closed` is a
+        # check-then-act and this is the act. Everything between the two runs
+        # customer code while holding state.lock: the input/output transforms
+        # above, a result override in _build_operations, and __del__ on any object
+        # the record carries. state.lock is a reentrant RLock on purpose (so that
+        # customer code re-entering a hook on this thread does not self-deadlock),
+        # which means such a re-entrant call can run on_invocation_end all the way
+        # through -- set `closed`, emit the terminal record, discard the state and
+        # drain it -- and then return here. Without this re-check the outer frame
+        # hands its already-built RUNNING record to the scheduler afterwards, and
+        # one execution exports ['SUCCEEDED', 'RUNNING'] from a single hook call,
+        # no concurrency required.
+        #
+        # `closing` marks the emit that set the gate (on_invocation_end's own),
+        # which by construction always runs with `closed` set and must not drop
+        # itself. It is not the same test as "the record is terminal": in
+        # on-change mode a PENDING/RETRY invocation end legitimately emits a
+        # RUNNING record, and that record is the closing one.
+        if state.closed and not closing:
+            return
+        self._scheduler.schedule(execution_arn, record)
 
 
 def workflow_insight(config: WorkflowInsightConfig) -> WorkflowInsightPlugin:

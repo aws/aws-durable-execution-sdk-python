@@ -13,6 +13,9 @@ map on ``InvocationStartInfo`` / ``InvocationEndInfo`` / ``OperationChangeInfo``
 from __future__ import annotations
 
 import datetime
+import itertools
+import threading
+import time
 from typing import Any
 
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -186,6 +189,46 @@ def test_on_failure_success_emits_nothing():
         WorkflowInsightConfig(exporters=[exporter], emit_mode="on-failure")
     )
     _run(plugin, ops=[_step("greet")], status=InvocationStatus.SUCCEEDED)
+    assert exporter.records == []
+    # No record, but the invocation end still flushed once: a sampled-in
+    # invocation end flushes whether or not this emit mode produced a record
+    # (JS/Java cadence), because the exporter may be buffering another
+    # execution's records.
+    assert exporter.flush_count == 1
+    assert _wait_until(lambda: not plugin._scheduler._worker_alive())
+
+
+def test_invocation_end_that_emits_no_record_still_flushes_exactly_once():
+    # on-complete mode with a PENDING end: the execution suspended, so nothing is
+    # emitted. JS and Java flush once per sampled-in invocation end regardless of
+    # whether a record was emitted, and a buffering exporter has to see the same
+    # rhythm in every SDK, so this end must still flush -- exactly once, not
+    # twice, and not zero times.
+    exporter = CaptureExporter()
+    plugin = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    plugin.on_invocation_start(_start(operations={}))
+    plugin.on_invocation_end(
+        _end(operations={}, status=InvocationStatus.PENDING, result=None)
+    )
+    assert exporter.records == []
+    assert exporter.flush_count == 1
+    # The worker retires, so no later flush can arrive after the invocation
+    # returned.
+    assert _wait_until(lambda: not plugin._scheduler._worker_alive())
+    assert exporter.flush_count == 1
+
+
+def test_sampled_out_invocation_end_neither_exports_nor_flushes():
+    # The sampled-out path is the one exception to the cadence above: a sampled
+    # out execution exports nothing and must not flush either, so instrumenting
+    # a fraction of executions costs the rest nothing.
+    exporter = CaptureExporter()
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], sampling_rate=0)
+    )
+    op = _step("s", op_id="1")
+    plugin.on_invocation_start(_start(operations={}))
+    plugin.on_invocation_end(_end(operations=_ops(op)))
     assert exporter.records == []
     assert exporter.flush_count == 0
     assert not plugin._scheduler._worker_alive()
@@ -587,3 +630,452 @@ def test_failed_end_is_terminal_with_end_time_and_duration():
     assert rec["endTime"] is not None
     assert rec["durationMs"] is not None
     assert rec["error"]["name"] == "StepError"
+
+
+# -- concurrent executions in one environment (LMI) ---------------------------
+
+
+class ConcurrentCaptureExporter:
+    """CaptureExporter for multi-threaded drives; appends under a lock."""
+
+    max_record_size_bytes = None
+
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+
+    def render(self, record: dict[str, Any]) -> Any:
+        return record
+
+    def export(self, record: dict[str, Any]) -> None:
+        with self._lock:
+            self.records.append(record)
+
+    def flush(self) -> None:
+        pass
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(self.records)
+
+
+def test_concurrent_executions_each_deliver_their_terminal_record():
+    # One plugin instance serves every execution its environment hosts, and LMI
+    # runs several at once. Drive the real hooks concurrently: every execution's
+    # terminal record must arrive exactly once.
+    executions = 5
+    exporter = ConcurrentCaptureExporter()
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
+    )
+    arns = [
+        f"arn:aws:lambda:us-west-2:123456789012:function:my-fn:$LATEST/durable-execution/exec-{index}/inv-1"
+        for index in range(executions)
+    ]
+    ready = threading.Barrier(executions)
+
+    def run(arn: str) -> None:
+        op = _step("s", op_id="1")
+        ready.wait(10.0)
+        plugin.on_invocation_start(_start(arn=arn, operations={}))
+        plugin.on_operation_change(
+            OperationChangeInfo(
+                execution_arn=arn, updated_operations=_ops(op), operations=_ops(op)
+            )
+        )
+        plugin.on_invocation_end(_end(arn=arn, operations=_ops(op)))
+
+    threads = [threading.Thread(target=run, args=(arn,)) for arn in arns]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30.0)
+    assert not any(thread.is_alive() for thread in threads)
+
+    terminal = [
+        record["executionArn"]
+        for record in exporter.snapshot()
+        if record["status"] == "SUCCEEDED"
+    ]
+    assert sorted(terminal) == sorted(arns)  # each exactly once, none lost
+    assert plugin._state == {}
+    # Nothing per-execution is retained in the scheduler either.
+    assert _wait_until(lambda: _scheduler_is_empty(plugin))
+
+
+def _wait_until(predicate, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return predicate()
+
+
+def _scheduler_is_empty(plugin) -> bool:
+    scheduler = plugin._scheduler
+    with scheduler._condition:
+        return not scheduler._pending and not scheduler._lanes
+
+
+class PinnedWorkerExporter:
+    """Blocks inside every ``export()`` until released, pinning the one worker."""
+
+    max_record_size_bytes = None
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def render(self, record: dict[str, Any]) -> Any:
+        return record
+
+    def export(self, record: dict[str, Any]) -> None:
+        self.entered.set()
+        self.release.wait(30.0)
+
+    def flush(self) -> None:
+        pass
+
+
+def test_reentrant_finalizer_in_a_hook_does_not_deadlock():
+    # _emit runs the scheduler's schedule() while holding the execution's lock,
+    # and schedule() releases the record it displaces inside that hold, on
+    # purpose: a record can carry customer objects whose finalizers run arbitrary
+    # code. A finalizer that re-enters a hook for the same execution therefore
+    # re-acquires that lock on the thread that already owns it, which a
+    # non-reentrant lock turns into a permanent hang of the invocation thread.
+    exporter = PinnedWorkerExporter()
+    reentered = threading.Event()
+    holder: dict[str, Any] = {}
+
+    class ReentrantPayload:
+        """A customer object that reaches the record through a content transform."""
+
+        def __del__(self) -> None:
+            if reentered.is_set():
+                return
+            reentered.set()
+            holder["plugin"].on_operation_change(
+                OperationChangeInfo(
+                    execution_arn=ARN,
+                    updated_operations=holder["ops"],
+                    operations=holder["ops"],
+                )
+            )
+
+    plugin = workflow_insight(
+        WorkflowInsightConfig(
+            exporters=[exporter],
+            emit_mode="on-change",
+            content=ContentConfig(input=lambda _value: ReentrantPayload()),
+        )
+    )
+    op = _step("s", op_id="1")
+    holder["plugin"] = plugin
+    holder["ops"] = _ops(op)
+    change = OperationChangeInfo(
+        execution_arn=ARN, updated_operations=_ops(op), operations=_ops(op)
+    )
+    try:
+        # The first emit pins the single worker inside export()...
+        plugin.on_invocation_start(_start(operations={}))
+        assert exporter.entered.wait(5.0)
+        # ...so this emit stays this execution's pending record...
+        plugin.on_operation_change(change)
+
+        returned = threading.Event()
+
+        def hook() -> None:
+            # ...and this one displaces it, releasing the displaced record (and
+            # running the payload's finalizer) on this thread, inside the lock.
+            plugin.on_operation_change(change)
+            returned.set()
+
+        thread = threading.Thread(target=hook, daemon=True)
+        thread.start()
+        assert returned.wait(10.0), (
+            "the hook never returned: a record finalizer that re-entered a hook "
+            "for the same execution deadlocked the invocation thread"
+        )
+        assert reentered.is_set()  # the finalizer really did re-enter a hook
+    finally:
+        exporter.release.set()
+
+
+# -- late hooks after the invocation ended (closed gate) ----------------------
+
+
+def test_change_hook_reaching_the_lock_after_invocation_end_emits_nothing():
+    # A change hook for a checkpoint that completed just before the invocation
+    # ended can reach the execution's lock while on_invocation_end still holds it.
+    # It must find the gate closed and emit nothing, so no RUNNING record can
+    # follow the terminal one.
+    exporter = ConcurrentCaptureExporter()
+    in_terminal_emit = threading.Event()
+    release_terminal = threading.Event()
+
+    def blocking_output(value: Any) -> Any:
+        # Runs inside _emit, which runs inside the execution's lock, and only for
+        # a terminal record (a RUNNING record carries no output).
+        in_terminal_emit.set()
+        release_terminal.wait(10.0)
+        return value
+
+    plugin = workflow_insight(
+        WorkflowInsightConfig(
+            exporters=[exporter],
+            emit_mode="on-change",
+            content=ContentConfig(output=blocking_output),
+        )
+    )
+    op = _step("s", op_id="1")
+    plugin.on_invocation_start(_start(operations={}))
+
+    end_returned = threading.Event()
+
+    def end() -> None:
+        plugin.on_invocation_end(_end(operations=_ops(op)))
+        end_returned.set()
+
+    end_thread = threading.Thread(target=end, daemon=True)
+    end_thread.start()
+    # on_invocation_end has closed the gate and is building the terminal record,
+    # still holding the execution's lock.
+    assert in_terminal_emit.wait(5.0)
+
+    change_returned = threading.Event()
+
+    def change() -> None:
+        plugin.on_operation_change(
+            OperationChangeInfo(
+                execution_arn=ARN, updated_operations=_ops(op), operations=_ops(op)
+            )
+        )
+        change_returned.set()
+
+    change_thread = threading.Thread(target=change, daemon=True)
+    change_thread.start()
+    # It cannot get past the execution's lock while the end hook holds it.
+    assert not change_returned.wait(0.25)
+
+    release_terminal.set()
+    end_thread.join(5.0)
+    change_thread.join(5.0)
+    assert end_returned.is_set()
+    assert change_returned.is_set()
+    plugin._scheduler.drain(ARN)
+
+    statuses = [record["status"] for record in exporter.snapshot()]
+    assert "SUCCEEDED" in statuses
+    # Nothing at all after the terminal record.
+    assert statuses[statuses.index("SUCCEEDED") + 1 :] == []
+    assert plugin._state == {}
+
+
+def test_invocation_end_waits_for_an_in_flight_change_hook_emit():
+    # The mirror interleaving: a change hook is already inside its emit, holding
+    # the execution's lock, when the invocation ends. Closing the gate and
+    # emitting the terminal record has to wait for it, otherwise the change hook
+    # finishes afterwards and appends a RUNNING record after the terminal one.
+    exporter = ConcurrentCaptureExporter()
+    in_change_emit = threading.Event()
+    release_change = threading.Event()
+    calls = itertools.count()
+    lock = threading.Lock()
+
+    def blocking_input(value: Any) -> Any:
+        # Runs inside _emit for every record. Block only on the change hook's
+        # emit, which is the second one (invocation start emits the first).
+        with lock:
+            index = next(calls)
+        if index == 1:
+            in_change_emit.set()
+            release_change.wait(10.0)
+        return value
+
+    plugin = workflow_insight(
+        WorkflowInsightConfig(
+            exporters=[exporter],
+            emit_mode="on-change",
+            content=ContentConfig(input=blocking_input),
+        )
+    )
+    op = _step("s", op_id="1")
+    plugin.on_invocation_start(_start(operations={}))
+
+    change_returned = threading.Event()
+
+    def change() -> None:
+        plugin.on_operation_change(
+            OperationChangeInfo(
+                execution_arn=ARN, updated_operations=_ops(op), operations=_ops(op)
+            )
+        )
+        change_returned.set()
+
+    change_thread = threading.Thread(target=change, daemon=True)
+    change_thread.start()
+    assert in_change_emit.wait(5.0)
+
+    end_returned = threading.Event()
+
+    def end() -> None:
+        plugin.on_invocation_end(_end(operations=_ops(op)))
+        end_returned.set()
+
+    end_thread = threading.Thread(target=end, daemon=True)
+    end_thread.start()
+    # The terminal record cannot be emitted while the change hook holds the lock.
+    assert not end_returned.wait(0.25)
+
+    release_change.set()
+    change_thread.join(5.0)
+    end_thread.join(10.0)
+    assert change_returned.is_set()
+    assert end_returned.is_set()
+    plugin._scheduler.drain(ARN)
+
+    statuses = [record["status"] for record in exporter.snapshot()]
+    assert "SUCCEEDED" in statuses
+    assert statuses[statuses.index("SUCCEEDED") + 1 :] == []
+    assert plugin._state == {}
+
+
+def test_operation_change_after_invocation_end_emits_nothing():
+    # A checkpoint that completed just before the invocation ended still delivers
+    # its operation-change hook. It must not recreate state, must not fabricate a
+    # start time, and must not append a RUNNING record after the terminal one.
+    exporter = CaptureExporter()
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
+    )
+    op = _step("s", op_id="1")
+    plugin.on_invocation_start(_start(operations={}))
+    plugin.on_invocation_end(_end(operations=_ops(op)))
+    before = list(exporter.records)
+    assert before and before[-1]["status"] == "SUCCEEDED"
+
+    plugin.on_operation_change(
+        OperationChangeInfo(
+            execution_arn=ARN, updated_operations=_ops(op), operations=_ops(op)
+        )
+    )
+    plugin._scheduler.drain(ARN)
+
+    assert exporter.records == before  # nothing emitted after the terminal record
+    assert [record["status"] for record in exporter.records][-1] == "SUCCEEDED"
+    # No fabricated start time: every record still reports the execution start.
+    assert {record["startTime"] for record in exporter.records} == {
+        "2026-01-01T00:00:00Z"
+    }
+    assert plugin._state == {}  # and no state entry recreated
+
+
+def test_late_invocation_start_finds_the_closed_gate_shut(monkeypatch):
+    # on_invocation_end sets `closed` and emits the terminal record while holding
+    # the execution's lock, RELEASES the lock, and only then discards the state.
+    # A concurrent on_invocation_start that already resolved that state reference
+    # gets the lock inside that window and finds a state that is closed but not
+    # yet gone; the gate has to shut it out.
+    #
+    # In production that window is sub-microsecond, so it is entered here
+    # deterministically: the late hook runs from inside _discard_state, which is
+    # exactly where the window sits.
+    exporter = CaptureExporter()
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
+    )
+    op = _step("s", op_id="1")
+    plugin.on_invocation_start(_start(operations={}, input_value="World"))
+    state = plugin._state[ARN]
+    real_discard = plugin._discard_state
+    late = threading.Event()
+
+    def discard_after_a_late_start(arn: str) -> None:
+        if not late.is_set():
+            late.set()
+            assert state.closed  # the window: closed, emitted, lock free, state alive
+            plugin.on_invocation_start(
+                _start(
+                    operations=_ops(_step("late", op_id="2")),
+                    input_value="late-input",
+                    execution_start_time=T1,
+                )
+            )
+        real_discard(arn)
+
+    monkeypatch.setattr(plugin, "_discard_state", discard_after_a_late_start)
+    plugin.on_invocation_end(_end(operations=_ops(op)))
+    plugin._scheduler.drain(ARN)
+
+    assert late.is_set()  # the late hook really did run inside the window
+    statuses = [record["status"] for record in exporter.records]
+    assert "SUCCEEDED" in statuses
+    # Nothing follows the terminal record...
+    assert statuses[statuses.index("SUCCEEDED") + 1 :] == []
+    # ...and the closed state was not re-seeded on the way out. A late start that
+    # got past the gate adopts its own operation snapshot, input and start time,
+    # which is the observable effect of the gate: the emission it would also have
+    # produced is stopped a second time by the re-check in _emit, so these are
+    # what pin the hook's own check.
+    assert state.cached_input == "World"
+    assert state.start_time == T0
+    assert [info.name for info in state.operations.values()] == ["s"]
+    assert plugin._state == {}
+
+
+def test_reentrant_invocation_end_stops_the_outer_running_record():
+    # The gate at the top of each hook is a check-then-act, and _emit is the act.
+    # Between them _emit runs customer code while holding the execution's lock --
+    # here a content transform -- and the lock is reentrant, so that customer code
+    # can run on_invocation_end to completion on this same thread: `closed` set,
+    # terminal record scheduled, state discarded and drained. The outer frame then
+    # resumes with a fully built RUNNING record, which must NOT reach the
+    # exporters after the terminal one. One hook call, no concurrency.
+    exporter = ConcurrentCaptureExporter()
+    holder: dict[str, Any] = {}
+    reentered = threading.Event()
+
+    def reentering_input(value: Any) -> Any:
+        if not reentered.is_set():
+            reentered.set()
+            holder["plugin"].on_invocation_end(_end(operations=_ops(_step("s"))))
+        return value
+
+    plugin = workflow_insight(
+        WorkflowInsightConfig(
+            exporters=[exporter],
+            emit_mode="on-change",
+            content=ContentConfig(input=reentering_input),
+        )
+    )
+    holder["plugin"] = plugin
+
+    # On a bounded thread, so a regression that makes the lock non-reentrant
+    # again fails here instead of hanging the suite.
+    returned = threading.Event()
+
+    def hook() -> None:
+        plugin.on_invocation_start(_start(operations={}))
+        returned.set()
+
+    thread = threading.Thread(target=hook, daemon=True)
+    thread.start()
+    assert returned.wait(10.0), (
+        "the hook never returned: re-entering on_invocation_end from customer "
+        "code inside _emit deadlocked the invocation thread"
+    )
+    thread.join(5.0)
+    assert not thread.is_alive()
+    assert reentered.is_set()  # the re-entrant end hook really did run
+    # Force everything the plugin scheduled to reach the exporters, so a record
+    # that slipped past the gate is observed here rather than left pending.
+    plugin._scheduler.drain(ARN)
+
+    statuses = [record["status"] for record in exporter.snapshot()]
+    assert statuses == ["SUCCEEDED"], (
+        "a non-terminal record reached the exporters after the terminal one for "
+        f"the same execution: {statuses}"
+    )
+    assert _wait_until(lambda: not plugin._scheduler._worker_alive())
