@@ -312,15 +312,39 @@ each durable span in the same invocation.
 ### Log Correlation
 
 When `enrich_logger=True` (the default), the plugin installs a logging filter on
-the root logger at invocation start. The filter stamps the active OTel trace
-context onto every emitted log record using these attributes:
+the root logger at invocation start. The filter stamps the trace context that is
+active for the emitting invocation onto log records, using these attributes:
 
 - `traceId`: 32-char hex trace identifier
 - `spanId`: 16-char hex span identifier
 - `otelTraceSampled`: boolean indicating if the trace is sampled
 
-These attributes are only set when a valid span context is active, so any log
-formatter or schema must treat the fields as optional.
+Which span a record carries follows the emitting thread: the operation attempt
+span inside a step, the context span inside a child context, and the Invocation
+span for top-level handler code. A span you start yourself on the execution
+trace is used for records emitted inside it. A span the runtime already had
+active when the invocation started — the Lambda invocation span the ADOT layer
+creates under X-Ray active tracing — is the parent of the Invocation span rather
+than a substitute for it, so a top-level record still names the Invocation span.
+Correlation holds from the first statement of the handler, before any durable
+operation, and holds when several invocations run concurrently in one
+environment (Lambda Managed Instances): the plugin claims the invocation thread
+at invocation start and the SDK runs the handler body in a copy of that thread's
+context, so each record resolves to the invocation that emitted it rather than
+to whichever invocation started last.
+
+Two cases are left unstamped, so any log formatter or schema must treat the
+fields as optional:
+
+- No invocation is open — for example during environment initialization or
+  teardown.
+- The record is emitted on a thread that carries no invocation claim, while more
+  than one invocation is open in the environment. A thread your code starts
+  itself is such a thread, since Python does not copy context into a new thread,
+  as is the SDK's background checkpointing thread. With exactly one invocation
+  open, such a record is correlated to it. With several open there is no way to
+  tell which one it belongs to, and an uncorrelated record is preferred over one
+  attributed to another execution.
 
 ## Verification
 

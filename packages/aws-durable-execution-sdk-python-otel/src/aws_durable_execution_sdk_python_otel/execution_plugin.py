@@ -164,6 +164,10 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._sampling_intent: DurableSamplingIntent | None = None
         self._workflow_span: Span | None = None
         self._invocation_span: Span | None = None
+        # The span that was already current when this invocation's body began,
+        # recorded by _record_enclosing_span. Used only to resolve log
+        # correlation; see get_current_span_context.
+        self._enclosing_span_context: SpanContext | None = None
         self._operation_spans: dict[str, Span] = {}
         # CONTEXT operations that emitted a durable START hook this invocation.
         # A context absent from this set is checkpointless (for example, a FLAT
@@ -299,9 +303,21 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             self._detach_context(key)
 
     def get_current_span_context(self) -> SpanContext | None:
-        """Return the active span context for log correlation (see log_filter)."""
+        """Return the active span context for log correlation (see log_filter).
+
+        A span that became current *inside* this invocation wins: the attempt
+        span inside a step, the context span inside a child context, or a span
+        the handler body starts itself. The span that enclosed this invocation is
+        excluded, so top-level handler records resolve to the Invocation span
+        rather than to the Workflow span this plugin makes current at invocation
+        start, which the SDK carries into the thread running the handler body.
+        """
         span_context = trace.get_current_span().get_span_context()
-        if span_context and span_context.is_valid:
+        if (
+            span_context
+            and span_context.is_valid
+            and not self._is_enclosing_span(span_context)
+        ):
             return span_context
         for candidate in (self._invocation_span, self._workflow_span):
             if candidate is not None:
@@ -309,6 +325,26 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 if ctx and ctx.is_valid:
                     return ctx
         return None
+
+    def _record_enclosing_span(self) -> None:
+        """Record the span that is current now, as this invocation's body begins.
+
+        Called at the end of ``on_invocation_start``, on the invocation thread,
+        which is the context the SDK copies into the thread that runs the handler
+        body. That is the Workflow span this plugin just attached, so it is less
+        specific than the Invocation span for a top-level record.
+        """
+        span_context = trace.get_current_span().get_span_context()
+        self._enclosing_span_context = span_context if span_context.is_valid else None
+
+    def _is_enclosing_span(self, span_context: SpanContext) -> bool:
+        """Whether ``span_context`` is the span that enclosed this invocation."""
+        enclosing = self._enclosing_span_context
+        return (
+            enclosing is not None
+            and enclosing.trace_id == span_context.trace_id
+            and enclosing.span_id == span_context.span_id
+        )
 
     # ------------------------------------------------------------------
     # Links
@@ -512,6 +548,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                 ),
             )
 
+        # Last, so that everything this hook makes current is accounted for.
+        self._record_enclosing_span()
+
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
         """Install a non-recording placeholder for the execution-scoped Workflow span.
 
@@ -693,13 +732,12 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         logger.debug("Durable operation started: %s", info)
         if not self._tracing_enabled:
             return
-        # Runs on the thread that drives the durable operation, which is the
-        # thread running the handler body and not the thread the
-        # invocation-start hook claimed. Claim it too, so records emitted from
-        # top-level handler code are correlated to this invocation even while
-        # another invocation is open in the same process. Claimed after the
-        # tracing-enabled gate, so a hook arriving after the invocation ended
-        # cannot re-register a finished invocation.
+        # Runs on the thread that drives the durable operation. The thread
+        # running the handler body already carries this invocation's claim,
+        # propagated from the invocation thread, but a branch of a map or
+        # parallel runs on a pool thread that does not, so claim it here.
+        # Claimed after the tracing-enabled gate, so a hook arriving after the
+        # invocation ended cannot re-register a finished invocation.
         bind_invocation(self)
         if info.operation_type is OperationType.CONTEXT:
             with self._lock:

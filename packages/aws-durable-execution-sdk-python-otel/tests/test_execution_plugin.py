@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -32,6 +33,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import (
     NonRecordingSpan,
+    Span,
     SpanContext,
     SpanKind,
     TraceFlags,
@@ -48,6 +50,7 @@ from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtel
 from aws_durable_execution_sdk_python_otel.durable_parent_span import (
     DurableParentSpan,
 )
+from aws_durable_execution_sdk_python_otel.log_filter import OtelContextLogFilter
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 
 
@@ -1644,3 +1647,73 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
 
     plugin.on_invocation_end(_invocation_end_info())
     assert plugin._context_tokens == {}
+
+
+# ---------------------------------------------------------------------------
+# Log correlation
+# ---------------------------------------------------------------------------
+def _stamped_span_id() -> str:
+    """Return the span ID the log filter stamps on a record emitted right here."""
+    record = logging.LogRecord(
+        name="test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="message",
+        args=(),
+        exc_info=None,
+    )
+    OtelContextLogFilter().filter(record)
+    return str(getattr(record, "spanId", None))
+
+
+def _span_id_hex(span: Span) -> str:
+    """Return a span's ID in the hex form the log filter stamps."""
+    return format(span.get_span_context().span_id, "016x")
+
+
+def test_top_level_log_names_invocation_span_not_the_attached_workflow_span():
+    """A top-level handler record names the Invocation span, not the Workflow span.
+
+    This plugin makes the Workflow span current at invocation start so
+    auto-instrumented spans join the execution trace, and the SDK carries the
+    invocation thread's context into the thread that runs the handler body. The
+    Workflow span spans the whole execution, so it is less specific than the
+    Invocation span for a record emitted by one invocation's top-level code.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    try:
+        assert plugin._invocation_span is not None
+        assert plugin._workflow_span is not None
+        # Confirm the shape under test: the Workflow span is the current span.
+        assert trace.get_current_span() is plugin._workflow_span
+
+        stamped = _stamped_span_id()
+
+        assert stamped == _span_id_hex(plugin._invocation_span)
+        assert stamped != _span_id_hex(plugin._workflow_span)
+    finally:
+        plugin.on_invocation_end(_invocation_end_info())
+
+
+def test_step_attempt_log_names_the_attempt_span():
+    """A record inside a step names the attempt span, not the Invocation span.
+
+    Excluding the Workflow span from log correlation must not also exclude spans
+    that become current inside the invocation.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    try:
+        plugin.on_user_function_start(_step_start_info("step-1"))
+        attempt_span = plugin._get_span("step-1:attempt:1")
+        assert attempt_span is not None
+        assert plugin._invocation_span is not None
+
+        stamped = _stamped_span_id()
+
+        assert stamped == _span_id_hex(attempt_span)
+        assert stamped != _span_id_hex(plugin._invocation_span)
+    finally:
+        plugin.on_invocation_end(_invocation_end_info())

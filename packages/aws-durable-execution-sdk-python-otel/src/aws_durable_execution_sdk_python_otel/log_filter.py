@@ -32,24 +32,28 @@ So the binding is per invocation, not per filter:
       which is per-thread and per-task and so cannot be overwritten by a
       concurrent invocation.
     - ``unbind_invocation`` marks the invocation closed.
-    - A record emitted on a thread no invocation has claimed resolves to the one
-      open invocation, if exactly one is open. That covers the SDK's user-code
-      worker threads: the invocation-start hook runs on the Lambda handler
-      thread, the handler body runs on a pool thread the plugin has not been
-      given control on yet, and Python does not propagate context into new
-      threads.
-    - If several invocations are open and the thread is unclaimed, the record is
-      left unstamped. An unattributed record is a smaller defect than one
+    - The claim reaches the thread running the handler body because the SDK
+      submits that work with a copy of the invocation thread's context, taken
+      after the invocation-start hook has run. Records from top-level handler
+      code therefore resolve to their own invocation, including the first
+      statement of the handler, before any durable operation has claimed the
+      thread directly.
+    - A record emitted on a thread that carries no claim resolves to the one
+      open invocation, if exactly one is open. Threads the SDK does not submit
+      the invocation's context into land here: a thread customer code starts
+      itself, since Python does not copy context into a new thread, and the
+      SDK's background checkpointing thread.
+    - If several invocations are open and the thread carries no claim, the record
+      is left unstamped. An unattributed record is a smaller defect than one
       attributed to another customer execution.
 
 Reading the active span straight from the OTel context (as the Java plugin's
 static ``MdcSpanEnricher`` does) is not sufficient here: the invocation span is
-never attached to the OTel context, and the context of the handler thread -- the
-only place the plugin attaches anything at invocation scope -- is not visible on
-the worker thread that runs the handler body. Top-level records would silently
-lose correlation. The plugin's ``get_current_span_context()`` still reads the
-OTel context first, so records emitted inside a step or child context resolve to
-the active operation span exactly as before.
+never attached to the OTel context, so a record emitted between durable
+operations would find no durable span current and silently lose correlation. The
+plugin's ``get_current_span_context()`` still reads the OTel context first, so
+records emitted inside a step or child context resolve to the active operation
+span exactly as before.
 """
 
 from __future__ import annotations

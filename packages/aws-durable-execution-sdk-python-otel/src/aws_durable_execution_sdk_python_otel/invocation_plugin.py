@@ -162,6 +162,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._sampling_intent: DurableSamplingIntent | None = None
         self._workflow_span: Span | None = None
         self._span_time_floor_ns: int | None = None
+        # The span that was already current when this invocation's body began,
+        # recorded by _record_enclosing_span. Used only to resolve log
+        # correlation; see get_current_span_context.
+        self._enclosing_span_context: SpanContext | None = None
         # Maps operation ID (None for root) to the active span.
         self._operation_spans: dict[str | None, Span] = {}
         # Replay state supplied by CONTEXT operation START hooks. Missing
@@ -300,17 +304,29 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         """Return the span context to use for log correlation.
 
         Resolution order:
-        1. The same-trace span attached to the OTel thread-local context.
+        1. A same-trace span that became current *inside* this invocation.
            Inside a step this is the active attempt span, and inside a child
            context this is the active context span (attached in
-           on_user_function_start). Unrelated ambient spans are ignored so logs
-           stay correlated to the durable execution trace.
+           on_user_function_start); a span the handler body starts itself also
+           lands here. Such a span is more specific than the Invocation span, so
+           it wins. Unrelated ambient spans are ignored so logs stay correlated
+           to the durable execution trace.
         2. The invocation span from the plugin registry. This is the path used
            for top-level handler code: the invocation span is never attached to
            the worker thread's context, so the registry is the only way to
            resolve it. It also covers code between top-level operations, where
            detaching the operation scope restores a context with no durable
            span.
+
+        The span that enclosed this invocation is deliberately excluded from
+        step 1. Under X-Ray active tracing with the ADOT layer, the layer's
+        Lambda invocation span is current before this invocation starts and is
+        on the execution trace, and the SDK carries it into the thread running
+        the handler body. It is also the parent of this plugin's Invocation
+        span, so preferring it would point top-level records one level up the
+        tree from the invocation they were emitted by. Anything that becomes
+        current after the enclosing span was recorded is inside the invocation
+        and still takes precedence.
 
         Returns:
             A valid SpanContext, or None if no span is active.
@@ -320,6 +336,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             span_context
             and span_context.is_valid
             and span_context.trace_id == self._execution_trace_id
+            and not self._is_enclosing_span(span_context)
         ):
             return span_context
 
@@ -330,6 +347,28 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 return invocation_context
 
         return None
+
+    def _record_enclosing_span(self) -> None:
+        """Record the span that is current now, as this invocation's body begins.
+
+        Called at the end of ``on_invocation_start``, on the invocation thread,
+        which is the context the SDK copies into the thread that runs the
+        handler body. Whatever span is current at that moment existed before the
+        invocation did -- the ADOT layer's Lambda invocation span, in the X-Ray
+        active tracing shape -- and is therefore less specific than this
+        plugin's own Invocation span.
+        """
+        span_context = trace.get_current_span().get_span_context()
+        self._enclosing_span_context = span_context if span_context.is_valid else None
+
+    def _is_enclosing_span(self, span_context: SpanContext) -> bool:
+        """Whether ``span_context`` is the span that enclosed this invocation."""
+        enclosing = self._enclosing_span_context
+        return (
+            enclosing is not None
+            and enclosing.trace_id == span_context.trace_id
+            and enclosing.span_id == span_context.span_id
+        )
 
     # ------------------------------------------------------------------
     # Context resolution
@@ -603,6 +642,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             attributes=self._extract_attributes(info),
         )
 
+        # Last, so that everything this hook makes current is accounted for.
+        self._record_enclosing_span()
+
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
         """Install a non-recording placeholder for the execution-scoped Workflow span.
 
@@ -760,13 +802,12 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         logger.debug("Durable operation started: %s", info)
         if not self._tracing_enabled:
             return
-        # Runs on the thread that drives the durable operation, which is the
-        # thread running the handler body and not the thread the
-        # invocation-start hook claimed. Claim it too, so records emitted from
-        # top-level handler code are correlated to this invocation even while
-        # another invocation is open in the same process. Claimed after the
-        # tracing-enabled gate, so a hook arriving after the invocation ended
-        # cannot re-register a finished invocation.
+        # Runs on the thread that drives the durable operation. The thread
+        # running the handler body already carries this invocation's claim,
+        # propagated from the invocation thread, but a branch of a map or
+        # parallel runs on a pool thread that does not, so claim it here.
+        # Claimed after the tracing-enabled gate, so a hook arriving after the
+        # invocation ended cannot re-register a finished invocation.
         bind_invocation(self)
         if info.operation_type is OperationType.CONTEXT:
             # The user-function hook owns the span, but this durable START hook

@@ -35,6 +35,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import (
     NonRecordingSpan,
+    Span,
     SpanContext,
     SpanKind,
     StatusCode,
@@ -132,6 +133,45 @@ def _invocation_end_info(
         status=status,
         error=None,
     )
+
+
+def _same_trace_ambient_context() -> SpanContext:
+    """Return the span context of an ADOT-style enclosing Lambda span.
+
+    Under X-Ray active tracing the execution trace is the ambient trace, so the
+    span the ADOT layer has current before the invocation starts is on the
+    execution trace and becomes the parent of the Invocation span.
+    """
+    return SpanContext(
+        trace_id=_to_otel_trace_id(EXECUTION_ARN, START_TIME),
+        span_id=int("1234567890abcdef", 16),
+        is_remote=True,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        trace_state=TraceState(),
+    )
+
+
+def _stamped_span_id(plugin: InvocationOtelPlugin) -> str:
+    """Return the span ID the log filter stamps on a record emitted right here."""
+    record = logging.LogRecord(
+        name="test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="message",
+        args=(),
+        exc_info=None,
+    )
+    OtelContextLogFilter().filter(record)
+    assert getattr(record, "traceId", None) == format(
+        plugin._execution_trace_id or 0, "032x"
+    )
+    return str(getattr(record, "spanId", None))
+
+
+def _span_id_hex(span: Span) -> str:
+    """Return a span's ID in the hex form the log filter stamps."""
+    return format(span.get_span_context().span_id, "016x")
 
 
 def _user_function_start_info(
@@ -424,6 +464,119 @@ def test_invocation_span_parents_to_same_trace_ambient_span():
     assert workflow.context.trace_state == trace_state
     assert invocation.parent.span_id == ambient_context.span_id
     assert workflow.parent.span_id == derive_execution_root_span_id(EXECUTION_ARN)
+
+
+def test_top_level_log_names_invocation_span_not_the_enclosing_ambient_span():
+    """A top-level handler record names the Invocation span, not its parent.
+
+    In the X-Ray active tracing plus ADOT shape the layer's Lambda span is
+    current before the invocation starts, is on the execution trace, and is the
+    parent of the Invocation span. The SDK carries the invocation thread's
+    context into the thread that runs the handler body, so that span is current
+    where top-level handler code runs. It is one level up the tree from the
+    invocation that emitted the record, so the Invocation span is the more
+    specific answer and the one a top-level record must carry.
+    """
+    plugin, _ = _create_plugin()
+    ambient_context = _same_trace_ambient_context()
+    ambient = NonRecordingSpan(ambient_context)
+    token = otel_context.attach(trace.set_span_in_context(ambient, Context()))
+    try:
+        plugin.on_invocation_start(_invocation_start_info())
+        invocation_span = plugin._get_span(None)
+        assert invocation_span is not None
+        # Confirm the shape under test: same trace, and the ambient span really
+        # is the parent of the Invocation span.
+        assert plugin._execution_trace_id == ambient_context.trace_id
+        assert invocation_span.parent is not None
+        assert invocation_span.parent.span_id == ambient_context.span_id
+
+        stamped = _stamped_span_id(plugin)
+
+        assert stamped == _span_id_hex(invocation_span)
+        assert stamped != format(ambient_context.span_id, "016x")
+
+        # The same holds between top-level operations: once a step's scope is
+        # released the enclosing ambient span is current again.
+        plugin.on_user_function_start(_user_function_start_info("step-1"))
+        plugin.on_user_function_end(_user_function_end_info("step-1"))
+        assert trace.get_current_span().get_span_context().span_id == (
+            ambient_context.span_id
+        )
+        assert _stamped_span_id(plugin) == _span_id_hex(invocation_span)
+    finally:
+        plugin.on_invocation_end(_invocation_end_info())
+        otel_context.detach(token)
+
+
+def test_durable_operation_spans_win_over_the_enclosing_ambient_span():
+    """A record inside a durable operation names that operation's span.
+
+    The enclosing ambient span is excluded from log correlation, but a span that
+    becomes current inside the invocation is more specific than the Invocation
+    span and still wins. Both operation shapes that attach a scope are covered:
+    a STEP attempt and a child CONTEXT.
+    """
+    plugin, _ = _create_plugin()
+    ambient = NonRecordingSpan(_same_trace_ambient_context())
+    token = otel_context.attach(trace.set_span_in_context(ambient, Context()))
+    try:
+        plugin.on_invocation_start(_invocation_start_info())
+        invocation_span = plugin._get_span(None)
+        assert invocation_span is not None
+
+        plugin.on_user_function_start(_user_function_start_info("step-1"))
+        attempt_span = plugin._get_span("step-1:attempt:1")
+        assert attempt_span is not None
+        assert _stamped_span_id(plugin) == _span_id_hex(attempt_span)
+        assert _stamped_span_id(plugin) != _span_id_hex(invocation_span)
+        plugin.on_user_function_end(_user_function_end_info("step-1"))
+
+        plugin.on_user_function_start(
+            _user_function_start_info("ctx-1", operation_type=OperationType.CONTEXT)
+        )
+        context_span = plugin._get_span("ctx-1")
+        assert context_span is not None
+        assert _stamped_span_id(plugin) == _span_id_hex(context_span)
+        assert _stamped_span_id(plugin) != _span_id_hex(invocation_span)
+    finally:
+        # The child context never ends, so invocation cleanup releases its scope.
+        plugin.on_invocation_end(_invocation_end_info())
+        otel_context.detach(token)
+
+
+def test_customer_span_started_in_the_handler_wins_over_the_invocation_span():
+    """A record inside a span the handler body started names that span.
+
+    A span the customer creates while the invocation is running is on the
+    execution trace, because the enclosing ambient span is current when it
+    starts, and it is not the enclosing span itself, so it is the most specific
+    span for a record emitted inside it.
+    """
+    plugin, _ = _create_plugin()
+    ambient = NonRecordingSpan(_same_trace_ambient_context())
+    token = otel_context.attach(trace.set_span_in_context(ambient, Context()))
+    try:
+        plugin.on_invocation_start(_invocation_start_info())
+        invocation_span = plugin._get_span(None)
+        assert invocation_span is not None
+
+        customer_span = plugin._provider.get_tracer("customer").start_span(
+            "customer-work"
+        )
+        customer_token = otel_context.attach(
+            trace.set_span_in_context(customer_span, otel_context.get_current())
+        )
+        try:
+            stamped = _stamped_span_id(plugin)
+            assert stamped == _span_id_hex(customer_span)
+            assert stamped != _span_id_hex(invocation_span)
+        finally:
+            otel_context.detach(customer_token)
+            customer_span.end()
+    finally:
+        plugin.on_invocation_end(_invocation_end_info())
+        otel_context.detach(token)
 
 
 def test_pre_terminal_placeholder_preserves_same_trace_tracestate():

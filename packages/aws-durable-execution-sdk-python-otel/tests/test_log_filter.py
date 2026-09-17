@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import threading
 from datetime import UTC, datetime
 
+import opentelemetry.context as otel_context
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
     OperationStatus,
@@ -17,11 +19,22 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationType,
     UserFunctionStartInfo,
 )
+from opentelemetry import trace
+from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import (
+    NonRecordingSpan,
+    SpanContext,
+    TraceFlags,
+    TraceState,
+)
 
 from aws_durable_execution_sdk_python_otel import log_filter as log_filter_module
+from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
+    _to_otel_trace_id,
+)
 from aws_durable_execution_sdk_python_otel.log_filter import (
     OtelContextLogFilter,
     install_log_filter,
@@ -250,12 +263,12 @@ def test_concurrent_invocations_each_stamp_their_own_span_context():
 
 
 def test_record_on_an_unclaimed_thread_uses_the_only_open_invocation():
-    """A thread the plugin never ran on still correlates to the one invocation.
+    """A thread carrying no claim still correlates to the one open invocation.
 
-    The SDK runs the handler body on a worker thread it creates after the
-    invocation-start hook has run, and Python does not propagate context into a
-    new thread, so that thread carries no claim. With a single invocation open
-    there is no ambiguity to resolve.
+    A thread that carries no claim -- one customer code started itself, since
+    ``threading.Thread`` does not copy the starting thread's context -- has no
+    invocation of its own. With a single invocation open there is no ambiguity to
+    resolve, so the record is correlated to it.
     """
     plugin, _ = _create_plugin(enrich_logger=False)
     plugin.on_invocation_start(_invocation_start_info())
@@ -277,27 +290,178 @@ def test_record_on_an_unclaimed_thread_uses_the_only_open_invocation():
         plugin.on_invocation_end(_invocation_end_info())
 
 
-def test_record_on_an_unclaimed_thread_is_left_alone_when_two_are_open():
-    """An unattributable record is not correlated to an arbitrary invocation."""
+def test_context_propagated_into_a_worker_resolves_the_claiming_invocation():
+    """A worker started from a copy of the claiming thread's context resolves it.
+
+    This is what the SDK does for the thread it runs the handler body on: the
+    invocation-start hook claims the invocation thread, and the handler body runs
+    in a copy of that thread's context. Both invocations are open when either
+    record is emitted, so the number of open invocations cannot resolve them and
+    only the propagated claim can.
+    """
+    both_emitted = threading.Barrier(2, timeout=10)
+    stamped: dict[str, tuple[str | None, str | None]] = {}
+    own: dict[str, tuple[str, str]] = {}
+    failures: list[BaseException] = []
+    lock = threading.Lock()
+
+    def invocation(owner: str) -> None:
+        """Run one invocation the way the SDK does, on its own thread."""
+        try:
+            plugin, _ = _create_plugin(enrich_logger=False)
+            plugin.on_invocation_start(_invocation_start_info(suffix=owner))
+            try:
+                with lock:
+                    own[owner] = _own_identifiers(plugin)
+
+                def emit() -> None:
+                    record = _make_record()
+                    # Emit only once both invocations are open, so the
+                    # single-open-invocation fallback cannot resolve the record.
+                    both_emitted.wait()
+                    OtelContextLogFilter().filter(record)
+                    with lock:
+                        stamped[owner] = _stamped(record)
+
+                # A fresh copy per submission: one Context cannot be entered
+                # twice concurrently, which is why the SDK copies at each submit.
+                worker = threading.Thread(
+                    target=contextvars.copy_context().run,
+                    args=(emit,),
+                    name=f"worker-{owner}",
+                )
+                worker.start()
+                worker.join(timeout=10)
+            finally:
+                plugin.on_invocation_end(_invocation_end_info())
+        except BaseException as error:  # noqa: BLE001
+            with lock:
+                failures.append(error)
+            both_emitted.abort()
+
+    threads = [
+        threading.Thread(target=invocation, args=(owner,), name=f"invocation-{owner}")
+        for owner in ("a", "b")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not failures
+    assert own["a"] != own["b"]
+    assert stamped == own
+
+
+def test_concurrent_invocations_with_enclosing_ambient_spans_stay_separate():
+    """Excluding the enclosing ambient span does not blur two open invocations.
+
+    Each invocation runs with its own ADOT-style enclosing span current, on its
+    own execution trace, and both are open when either record is emitted. Each
+    record must carry its own invocation's Invocation span: not the other
+    invocation's span, and not its own enclosing span.
+    """
+    both_started = threading.Barrier(2, timeout=10)
+    stamped: dict[str, tuple[str | None, str | None]] = {}
+    invocation_spans: dict[str, tuple[str, str]] = {}
+    ambient_span_ids: dict[str, str] = {}
+    failures: list[BaseException] = []
+    lock = threading.Lock()
+    ambient_span_id_by_owner = {
+        "a": int("1111aaaa1111aaaa", 16),
+        "b": int("2222bbbb2222bbbb", 16),
+    }
+
+    def invocation(owner: str) -> None:
+        try:
+            plugin, _ = _create_plugin(enrich_logger=False)
+            # The enclosing span sits on this execution's own trace, which is
+            # what the ADOT layer produces under X-Ray active tracing.
+            ambient_context = SpanContext(
+                trace_id=_to_otel_trace_id(f"{EXECUTION_ARN}{owner}", START_TIME),
+                span_id=ambient_span_id_by_owner[owner],
+                is_remote=True,
+                trace_flags=TraceFlags(TraceFlags.SAMPLED),
+                trace_state=TraceState(),
+            )
+            token = otel_context.attach(
+                trace.set_span_in_context(NonRecordingSpan(ambient_context), Context())
+            )
+            try:
+                plugin.on_invocation_start(_invocation_start_info(suffix=owner))
+                try:
+                    invocation_span = plugin._get_span(None)
+                    assert invocation_span is not None
+                    span_context = invocation_span.get_span_context()
+                    with lock:
+                        invocation_spans[owner] = (
+                            format(span_context.trace_id, "032x"),
+                            format(span_context.span_id, "016x"),
+                        )
+                        ambient_span_ids[owner] = format(
+                            ambient_context.span_id, "016x"
+                        )
+                    both_started.wait()
+                    record = _make_record()
+                    OtelContextLogFilter().filter(record)
+                    with lock:
+                        stamped[owner] = _stamped(record)
+                finally:
+                    plugin.on_invocation_end(_invocation_end_info(suffix=owner))
+            finally:
+                otel_context.detach(token)
+        except BaseException as error:  # noqa: BLE001
+            with lock:
+                failures.append(error)
+            both_started.abort()
+
+    threads = [
+        threading.Thread(target=invocation, args=(owner,), name=f"invocation-{owner}")
+        for owner in ("a", "b")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not failures, failures
+    assert invocation_spans["a"] != invocation_spans["b"]
+    assert stamped == invocation_spans
+    for owner in ("a", "b"):
+        assert stamped[owner][1] != ambient_span_ids[owner]
+
+
+def test_record_on_a_customer_thread_is_not_attributed_to_another_invocation():
+    """A thread customer code starts itself is never given the wrong invocation.
+
+    ``threading.Thread`` does not copy the starting thread's context, so a thread
+    a handler creates directly carries no claim. This case is not the SDK's
+    handler worker, which is submitted with a copy of the invocation's context.
+    With two invocations open there is nothing to resolve such a record against,
+    and it is left uncorrelated rather than attributed to either invocation.
+    """
     first, _ = _create_plugin(enrich_logger=False)
     second, _ = _create_plugin(enrich_logger=False)
     first.on_invocation_start(_invocation_start_info(suffix="first"))
     second.on_invocation_start(_invocation_start_info(suffix="second"))
     try:
-        records: list[logging.LogRecord] = []
+        wrong_identifiers = {_own_identifiers(first), _own_identifiers(second)}
+        stamped: list[tuple[str | None, str | None]] = []
 
         def emit() -> None:
             record = _make_record()
             OtelContextLogFilter().filter(record)
-            records.append(record)
+            stamped.append(_stamped(record))
 
-        worker = threading.Thread(target=emit, name="unclaimed")
+        worker = threading.Thread(target=emit, name="customer-created")
         worker.start()
         worker.join(timeout=10)
 
-        assert len(records) == 1
-        assert not hasattr(records[0], "traceId")
-        assert not hasattr(records[0], "spanId")
+        assert len(stamped) == 1
+        # The rule that matters: never another execution's trace.
+        assert stamped[0] not in wrong_identifiers
+        # And with no claim and no single open invocation, nothing is stamped.
+        assert stamped[0] == (None, None)
     finally:
         first.on_invocation_end(_invocation_end_info())
         second.on_invocation_end(_invocation_end_info())
