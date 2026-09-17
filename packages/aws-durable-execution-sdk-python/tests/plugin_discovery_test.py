@@ -439,3 +439,118 @@ def test_discovery_accepts_a_plugin_class_as_factory() -> None:
     plugin = result[0](INVOCATION_START_INFO)
     assert isinstance(plugin, _InfoAwarePlugin)
     assert plugin.info is INVOCATION_START_INFO
+
+
+def test_explicit_plugin_instance_is_rejected_with_its_position() -> None:
+    """A plugin instance in ``plugins`` fails configuration, not every invocation.
+
+    An instance is not callable, so the per-invocation factory call raises
+    ``TypeError``, which the executor logs and swallows -- the plugin silently
+    never runs. The position is asserted because a caller passing several entries
+    has no other way to tell which one is wrong.
+    """
+    with pytest.raises(PluginLoadError) as error:
+        load_configured_plugins(
+            [_plugin_a_factory, _PluginB(), _plugin_b_factory],  # type: ignore[list-item]
+            environment={},
+        )
+
+    assert "plugins[1]" in str(error.value)
+    assert "must be a callable plugin factory" in str(error.value)
+    assert "_PluginB" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("non_callable", "expected_type_name"),
+    [
+        (_PluginA(), "_PluginA"),
+        (object(), "builtins.object"),
+        ("not-a-factory", "builtins.str"),
+        (None, "builtins.NoneType"),
+    ],
+)
+def test_explicit_non_callable_entries_are_rejected(
+    non_callable: object,
+    expected_type_name: str,
+) -> None:
+    """Callability is the only property checkable without building an instance."""
+    with pytest.raises(PluginLoadError) as error:
+        load_configured_plugins([non_callable], environment={})  # type: ignore[list-item]
+
+    assert "plugins[0]" in str(error.value)
+    assert expected_type_name in str(error.value)
+
+
+def test_explicit_plugin_class_is_accepted_as_a_factory() -> None:
+    """Calling a class constructs an instance, so a class is a factory in Python.
+
+    This is the language difference against the TypeScript SDK, which rejects a
+    class because calling one there throws. Rejecting classes here would break
+    ``plugins=[MyPlugin]``, which works whenever ``__init__`` takes the info.
+    """
+
+    class _InfoAwarePlugin(DurableInstrumentationPlugin):
+        def __init__(self, info: InvocationStartInfo) -> None:
+            self.info = info
+
+    result = load_configured_plugins([_InfoAwarePlugin], environment={})
+
+    assert result == [_InfoAwarePlugin]
+    plugin = result[0](INVOCATION_START_INFO)
+    assert isinstance(plugin, _InfoAwarePlugin)
+    assert plugin.info is INVOCATION_START_INFO
+
+
+def test_explicit_plain_function_is_accepted_as_a_factory() -> None:
+    result = load_configured_plugins([_plugin_a_factory], environment={})
+
+    assert result == [_plugin_a_factory]
+    assert isinstance(result[0](INVOCATION_START_INFO), _PluginA)
+
+
+def test_explicit_callable_object_is_accepted_as_a_factory() -> None:
+    """A ``__call__`` instance is the documented way to hold handler-lifetime state."""
+
+    class _CallableFactory:
+        def __init__(self) -> None:
+            self.calls: list[InvocationStartInfo] = []
+
+        def __call__(self, info: InvocationStartInfo) -> _PluginA:
+            self.calls.append(info)
+            return _PluginA()
+
+    factory = _CallableFactory()
+
+    result = load_configured_plugins([factory], environment={})
+
+    assert result == [factory]
+    assert isinstance(result[0](INVOCATION_START_INFO), _PluginA)
+    assert factory.calls == [INVOCATION_START_INFO]
+
+
+def test_explicit_entries_are_validated_before_entry_points_are_imported() -> None:
+    """Explicit entries are checked first, so a valid provider is not imported.
+
+    Importing a provider runs third-party module code. A configuration that is
+    already invalid should fail before that happens, and the failure should name
+    the invalid entry rather than whatever the import did.
+    """
+    entry_point = _FakeEntryPoint("a", _plugin_a_factory)
+
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry_point],
+        ) as entry_points,
+        patch.object(
+            _FakeEntryPoint, "load", side_effect=AssertionError("must not import")
+        ) as load,
+        pytest.raises(PluginLoadError, match=r"plugins\[0\]"),
+    ):
+        load_configured_plugins(
+            [_PluginA()],  # type: ignore[list-item]
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
+        )
+
+    entry_points.assert_not_called()
+    load.assert_not_called()

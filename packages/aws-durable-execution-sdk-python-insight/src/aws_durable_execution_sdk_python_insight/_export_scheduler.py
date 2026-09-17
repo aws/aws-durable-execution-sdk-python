@@ -31,6 +31,23 @@ from aws_durable_execution_sdk_python_insight.types import InsightExporter
 _logger = logging.getLogger("aws_durable_execution_sdk_python_insight")
 
 
+# Consecutive export-worker deaths tolerated before asynchronous export is
+# disabled for good.
+#
+# A replacement worker is started by whoever is waiting, so a worker that dies on
+# every attempt is retried as fast as threads can be created, and each retry
+# leaves the waiting drain -- an invocation thread -- exactly where it was. The
+# bound converts that unbounded retry into a bounded one.
+#
+# The bound is not 1, because a single death can come from a transient condition
+# that the next attempt would not hit, and disabling instrumentation for the rest
+# of the environment's life on one transient is too coarse. A deterministic defect
+# reproduces on every attempt, so a small constant separates the two cases. Every
+# completed export attempt and every completed flush resets the count, so only
+# deaths with no work completed in between accumulate.
+_MAX_CONSECUTIVE_WORKER_FAULTS = 3
+
+
 class _ExportState:
     """One execution's export bookkeeping, and its slot in the export queue.
 
@@ -122,6 +139,10 @@ class _ExportScheduler:
         self._flush_barrier = 0
         self._worker: threading.Thread | None = None
         self._disabled = False
+        # Export workers that died without completing any work, counted since the
+        # last completed export attempt or flush. Only deaths accumulate here, so
+        # a worker that keeps making progress never approaches the bound.
+        self._worker_faults = 0
 
     def schedule(self, execution: _ExportState, record: dict[str, Any]) -> None:
         """Replace this execution's pending snapshot; never runs exporters inline."""
@@ -169,8 +190,10 @@ class _ExportScheduler:
         Two paths return without exporting or flushing anything, because the
         permanent ``_disabled`` latch means no record will ever be exported: the
         latch was already set when this call started, or it is set while this call
-        is parked. Failing to start the export worker sets that latch, so a drain
-        that hits a worker-start failure also returns without a flush.
+        is parked. Two things set that latch, and a drain that meets either
+        returns without a flush: failing to start the export worker, and an export
+        worker that has died ``_MAX_CONSECUTIVE_WORKER_FAULTS`` times without
+        completing any work.
         """
         failed_pending: _Dropped | None = None
         start_error: Exception | None = None
@@ -237,6 +260,34 @@ class _ExportScheduler:
 
     # -- internals ------------------------------------------------------------
 
+    def _disable_locked(self) -> _Dropped:
+        """Latch asynchronous export off for good and surrender everything queued.
+
+        The latch is permanent, so no record the scheduler still holds will ever
+        be exported: keeping any of them would pin customer objects for the
+        remaining life of the environment. Empty the queue, which is the
+        scheduler's only per-execution structure, and hand what came out back to
+        the CALLER to release once it is outside the lock -- a record can carry
+        customer objects whose finalizers run arbitrary code, and so can an
+        execution whose hook state the plugin has already discarded.
+
+        Every parked waiter is woken, because the latch means the export and the
+        flush it is waiting for are never going to happen.
+
+        Callers hold ``self._condition``.
+        """
+        self._disabled = True
+        self._worker = None
+        dropped = [(execution, execution.pending_record) for execution in self._pending]
+        for execution, _ in dropped:
+            execution.pending_record = None
+        self._pending = {}
+        self._flush_requested = False
+        self._flush_barrier = 0
+        self._flush_in_flight = None
+        self._condition.notify_all()
+        return dropped
+
     def _ensure_worker_locked(self) -> tuple[_Dropped | None, Exception | None]:
         if self._worker is not None and self._worker.is_alive():
             return None, None
@@ -249,27 +300,7 @@ class _ExportScheduler:
         try:
             worker.start()
         except Exception as exc:  # noqa: BLE001 - instrumentation must not escape hooks
-            self._disabled = True
-            self._worker = None
-            # Nothing is retained once the plugin has given up on asynchronous
-            # export for good: the queue is the scheduler's only per-execution
-            # structure, so emptying it drops every reference it holds. Both the
-            # records and the execution objects go back to the CALLER to release
-            # outside the lock -- a record can carry customer objects whose
-            # finalizers run arbitrary code, and so can an execution whose hook
-            # state the plugin has already discarded.
-            failed_pending = [
-                (execution, execution.pending_record) for execution in self._pending
-            ]
-            for execution, _ in failed_pending:
-                execution.pending_record = None
-            self._pending = {}
-            self._flush_requested = False
-            self._flush_barrier = 0
-            self._flush_in_flight = None
-            # Release every waiter; the permanent disable latch means no record
-            # will ever be exported.
-            self._condition.notify_all()
+            failed_pending = self._disable_locked()
             return failed_pending, exc
         return None, None
 
@@ -281,20 +312,57 @@ class _ExportScheduler:
     def _run(self) -> None:
         # The worker slot must be empty whenever no worker is running, or
         # _ensure_worker_locked() never starts a replacement and every later
-        # record sits pending forever. The loop's own exits clear it, but a
-        # BaseException from a customer exporter -- asyncio.CancelledError is one,
-        # so an exporter that merely touches asyncio can raise it without writing
-        # `raise` -- unwinds past them, and a thread that is unwinding still
-        # reports is_alive(), so the slot would stay occupied by a dead thread.
-        # Vacate it here, on every exit path, and wake anyone parked so they can
-        # ask for the replacement.
+        # record sits pending forever. The loop's own exits clear it, but an
+        # exception that unwinds out of the loop passes them by, and a thread that
+        # is unwinding still reports is_alive(), so the slot would stay occupied
+        # by a dead thread. Vacate it here, on every exit path, and wake anyone
+        # parked so they can ask for the replacement.
+        #
+        # A replacement alone is not enough when the death repeats. The waiter
+        # that starts the replacement runs the same work again, so a fault the
+        # work reproduces every time is retried as fast as threads can be
+        # created, and the drain that keeps starting them never returns: the
+        # invocation hangs and the environment fills with dead threads.
+        # _export() and _flush() contain everything a customer exporter can
+        # raise, so a fault reaching here comes from the scheduler's own code or
+        # from a failure-reporting call that a customer object subverted, and
+        # neither is something a retry can be expected to clear. Count
+        # consecutive faults and give up on asynchronous export at the bound.
+        faulted = True
+        dropped: _Dropped | None = None
+        gave_up = False
         try:
             self._run_loop()
+            faulted = False
         finally:
             with self._condition:
                 if self._worker is threading.current_thread():
                     self._worker = None
+                if faulted:
+                    self._worker_faults += 1
+                    if self._worker_faults >= _MAX_CONSECUTIVE_WORKER_FAULTS:
+                        # Releasing the waiters matters more than delivering the
+                        # records. A waiter is an invocation thread inside
+                        # on_invocation_end, so leaving it parked turns an
+                        # instrumentation defect into a stalled customer
+                        # execution; dropping records loses instrumentation data
+                        # only. The drop is reported below, so the scheduler
+                        # never claims delivery it did not make.
+                        dropped = self._disable_locked()
+                        gave_up = True
                 self._condition.notify_all()
+            # A dropped record can run customer finalizers, so release it outside
+            # the lock. The exception that brought us here keeps unwinding once
+            # this block finishes, into the thread's traceback, with nothing
+            # swallowed.
+            del dropped
+            if gave_up:
+                _logger.warning(
+                    "workflow-insight: export worker died %d times without "
+                    "completing any work; disabling asynchronous export and "
+                    "dropping every record still queued",
+                    self._worker_faults,
+                )
 
     def _run_loop(self) -> None:
         while True:
@@ -331,16 +399,21 @@ class _ExportScheduler:
                 # nothing will ever export that snapshot again. The bookkeeping
                 # must therefore advance whatever export() did: skip it and
                 # execution.exported_seq never reaches a waiter's want_seq, so a
-                # drain parked on this execution is never released. _export()
-                # already contains every Exception, but a BaseException from a
-                # customer exporter unwinds through here. Count the attempt in a
-                # finally and let the exception continue out to the wrapper --
-                # and into the thread's traceback -- with nothing swallowed.
+                # drain parked on this execution is never released. Count the
+                # attempt in a finally so that holds even if _export() raises.
+                #
+                # Advancing here means the record was OFFERED to every exporter,
+                # not that every exporter accepted it. _export() reports each
+                # exporter's own failure and moves to the next, so no exporter is
+                # skipped because another one failed, and coverage never stands
+                # for a delivery that was never attempted.
                 #
                 # The record and its bookkeeping are one object, so there is no
                 # second lookup left to come back empty: publishing cannot miss.
+                exported = False
                 try:
                     self._export(record)
+                    exported = True
                 finally:
                     # Release the exported record before re-locking: a custom
                     # finalizer may re-enter schedule().
@@ -350,6 +423,11 @@ class _ExportScheduler:
                         if seq > execution.exported_seq:
                             execution.exported_seq = seq
                         execution.exported_at = self._export_count
+                        if exported:
+                            # This worker completed work, so any earlier worker
+                            # death was not the start of a fault the work
+                            # reproduces every time.
+                            self._worker_faults = 0
                         self._condition.notify_all()
                 continue
 
@@ -367,11 +445,39 @@ class _ExportScheduler:
                         self._flushes_completed += 1
                         if flush_covers > self._flushed_through:
                             self._flushed_through = flush_covers
+                        self._worker_faults = 0
                     self._condition.notify_all()
             with self._condition:
                 if not self._pending and not self._flush_requested:
                     self._worker = None
                     return
+
+    # Isolation of one exporter's failure from the others is what both loops below
+    # exist for, and it holds for every exception type a customer exporter can
+    # raise, BaseException included.
+    #
+    # A BaseException is normally not caught, because KeyboardInterrupt,
+    # SystemExit and asyncio.CancelledError each mean that the operation the
+    # current thread is running must stop. None of those three can arrive here
+    # that way. This is the export worker thread: the interpreter raises
+    # KeyboardInterrupt only in the main thread, threading discards a SystemExit
+    # raised in a worker thread, and nothing cancels this thread because nothing
+    # outside the scheduler knows it exists. A BaseException seen at these call
+    # sites was therefore raised by the exporter itself, which makes it a report
+    # of a defective exporter rather than an instruction to this thread. An
+    # exporter that touches asyncio can raise CancelledError without writing
+    # `raise`, so the case is reachable without a customer intending it.
+    #
+    # Containing it here is what keeps the two guarantees the worker owes. Every
+    # remaining exporter still receives the record, so one exporter cannot make
+    # the others miss a snapshot that is then discarded. And the flush the waiting
+    # drain asked for still completes, so the drain is released by this worker
+    # instead of by a replacement that runs the same failing exporter and dies the
+    # same way.
+    #
+    # The containment is confined to these two call sites. Nowhere else does the
+    # scheduler catch a BaseException, and neither loop runs on an invocation
+    # thread.
 
     def _export(self, record: dict[str, Any]) -> None:
         for exporter in self._exporters:
@@ -380,7 +486,7 @@ class _ExportScheduler:
                     record, exporter.max_record_size_bytes, exporter.render
                 )
                 exporter.export(shaped)
-            except Exception as exc:  # noqa: BLE001 - one exporter must not break others
+            except BaseException as exc:  # noqa: BLE001 - one exporter must not break others
                 _logger.warning(
                     "workflow-insight: exporter %s failed: %s",
                     type(exporter).__name__,
@@ -391,7 +497,7 @@ class _ExportScheduler:
         for exporter in self._exporters:
             try:
                 exporter.flush()
-            except Exception as exc:  # noqa: BLE001 - one exporter must not break others
+            except BaseException as exc:  # noqa: BLE001 - one exporter must not break others
                 _logger.warning(
                     "workflow-insight: exporter %s flush failed: %s",
                     type(exporter).__name__,

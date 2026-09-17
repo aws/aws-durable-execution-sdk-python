@@ -85,6 +85,38 @@ def _load_factory(
     return cast(DurableInstrumentationPluginFactory, factory)
 
 
+def _validate_explicit_factories(
+    explicit_plugins: Sequence[DurableInstrumentationPluginFactory] | None,
+) -> list[DurableInstrumentationPluginFactory]:
+    """Check that every explicitly passed plugin entry is callable.
+
+    Each entry is called once per invocation to build that invocation's plugin
+    instance. An entry that is not callable can never be called, so
+    :meth:`PluginExecutor._create_plugins` raises ``TypeError`` on every
+    invocation, logs it and continues without that plugin -- telemetry is lost
+    for the lifetime of the function, and nothing fails. Raising here converts
+    that into one configuration failure while the handler is being initialized.
+    The position is named because a caller passing several entries cannot
+    otherwise tell which one is wrong.
+
+    A plugin *class* is callable and stays valid: calling it constructs an
+    instance, so ``plugins=[MyPlugin]`` is a factory whenever ``MyPlugin``
+    accepts the info argument. Only a plugin *instance*, or any other
+    non-callable value, is rejected.
+    """
+    factories = list(explicit_plugins or [])
+    for index, factory in enumerate(factories):
+        if not callable(factory):
+            raise PluginLoadError(
+                f"Durable instrumentation plugin at plugins[{index}] must be a "
+                "callable plugin factory taking an InvocationStartInfo, but is "
+                f"{_qualified_type_name(factory)}. Pass a factory rather than a "
+                "plugin instance, for example "
+                "plugins=[lambda info: MyPlugin(...)]."
+            )
+    return factories
+
+
 def load_configured_plugins(
     explicit_plugins: Sequence[DurableInstrumentationPluginFactory] | None,
     *,
@@ -105,7 +137,7 @@ def load_configured_plugins(
     build the same plugin type will now both be registered.
     """
 
-    resolved_factories = list(explicit_plugins or [])
+    resolved_factories = _validate_explicit_factories(explicit_plugins)
     resolved_environment = os.environ if environment is None else environment
     plugin_names = _parse_configured_plugin_names(resolved_environment)
     if not plugin_names:

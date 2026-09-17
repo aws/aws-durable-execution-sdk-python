@@ -89,13 +89,12 @@ class InsightExporter(Protocol):
         It must return promptly. The invocation that triggered it cannot return
         until it does, so a slow flush is billed to the customer's invocation.
 
-        Failures are isolated: an ``Exception`` is logged, never retried, never
-        propagated into the execution, and never prevents another exporter from
-        flushing. A ``BaseException`` (``asyncio.CancelledError`` is one) is not
-        contained -- it skips the remaining exporters for that flush and ends the
-        export worker -- but it still never reaches the execution, and the
-        waiting invocation is released by a replacement worker running the flush
-        it asked for.
+        Failures are isolated, whatever is raised. An exception is logged, never
+        retried, never propagated into the execution, and never prevents another
+        exporter from flushing. That holds for a ``BaseException`` too
+        (``asyncio.CancelledError`` is one): the export worker is not the thread
+        such a signal is ever addressed to, so one raised here is a report of a
+        defective exporter and is contained exactly like any other failure.
         """
 
 

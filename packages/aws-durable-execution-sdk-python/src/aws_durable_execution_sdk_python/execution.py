@@ -200,6 +200,16 @@ def durable_execution(
     plugin_host = PluginHost(load_configured_plugins(plugins))
 
     @plugin_host.handle_durable_output
+    # The metadata of whatever function the host wrapper wraps becomes the
+    # decorated handler's own, because the host wrapper applies
+    # functools.wraps() to it. This function takes a third argument the returned
+    # handler does not accept, so without this line inspect.signature() on the
+    # handler advertises a required `plugin_executor` parameter, and a
+    # signature-aware runtime or test harness rejects or misinvokes a handler
+    # that in fact takes (event, context). Copying the user function's metadata
+    # here puts it at the head of the chain the host wrapper then extends, so
+    # the handler reports the user function's signature, name and docstring.
+    @functools.wraps(func)
     def wrapper(
         event: Any, context: LambdaContext, plugin_executor: PluginExecutor
     ) -> MutableMapping[str, Any]:

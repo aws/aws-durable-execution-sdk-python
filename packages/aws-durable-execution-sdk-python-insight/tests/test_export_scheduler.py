@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from aws_durable_execution_sdk_python_insight._export_scheduler import (
+    _MAX_CONSECUTIVE_WORKER_FAULTS,
     _ExportScheduler,
     _ExportState,
 )
@@ -117,6 +118,62 @@ class BaseExceptionExporter(CaptureExporter):
         super().export(record)
 
 
+class AlwaysBaseExceptionExportExporter(CaptureExporter):
+    """Raises a ``BaseException`` out of every ``export()`` call, and counts them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lock = threading.Lock()
+        self.export_attempts = 0
+
+    def export(self, record: dict[str, Any]) -> None:
+        with self.lock:
+            self.export_attempts += 1
+        raise ExporterBaseException("export exploded")
+
+    def exports(self) -> int:
+        with self.lock:
+            return self.export_attempts
+
+
+class AlwaysBaseExceptionFlushExporter(CaptureExporter):
+    """Raises a ``BaseException`` out of every ``flush()`` call, and counts them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lock = threading.Lock()
+        self.flush_attempts = 0
+
+    def flush(self) -> None:
+        with self.lock:
+            self.flush_attempts += 1
+        raise ExporterBaseException("flush exploded")
+
+    def flushes(self) -> int:
+        with self.lock:
+            return self.flush_attempts
+
+
+def _drain_off_thread(
+    scheduler: _ArnScheduler, arn: str
+) -> tuple[threading.Thread, threading.Event]:
+    """Start drain() on its own thread and return it with its completion event.
+
+    A regression that parks the drain would block whichever thread called it, so
+    no test may call drain() on the thread it asserts from. Waiting on the event
+    with a timeout turns such a regression into a failure instead of a hung run.
+    """
+    returned = threading.Event()
+
+    def drain() -> None:
+        scheduler.drain(arn)
+        returned.set()
+
+    thread = threading.Thread(target=drain, daemon=True)
+    thread.start()
+    return thread, returned
+
+
 def test_latest_pending_coalesces_within_one_execution() -> None:
     exporter = BlockingExporter()
     scheduler = _ArnScheduler([exporter])
@@ -177,6 +234,131 @@ def test_base_exception_from_export_still_releases_drain() -> None:
     assert exporter.exports == 1
     assert exporter.calls == [("flush", None)]
     assert _wait_until(lambda: not scheduler._worker_alive())
+
+
+def test_always_failing_flush_releases_the_drain_without_a_respawn() -> None:
+    # A drain is only released by a flush that COMPLETED, and a worker that dies
+    # is replaced by whoever is waiting. An exporter whose flush() raises a
+    # BaseException on every call therefore used to make the drain start a
+    # replacement worker, which ran the same flush and died the same way, without
+    # bound: the flush was attempted thousands of times per second, thousands of
+    # threads were created, and the invocation parked on that drain never
+    # returned. The flush has to be attempted once, the failure reported, and the
+    # flush counted as completed so the drain returns.
+    #
+    # The wait is bounded, so the regression this pins fails the test rather than
+    # blocking the run.
+    exporter = AlwaysBaseExceptionFlushExporter()
+    scheduler = _ArnScheduler([exporter])
+    scheduler.schedule(ARN_A, _record("terminal"))
+    thread, returned = _drain_off_thread(scheduler, ARN_A)
+
+    assert returned.wait(10.0), "drain() never returned while flush() kept failing"
+    thread.join(5.0)
+    assert not thread.is_alive()
+    assert _wait_until(lambda: not scheduler._worker_alive())
+
+    # One attempt, not one per replacement worker.
+    assert exporter.flushes() == 1
+    # The record still reached the exporter, and the failing flush was not retried
+    # after the drain returned either.
+    assert exporter.calls == [("export", "terminal")]
+    assert exporter.flushes() == 1
+
+
+def test_base_exception_from_one_exporter_never_skips_the_next() -> None:
+    # Consuming a record from the pending slot is what advances the completion
+    # bookkeeping, and nothing re-exports a consumed snapshot. A first exporter
+    # that raised a BaseException used to abort the fan-out loop, so every
+    # exporter after it missed that record permanently while the drain was
+    # released as though the record had been delivered. Each exporter's failure
+    # has to be contained at its own call, so the next exporter still receives the
+    # record that the bookkeeping counts as offered.
+    failing = AlwaysBaseExceptionExportExporter()
+    healthy = CaptureExporter()
+    scheduler = _ArnScheduler([failing, healthy])
+    scheduler.schedule(ARN_A, _record("terminal"))
+    thread, returned = _drain_off_thread(scheduler, ARN_A)
+
+    assert returned.wait(10.0), "drain() never returned after export() raised"
+    thread.join(5.0)
+    assert not thread.is_alive()
+    assert _wait_until(lambda: not scheduler._worker_alive())
+
+    assert healthy.calls == [("export", "terminal"), ("flush", None)]
+    # Offered once. The snapshot is gone from the pending slot, so a retry is not
+    # available and must not be implied.
+    assert failing.exports() == 1
+
+
+def test_base_exception_from_one_exporters_flush_never_skips_the_next() -> None:
+    # The same containment at the flush call. A first exporter whose flush()
+    # raises a BaseException must not stop a later exporter from flushing, and the
+    # flush must still count as completed so the waiting drain is released.
+    failing = AlwaysBaseExceptionFlushExporter()
+    healthy = CaptureExporter()
+    scheduler = _ArnScheduler([failing, healthy])
+    scheduler.schedule(ARN_A, _record("terminal"))
+    thread, returned = _drain_off_thread(scheduler, ARN_A)
+
+    assert returned.wait(10.0), "drain() never returned while flush() kept failing"
+    thread.join(5.0)
+    assert not thread.is_alive()
+    assert _wait_until(lambda: not scheduler._worker_alive())
+
+    assert healthy.calls == [("export", "terminal"), ("flush", None)]
+    assert failing.flushes() == 1
+
+
+class _FaultingScheduler(_ArnScheduler):
+    """Kills every export worker with a ``BaseException`` before it does any work.
+
+    Stands in for a fault in the scheduler's own code rather than in an exporter:
+    exporter failures are contained at the exporter call, so they can no longer
+    reach the worker's exit path, and this is the only way left to drive it.
+    """
+
+    def __init__(self, exporters: list[Any]) -> None:
+        super().__init__(exporters)
+        self.runs = 0
+
+    def _run_loop(self) -> None:
+        with self._condition:
+            self.runs += 1
+        raise ExporterBaseException("worker exploded")
+
+
+def test_worker_deaths_stop_at_the_bound_instead_of_respawning_forever() -> None:
+    # A waiting drain starts a replacement worker for every worker that dies, so a
+    # fault the worker reproduces on every attempt is retried as fast as threads
+    # can be created and the drain never returns. Releasing the waiter matters
+    # more than delivering the records, because the waiter is an invocation
+    # thread: bound the replacements, then latch asynchronous export off, which
+    # wakes every waiter and drops what is queued.
+    exporter = CaptureExporter()
+    scheduler = _FaultingScheduler([exporter])
+    scheduler.schedule(ARN_A, _record("terminal"))
+    thread, returned = _drain_off_thread(scheduler, ARN_A)
+
+    assert returned.wait(10.0), "drain() never returned while the worker kept dying"
+    thread.join(5.0)
+    assert not thread.is_alive()
+
+    with scheduler._condition:
+        assert scheduler.runs == _MAX_CONSECUTIVE_WORKER_FAULTS
+        assert scheduler._worker_faults == _MAX_CONSECUTIVE_WORKER_FAULTS
+        # The latch is what released the drain, and it retains nothing.
+        assert scheduler._disabled
+        assert scheduler._pending == {}
+        assert scheduler._flush_requested is False
+        assert scheduler._flush_in_flight is None
+    # No further worker is started once the latch is set, so the count cannot
+    # creep up after the drain returned.
+    scheduler.schedule(ARN_B, _record("after-the-latch"))
+    scheduler.drain(ARN_B)
+    with scheduler._condition:
+        assert scheduler.runs == _MAX_CONSECUTIVE_WORKER_FAULTS
+    assert exporter.calls == []
 
 
 def test_drain_flushes_after_export() -> None:

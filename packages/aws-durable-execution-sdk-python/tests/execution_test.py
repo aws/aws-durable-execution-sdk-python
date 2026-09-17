@@ -1,6 +1,7 @@
 """Tests for execution."""
 
 import datetime
+import inspect
 import json
 import threading
 import time
@@ -4051,3 +4052,82 @@ def test_durable_execution_decorator_with_plugins_and_boto3_client():
 
 
 # endregion Plugin Integration Tests
+
+
+# region Handler Metadata Tests
+
+
+def _bare_decorated_handler():
+    """The ``@durable_execution`` form, desugared so the test keeps both objects."""
+
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        """Handler docstring."""
+        return {"result": "success"}
+
+    return durable_execution(test_handler), test_handler
+
+
+def _plugin_decorated_handler():
+    """The ``@durable_execution(plugins=[...])`` form, desugared the same way.
+
+    This form takes a different path through the decorator: the first call
+    returns a ``functools.partial``, which the second call applies to the user
+    function.
+    """
+
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        """Handler docstring."""
+        return {"result": "success"}
+
+    decorator = durable_execution(plugins=[plugin_factory(_RecordingPlugin())])
+    return decorator(test_handler), test_handler
+
+
+@pytest.mark.parametrize(
+    "build_handler",
+    [_bare_decorated_handler, _plugin_decorated_handler],
+    ids=["bare", "with_plugins"],
+)
+def test_decorated_handler_signature_is_event_and_context(build_handler) -> None:
+    """The decorated handler accepts exactly the two Lambda handler arguments.
+
+    A Lambda runtime, or a test harness that inspects a handler before calling
+    it, reads ``inspect.signature()``. Any parameter reported there that the
+    callable does not accept makes the handler look uninvokable, or invites a
+    caller to pass an argument that raises. The SDK's own invocation body takes a
+    third argument -- this invocation's ``PluginExecutor`` -- so this pins the
+    public signature to the two arguments the handler really takes, for both
+    decorator forms.
+    """
+    handler, _user_function = build_handler()
+
+    signature = inspect.signature(handler)
+
+    assert list(signature.parameters) == ["event", "context"]
+    assert "plugin_executor" not in signature.parameters
+    # Binding is the operation a signature-aware caller actually performs.
+    signature.bind({}, _make_lambda_context())
+
+
+@pytest.mark.parametrize(
+    "build_handler",
+    [_bare_decorated_handler, _plugin_decorated_handler],
+    ids=["bare", "with_plugins"],
+)
+def test_decorated_handler_reports_user_function_metadata(build_handler) -> None:
+    """The handler identifies itself as the user's function, not as SDK internals.
+
+    Logging, ``help()`` and error messages read ``__name__`` and ``__doc__``. The
+    SDK wraps the user function twice, so without the user function's metadata at
+    the head of the chain the handler names an internal wrapper instead.
+    ``inspect.unwrap()`` reaching the user function is what makes
+    ``inspect.signature()`` report that function's parameters.
+    """
+    handler, user_function = build_handler()
+
+    assert handler.__name__ == user_function.__name__
+    assert handler.__doc__ == user_function.__doc__
+    assert inspect.unwrap(handler) is user_function
+
+
+# endregion Handler Metadata Tests
