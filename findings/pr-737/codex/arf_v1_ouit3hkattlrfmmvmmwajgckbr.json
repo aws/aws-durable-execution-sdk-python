@@ -1,0 +1,1 @@
+{"finding_digest":"75113d9d409cd712b195632c04984a0c685c210cd54c4a73efcb6a4b3d519673","finding_id":"arf_v1_ouit3hkattlrfmmvmmwajgckbr","identity_key":"core/execution.py::durable_execution.wrapper::two-argument-handler-signature","pull_request_number":737,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}

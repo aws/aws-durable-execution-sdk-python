@@ -1,0 +1,1 @@
+{"finding_digest":"4137429c17ca6b14a098e536874ac28eee43fd6cb5063acc0b9c5b3d4f04da08","finding_id":"arf_v1_ie3ufhaxzjvrjiey4u3ioswcr3","identity_key":"core/plugin_discovery.py::load_configured_plugins::explicit-factory-validation","pull_request_number":737,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
