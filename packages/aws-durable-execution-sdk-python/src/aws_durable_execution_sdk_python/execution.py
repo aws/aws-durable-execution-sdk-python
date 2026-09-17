@@ -29,6 +29,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPluginFactory,
     PluginExecutor,
+    PluginHost,
 )
 from aws_durable_execution_sdk_python.plugin_discovery import (
     load_configured_plugins,
@@ -191,10 +192,16 @@ def durable_execution(
 
     logger.debug("Starting durable execution handler...")
 
-    plugin_executor = PluginExecutor(load_configured_plugins(plugins))
+    # Only the resolved factory list is handler-lifetime. The plugin instances,
+    # and the invocation metadata the hooks read, are built per invocation by
+    # PluginHost.invocation() and live in that invocation's frame -- see the
+    # plugin_executor parameter below.
+    plugin_host = PluginHost(load_configured_plugins(plugins))
 
-    @plugin_executor.handle_durable_output
-    def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
+    @plugin_host.handle_durable_output
+    def wrapper(
+        event: Any, context: LambdaContext, plugin_executor: PluginExecutor
+    ) -> MutableMapping[str, Any]:
         invocation_input: DurableExecutionInvocationInput
         service_client: DurableServiceClient
 

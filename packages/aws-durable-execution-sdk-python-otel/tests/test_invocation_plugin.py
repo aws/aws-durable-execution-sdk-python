@@ -381,7 +381,7 @@ def test_log_filter_uses_invocation_trace_when_ambient_trace_is_rejected():
             exc_info=None,
         )
 
-        OtelContextLogFilter(plugin).filter(record)
+        OtelContextLogFilter().filter(record)
 
         invocation_span = plugin._get_span(None)
         assert invocation_span is not None

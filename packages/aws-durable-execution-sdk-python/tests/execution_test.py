@@ -2,6 +2,7 @@
 
 import datetime
 import json
+import threading
 import time
 import warnings
 from collections.abc import Sequence
@@ -2729,10 +2730,10 @@ def _make_invocation_input(mock_client, next_marker="", input_payload="{}"):
     )
 
 
-def _make_lambda_context():
+def _make_lambda_context(request_id: str = "test-request"):
     """Helper to create a standard mock Lambda context."""
     ctx = Mock()
-    ctx.aws_request_id = "test-request"
+    ctx.aws_request_id = request_id
     ctx.client_context = None
     ctx.identity = None
     ctx._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
@@ -3835,6 +3836,122 @@ def test_durable_execution_builds_a_plugin_per_invocation():
     for plugin in built:
         assert plugin.calls.count("invocation_start") == 1
         assert plugin.calls.count("invocation_end:SUCCEEDED") == 1
+
+
+class _TaggedRecordingPlugin(DurableInstrumentationPlugin):
+    """Records the hooks it receives, tagging each with its own identity."""
+
+    def __init__(self) -> None:
+        self.invocation_starts: list[str | None] = []
+        self.invocation_ends: list[str] = []
+        self.operation_names: list[str | None] = []
+
+    def on_invocation_start(self, info):
+        self.invocation_starts.append(info.request_id)
+
+    def on_invocation_end(self, info):
+        self.invocation_ends.append(f"{info.request_id}:{info.status.value}")
+
+    def on_operation_start(self, info):
+        self.operation_names.append(info.name)
+
+    def on_operation_end(self, info):
+        self.operation_names.append(info.name)
+
+    def on_user_function_start(self, info):
+        self.operation_names.append(info.name)
+
+    def on_user_function_end(self, info):
+        self.operation_names.append(info.name)
+
+
+def test_durable_execution_keeps_overlapping_invocations_isolated():
+    """Two invocations in flight at once never see each other's hooks.
+
+    This is the Lambda Managed Instances case: one decorated handler, one
+    process, two concurrent executions in separate threads. A barrier holds both
+    invocations inside their user function at the same time, so both
+    ``on_invocation_start`` hooks have already fired before either operation
+    runs, and neither invocation returns until the other has run its operation.
+    Running the two invocations sequentially would not pin this -- the defect it
+    guards against is a per-invocation slot being overwritten while both
+    invocations are live.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    built: dict[str, _TaggedRecordingPlugin] = {}
+    built_lock = threading.Lock()
+
+    def build_plugin(info) -> _TaggedRecordingPlugin:
+        plugin = _TaggedRecordingPlugin()
+        with built_lock:
+            built[str(info.request_id)] = plugin
+        return plugin
+
+    timeout = 30
+    # Released only once both invocations are inside their user function, so both
+    # invocation-start hooks have fired and both invocations are live.
+    both_in_user_code = threading.Barrier(2, timeout=timeout)
+    # b runs its operation first; a runs its operation afterwards, while b is
+    # still inside its user function waiting on a.
+    b_ran_operation = threading.Event()
+    a_ran_operation = threading.Event()
+
+    @durable_execution(plugins=[build_plugin])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        tag = event["tag"]
+        both_in_user_code.wait()
+        if tag == "b":
+            context.step(lambda _: "ok", name="step-b")
+            b_ran_operation.set()
+            assert a_ran_operation.wait(timeout)
+        else:
+            assert b_ran_operation.wait(timeout)
+            context.step(lambda _: "ok", name="step-a")
+            a_ran_operation.set()
+        return {"result": tag}
+
+    results: dict[str, Any] = {}
+
+    def invoke(tag: str) -> None:
+        results[tag] = test_handler(
+            _make_invocation_input(mock_client, input_payload=f'{{"tag": "{tag}"}}'),
+            _make_lambda_context(request_id=f"request-{tag}"),
+        )
+
+    threads = [
+        threading.Thread(target=invoke, args=(tag,), name=f"invocation-{tag}")
+        for tag in ("a", "b")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=timeout)
+    for thread in threads:
+        assert not thread.is_alive(), f"{thread.name} did not finish"
+
+    assert results["a"]["Status"] == InvocationStatus.SUCCEEDED.value
+    assert results["b"]["Status"] == InvocationStatus.SUCCEEDED.value
+
+    # One instance per invocation, and each one keyed to its own request.
+    assert sorted(built) == ["request-a", "request-b"]
+
+    for tag in ("a", "b"):
+        plugin = built[f"request-{tag}"]
+        # Exactly its own invocation hooks: not the other invocation's request
+        # id, not two copies of its own, not zero because the other invocation's
+        # teardown got there first.
+        assert plugin.invocation_starts == [f"request-{tag}"]
+        assert plugin.invocation_ends == [f"request-{tag}:SUCCEEDED"]
+        # Only its own operation. The other invocation's step ran while this one
+        # was live, so a shared plugin slot would show up here.
+        assert f"step-{tag}" in plugin.operation_names
+        other = "b" if tag == "a" else "a"
+        assert f"step-{other}" not in plugin.operation_names
 
 
 def test_durable_execution_with_failing_plugin_factory_does_not_break_execution():

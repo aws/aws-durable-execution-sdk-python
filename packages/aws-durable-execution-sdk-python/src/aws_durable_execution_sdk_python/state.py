@@ -282,6 +282,9 @@ class ExecutionState:
         self._current_checkpoint_token: str = initial_checkpoint_token
         self._operations: dict[str, Operation] = dict(operations)
         self._service_client: DurableServiceClient = service_client
+        # Invocation-scoped, like this state object itself: PluginHost builds one
+        # executor per invocation, so holding it here cannot make one
+        # invocation's plugin instances visible to another.
         self._plugin_executor: PluginExecutor = plugin_executor
         self._operations_lock: Lock = Lock()
 

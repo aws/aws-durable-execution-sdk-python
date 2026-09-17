@@ -430,7 +430,10 @@ Structured trace context and sampling decision returned by context extractors.
 
 The logging filter (and its installer) used to stamp trace context onto log
 records. Installed automatically when `enrich_logger=True`; exported for manual
-setups.
+setups, where `install_log_filter(target_logger)` attaches it to a logger of your
+choice. The filter carries no invocation identity of its own: it resolves the
+invocation a record belongs to at emit time, so one filter serves every
+invocation the environment runs, including concurrent ones.
 
 ## Requirements
 

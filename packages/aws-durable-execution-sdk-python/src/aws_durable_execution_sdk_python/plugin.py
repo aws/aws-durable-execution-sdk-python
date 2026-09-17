@@ -5,7 +5,7 @@ import copy
 import datetime
 import functools
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
@@ -477,18 +477,51 @@ def _factory_name(factory: object) -> str:
 
 
 class PluginExecutor:
+    """One invocation's plugin instances, metadata and dispatch.
+
+    Scoped to a single invocation, not to the handler. Everything mutable here --
+    the instances built for this invocation, the start info the end hook derives
+    from, the operations provider, the dispatch pool -- describes one invocation,
+    so a single instance shared by two of them would let each overwrite the
+    other's state. Concurrent executions in one environment (Lambda Managed
+    Instances) are exactly that case: they run in separate threads of one
+    process, against one decorated handler. :class:`PluginHost` therefore builds
+    a fresh executor per invocation and holds it only in that invocation's frame.
+
+    Single-use by construction: :meth:`run` refuses a second entry, so the
+    lifetime is an invariant of the class rather than a convention its callers
+    have to keep. Only the factory list is handler-lifetime, and it is copied in
+    rather than shared mutably.
+    """
+
     def __init__(self, plugins: list[DurableInstrumentationPluginFactory] | None):
-        # Factories live for the life of the handler; the instances they build do
-        # not. _plugins is populated in on_invocation_start and emptied when the
-        # invocation scope exits, so one instance never spans two invocations.
+        # Factories outlive this executor -- the list is copied, never aliased.
+        # The instances they build do not: _plugins is populated in
+        # on_invocation_start and emptied when the invocation scope exits.
         self._plugin_factories = list(plugins or [])
         self._plugins: list[DurableInstrumentationPlugin] = []
         self._executor: ThreadPoolExecutor | None = None
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
+        self._run_entered = False
 
     @contextlib.contextmanager
     def run(self):
+        """Open this executor's one invocation scope.
+
+        Raises:
+            RuntimeError: if entered more than once. A second entry would mean an
+                executor is serving two invocations, which is the shape this
+                class exists to prevent; failing loudly here keeps the bug from
+                reappearing as silent crosstalk.
+        """
+        if self._run_entered:
+            msg = (
+                "PluginExecutor.run() is single-use: this executor has already "
+                "served an invocation. Build one executor per invocation."
+            )
+            raise RuntimeError(msg)
+        self._run_entered = True
         if self._plugin_factories:
             self._executor = ThreadPoolExecutor(
                 max_workers=1,
@@ -500,11 +533,14 @@ class PluginExecutor:
             self._invocation_status = None
             self._operations_provider = None
             # Shut down the thread pool, waiting for pending tasks to complete.
+            # The pool belongs to this invocation, so this drains only this
+            # invocation's queued dispatches and cannot cut short a concurrent
+            # invocation's.
             if self._executor:
                 self._executor.shutdown(wait=True)
             # Drop this invocation's plugin instances. After the pool has
-            # drained, so no queued dispatch still holds one: nothing reachable
-            # from this handler-lifetime executor outlives the invocation.
+            # drained, so no queued dispatch still holds one: nothing outlives
+            # the invocation.
             self._plugins = []
 
     def _create_plugins(self, info: InvocationStartInfo) -> None:
@@ -895,21 +931,67 @@ class PluginExecutor:
             OperationStatus.STOPPED,
         ]
 
+
+class PluginHost:
+    """Handler-lifetime owner of the configured plugin factories.
+
+    The factory list is the only plugin state that may span invocations: a
+    factory is resolved once when the handler is initialized and is, by
+    definition, environment-lifetime. Everything a factory produces is
+    invocation-lifetime, so this class never holds an instance, a start info or a
+    dispatch pool -- :meth:`invocation` hands out a fresh
+    :class:`PluginExecutor` and the caller keeps it in the invocation's own
+    frame.
+
+    Mirrors the JS SDK's ``createInvocationPluginRunner`` and the Java SDK's
+    per-invocation ``PluginRunner``: the handler holds factories, the invocation
+    holds instances.
+    """
+
+    def __init__(self, plugins: list[DurableInstrumentationPluginFactory] | None):
+        self._plugin_factories = list(plugins or [])
+
+    @contextlib.contextmanager
+    def invocation(self) -> Iterator[PluginExecutor]:
+        """Open one invocation's plugin scope and yield its executor.
+
+        The executor is created here rather than at handler-initialization time
+        so that two invocations sharing this process -- concurrent executions on
+        a Lambda Managed Instance, or successive executions on a warm
+        environment -- never write to the same slot. Teardown on scope exit
+        touches only the executor yielded here.
+        """
+        executor = PluginExecutor(self._plugin_factories)
+        with executor.run():
+            yield executor
+
     @property
     def handle_durable_output(self):
-        def decorator(func: Callable[[Any, LambdaContext], MutableMapping[str, Any]]):
+        """Wrap an invocation body so plugins see its outcome.
+
+        The wrapped function receives this invocation's :class:`PluginExecutor`
+        as a third argument. Passing it in, rather than closing over one, is what
+        keeps the instances out of handler-lifetime state: the executor is
+        reachable only from the frames of the invocation it belongs to.
+        """
+
+        def decorator(
+            func: Callable[
+                [Any, LambdaContext, PluginExecutor], MutableMapping[str, Any]
+            ],
+        ):
             @functools.wraps(func)
             def wrapper(event: Any, context: LambdaContext):
-                with self.run():
+                with self.invocation() as plugin_executor:
                     try:
-                        output = func(event, context)
+                        output = func(event, context, plugin_executor)
 
-                        self.on_invocation_end(
+                        plugin_executor.on_invocation_end(
                             output=DurableExecutionInvocationOutput.from_dict(output),
                         )
                         return output
                     except Exception as e:
-                        self.on_invocation_end(
+                        plugin_executor.on_invocation_end(
                             output=DurableExecutionInvocationOutput.create_retry(
                                 ErrorObject.from_exception(e)
                             ),

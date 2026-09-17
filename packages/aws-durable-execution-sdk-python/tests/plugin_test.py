@@ -32,6 +32,7 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationStartInfo,
     OperationType,
     PluginExecutor,
+    PluginHost,
     UserFunctionEndInfo,
     UserFunctionOutcome,
     UserFunctionStartInfo,
@@ -580,18 +581,6 @@ class TestPluginExecutorInit(unittest.TestCase):
 class TestPluginLifetime(unittest.TestCase):
     """The per-invocation plugin lifetime."""
 
-    @staticmethod
-    def _run_invocation(executor: PluginExecutor, request_id: str) -> None:
-        lambda_context = MagicMock()
-        lambda_context.aws_request_id = request_id
-        with executor.run():
-            executor.on_invocation_start(
-                execution_arn="arn:exec",
-                lambda_context=lambda_context,
-                execution_start_time=START_TS,
-                is_first_invocation=False,
-            )
-
     def test_each_invocation_gets_its_own_instance(self):
         """Two invocations of one handler never share a plugin instance."""
         built: list[_TrackingPlugin] = []
@@ -601,16 +590,49 @@ class TestPluginLifetime(unittest.TestCase):
             built.append(plugin)
             return plugin
 
-        executor = PluginExecutor(plugins=[build])
+        # One host for the handler, one executor per invocation -- the shape
+        # durable_execution() uses.
+        host = PluginHost(plugins=[build])
 
-        self._run_invocation(executor, "req-1")
-        self._run_invocation(executor, "req-2")
+        for request_id in ("req-1", "req-2"):
+            lambda_context = MagicMock()
+            lambda_context.aws_request_id = request_id
+            with host.invocation() as executor:
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=lambda_context,
+                    execution_start_time=START_TS,
+                    is_first_invocation=False,
+                )
 
         self.assertEqual(len(built), 2)
         self.assertIsNot(built[0], built[1])
         # Each instance saw only its own invocation.
         self.assertEqual(built[0].calls, ["invocation_start:req-1"])
         self.assertEqual(built[1].calls, ["invocation_start:req-2"])
+
+    def test_host_hands_out_a_new_executor_per_invocation(self):
+        """The host itself holds no per-invocation state to overwrite."""
+        host = PluginHost(plugins=[plugin_factory(_TrackingPlugin())])
+
+        with host.invocation() as first, host.invocation() as second:
+            self.assertIsNot(first, second)
+
+    def test_executor_refuses_a_second_invocation(self):
+        """An executor that has served an invocation cannot serve another.
+
+        The lifetime is enforced by the class, not just by how
+        ``durable_execution()`` happens to call it, so reintroducing a shared
+        executor fails loudly instead of silently mixing two invocations.
+        """
+        executor = PluginExecutor(plugins=[plugin_factory(_TrackingPlugin())])
+
+        with executor.run():
+            pass
+
+        with self.assertRaisesRegex(RuntimeError, "single-use"):
+            with executor.run():
+                pass
 
     def test_instances_are_dropped_when_the_invocation_returns(self):
         """Nothing on the handler-lifetime executor still references the instance."""

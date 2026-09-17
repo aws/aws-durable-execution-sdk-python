@@ -101,11 +101,17 @@ class _ExportScheduler:
         self._flushes_completed = 0
         self._flush_requested = False
         # Export counter coverage of the flush the worker is running right now, or
-        # 0 when no flush is in flight. Published when the worker commits to a
-        # flush, so a waiter woken while that flush runs -- before its coverage
-        # reaches _flushed_through -- can tell it is already covered instead of
-        # requesting a second flush that would run after its drain returned.
-        self._flush_in_flight = 0
+        # None when no flush is in flight. Presence and coverage are separate
+        # facts: a flush that covers zero exports is an ordinary flush -- it is
+        # what an invocation that emitted no record asks for -- and a single
+        # integer cannot say both "no flush is running" and "a flush covering
+        # nothing is running". Encoding the first as 0 made those two states
+        # identical, so a waiter needing zero coverage could not tell that its
+        # flush was already running and requested a second one that then ran
+        # after its invocation had returned. Published when the worker commits to
+        # a flush, so a waiter woken while that flush runs -- before its coverage
+        # reaches _flushed_through -- can tell it is already covered.
+        self._flush_in_flight: int | None = None
         # Value of the global schedule counter (_seq) when a flush was requested.
         # The worker defers the flush until no record scheduled at or before that
         # point is still pending. That is deliberately wider than the requester's
@@ -202,15 +208,15 @@ class _ExportScheduler:
                     # made has already been consumed -- runs an extra flush after
                     # this drain, and the invocation, returned.
                     #
-                    # `_flush_in_flight` uses 0 as its "no flush is running"
-                    # sentinel, so the naive `self._flush_in_flight >= need`
-                    # reads as "already covered" when `need` is 0 -- precisely
-                    # when nothing is running at all. `need` is 0 for a drain
-                    # whose invocation emitted no record, so that form would let
-                    # such a drain skip its request and park until some other
-                    # execution happened to flush. Require a marker that is
-                    # actually set AND that reaches `need`.
-                    covered = 0 < self._flush_in_flight >= need
+                    # `_flush_in_flight` is None exactly while no flush is
+                    # running, so a flush that covers zero exports is still a
+                    # flush in flight. That case is the common one, not a corner:
+                    # `need` is 0 for a drain whose invocation emitted no record,
+                    # and the flush it asks for covers 0 exports when nothing has
+                    # ever been exported. Two such drains at once both see the
+                    # other's flush and neither asks for a second.
+                    in_flight = self._flush_in_flight
+                    covered = in_flight is not None and in_flight >= need
                     if not self._flush_requested and not covered:
                         self._flush_requested = True
                         self._flush_barrier = max(self._flush_barrier, self._seq)
@@ -260,7 +266,7 @@ class _ExportScheduler:
             self._pending = {}
             self._flush_requested = False
             self._flush_barrier = 0
-            self._flush_in_flight = 0
+            self._flush_in_flight = None
             # Release every waiter; the permanent disable latch means no record
             # will ever be exported.
             self._condition.notify_all()
@@ -304,7 +310,10 @@ class _ExportScheduler:
                         flush_covers = self._export_count
                         # Publish what this flush will cover before releasing the
                         # lock, so a waiter that wakes while it runs can see that
-                        # this flush releases it and skip asking for another.
+                        # this flush releases it and skip asking for another. A
+                        # coverage of 0 is published like any other: it means this
+                        # flush covers every export so far, of which there are
+                        # none, and it is still a flush in flight.
                         self._flush_in_flight = flush_covers
                         break
                     if self._pending:
@@ -353,7 +362,7 @@ class _ExportScheduler:
                     # Retire the marker whatever happened: a stale one would park
                     # every later waiter that trusted this flush to cover it. Only
                     # a flush that ran to completion publishes its coverage.
-                    self._flush_in_flight = 0
+                    self._flush_in_flight = None
                     if flushed:
                         self._flushes_completed += 1
                         if flush_covers > self._flushed_through:

@@ -430,6 +430,92 @@ def test_drain_with_nothing_to_export_still_flushes_exactly_once() -> None:
     assert capture.calls == [("flush", None)]
 
 
+class GatedFlushExporter(CaptureExporter):
+    """Holds each ``flush()`` open until the test releases it, and counts them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self.flush_count = 0
+        self.started: dict[int, threading.Event] = {}
+        self.release: dict[int, threading.Event] = {}
+        for index in (1, 2):
+            self.started[index] = threading.Event()
+            self.release[index] = threading.Event()
+
+    def flush(self) -> None:
+        with self._lock:
+            self.flush_count += 1
+            index = self.flush_count
+        if index in self.started:
+            self.started[index].set()
+            self.release[index].wait(10.0)
+        super().flush()
+
+
+def test_concurrent_drains_with_nothing_to_export_share_one_flush() -> None:
+    # Two invocations that emitted no record drain at the same time. Neither has
+    # an export to be covered, so both need a flush that covers zero exports.
+    # While `_flush_in_flight` used 0 for "no flush is running", the second drain
+    # could not tell that the flush it needs was already running, and asked for
+    # another. The completion of the first flush then released both drains, and
+    # the second flush ran after both invocations had already returned -- customer
+    # exporter code running past the invocation boundary, which is what the flush
+    # contract forbids. One flush must serve both, and whichever drain a flush
+    # belongs to must stay parked until that flush completes.
+    exporter = GatedFlushExporter()
+    scheduler = _ArnScheduler([exporter])
+    returned: list[str] = []
+    returned_lock = threading.Lock()
+
+    def drain(name: str, execution_arn: str) -> None:
+        scheduler.drain(execution_arn)
+        with returned_lock:
+            returned.append(name)
+
+    threads = [
+        threading.Thread(target=drain, args=("first", ARN_A), daemon=True),
+        threading.Thread(target=drain, args=("second", ARN_B), daemon=True),
+    ]
+    try:
+        threads[0].start()
+        assert exporter.started[1].wait(10.0), "the first drain never flushed"
+        threads[1].start()
+
+        first = scheduler.executions[ARN_A]
+
+        def both_parked() -> bool:
+            second = scheduler.executions.get(ARN_B)
+            if second is None:
+                return False
+            with scheduler._condition:
+                return first.waiters == 1 and second.waiters == 1
+
+        assert _wait_until(both_parked), "a drain raced past the flush it needs"
+        with returned_lock:
+            assert returned == [], "a drain returned before its flush completed"
+
+        exporter.release[1].set()
+        for thread in threads:
+            thread.join(10.0)
+        assert not any(thread.is_alive() for thread in threads)
+        with returned_lock:
+            assert sorted(returned) == ["first", "second"]
+
+        # The redundant request, if one was made, was recorded before either
+        # drain returned, so the worker starts that flush without further
+        # prompting. Nothing arriving here is what proves no second flush was
+        # requested.
+        assert not exporter.started[2].wait(0.75), (
+            "a second flush ran after both invocations had returned"
+        )
+        assert exporter.flush_count == 1
+    finally:
+        exporter.release[1].set()
+        exporter.release[2].set()
+        _wait_until(lambda: not scheduler._worker_alive())
+
+
 def test_drain_never_rides_on_a_flush_that_finished_before_it_started() -> None:
     # Export coverage alone would let the second drain return immediately: every
     # export is already covered by the first drain's flush. A drain must wait for
@@ -475,14 +561,15 @@ def test_disabled_latch_retains_no_lanes_or_pending_records(monkeypatch) -> None
             for execution in scheduler.executions.values()
         )
         assert scheduler._flush_requested is False
-        assert scheduler._flush_in_flight == 0
+        assert scheduler._flush_in_flight is None
 
 
 def test_disabled_latch_clears_a_published_flush_in_flight_marker(monkeypatch) -> None:
     # `_flush_in_flight` is the coverage of the flush the worker is running right
     # now, published so a waiter woken during that flush can tell it is already
-    # covered and skip requesting another. 0 means "no flush is running", so the
-    # marker is a claim that a flush is in flight and will complete.
+    # covered and skip requesting another. None means "no flush is running", so
+    # any integer -- 0 included -- is a claim that a flush is in flight and will
+    # complete.
     #
     # The _disabled latch makes that claim permanently false: no worker exists and
     # none will ever be started again, so the published flush can never complete.
@@ -503,7 +590,7 @@ def test_disabled_latch_clears_a_published_flush_in_flight_marker(monkeypatch) -
 
     with scheduler._condition:
         assert scheduler._disabled
-        assert scheduler._flush_in_flight == 0, (
+        assert scheduler._flush_in_flight is None, (
             "the _disabled latch left a flush-in-flight marker behind for a flush "
             "that can never run"
         )

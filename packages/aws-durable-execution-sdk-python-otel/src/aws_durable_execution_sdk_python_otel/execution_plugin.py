@@ -90,7 +90,11 @@ from aws_durable_execution_sdk_python_otel.execution_trace_context import (
     canonical_trace_id,
 )
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
-from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
+from aws_durable_execution_sdk_python_otel.log_filter import (
+    bind_invocation,
+    install_log_filter,
+    unbind_invocation,
+)
 from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
 
 
@@ -177,9 +181,12 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._tracing_enabled = False
 
         if self._config.enrich_logger:
-            # Install (or, on a warm environment, rebind) the root-logger filter
-            # so every log record is stamped with this invocation's span context.
-            install_log_filter(self)
+            # Install the root-logger filter so every log record is stamped with
+            # the active span context. On a warm environment the handler already
+            # carries the filter a previous invocation installed and it is reused
+            # as is: the filter holds no invocation identity, and this plugin
+            # claims the invocation in on_invocation_start instead.
+            install_log_filter()
 
     def _bind_sdk_tracer(self) -> bool:
         """Bind to an SDK tracer, retrying a deferred global provider."""
@@ -426,6 +433,12 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     # ------------------------------------------------------------------
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         logger.debug("Durable invocation started: %s", info)
+        # Claim log correlation for this invocation before anything can fail
+        # below: the claim is what keeps a concurrent invocation's records off
+        # this invocation's trace, and it is registered even when tracing turns
+        # out to be disabled so that the filter can still tell how many
+        # invocations are open.
+        bind_invocation(self)
         if info.execution_start_time is None:
             logger.warning(
                 "ExecutionOtelPlugin requires InvocationStartInfo.execution_start_time "
@@ -660,12 +673,17 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
           plugin, so any scope this plugin attached and did not release must be
           detached here or it would stay current on a warm environment's thread
           after the invocation returns.
+        * The log filter's record of open invocations is process-global, so this
+          invocation must be removed from it. Until it is, a record emitted on an
+          unclaimed thread could still be correlated to this finished
+          invocation's spans.
         * ``_tracing_enabled`` is cleared so a hook that arrives after the
           invocation end -- one dispatched off the checkpointing path, for
           instance -- cannot start a span after the invocation span was ended and
           the provider flushed.
         """
         self._detach_remaining_contexts()
+        unbind_invocation(self)
         self._tracing_enabled = False
 
     # ------------------------------------------------------------------
@@ -675,6 +693,14 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         logger.debug("Durable operation started: %s", info)
         if not self._tracing_enabled:
             return
+        # Runs on the thread that drives the durable operation, which is the
+        # thread running the handler body and not the thread the
+        # invocation-start hook claimed. Claim it too, so records emitted from
+        # top-level handler code are correlated to this invocation even while
+        # another invocation is open in the same process. Claimed after the
+        # tracing-enabled gate, so a hook arriving after the invocation ended
+        # cannot re-register a finished invocation.
+        bind_invocation(self)
         if info.operation_type is OperationType.CONTEXT:
             with self._lock:
                 self._checkpointed_context_ids.add(info.operation_id)
@@ -807,6 +833,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         logger.debug("Durable user function started: %s", info)
         if not self._tracing_enabled:
             return
+        # Runs on the thread executing user code -- a parallel branch runs on its
+        # own thread -- so claim that thread for this invocation as well.
+        bind_invocation(self)
         if info.operation_type not in (OperationType.CONTEXT, OperationType.STEP):
             raise RuntimeError(
                 "on_user_function_start only supports CONTEXT and STEP operations"
