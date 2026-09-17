@@ -1,0 +1,1 @@
+{"finding_digest":"c431e3545dc4517c12af15c201f1b6cfc4cda8b51da5697de2308e0130294de7","finding_id":"arf_v1_yqy6gvc5yrixyevpcxbad4nwz7","identity_key":"insight/plugin.py::on_invocation_end::async-export-readme-contract-drift","pull_request_number":734,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
