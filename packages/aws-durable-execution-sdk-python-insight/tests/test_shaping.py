@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 from aws_durable_execution_sdk_python_insight.operations_index import (
+    OperationsFormat,
+    apply_operations_format,
     build_operations_by_name,
     with_operations_by_name,
 )
@@ -130,3 +132,29 @@ def test_truncation_noop_when_within_limit():
     record = _record_with_results([5])
     out = truncate_record(record, 5_000_000, render=lambda r: r)
     assert out is record
+
+
+def test_apply_operations_format_array_returns_record_unchanged():
+    record = {"executionArn": "arn", "operations": [_op("greet")]}
+    assert apply_operations_format(record, "array") is record
+    assert apply_operations_format(record, OperationsFormat.ARRAY) is record
+
+
+def test_apply_operations_format_by_name_replaces_array():
+    record = {"executionArn": "arn", "operations": [_op("greet")]}
+    out = apply_operations_format(record, "by-name")
+    assert "operations" not in out
+    assert out["operationsByName"]["greet"]["count"] == 1
+    assert "operations" in record  # input never mutated
+
+
+def test_apply_operations_format_both_keeps_array_and_adds_map():
+    record = {"executionArn": "arn", "operations": [_op("greet")]}
+    out = apply_operations_format(record, OperationsFormat.BOTH)
+    assert out["operations"] == record["operations"]
+    assert out["operationsByName"]["greet"]["count"] == 1
+    assert "operationsByName" not in record
+
+
+def test_operations_format_enum_values():
+    assert {f.value for f in OperationsFormat} == {"array", "by-name", "both"}

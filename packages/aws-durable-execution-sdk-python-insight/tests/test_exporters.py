@@ -75,6 +75,16 @@ def test_public_import_paths_resolve_same_classes():
     assert S3Partitioning is S3PartitioningFromModule
 
 
+def test_every_exporter_is_re_exported_from_the_package_root():
+    import aws_durable_execution_sdk_python_insight as pkg
+    from aws_durable_execution_sdk_python_insight import exporters
+
+    assert set(exporters.__all__) <= set(pkg.__all__)
+    for name in exporters.__all__:
+        assert getattr(pkg, name) is getattr(exporters, name)
+    assert exporters.__all__ == sorted(exporters.__all__)
+
+
 # -- LambdaLogExporter --------------------------------------------------------
 
 
@@ -216,3 +226,46 @@ def test_s3_partitioning_invalid_string_raises_value_error():
         S3Exporter(bucket="b", partitioning="function_name", client=FakeS3Client())
     with pytest.raises(ValueError):
         S3Exporter(bucket="b", partitioning="bogus", client=FakeS3Client())
+
+
+def test_every_exporter_satisfies_the_insight_exporter_protocol() -> None:
+    # Annotated on purpose so mypy checks this body: each first-party exporter
+    # must be assignable to the protocol the plugin config is typed against.
+    from aws_durable_execution_sdk_python_insight import (
+        AuroraExporter,
+        CloudWatchLogsExporter,
+        DynamoDBExporter,
+        EventBridgeExporter,
+        FileExporter,
+        FirehoseExporter,
+        HttpExporter,
+        InsightExporter,
+        OpenSearchExporter,
+        OTelExporter,
+        RedshiftExporter,
+        SQSExporter,
+    )
+
+    fake = FakeS3Client()
+    exporters: list[InsightExporter] = [
+        LambdaLogExporter(),
+        S3Exporter(bucket="b", client=fake),
+        DynamoDBExporter(table_name="t", client=fake),
+        AuroraExporter(
+            resource_arn="r", secret_arn="s", database="d", engine="mysql", client=fake
+        ),
+        CloudWatchLogsExporter(log_group_name="/g", client=fake),
+        OTelExporter(endpoint="http://127.0.0.1:1/"),
+        FirehoseExporter(delivery_stream_name="s", client=fake),
+        EventBridgeExporter(client=fake),
+        RedshiftExporter(database="d", workgroup_name="w", client=fake),
+        OpenSearchExporter(endpoint="http://127.0.0.1:1", region="us-east-1"),
+        SQSExporter(queue_url="https://sqs.us-east-1.amazonaws.com/1/q", client=fake),
+        HttpExporter(url="http://127.0.0.1:1/"),
+        FileExporter(directory="/tmp/insight-protocol-check"),
+    ]
+    assert len(exporters) == 13
+    for exporter in exporters:
+        assert exporter.max_record_size_bytes is None or isinstance(
+            exporter.max_record_size_bytes, int
+        )

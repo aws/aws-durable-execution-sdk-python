@@ -66,11 +66,11 @@ def test_checkpoint_error():
 
 
 def test_checkpoint_error_classification_invalid_token_invocation():
-    """Test 4xx InvalidParameterValueException with Invalid Checkpoint Token is invocation error."""
+    """Test 4xx InvalidParameterValueException with "Invalid checkpoint token" error message is an invocation error."""
     error_response = {
         "Error": {
             "Code": "InvalidParameterValueException",
-            "Message": "Invalid Checkpoint Token: token expired",
+            "Message": "Invalid checkpoint token: token expired",
         },
         "ResponseMetadata": {"HTTPStatusCode": 400},
     }

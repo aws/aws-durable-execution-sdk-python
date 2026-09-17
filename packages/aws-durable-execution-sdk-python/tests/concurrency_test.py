@@ -1410,14 +1410,12 @@ def test_concurrent_executor_resume_checkpoint_failure_propagates():
 
     execution_state = Mock()
 
-    def checkpoint(*args, **kwargs):
-        # The resume refresh calls create_checkpoint() with no arguments.
-        # Fail that call; leave the branches' own checkpoints as no-ops.
-        if not args and not kwargs:
-            msg = "resume refresh failed"
-            raise RuntimeError(msg)
-
-    execution_state.create_checkpoint = Mock(side_effect=checkpoint)
+    # The coordinator requests the refresh when task 1 suspends and waits on
+    # the returned event when task 1 is due. Fail the wait. The branches' own
+    # checkpoints stay no-ops.
+    failing_refresh = Mock()
+    failing_refresh.wait = Mock(side_effect=RuntimeError("resume refresh failed"))
+    execution_state.schedule_refresh = Mock(return_value=failing_refresh)
 
     executor_context = Mock()
     executor_context._create_step_id_for_logical_step = lambda *args: "1"
@@ -3500,8 +3498,180 @@ def test_timed_suspend_resumes_in_process_while_sibling_runs():
     assert call_counts[0] == 2
     assert result.success_count == 2
     assert result.completion_reason is CompletionReason.ALL_COMPLETED
-    # A resume wave refreshes state once before resubmitting.
-    execution_state.create_checkpoint.assert_called()
+    # One refresh is requested for the resume time and waited on before the
+    # wave is resubmitted.
+    execution_state.schedule_refresh.assert_called_once()
+    execution_state.schedule_refresh.return_value.wait.assert_called_once()
+
+
+def test_branches_sharing_a_resume_time_request_one_refresh():
+    """Two branches suspend until the same time while a sibling runs. The
+    coordinator requests one refresh for that time and waits on it once."""
+    # In the future, so both suspensions are recorded before the wave is due.
+    resume_at = time.time() + 0.3
+    release = threading.Event()
+    call_counts: dict[int, int] = {}
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            index = executable.index
+            call_counts[index] = call_counts.get(index, 0) + 1
+            if index == 0:
+                assert release.wait(timeout=5)
+                return "long"
+            if call_counts[index] == 1:
+                msg = "wait"
+                raise TimedSuspendExecution(msg, resume_at)
+            if all(call_counts.get(i) == 2 for i in (1, 2)):
+                release.set()
+            return f"resumed{index}"
+
+    executor = TestExecutor(
+        executables=[Executable(i, lambda: None) for i in range(3)],
+        max_concurrency=3,
+        completion_config=CompletionConfig(
+            min_successful=3,
+            tolerated_failure_count=None,
+            tolerated_failure_percentage=None,
+        ),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+    execution_state = Mock()
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    result = executor.execute(execution_state, executor_context)
+
+    assert result.success_count == 3
+    execution_state.schedule_refresh.assert_called_once_with(resume_at)
+    execution_state.schedule_refresh.return_value.wait.assert_called_once()
+
+
+def test_wave_resumes_branches_in_index_order():
+    """Branch 2 suspends before branch 1, both until the same time. The wave
+    resumes them as 1 then 2, not in the order their suspensions arrived."""
+    resume_at = time.time() + 0.3
+    release_long = threading.Event()
+    resumed: list[int] = []  # start() calls on suspended branches, coordinator order
+    call_counts: dict[int, int] = {}
+    original_start = Branch.start
+
+    def recording_start(branch):
+        if branch.status is BranchStatus.SUSPENDED_WITH_TIMEOUT:
+            resumed.append(branch.index)
+        original_start(branch)
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            index = executable.index
+            call_counts[index] = call_counts.get(index, 0) + 1
+            if index == 0:
+                assert release_long.wait(timeout=5)
+                return "long"
+            if call_counts[index] == 1:
+                if index == 1:
+                    # Raise only once the coordinator has recorded branch 2's
+                    # suspension, so the two events arrive as 2 then 1.
+                    deadline = time.monotonic() + 5
+                    while (
+                        self.branches[2].status
+                        is not BranchStatus.SUSPENDED_WITH_TIMEOUT
+                    ):
+                        assert time.monotonic() < deadline
+                        time.sleep(0.001)
+                msg = "wait"
+                raise TimedSuspendExecution(msg, resume_at)
+            if call_counts.get(1) == 2 and call_counts.get(2) == 2:
+                release_long.set()
+            return f"resumed{index}"
+
+    executor = TestExecutor(
+        executables=[Executable(i, lambda: None) for i in range(3)],
+        max_concurrency=3,
+        completion_config=CompletionConfig(
+            min_successful=3,
+            tolerated_failure_count=None,
+            tolerated_failure_percentage=None,
+        ),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+    execution_state = Mock()
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    with patch.object(Branch, "start", recording_start):
+        result = executor.execute(execution_state, executor_context)
+
+    assert result.success_count == 3
+    assert resumed == [1, 2]
+
+
+def test_early_completion_cancels_unused_refresh():
+    """min_successful is met while another branch waits on a far timed resume.
+    The coordinator will never wait for that refresh, so it cancels it. Sending
+    it later would waste a request."""
+
+    refresh_requested = threading.Event()
+
+    class TestExecutor(ConcurrentExecutor):
+        def execute_item(self, child_context, executable):
+            if executable.index == 0:
+                # Complete only after the coordinator has requested the refresh
+                # for branch 1, so the cancel path is always exercised.
+                assert refresh_requested.wait(timeout=5)
+                return "fast"
+            msg = "far away"
+            raise TimedSuspendExecution(msg, time.time() + 3600)
+
+    executor = TestExecutor(
+        executables=[Executable(0, lambda: "a"), Executable(1, lambda: "b")],
+        max_concurrency=2,
+        completion_config=CompletionConfig(
+            min_successful=1,
+            tolerated_failure_count=None,
+            tolerated_failure_percentage=None,
+        ),
+        sub_type_top="TOP",
+        sub_type_iteration="ITER",
+        name_prefix="test_",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+
+    execution_state = Mock()
+    refresh = Mock()
+
+    def schedule_refresh(_resume_at):
+        refresh_requested.set()
+        return refresh
+
+    execution_state.schedule_refresh = Mock(side_effect=schedule_refresh)
+    executor_context = Mock()
+    executor_context._create_step_id_for_logical_step = lambda *args: "1"
+    child_context = Mock()
+    child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
+    executor_context.create_child_context = lambda *args, **kwargs: child_context
+
+    result = executor.execute(execution_state, executor_context)
+
+    assert result.success_count == 1
+    execution_state.schedule_refresh.assert_called_once()
+    refresh.cancel.assert_called_once()
+    refresh.wait.assert_not_called()
 
 
 def test_all_timed_suspended_parent_suspends_with_earliest_timestamp():
