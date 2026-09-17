@@ -1,0 +1,1 @@
+{"finding_digest":"471da4bccee8997af1d26a3ea0b813cfe2675bf59ebff1bfd35f636c783dee9e","finding_id":"arf_v1_i4o2jpgo5cmxv4osni7kboatz7","identity_key":"testing/checkpoint/processors/invoke.py::process::dispatch-effect-not-recoverable","pull_request_number":731,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
