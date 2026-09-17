@@ -1,0 +1,1 @@
+{"finding_digest":"77f2b3c3d0dd7e5fb1c8b3d65479ea71c1b3220c46df773b67cfee5b7e80a8bc","finding_id":"arf_v1_o7zlhq6q3v7f7moiwplfi6pkoh","identity_key":"testing/executor.py::_create_execution::endpoint-region-snapshot-stale","pull_request_number":731,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
