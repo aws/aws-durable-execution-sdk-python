@@ -193,8 +193,8 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
     Two locks, disjoint field sets, and neither is ever taken to reach the
     other's fields:
 
-    * ``_lock`` guards ``_closed``, the ``_operations`` rebind and record
-      emission.
+    * ``_lock`` guards ``_closed``, ``_build_revision``, the ``_operations``
+      rebind and record emission.
     * ``_ExportScheduler._condition``'s lock guards the export bookkeeping this
       instance carries for the scheduler; nothing outside the scheduler reads or
       writes those fields, and the scheduler never touches the fields above.
@@ -236,13 +236,34 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
         # operation-change for a checkpoint that completed just before the end)
         # must emit nothing (mirrors the Java ExecutionState.closed flag).
         self._closed = False
-        # Guards `_closed`, the operations rebind and record emission, so a late
-        # hook can never slip a RUNNING record in after the terminal one. Still
-        # earns its place with one instance per invocation: the SDK dispatches
-        # every hook synchronously on the thread that produced the event, so an
-        # operation-change raised off the checkpointing path runs concurrently
-        # with the invocation thread's on_invocation_end -- two hooks, one
-        # instance, genuinely racing.
+        # Counts the record builds this instance has started. Never decremented.
+        #
+        # A record is a complete snapshot of one execution, so the scheduler's
+        # per-execution slot takes whichever record is handed over last and never
+        # compares ages. The build that hands its record over last is not the
+        # build that started last: `_emit` runs customer code (the input/output
+        # transforms and the operation result overrides) between the snapshot it
+        # takes and the hand-off, and that code can re-enter a hook on this thread
+        # and complete a newer build first. Without a comparison of build ages the
+        # outer frame's older snapshot then replaces the newer one in the slot, or
+        # is exported after it. Every non-terminal build takes the next value here
+        # before it starts, and `_emit` hands the record over only while that value
+        # is still the newest (mirrors the JS `buildRevision` and the Java
+        # `AtomicLong buildRevision`).
+        #
+        # A plain int, not an atomic: every read and every increment happens under
+        # `_lock`, so the read-modify-write cannot interleave, and the two builds
+        # this counter distinguishes are nested frames on one thread rather than
+        # two threads. Java needs an AtomicLong because its two builds really can
+        # run at once.
+        self._build_revision = 0
+        # Guards `_closed`, `_build_revision`, the operations rebind and record
+        # emission, so a late hook can never slip a RUNNING record in after the
+        # terminal one. Still earns its place with one instance per invocation: the
+        # SDK dispatches every hook synchronously on the thread that produced the
+        # event, so an operation-change raised off the checkpointing path runs
+        # concurrently with the invocation thread's on_invocation_end -- two hooks,
+        # one instance, genuinely racing.
         #
         # Reentrant on purpose: `_emit` runs the scheduler's `schedule()` inside
         # this hold, and `schedule()` releases the record it displaces, which can
@@ -421,6 +442,19 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
         # cannot change the map mid-build.
         operations = self._operations
 
+        # The revision is taken here, before the build, never after. Customer code
+        # runs inside the build below and can re-enter a hook on this thread,
+        # which starts and finishes a newer build. A value read after the build
+        # would already be that newer build's, so this older record would pass the
+        # check and replace the newer one. Callers hold self._lock, so the
+        # increment cannot interleave with another build's.
+        #
+        # The closing emit takes no revision; see the hand-off below.
+        revision = 0
+        if not closing:
+            self._build_revision += 1
+            revision = self._build_revision
+
         content = self._shared._content
         record: dict[str, Any] = {
             "recordType": "WorkflowInsight",
@@ -492,7 +526,35 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
         # itself. It is not the same test as "the record is terminal": in
         # on-change mode a PENDING/RETRY invocation end legitimately emits a
         # RUNNING record, and that record is the closing one.
-        if self._closed and not closing:
+        #
+        # INVARIANT: the record handed to the scheduler below is the newest build
+        # this instance has started -- an exporter never stores an older snapshot
+        # over a newer one for the same execution.
+        #
+        # A build that customer code started from inside this one has already
+        # handed its own, newer record over by the time control returns here, so
+        # this record is superseded. Dropping it loses nothing: a record is a
+        # complete snapshot of one execution, so the newer record carries
+        # everything this one carries. That is the same property that makes the
+        # scheduler's per-execution coalescing sound.
+        #
+        # The check and the hand-off are one critical section. self._lock is held
+        # across both -- schedule() is called inside this hold -- and every build
+        # takes that same lock, so no build can start, finish and queue its record
+        # between this check and the schedule() below. A record that passes
+        # therefore cannot be queued after the record that supersedes it. (Java
+        # revalidates inside the scheduler's monitor instead, because there the
+        # scheduler's monitor is what guards `closed` and the record slot; here
+        # both facts already belong to self._lock.)
+        #
+        # The closing record is exempt from the revision check. Customer code
+        # inside its build can start a newer non-terminal build, which would make a
+        # revision taken here stale, and a checked hand-off would then drop the
+        # closing record and leave a RUNNING snapshot as this execution's last
+        # exported state. The exemption cannot let a stale record win, because
+        # `_closed` was set in the same self._lock hold that queues this record and
+        # every later non-terminal record is rejected above.
+        if not closing and (self._closed or revision != self._build_revision):
             return
         self._shared._scheduler.schedule(self, record)
 

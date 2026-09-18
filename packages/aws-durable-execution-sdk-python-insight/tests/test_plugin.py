@@ -1123,3 +1123,275 @@ def test_reentrant_invocation_end_stops_the_outer_running_record():
         f"the same execution: {statuses}"
     )
     assert _wait_until(lambda: not factory._scheduler._worker_alive())
+
+
+# -- a build overtaken by one customer code started from inside it -------------
+
+
+class GatedCaptureExporter:
+    """Records every export; optionally blocks inside one execution's export.
+
+    Blocking there pins the single export worker, so records scheduled while it
+    is held stay in their execution's pending slot and coalesce there.
+    """
+
+    max_record_size_bytes = None
+
+    def __init__(self, hold_arn: str | None = None) -> None:
+        self._hold_arn = hold_arn
+        self.holding = threading.Event()
+        self.release = threading.Event()
+        self._lock = threading.Lock()
+        self._arrived = threading.Condition(self._lock)
+        self._records: list[dict[str, Any]] = []
+
+    def render(self, record: dict[str, Any]) -> Any:
+        return record
+
+    def export(self, record: dict[str, Any]) -> None:
+        if self._hold_arn is not None and record["executionArn"] == self._hold_arn:
+            self.holding.set()
+            self.release.wait(30.0)
+        with self._arrived:
+            self._records.append(record)
+            self._arrived.notify_all()
+
+    def flush(self) -> None:
+        pass
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(self._records)
+
+    def wait_for(self, arn: str, count: int, timeout: float = 10.0) -> bool:
+        with self._arrived:
+            return self._arrived.wait_for(
+                lambda: (
+                    sum(1 for r in self._records if r["executionArn"] == arn) >= count
+                ),
+                timeout,
+            )
+
+
+def _records_for(exporter: GatedCaptureExporter, arn: str) -> list[dict[str, Any]]:
+    return [record for record in exporter.snapshot() if record["executionArn"] == arn]
+
+
+def _force_drain_bounded(factory, timeout: float = 20.0) -> None:
+    """``_force_drain`` on a bounded thread, so a stalled drain fails the test.
+
+    ``drain()`` parks on a condition with no deadline: that is correct in
+    production, where the only thing that can release it is the export worker, but
+    a regression that loses a record leaves it parked for good. Running it on
+    another thread turns that into an assertion failure instead of a hung suite.
+    """
+    drained = threading.Event()
+
+    def drain() -> None:
+        _force_drain(factory)
+        drained.set()
+
+    thread = threading.Thread(target=drain, daemon=True)
+    thread.start()
+    assert drained.wait(timeout), "the drain never returned"
+    thread.join(5.0)
+    assert not thread.is_alive()
+
+
+def _exported_operation_names(
+    exporter: GatedCaptureExporter, arn: str
+) -> list[list[str]]:
+    return [
+        [op["name"] for op in record["operations"]]
+        for record in _records_for(exporter, arn)
+    ]
+
+
+def _newer_change() -> OperationChangeInfo:
+    """An operation-change carrying a strictly newer map than the drives below start from."""
+    return OperationChangeInfo(
+        execution_arn=ARN,
+        updated_operations=_ops(_step("s1")),
+        operations=_ops(_step("s1")),
+    )
+
+
+def test_a_build_overtaken_by_a_nested_one_does_not_coalesce_the_newer_away():
+    # _emit runs customer code -- here the content.input transform -- between the
+    # operation snapshot it takes and the hand-off to the scheduler, and the
+    # execution's lock is reentrant, so that code can run on_operation_change to
+    # completion on this same thread. The nested hook adopts a newer operation map
+    # and schedules its record first. The outer frame then hands over the older
+    # snapshot it built, and the pending slot takes whichever record arrives last,
+    # so without a comparison of build ages the newer record is coalesced away and
+    # the exporter only ever sees the older one. One hook call, one instance, no
+    # concurrency.
+    exporter = GatedCaptureExporter(hold_arn=ARN_B)
+    holder: dict[str, Any] = {}
+    reentered = threading.Event()
+
+    def reentering_input(value: Any) -> Any:
+        # The primer execution below runs this same transform, so re-enter only
+        # once the instance under test has been published.
+        if holder.get("plugin") is None or reentered.is_set():
+            return value
+        reentered.set()
+        holder["plugin"].on_operation_change(_newer_change())
+        return value
+
+    factory = workflow_insight(
+        WorkflowInsightConfig(
+            exporters=[exporter],
+            emit_mode="on-change",
+            content=ContentConfig(input=reentering_input),
+        )
+    )
+    # Pin the one export worker on another execution's record, so both records
+    # this execution builds are still in its pending slot when the outer frame
+    # hands its own over.
+    primer = factory.create_plugin(_start(arn=ARN_B))
+    primer.on_invocation_start(_start(arn=ARN_B))
+    assert exporter.holding.wait(10.0), "the export worker never reached the exporter"
+
+    start = _start(operations={})
+    plugin = factory.create_plugin(start)
+    holder["plugin"] = plugin
+
+    # On a bounded thread, so a regression that deadlocks the hook fails here
+    # instead of hanging the suite.
+    returned = threading.Event()
+
+    def hook() -> None:
+        plugin.on_invocation_start(start)
+        returned.set()
+
+    thread = threading.Thread(target=hook, daemon=True)
+    thread.start()
+    assert returned.wait(10.0), "the hook never returned"
+    thread.join(5.0)
+    assert not thread.is_alive()
+    assert reentered.is_set()  # the nested change hook really did run
+    exporter.release.set()
+    _force_drain_bounded(factory)
+
+    assert _exported_operation_names(exporter, ARN) == [["s1"]], (
+        "the newer snapshot the nested hook built was coalesced away by the "
+        "older one the outer frame built: "
+        f"{_exported_operation_names(exporter, ARN)}"
+    )
+
+
+def test_a_build_overtaken_by_a_nested_one_is_not_exported_after_it():
+    # Same overtaking, with the newer record already handed to the exporter before
+    # the outer frame reaches the hand-off. Nothing coalesces, so without a
+    # comparison of build ages the exporter sees the newer snapshot and then the
+    # older one, and an exporter that upserts by execution ARN ends up storing the
+    # older state.
+    exporter = GatedCaptureExporter()
+    holder: dict[str, Any] = {}
+    reentered = threading.Event()
+
+    def reentering_input(value: Any) -> Any:
+        if reentered.is_set():
+            return value
+        reentered.set()
+        holder["plugin"].on_operation_change(_newer_change())
+        # Wait for the newer record to reach the exporter, so this frame's older
+        # record cannot displace it in the pending slot and the two records are
+        # ordered at the exporter instead.
+        assert exporter.wait_for(ARN, 1), "the nested record never reached the exporter"
+        return value
+
+    factory = workflow_insight(
+        WorkflowInsightConfig(
+            exporters=[exporter],
+            emit_mode="on-change",
+            content=ContentConfig(input=reentering_input),
+        )
+    )
+    start = _start(operations={})
+    plugin = factory.create_plugin(start)
+    holder["plugin"] = plugin
+
+    returned = threading.Event()
+
+    def hook() -> None:
+        plugin.on_invocation_start(start)
+        returned.set()
+
+    thread = threading.Thread(target=hook, daemon=True)
+    thread.start()
+    assert returned.wait(10.0), "the hook never returned"
+    thread.join(5.0)
+    assert not thread.is_alive()
+    assert reentered.is_set()
+    _force_drain_bounded(factory)
+
+    assert _exported_operation_names(exporter, ARN) == [["s1"]], (
+        "the exporter saw the older snapshot after the newer one for the same "
+        f"execution: {_exported_operation_names(exporter, ARN)}"
+    )
+
+
+def test_the_closing_record_is_exempt_from_the_build_age_check():
+    # The closing record must reach the exporters whatever the build ages say.
+    # Customer code inside its build can start a newer non-terminal build, which
+    # would leave the closing record's age stale, and a checked hand-off would
+    # then drop it and leave a RUNNING snapshot as this execution's last exported
+    # state. Nothing else can rescue it: it is the last record this instance ever
+    # builds.
+    #
+    # The drive raises the build counter above the closing record's own first, by
+    # overtaking one build with a nested one exactly as the two tests above do, so
+    # a closing record that is age-checked against a counter it never incremented
+    # is dropped here.
+    exporter = GatedCaptureExporter()
+    holder: dict[str, Any] = {}
+    reentered = threading.Event()
+
+    def reentering_input(value: Any) -> Any:
+        if reentered.is_set():
+            return value
+        reentered.set()
+        holder["plugin"].on_operation_change(_newer_change())
+        assert exporter.wait_for(ARN, 1), "the nested record never reached the exporter"
+        return value
+
+    factory = workflow_insight(
+        WorkflowInsightConfig(
+            exporters=[exporter],
+            emit_mode="on-change",
+            content=ContentConfig(input=reentering_input),
+        )
+    )
+    start = _start(operations={})
+    plugin = factory.create_plugin(start)
+    holder["plugin"] = plugin
+
+    returned = threading.Event()
+
+    def hook() -> None:
+        plugin.on_invocation_start(start)
+        # Push whatever the start hook handed over to the exporter before the end
+        # hook schedules the closing record, so a record the outer frame scheduled
+        # is observed here instead of being coalesced away by the closing one.
+        _force_drain(factory)
+        # on_invocation_end drains, so every record is at the exporter once this
+        # returns.
+        plugin.on_invocation_end(_end(operations=_ops(_step("s1"), _step("s2"))))
+        returned.set()
+
+    thread = threading.Thread(target=hook, daemon=True)
+    thread.start()
+    assert returned.wait(10.0), "the hooks never returned"
+    thread.join(5.0)
+    assert not thread.is_alive()
+    assert reentered.is_set()
+
+    records = _records_for(exporter, ARN)
+    assert [record["status"] for record in records] == ["RUNNING", "SUCCEEDED"], (
+        "the closing record was dropped, or the superseded RUNNING record was "
+        f"exported: {[record['status'] for record in records]}"
+    )
+    assert [op["name"] for op in records[0]["operations"]] == ["s1"]
+    assert sorted(op["name"] for op in records[1]["operations"]) == ["s1", "s2"]

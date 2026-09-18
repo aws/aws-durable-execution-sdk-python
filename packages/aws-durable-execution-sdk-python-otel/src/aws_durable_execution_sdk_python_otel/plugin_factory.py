@@ -15,8 +15,12 @@ Everything else the plugins need is resolved per invocation inside the plugin
 itself: the tracer provider (which for the global-provider case may only be
 installed after the handler module is imported), the tracer, and the
 deterministic id generator and sampler installed on it. Those installs are
-idempotent and scoped to the plugin's own tracer, so building a plugin per
-invocation neither stacks wrappers nor disturbs other instrumentation scopes.
+scoped to the plugin's own tracer, so building a plugin per invocation does not
+disturb other instrumentation scopes. They are also atomic and return whatever
+the tracer holds, which matters because a provider caches tracers by
+instrumentation scope: two invocations starting at once get one tracer, and a
+plugin that lost the install race must use the wrapper on that tracer rather than
+one of its own that the tracer would never consult.
 """
 
 from __future__ import annotations
