@@ -480,7 +480,8 @@ class DurableInstrumentationPluginFactory(Protocol):
             def create_plugin(self, info: InvocationStartInfo) -> MyPlugin:
                 return MyPlugin(self._exporter)
 
-        plugins=[MyPluginFactory(exporter)]
+
+        plugins = [MyPluginFactory(exporter)]
 
     A plugin class is not a factory. ``plugins=[MyPlugin]`` used to work because
     calling a class constructs an instance, and it now fails at handler
