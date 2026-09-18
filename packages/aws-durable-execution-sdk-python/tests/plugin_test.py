@@ -829,6 +829,44 @@ class TestPluginLifetime(unittest.TestCase):
         self.assertIn("returned None", "\n".join(logs.output))
         self.assertEqual(surviving.calls, ["invocation_start:req-1"])
 
+    def test_factory_returning_a_non_plugin_is_contained(self):
+        """A factory whose return is not a plugin is logged once and skipped.
+
+        The load-time shape check establishes only that the factory has a
+        callable ``create_plugin``; what that call returns is knowable only
+        here. A value that is not a plugin fails every hook, so registering it
+        would log one error per hook per invocation and still provide no
+        telemetry.
+        """
+        surviving = _TrackingPlugin()
+
+        class _WrongTypeFactory:
+            def create_plugin(self, info: InvocationStartInfo):
+                return object()
+
+        executor = PluginExecutor(
+            plugins=[_WrongTypeFactory(), plugin_factory(surviving)],
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with executor.run():
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=LAMBDA_CTX,
+                    execution_start_time=START_TS,
+                    is_first_invocation=True,
+                )
+                self.assertEqual(executor._plugins, [surviving])
+
+        output = "\n".join(logs.output)
+        self.assertIn("not a DurableInstrumentationPlugin", output)
+        self.assertIn("object", output)
+        # One error, not one per hook: the value never reaches the dispatch.
+        self.assertEqual(len(logs.output), 1)
+        self.assertEqual(surviving.calls, ["invocation_start:req-1"])
+
     def test_every_failing_factory_leaves_the_executor_usable(self):
         """All factories failing is not distinguishable from having no plugins."""
         executor = PluginExecutor(plugins=[_ExplodingFactory()])

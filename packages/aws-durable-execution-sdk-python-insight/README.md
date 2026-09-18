@@ -223,9 +223,12 @@ Behavior is validated cross-SDK by the `insight` conformance suite
 > **Note (asynchronous export).** Export rendering, truncation, `export()`, and
 > `flush()` run on one lazy background worker per registered factory. Checkpoint
 > hooks only replace the latest pending snapshot and wake the worker. Consecutive
-> `on-change` snapshots may coalesce while an export is in flight. An invocation
-> that emits a record drains the latest snapshot and flushes exporters before it
-> returns; invocations that emit nothing do not start or flush the worker.
+> `on-change` snapshots may coalesce while an export is in flight. Every
+> sampled-in invocation end drains the latest snapshot and flushes exporters
+> before it returns, including an end that emitted no record: a buffering
+> exporter therefore sees one flush per sampled-in invocation end, which is the
+> cadence the JS and Java plugins have. Only a sampled-out execution neither
+> exports nor flushes.
 
 ## Requirements
 

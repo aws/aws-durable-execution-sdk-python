@@ -627,6 +627,20 @@ class PluginExecutor:
                     _factory_name(factory),
                 )
                 continue
+            # The load-time shape check can only establish that the factory has
+            # a callable create_plugin; what that call returns is knowable only
+            # here. A value that is not a plugin fails every hook inside
+            # _dispatch_plugin, so registering it would produce one logged error
+            # per hook per invocation for the life of the function while
+            # providing no telemetry. Reject it once instead.
+            if not isinstance(plugin, DurableInstrumentationPlugin):
+                logger.error(
+                    "Plugin factory %s returned %s, which is not a "
+                    "DurableInstrumentationPlugin; plugin ignored",
+                    _factory_name(factory),
+                    type(plugin).__qualname__,
+                )
+                continue
             plugins.append(plugin)
         self._plugins = plugins
 
