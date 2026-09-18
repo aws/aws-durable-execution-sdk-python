@@ -45,6 +45,20 @@ class _PluginBFactory:
         return _PluginB()
 
 
+class _DefaultedArgumentFactory:
+    """Instance method whose info parameter has a default, so one argument binds."""
+
+    def create_plugin(self, info: InvocationStartInfo | None = None) -> _PluginA:
+        return _PluginA()
+
+
+class _VariadicFactory:
+    """Instance method taking ``*args``, so any argument count binds."""
+
+    def create_plugin(self, *args: object) -> _PluginA:
+        return _PluginA()
+
+
 _plugin_a_factory = _PluginAFactory()
 _plugin_b_factory = _PluginBFactory()
 
@@ -579,26 +593,49 @@ def test_explicit_class_declaring_create_plugin_is_accepted() -> None:
     assert plugin.info is INVOCATION_START_INFO
 
 
-def test_explicit_factory_class_with_an_instance_method_is_rejected() -> None:
-    """The factory class is not the factory, and callability does not reveal it.
+@pytest.mark.parametrize(
+    "factory_class",
+    [
+        _PluginAFactory,
+        _DefaultedArgumentFactory,
+        _VariadicFactory,
+    ],
+    ids=["plain", "defaulted", "variadic"],
+)
+def test_explicit_factory_class_with_an_instance_method_is_rejected(
+    factory_class: type,
+) -> None:
+    """The factory class is not the factory, and no signature shape rescues it.
 
-    ``MyFactory.create_plugin`` read off the class is a plain function whose
-    first parameter is ``self``, so it is callable and used to pass. The
-    per-invocation call supplies only the info, Python binds it to ``self``, and
-    the resulting ``TypeError`` is contained like any other factory failure:
-    instrumentation is silently absent for the lifetime of the function. The
-    signature is bound at registration so the mistake fails here instead.
+    ``MyFactory.create_plugin`` read off the class is a plain function whose first
+    parameter is ``self``, so the per-invocation call binds the info to ``self``
+    and the factory never sees it. A signature bind alone does not catch every
+    such shape: ``create_plugin(self, info=None)`` and
+    ``create_plugin(self, *args)`` both bind one argument to ``self`` and leave
+    the rest satisfied, so they used to pass and then fail on every invocation
+    where the error is swallowed. The kind of the member decides instead.
     """
     with pytest.raises(PluginLoadError) as error:
-        load_configured_plugins([_PluginAFactory], environment={})  # type: ignore[list-item]
+        load_configured_plugins([factory_class], environment={})  # type: ignore[list-item]
 
     assert "plugins[0]" in str(error.value)
     assert "a factory instance rather than the factory class" in str(error.value)
 
 
-def test_discovery_rejects_a_factory_class_at_the_entry_point() -> None:
-    """The entry-point path applies the same signature check."""
-    entry_point = _FakeEntryPoint("a", _PluginAFactory)
+@pytest.mark.parametrize(
+    "factory_class",
+    [
+        _PluginAFactory,
+        _DefaultedArgumentFactory,
+        _VariadicFactory,
+    ],
+    ids=["plain", "defaulted", "variadic"],
+)
+def test_discovery_rejects_a_factory_class_at_the_entry_point(
+    factory_class: type,
+) -> None:
+    """The entry-point path applies the same rule."""
+    entry_point = _FakeEntryPoint("a", factory_class)
 
     with (
         patch(
@@ -614,6 +651,28 @@ def test_discovery_rejects_a_factory_class_at_the_entry_point() -> None:
 
     assert "must resolve to a plugin factory" in str(error.value)
     assert "not the factory class" in str(error.value)
+
+
+def test_explicit_class_holding_a_callable_create_plugin_is_accepted() -> None:
+    """A class attribute holding a callable takes no implicit first argument.
+
+    Reading it off the class produces the callable itself, so the info reaches it.
+    """
+
+    class _CallableMember:
+        def __call__(self, info: InvocationStartInfo) -> _PluginA:
+            return _PluginA()
+
+    class _MemberFactory:
+        create_plugin = _CallableMember()
+
+    result = load_configured_plugins([_MemberFactory], environment={})  # type: ignore[list-item]
+
+    assert result == [_MemberFactory]
+    assert isinstance(
+        _MemberFactory.create_plugin(INVOCATION_START_INFO),
+        _PluginA,
+    )
 
 
 def test_explicit_class_declaring_a_static_create_plugin_is_accepted() -> None:

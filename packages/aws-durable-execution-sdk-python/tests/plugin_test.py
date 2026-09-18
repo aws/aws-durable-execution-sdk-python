@@ -647,6 +647,36 @@ class TestPluginLifetime(unittest.TestCase):
         self.assertEqual(built[0].calls, ["invocation_start:req-1"])
         self.assertEqual(built[1].calls, ["invocation_start:req-2"])
 
+    def test_an_end_hook_that_stops_the_thread_is_not_reported_twice(self):
+        """Exactly one end notification per invocation, whatever the hook does.
+
+        ``_dispatch_plugin`` re-raises the three exceptions that instruct the
+        calling thread to stop, so a hook can raise. With the success dispatch
+        inside the try, that raise was caught as a handler failure and the hook
+        ran a second time with a RETRY outcome -- the wrong outcome for an
+        invocation that succeeded, and a second export for an exporter.
+        """
+        plugin = _ControlOnEndPlugin()
+        host = PluginHost(plugins=[plugin_factory(plugin)])
+
+        @host.handle_durable_output
+        def handler(event, context, plugin_executor):
+            plugin_executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+            )
+            return {
+                "Status": ServiceInvocationStatus.SUCCEEDED.value,
+                "Result": None,
+            }
+
+        with self.assertRaises(KeyboardInterrupt):
+            handler({}, LAMBDA_CTX)
+
+        self.assertEqual(plugin.end_statuses, [InvocationStatus.SUCCEEDED])
+
     def test_a_body_raising_cancellation_still_fires_the_end_hook(self):
         """Every exit fires the end hook, not only the ones deriving from Exception.
 
@@ -2292,6 +2322,17 @@ class _CancellingPlugin(DurableInstrumentationPlugin):
 
     def on_operation_start(self, info):
         raise asyncio.CancelledError("hook cancelled")
+
+
+class _ControlOnEndPlugin(DurableInstrumentationPlugin):
+    """Plugin whose end hook records the outcome and then stops the thread."""
+
+    def __init__(self) -> None:
+        self.end_statuses: list[InvocationStatus] = []
+
+    def on_invocation_end(self, info: InvocationEndInfo) -> None:
+        self.end_statuses.append(info.status)
+        raise KeyboardInterrupt
 
 
 class _FailingPlugin(DurableInstrumentationPlugin):

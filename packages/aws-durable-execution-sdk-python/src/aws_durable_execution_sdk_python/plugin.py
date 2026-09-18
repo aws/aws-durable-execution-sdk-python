@@ -1094,13 +1094,18 @@ class PluginHost:
             @functools.wraps(func)
             def wrapper(event: Any, context: LambdaContext):
                 with self.invocation() as plugin_executor:
+                    # The end hook is dispatched exactly once per invocation, so
+                    # the success dispatch sits outside the try. Inside it, an
+                    # end hook that raised would be caught as though the handler
+                    # had failed, and the hook would run a second time with a
+                    # RETRY outcome -- telling later plugins the wrong thing about
+                    # an invocation that succeeded, and letting an exporter export
+                    # twice. A hook can raise: _dispatch_plugin re-raises the three
+                    # exceptions that instruct the calling thread to stop, and
+                    # from_dict below can reject an output the handler built.
                     try:
                         output = func(event, context, plugin_executor)
-
-                        plugin_executor.on_invocation_end(
-                            output=DurableExecutionInvocationOutput.from_dict(output),
-                        )
-                        return output
+                        completed = DurableExecutionInvocationOutput.from_dict(output)
                     except BaseException as e:
                         # Every exit fires the end hook, not only the ones that
                         # derive from Exception. A handler that surfaces an
@@ -1126,6 +1131,8 @@ class PluginHost:
                             ),
                         )
                         raise
+                    plugin_executor.on_invocation_end(output=completed)
+                    return output
 
             return wrapper
 

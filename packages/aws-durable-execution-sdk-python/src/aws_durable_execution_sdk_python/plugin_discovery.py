@@ -73,9 +73,12 @@ def _is_plugin_factory(value: object) -> bool:
     plain function whose first parameter is ``self``, which is callable. The
     per-invocation call supplies only the info, Python binds it to ``self``, and
     the resulting :exc:`TypeError` is contained like any other factory failure:
-    telemetry is silently absent for the lifetime of the function. Binding one
-    positional argument to the signature rejects that at registration instead.
-    The bind is a signature operation, so no factory code runs.
+    telemetry is silently absent for the lifetime of the function. Two checks
+    reject that at registration instead. For a class, the *kind* of the member
+    decides, because a signature bind cannot tell ``create_plugin(self, info)``
+    from ``create_plugin(info)``: see :func:`_is_unbound_instance_method`. For
+    everything else, binding one positional argument to the signature rejects a
+    member that cannot receive the info. Neither check runs factory code.
 
     A callable with no introspectable signature -- a C-implemented callable, for
     example -- is accepted on the member alone. ``inspect.signature`` raises for
@@ -94,7 +97,43 @@ def _is_plugin_factory(value: object) -> bool:
     create_plugin = getattr(value, "create_plugin", None)
     if not callable(create_plugin):
         return False
+    if isinstance(value, type) and _is_unbound_instance_method(value, create_plugin):
+        return False
     return _accepts_one_positional_argument(create_plugin)
+
+
+def _is_unbound_instance_method(cls: type, create_plugin: object) -> bool:
+    """Report whether a class's ``create_plugin`` is an instance method.
+
+    Read off the class, an instance method is a plain function whose first
+    parameter is ``self``, so the per-invocation call binds the info to ``self``
+    and the factory never sees it. The signature bind below cannot catch every
+    such shape: ``create_plugin(self, info=None)`` and
+    ``create_plugin(self, *args)`` both bind one argument to ``self`` and leave
+    the rest satisfied. The kind of the member decides it instead.
+
+    Three shapes read off a class are usable and none of them is a plain
+    function. A ``@classmethod`` is already bound to the class, so it carries
+    ``__self__``. A ``@staticmethod`` is a plain function, but its descriptor says
+    it takes no implicit first argument. And an attribute holding a callable
+    object -- ``create_plugin = SomeCallable()`` -- is not a function at all and
+    takes no implicit first argument either. Anything else read off a class takes
+    ``self`` and cannot serve.
+
+    :func:`inspect.getattr_static` is what distinguishes the ``@staticmethod``,
+    because it returns the descriptor rather than what reading the attribute
+    produces. It walks the MRO without running any descriptor, so no factory code
+    runs here.
+    """
+    if getattr(create_plugin, "__self__", None) is not None:
+        return False
+    if not inspect.isfunction(create_plugin):
+        return False
+    try:
+        declared = inspect.getattr_static(cls, "create_plugin")
+    except AttributeError:
+        return False
+    return not isinstance(declared, staticmethod)
 
 
 def _accepts_one_positional_argument(create_plugin: object) -> bool:
