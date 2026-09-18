@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import os
+import time
 from unittest.mock import Mock, patch
 
 import pytest
@@ -575,6 +577,95 @@ def test_explicit_class_declaring_create_plugin_is_accepted() -> None:
     plugin = result[0].create_plugin(INVOCATION_START_INFO)
     assert isinstance(plugin, _ClassFactoryPlugin)
     assert plugin.info is INVOCATION_START_INFO
+
+
+def test_explicit_factory_class_with_an_instance_method_is_rejected() -> None:
+    """The factory class is not the factory, and callability does not reveal it.
+
+    ``MyFactory.create_plugin`` read off the class is a plain function whose
+    first parameter is ``self``, so it is callable and used to pass. The
+    per-invocation call supplies only the info, Python binds it to ``self``, and
+    the resulting ``TypeError`` is contained like any other factory failure:
+    instrumentation is silently absent for the lifetime of the function. The
+    signature is bound at registration so the mistake fails here instead.
+    """
+    with pytest.raises(PluginLoadError) as error:
+        load_configured_plugins([_PluginAFactory], environment={})  # type: ignore[list-item]
+
+    assert "plugins[0]" in str(error.value)
+    assert "a factory instance rather than the factory class" in str(error.value)
+
+
+def test_discovery_rejects_a_factory_class_at_the_entry_point() -> None:
+    """The entry-point path applies the same signature check."""
+    entry_point = _FakeEntryPoint("a", _PluginAFactory)
+
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry_point],
+        ),
+        pytest.raises(PluginLoadError) as error,
+    ):
+        load_configured_plugins(
+            None,
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
+        )
+
+    assert "must resolve to a plugin factory" in str(error.value)
+    assert "not the factory class" in str(error.value)
+
+
+def test_explicit_class_declaring_a_static_create_plugin_is_accepted() -> None:
+    """A ``@staticmethod`` presents the signature the SDK calls, so it binds."""
+
+    class _StaticFactoryPlugin(DurableInstrumentationPlugin):
+        def __init__(self, info: InvocationStartInfo) -> None:
+            self.info = info
+
+        @staticmethod
+        def create_plugin(info: InvocationStartInfo) -> _StaticFactoryPlugin:
+            return _StaticFactoryPlugin(info)
+
+    result = load_configured_plugins([_StaticFactoryPlugin], environment={})
+
+    assert result == [_StaticFactoryPlugin]
+    assert isinstance(
+        result[0].create_plugin(INVOCATION_START_INFO), _StaticFactoryPlugin
+    )
+
+
+def test_explicit_factory_without_an_introspectable_signature_is_accepted() -> None:
+    """A signature that cannot be read is not evidence of a broken factory.
+
+    ``inspect.signature`` raises ``ValueError`` for some C-implemented callables,
+    ``time.strftime`` among them. Rejecting such a factory would refuse a usable
+    one over a missing description of it, so the member alone decides.
+    """
+
+    class _UnreadableSignatureFactory:
+        create_plugin = staticmethod(time.strftime)
+
+    factory = _UnreadableSignatureFactory()
+
+    with pytest.raises(ValueError, match="no signature"):
+        inspect.signature(time.strftime)
+
+    assert load_configured_plugins([factory], environment={}) == [factory]  # type: ignore[list-item, comparison-overlap]
+
+
+def test_explicit_factory_taking_no_argument_is_rejected() -> None:
+    """A ``create_plugin`` that takes nothing cannot receive the info."""
+
+    class _NoArgumentFactory:
+        def create_plugin(self) -> _PluginA:
+            return _PluginA()
+
+    with pytest.raises(PluginLoadError) as error:
+        load_configured_plugins([_NoArgumentFactory()], environment={})  # type: ignore[list-item]
+
+    assert "plugins[0]" in str(error.value)
+    assert "create_plugin(info) method" in str(error.value)
 
 
 def test_explicit_factory_object_is_accepted() -> None:

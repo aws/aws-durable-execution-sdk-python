@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 from collections.abc import Mapping, Sequence
@@ -16,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 PLUGIN_ENTRY_POINT_GROUP = "aws_durable_execution.plugins"
 PLUGIN_ENVIRONMENT_VARIABLE = "DURABLE_EXECUTION_PLUGINS"
+
+# Stands in for the InvocationStartInfo when a factory's signature is checked at
+# registration. Only the bind is performed, so nothing reads it.
+_ARGUMENT_PROBE = object()
 
 
 def _parse_configured_plugin_names(environment: Mapping[str, str]) -> list[str]:
@@ -58,21 +63,57 @@ def _is_plugin_factory(value: object) -> bool:
     """Report whether a value has the shape of a plugin factory.
 
     :class:`DurableInstrumentationPluginFactory` declares one method, so the
-    shape is one member: a callable ``create_plugin``. The attribute is fetched
-    and tested for callability rather than merely for presence, because an
-    object carrying a non-callable ``create_plugin`` would otherwise pass here
-    and fail at invocation time.
+    shape is one member: a ``create_plugin`` that can be called with one
+    positional argument. The attribute is fetched and tested rather than merely
+    checked for presence, because an object carrying a non-callable
+    ``create_plugin`` would otherwise pass here and fail at invocation time.
+
+    Callability alone is not enough. ``plugins=[MyFactory]`` -- the factory
+    *class* rather than an instance of it -- resolves ``create_plugin`` to a
+    plain function whose first parameter is ``self``, which is callable. The
+    per-invocation call supplies only the info, Python binds it to ``self``, and
+    the resulting :exc:`TypeError` is contained like any other factory failure:
+    telemetry is silently absent for the lifetime of the function. Binding one
+    positional argument to the signature rejects that at registration instead.
+    The bind is a signature operation, so no factory code runs.
+
+    A callable with no introspectable signature -- a C-implemented callable, for
+    example -- is accepted on the member alone. ``inspect.signature`` raises for
+    it, and refusing a factory because its signature could not be read would
+    reject a usable factory over a missing description of it.
 
     Structural rather than nominal, so a factory need not import the SDK
     protocol to satisfy it. The protocol is deliberately not
     ``@runtime_checkable``; see its docstring.
 
-    The check cannot go further than one member. Whether ``create_plugin``
-    accepts the info, and whether it returns a plugin, is only knowable by
-    calling it, and calling it at load time is what the per-invocation factory
-    design avoids: there is no invocation yet.
+    The check stops there. Whether ``create_plugin`` returns a plugin is only
+    knowable by calling it, and calling it at load time is what the
+    per-invocation factory design avoids: there is no invocation yet. That case
+    is checked per invocation by :meth:`PluginExecutor._create_plugins`.
     """
-    return callable(getattr(value, "create_plugin", None))
+    create_plugin = getattr(value, "create_plugin", None)
+    if not callable(create_plugin):
+        return False
+    return _accepts_one_positional_argument(create_plugin)
+
+
+def _accepts_one_positional_argument(create_plugin: object) -> bool:
+    """Report whether one positional argument can be bound to a callable.
+
+    A bound method, a ``@classmethod`` or ``@staticmethod`` read off a class, and
+    a ``__call__`` on an instance all present the signature the SDK calls, so all
+    three bind. An instance method read off the class does not: its first
+    parameter is ``self``, so one argument leaves the info unbound.
+    """
+    try:
+        signature = inspect.signature(create_plugin)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return True
+    try:
+        signature.bind(_ARGUMENT_PROBE)
+    except TypeError:
+        return False
+    return True
 
 
 def _load_factory(
@@ -103,7 +144,7 @@ def _load_factory(
             "create_plugin(info) method returning a "
             "DurableInstrumentationPlugin -- but resolved to "
             f"{_qualified_type_name(factory)}. Name the factory instance, not a "
-            "plugin and not a plugin class."
+            "plugin, not a plugin class, and not the factory class."
         )
 
     return cast(DurableInstrumentationPluginFactory, factory)
@@ -126,11 +167,15 @@ def _validate_explicit_factories(
     A plugin *class* is rejected, and so is any bare callable. Both were
     accepted while the registration type was ``Callable``: a lambda satisfied it
     directly, and a class satisfied it because calling a class constructs an
-    instance. Neither carries ``create_plugin``, so ``plugins=[MyPlugin]`` and
-    ``plugins=[lambda info: MyPlugin()]`` now fail here. The replacement is a
-    small factory class, which is also where setup work that can fail belongs. A
-    class that declares ``create_plugin`` as a ``@classmethod`` is accepted,
-    because the requirement is the member and not the kind of object.
+    instance. Neither carries a ``create_plugin`` the SDK can call, so
+    ``plugins=[MyPlugin]`` and ``plugins=[lambda info: MyPlugin()]`` now fail
+    here. A *factory* class passed instead of an instance of it fails here too:
+    ``MyFactory.create_plugin`` is callable, but its first parameter is ``self``,
+    so the per-invocation call binds the info to ``self``. The replacement is a
+    small factory class, instantiated, which is also where setup work that can
+    fail belongs. A class that declares ``create_plugin`` as a ``@classmethod``
+    or a ``@staticmethod`` is accepted, because that member presents the
+    signature the SDK calls.
     """
     factories = list(explicit_plugins or [])
     for index, factory in enumerate(factories):
@@ -140,7 +185,8 @@ def _validate_explicit_factories(
                 "plugin factory -- an object with a create_plugin(info) method "
                 "returning a DurableInstrumentationPlugin -- but is "
                 f"{_qualified_type_name(factory)}. Pass a factory rather than a "
-                "plugin, a plugin class, or a plain callable, for example "
+                "plugin, a plugin class, or a plain callable, and pass a factory "
+                "instance rather than the factory class, for example "
                 "plugins=[MyPluginFactory(exporter)]."
             )
     return factories
