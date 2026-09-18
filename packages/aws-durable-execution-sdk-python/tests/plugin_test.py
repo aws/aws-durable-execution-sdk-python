@@ -647,6 +647,40 @@ class TestPluginLifetime(unittest.TestCase):
         self.assertEqual(built[0].calls, ["invocation_start:req-1"])
         self.assertEqual(built[1].calls, ["invocation_start:req-2"])
 
+    def test_an_end_hook_that_stops_the_thread_still_finishes_the_dispatch(self):
+        """Every started plugin receives the end hook, then the thread stops.
+
+        The end hook is a plugin's only chance to finish -- Insight drains there
+        and OTel ends its spans -- so a plugin raising one of the three control
+        exceptions must not cost the plugins after it in the list their own end
+        hook. The exception is held and re-raised once every plugin has been
+        called.
+        """
+        later = _TrackingPlugin()
+        host = PluginHost(
+            plugins=[plugin_factory(_ControlOnEndPlugin()), plugin_factory(later)]
+        )
+
+        @host.handle_durable_output
+        def handler(event, context, plugin_executor):
+            plugin_executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+            )
+            return {
+                "Status": ServiceInvocationStatus.SUCCEEDED.value,
+                "Result": None,
+            }
+
+        with self.assertRaises(KeyboardInterrupt):
+            handler({}, LAMBDA_CTX)
+
+        self.assertEqual(
+            later.calls, ["invocation_start:req-1", "invocation_end:req-1"]
+        )
+
     def test_a_start_hook_that_stops_the_thread_leaves_later_plugins_unpaired(self):
         """A plugin that never received the start hook never receives the end hook.
 

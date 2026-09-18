@@ -211,14 +211,20 @@ class _ExportScheduler:
                 "refused rather than deadlocking the invocation; an exporter "
                 "re-entered a plugin hook"
             )
-            # The refused call still leaves a flush behind. The hook that
-            # re-entered may have queued a record, and this worker exits its loop
-            # once nothing is pending and no flush is requested -- so without the
-            # request the record would be handed to the exporters and the worker
-            # would stop, leaving a buffering exporter holding an execution's
-            # terminal telemetry when Lambda freezes the environment. Requesting
-            # it rather than waiting for it is what keeps the worker unblocked.
-            self._request_flush()
+            # The refused call still leaves a flush behind, but only when there is
+            # something for it to cover. The hook that re-entered may have queued a
+            # record, and this worker exits its loop once nothing is pending and no
+            # flush is requested -- so without the request the record would be
+            # handed to the exporters and the worker would stop, leaving a
+            # buffering exporter holding an execution's terminal telemetry when
+            # Lambda freezes the environment.
+            #
+            # Requesting one unconditionally would livelock instead: an exporter
+            # whose flush() re-enters a hook arrives here from inside a flush, and
+            # an unconditional request would ask for the next one, which re-enters
+            # again, for as long as the environment lives. A pending record is what
+            # distinguishes new work from that loop.
+            self._request_flush_for_pending_records()
             return
         failed_pending: _Dropped | None = None
         start_error: Exception | None = None
@@ -294,15 +300,23 @@ class _ExportScheduler:
         with self._condition:
             return self._worker is threading.current_thread()
 
-    def _request_flush(self) -> None:
-        """Ask the worker for a flush covering everything scheduled so far.
+    def _request_flush_for_pending_records(self) -> None:
+        """Ask the worker for a flush, but only if a record is waiting for one.
 
         Returns without waiting, so it is safe to call from the worker itself. The
         barrier is raised to the current schedule counter, which is what makes the
         flush cover a record queued moments ago rather than running before it.
+
+        A pending record is the condition, not a formality. This is called from a
+        drain refused on the worker thread, and one way to reach that is an
+        exporter whose ``flush()`` re-enters a plugin hook: the call then arrives
+        from inside a flush, and requesting the next one unconditionally would
+        produce a flush that re-enters, requests, and flushes again for as long as
+        the environment lives -- after the invocation has returned. Nothing is
+        pending in that case, so nothing is requested.
         """
         with self._condition:
-            if self._disabled:
+            if self._disabled or not self._pending:
                 return
             self._flush_requested = True
             self._flush_barrier = max(self._flush_barrier, self._seq)

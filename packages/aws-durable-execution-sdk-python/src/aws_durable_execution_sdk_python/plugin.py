@@ -723,19 +723,40 @@ class PluginExecutor:
         A plugin is counted as started before its start hook is dispatched rather
         than after, because a hook that begins and then fails may already have
         allocated what its end hook releases.
+
+        The invocation-end hook is the one hook that finishes dispatching even
+        when a plugin raises one of those three. Every plugin it reaches has
+        already started, so cutting the loop short costs a plugin its only chance
+        to finish: Insight would not drain, and OTel would leave spans unended.
+        The first such exception is held and re-raised once every plugin has been
+        called, so the thread still stops and nothing is swallowed. No other hook
+        defers: stopping a start-hook loop early leaves later plugins with nothing
+        to clean up, because the pairing rule above then withholds their end hook
+        too.
         """
         if not self._executor:
             return
         starting = isinstance(info, InvocationStartInfo)
+        ending = isinstance(info, InvocationEndInfo)
+        deferred_control: BaseException | None = None
         for plugin in self._plugins if starting else self._started:
             if starting:
                 self._started.append(plugin)
-            if sync:
-                # this is called synchronously, so plugins will be able to manipulate thread local objects
-                self._dispatch_plugin(plugin, info)
-            else:
+            if not sync:
                 # this is called asynchronously, so plugins cannot manipulate thread local objects
                 self._executor.submit(self._dispatch_plugin, plugin, info)
+                continue
+            # this is called synchronously, so plugins will be able to manipulate thread local objects
+            if not ending:
+                self._dispatch_plugin(plugin, info)
+                continue
+            try:
+                self._dispatch_plugin(plugin, info)
+            except _PLUGIN_THREAD_CONTROL_EXCEPTIONS as control:
+                if deferred_control is None:
+                    deferred_control = control
+        if deferred_control is not None:
+            raise deferred_control
 
     def _snapshot_operation_infos(
         self,

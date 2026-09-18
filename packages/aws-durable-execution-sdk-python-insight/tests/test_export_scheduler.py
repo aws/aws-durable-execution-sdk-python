@@ -866,22 +866,27 @@ def test_blocked_export_never_loses_another_executions_terminal_record() -> None
 
 
 class ReentrantDrainExporter(CaptureExporter):
-    """Exporter that drains from inside export(), as a plugin hook would.
+    """Exporter that queues a record and drains from inside export().
 
-    An exporter that re-enters a plugin hook reaches ``on_invocation_end``, and
-    that hook drains. The re-entry therefore arrives on the export worker thread,
-    which is the one thread able to serve the wait.
+    This is what an exporter re-entering a plugin hook produces: the hook emits
+    its record and then, at an invocation end, drains. Both arrive on the export
+    worker, which is the one thread able to serve the wait.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.scheduler: _ArnScheduler | None = None
         self.returned = threading.Event()
+        self._reentered = False
 
     def export(self, record: dict[str, Any]) -> None:
         super().export(record)
         assert self.scheduler is not None
-        self.scheduler.drain(ARN_A)
+        if self._reentered:
+            return
+        self._reentered = True
+        self.scheduler.schedule(ARN_B, _record("r2"))
+        self.scheduler.drain(ARN_B)
         self.returned.set()
 
 
@@ -907,11 +912,59 @@ def test_drain_from_the_export_worker_is_refused_rather_than_deadlocking(
 
     assert ("export", "r1") in exporter.calls
     # The refused drain still leaves a flush behind, with no external drain to ask
-    # for one. The re-entering hook may have queued a record, and the worker exits
-    # once nothing is pending and no flush is requested, so without the request a
+    # for one. The re-entering hook queued a record, and the worker exits once
+    # nothing is pending and no flush is requested, so without the request a
     # buffering exporter would be holding that record when the environment froze.
-    assert _wait_until(lambda: ("flush", None) in exporter.calls), (
-        "a refused drain must request a flush on its way out"
-    )
+    assert _wait_until(lambda: ("export", "r2") in exporter.calls)
+    assert _wait_until(
+        lambda: exporter.calls.index(("flush", None))
+        > exporter.calls.index(("export", "r2"))
+    ), "a refused drain must request a flush that covers the record it queued"
     # The worker is still serving: a drain from any other thread completes.
     scheduler.drain(ARN_B)
+
+
+class ReentrantFlushExporter(CaptureExporter):
+    """Exporter whose flush() drains, as a hook re-entered from a flush would.
+
+    An exporter that re-enters a plugin hook from ``flush()`` reaches
+    ``on_invocation_end``, which drains. The drain arrives on the export worker
+    from inside a flush, with nothing pending.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scheduler: _ArnScheduler | None = None
+        self.flushes = 0
+
+    def flush(self) -> None:
+        super().flush()
+        self.flushes += 1
+        assert self.scheduler is not None
+        self.scheduler.drain(ARN_A)
+
+
+def test_a_drain_refused_from_inside_a_flush_does_not_re_arm_it() -> None:
+    """A refused drain with nothing pending asks for no further flush.
+
+    Requesting one unconditionally would keep the worker flushing for as long as
+    the environment lived: the flush re-enters the hook, the hook drains, the
+    refused drain asks for the next flush. A pending record is what distinguishes
+    new work from that loop, so a drain refused from inside a flush leaves no
+    request behind.
+    """
+    exporter = ReentrantFlushExporter()
+    scheduler = _ArnScheduler([exporter])
+    exporter.scheduler = scheduler
+
+    scheduler.schedule(ARN_A, _record("r1"))
+    scheduler.drain(ARN_A)
+
+    flushes_after_drain = exporter.flushes
+    assert flushes_after_drain >= 1, "the drain must have flushed"
+
+    # Give a re-armed flush time to appear. The worker retires when nothing is
+    # pending and no flush is requested, so a bounded count here is the whole
+    # assertion: an unconditional request never settles.
+    assert not _wait_until(lambda: exporter.flushes > flushes_after_drain, timeout=1.0)
+    assert _wait_until(lambda: not scheduler._worker_alive())
