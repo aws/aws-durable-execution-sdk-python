@@ -1,14 +1,15 @@
 """Plugin factories for the bundled durable-execution OTel plugins.
 
-The SDK's plugin contract is a factory called once per invocation:
-``DurableInstrumentationPluginFactory = Callable[[InvocationStartInfo],
-DurableInstrumentationPlugin]``. The instance a factory returns serves exactly
-that one invocation and is dropped when the invocation scope exits, so a plugin
-keeps its per-invocation state in ordinary instance attributes.
+The SDK's plugin contract is a factory object whose ``create_plugin`` is called
+once per invocation: ``DurableInstrumentationPluginFactory`` declares
+``create_plugin(info: InvocationStartInfo) -> DurableInstrumentationPlugin``. The
+instance a factory returns serves exactly that one invocation and is dropped when
+the invocation scope exits, so a plugin keeps its per-invocation state in ordinary
+instance attributes.
 
-Both factories are callable classes rather than closures so the configuration
-they were built with stays inspectable (``factory.config``) and so the entry
-points below name an object with a readable type.
+Both factories are classes rather than closures so the configuration they were
+built with stays inspectable (``factory.config``) and so the entry points below
+name an object with a readable type.
 
 Everything else the plugins need is resolved per invocation inside the plugin
 itself: the tracer provider (which for the global-provider case may only be
@@ -57,7 +58,7 @@ class InvocationOtelPluginFactory:
     def __init__(self, config: OtelPluginConfig | None = None) -> None:
         self.config = config
 
-    def __call__(self, info: InvocationStartInfo) -> InvocationOtelPlugin:
+    def create_plugin(self, info: InvocationStartInfo) -> InvocationOtelPlugin:
         """Return this invocation's plugin.
 
         ``info`` is accepted because the SDK passes it, and is unused: the
@@ -78,7 +79,7 @@ class ExecutionOtelPluginFactory:
     def __init__(self, config: OtelPluginConfig | None = None) -> None:
         self.config = config
 
-    def __call__(self, info: InvocationStartInfo) -> ExecutionOtelPlugin:
+    def create_plugin(self, info: InvocationStartInfo) -> ExecutionOtelPlugin:
         """Return this invocation's plugin. ``info`` is unused; see above."""
         return ExecutionOtelPlugin(self.config)
 

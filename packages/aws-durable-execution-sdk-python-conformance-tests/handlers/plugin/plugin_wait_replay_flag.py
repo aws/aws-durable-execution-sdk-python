@@ -81,6 +81,21 @@ class WaitReplayFlagPlugin(DurableInstrumentationPlugin):
         )
 
 
+class WaitReplayFlagPluginFactory:
+    """Builds one :class:`WaitReplayFlagPlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> WaitReplayFlagPlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return WaitReplayFlagPlugin()
+
+
 def wait_short(ctx: DurableContext) -> str:
     ctx.wait(Duration.from_seconds(2), name="short")
     return "short-done"
@@ -91,7 +106,7 @@ def wait_long(ctx: DurableContext) -> str:
     return "long-done"
 
 
-@durable_execution(plugins=[lambda _info: WaitReplayFlagPlugin()])
+@durable_execution(plugins=[WaitReplayFlagPluginFactory()])
 def handler(_event: Any, context: DurableContext) -> list:
     result = context.parallel(
         [wait_short, wait_long],

@@ -151,8 +151,9 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    # The SDK takes a factory and calls it once per invocation, so the two
-    # invocations below are served by two plugin instances sharing this provider.
+    # The SDK takes a factory and calls its create_plugin once per invocation, so
+    # the two invocations below are served by two plugin instances sharing this
+    # provider.
     factory = factory_type(
         OtelPluginConfig(
             tracer_provider=provider,

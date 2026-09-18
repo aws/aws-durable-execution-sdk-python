@@ -79,6 +79,21 @@ class ContextInfoShapePlugin(DurableInstrumentationPlugin):
         _emit(record, self._execution_arn)
 
 
+class ContextInfoShapePluginFactory:
+    """Builds one :class:`ContextInfoShapePlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> ContextInfoShapePlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return ContextInfoShapePlugin()
+
+
 @durable_step
 def inner(_step_context: StepContext) -> str:
     return "x"
@@ -94,7 +109,7 @@ def branch_b(_context: DurableContext) -> str:
     return "b-done"
 
 
-@durable_execution(plugins=[lambda _info: ContextInfoShapePlugin()])
+@durable_execution(plugins=[ContextInfoShapePluginFactory()])
 def handler(_event: Any, context: DurableContext) -> list[str]:
     result: BatchResult[str] = context.parallel(
         [

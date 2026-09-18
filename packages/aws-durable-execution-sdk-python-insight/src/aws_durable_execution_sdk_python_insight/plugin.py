@@ -14,8 +14,8 @@ Two lifetimes:
   ``@durable_execution(plugins=[...])`` takes. The factory lives as long as the
   handler and owns everything that is not per-execution: the resolved immutable
   config, the exporters, and the ``_ExportScheduler`` that serializes export
-  across executions. The SDK calls it once per invocation and drops the instance
-  it returns when the invocation scope exits, so a
+  across executions. The SDK calls its ``create_plugin`` once per invocation and
+  drops the instance it returns when the invocation scope exits, so a
   :class:`WorkflowInsightPlugin` instance serves exactly one invocation of one
   execution. Everything this environment holds for that execution is therefore
   ordinary instance state: no ARN-keyed registry, and no hook can reach an
@@ -500,19 +500,20 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
 class _WorkflowInsightFactory:
     """The handler-lifetime half of the plugin: what is NOT per-execution.
 
-    Satisfies the SDK's ``DurableInstrumentationPluginFactory`` -- it is called
-    with an ``InvocationStartInfo`` and returns the plugin instance for that
-    invocation. Everything it holds is either immutable after construction (the
-    resolved config) or deliberately shared across executions:
+    Satisfies the SDK's ``DurableInstrumentationPluginFactory`` -- its
+    ``create_plugin`` is called with an ``InvocationStartInfo`` and returns the
+    plugin instance for that invocation. Everything it holds is either immutable
+    after construction (the resolved config) or deliberately shared across
+    executions:
 
     * the exporters, which are customer objects registered once, and
     * the ``_ExportScheduler``, because export serialization is cross-execution:
       one worker, one ``export()`` at a time, whatever the instance that
       scheduled the record.
 
-    A callable class rather than a closure so the resolved config stays
-    inspectable (``factory._emit_mode``, ``factory._exporters``) instead of being
-    buried in cell variables.
+    A class rather than a closure so the resolved config stays inspectable
+    (``factory._emit_mode``, ``factory._exporters``) instead of being buried in
+    cell variables.
     """
 
     def __init__(self, config: WorkflowInsightConfig) -> None:
@@ -549,7 +550,7 @@ class _WorkflowInsightFactory:
         )
         self._scheduler = _ExportScheduler(self._exporters)
 
-    def __call__(self, info: InvocationStartInfo) -> WorkflowInsightPlugin:
+    def create_plugin(self, info: InvocationStartInfo) -> WorkflowInsightPlugin:
         return WorkflowInsightPlugin(self, info)
 
 
@@ -557,6 +558,7 @@ def workflow_insight(config: WorkflowInsightConfig) -> _WorkflowInsightFactory:
     """Create a Workflow Insight plugin factory. Mirrors the JS ``workflowInsight()``.
 
     Pass the result straight to ``@durable_execution(plugins=[...])``: the SDK
-    calls it once per invocation to build that invocation's plugin instance.
+    calls its ``create_plugin`` once per invocation to build that invocation's
+    plugin instance.
     """
     return _WorkflowInsightFactory(config)

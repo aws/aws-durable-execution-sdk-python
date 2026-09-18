@@ -3809,13 +3809,14 @@ def test_durable_execution_builds_a_plugin_per_invocation():
     built: list[_RecordingPlugin] = []
     factory_arns: list[str | None] = []
 
-    def build_plugin(info) -> _RecordingPlugin:
-        factory_arns.append(info.execution_arn)
-        plugin = _RecordingPlugin()
-        built.append(plugin)
-        return plugin
+    class _BuildingFactory:
+        def create_plugin(self, info) -> _RecordingPlugin:
+            factory_arns.append(info.execution_arn)
+            plugin = _RecordingPlugin()
+            built.append(plugin)
+            return plugin
 
-    @durable_execution(plugins=[build_plugin])
+    @durable_execution(plugins=[_BuildingFactory()])
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"result": "success"}
 
@@ -3887,11 +3888,12 @@ def test_durable_execution_keeps_overlapping_invocations_isolated():
     built: dict[str, _TaggedRecordingPlugin] = {}
     built_lock = threading.Lock()
 
-    def build_plugin(info) -> _TaggedRecordingPlugin:
-        plugin = _TaggedRecordingPlugin()
-        with built_lock:
-            built[str(info.request_id)] = plugin
-        return plugin
+    class _BuildingFactory:
+        def create_plugin(self, info) -> _TaggedRecordingPlugin:
+            plugin = _TaggedRecordingPlugin()
+            with built_lock:
+                built[str(info.request_id)] = plugin
+            return plugin
 
     timeout = 30
     # Released only once both invocations are inside their user function, so both
@@ -3902,7 +3904,7 @@ def test_durable_execution_keeps_overlapping_invocations_isolated():
     b_ran_operation = threading.Event()
     a_ran_operation = threading.Event()
 
-    @durable_execution(plugins=[build_plugin])
+    @durable_execution(plugins=[_BuildingFactory()])
     def test_handler(event: Any, context: DurableContext) -> dict:
         tag = event["tag"]
         both_in_user_code.wait()
@@ -3965,10 +3967,11 @@ def test_durable_execution_with_failing_plugin_factory_does_not_break_execution(
 
     recording_plugin = _RecordingPlugin()
 
-    def exploding_factory(info) -> DurableInstrumentationPlugin:
-        raise RuntimeError("factory boom")
+    class _ExplodingFactory:
+        def create_plugin(self, info) -> DurableInstrumentationPlugin:
+            raise RuntimeError("factory boom")
 
-    @durable_execution(plugins=[exploding_factory, plugin_factory(recording_plugin)])
+    @durable_execution(plugins=[_ExplodingFactory(), plugin_factory(recording_plugin)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"result": "success"}
 

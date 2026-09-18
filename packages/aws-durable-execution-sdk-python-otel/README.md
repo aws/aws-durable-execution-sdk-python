@@ -43,10 +43,10 @@ processors, and exporter.
 4. Add X-Ray write permissions
 
 The SDK's `plugins` list takes plugin *factories*, not plugin instances: it calls
-each factory once per invocation and the plugin it returns serves that one
-invocation. `InvocationOtelPluginFactory` and `ExecutionOtelPluginFactory` are
-the factories for the two bundled plugins; each takes the optional
-`OtelPluginConfig` that every plugin it builds will use.
+each factory's `create_plugin` once per invocation and the plugin it returns
+serves that one invocation. `InvocationOtelPluginFactory` and
+`ExecutionOtelPluginFactory` are the factories for the two bundled plugins; each
+takes the optional `OtelPluginConfig` that every plugin it builds will use.
 
 Alternatively, install this package in the function artifact or a Lambda layer
 and select either OTel plugin by entry-point name:
@@ -58,9 +58,9 @@ DURABLE_EXECUTION_PLUGINS=otel-execution
 
 `otel-invocation` names a default-configured `InvocationOtelPluginFactory`;
 `otel-execution` names a default-configured `ExecutionOtelPluginFactory`. The SDK
-discovers the selected package entry point at cold start and calls it once per
-invocation, so the handler does not need to import or explicitly register the
-plugin.
+discovers the selected package entry point at cold start and calls its
+`create_plugin` once per invocation, so the handler does not need to import or
+explicitly register the plugin.
 
 ### 1. ADOT Lambda Layer
 
@@ -381,8 +381,8 @@ After deploying your function with the plugin configured:
 
 Factory for the invocation-rooted plugin, and what belongs in the SDK's `plugins`
 list. Satisfies `DurableInstrumentationPluginFactory` from
-`aws_durable_execution_sdk_python`: calling it with an `InvocationStartInfo`
-returns the `InvocationOtelPlugin` for that invocation.
+`aws_durable_execution_sdk_python`: its `create_plugin(info)` takes an
+`InvocationStartInfo` and returns the `InvocationOtelPlugin` for that invocation.
 
 ```python
 InvocationOtelPluginFactory(

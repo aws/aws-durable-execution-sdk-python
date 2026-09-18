@@ -54,17 +54,38 @@ def _qualified_type_name(value: object) -> str:
     return f"{value_type.__module__}.{value_type.__qualname__}"
 
 
+def _is_plugin_factory(value: object) -> bool:
+    """Report whether a value has the shape of a plugin factory.
+
+    :class:`DurableInstrumentationPluginFactory` declares one method, so the
+    shape is one member: a callable ``create_plugin``. The attribute is fetched
+    and tested for callability rather than merely for presence, because an
+    object carrying a non-callable ``create_plugin`` would otherwise pass here
+    and fail at invocation time.
+
+    Structural rather than nominal, so a factory need not import the SDK
+    protocol to satisfy it. The protocol is deliberately not
+    ``@runtime_checkable``; see its docstring.
+
+    The check cannot go further than one member. Whether ``create_plugin``
+    accepts the info, and whether it returns a plugin, is only knowable by
+    calling it, and calling it at load time is what the per-invocation factory
+    design avoids: there is no invocation yet.
+    """
+    return callable(getattr(value, "create_plugin", None))
+
+
 def _load_factory(
     plugin_name: str, entry_point: metadata.EntryPoint
 ) -> DurableInstrumentationPluginFactory:
     """Resolve an entry point to a plugin factory.
 
     Only two things can still be checked here. The entry point has to import,
-    and what it resolves to has to be callable. Nothing more is knowable without
-    calling the factory, and calling it at load time is precisely what this
-    design avoids: the instance belongs to an invocation, and there is no
-    invocation yet. A factory that then misbehaves at invocation time is
-    contained by :meth:`PluginExecutor._create_plugins`.
+    and what it resolves to has to have the factory shape. Nothing more is
+    knowable without calling the factory, and calling it at load time is
+    precisely what this design avoids: the instance belongs to an invocation,
+    and there is no invocation yet. A factory that then misbehaves at invocation
+    time is contained by :meth:`PluginExecutor._create_plugins`.
     """
     try:
         factory = entry_point.load()
@@ -75,11 +96,14 @@ def _load_factory(
             f"({_distribution_name(entry_point)}): {error}"
         ) from error
 
-    if not callable(factory):
+    if not _is_plugin_factory(factory):
         raise PluginLoadError(
             f"Durable instrumentation plugin entry point '{plugin_name}' must "
-            "resolve to a callable plugin factory, but resolved to "
-            f"{_qualified_type_name(factory)}."
+            "resolve to a plugin factory -- an object with a "
+            "create_plugin(info) method returning a "
+            "DurableInstrumentationPlugin -- but resolved to "
+            f"{_qualified_type_name(factory)}. Name the factory instance, not a "
+            "plugin and not a plugin class."
         )
 
     return cast(DurableInstrumentationPluginFactory, factory)
@@ -88,34 +112,36 @@ def _load_factory(
 def _validate_explicit_factories(
     explicit_plugins: Sequence[DurableInstrumentationPluginFactory] | None,
 ) -> list[DurableInstrumentationPluginFactory]:
-    """Check that every explicitly passed plugin entry is callable.
+    """Check that every explicitly passed plugin entry has the factory shape.
 
-    Each entry is called once per invocation to build that invocation's plugin
-    instance. An entry that is not callable can never be called, so
-    :meth:`PluginExecutor._create_plugins` raises ``TypeError`` on every
+    Each entry's ``create_plugin`` is called once per invocation to build that
+    invocation's plugin instance. An entry without one can never be called, so
+    :meth:`PluginExecutor._create_plugins` raises ``AttributeError`` on every
     invocation, logs it and continues without that plugin -- telemetry is lost
     for the lifetime of the function, and nothing fails. Raising here converts
     that into one configuration failure while the handler is being initialized.
     The position is named because a caller passing several entries cannot
     otherwise tell which one is wrong.
 
-    A plugin *class* is callable and stays valid: calling it constructs an
-    instance, so ``plugins=[MyPlugin]`` is accepted whenever ``MyPlugin`` accepts
-    the info argument. It is permitted rather than recommended, because a
-    constructor should only assign fields and a class used directly as a factory
-    invites setup work into ``__init__``. ``plugins=[lambda info: MyPlugin(...)]``
-    or a ``@classmethod`` factory keeps that work out of the constructor. Only a
-    plugin *instance*, or any other non-callable value, is rejected.
+    A plugin *class* is rejected, and so is any bare callable. Both were
+    accepted while the registration type was ``Callable``: a lambda satisfied it
+    directly, and a class satisfied it because calling a class constructs an
+    instance. Neither carries ``create_plugin``, so ``plugins=[MyPlugin]`` and
+    ``plugins=[lambda info: MyPlugin()]`` now fail here. The replacement is a
+    small factory class, which is also where setup work that can fail belongs. A
+    class that declares ``create_plugin`` as a ``@classmethod`` is accepted,
+    because the requirement is the member and not the kind of object.
     """
     factories = list(explicit_plugins or [])
     for index, factory in enumerate(factories):
-        if not callable(factory):
+        if not _is_plugin_factory(factory):
             raise PluginLoadError(
                 f"Durable instrumentation plugin at plugins[{index}] must be a "
-                "callable plugin factory taking an InvocationStartInfo, but is "
+                "plugin factory -- an object with a create_plugin(info) method "
+                "returning a DurableInstrumentationPlugin -- but is "
                 f"{_qualified_type_name(factory)}. Pass a factory rather than a "
-                "plugin instance, for example "
-                "plugins=[lambda info: MyPlugin(...)]."
+                "plugin, a plugin class, or a plain callable, for example "
+                "plugins=[MyPluginFactory(exporter)]."
             )
     return factories
 
@@ -128,16 +154,18 @@ def load_configured_plugins(
     """Combine explicit plugin factories with those selected through the environment.
 
     Explicit factories retain their order. Dynamically selected factories follow
-    in configured order. Every returned factory is called once per invocation.
+    in configured order. Every returned factory has its ``create_plugin`` called
+    once per invocation.
 
     A factory already registered explicitly is not registered a second time
     through the environment. The check is by factory identity, which is what is
     knowable here: the old shape declared a ``plugin_type`` and could dedup on
-    it, but a factory is opaque until called, and calling it at load time is what
-    this design avoids. Identity still covers the case the plugin packages
-    document -- the same provider callable both passed to the decorator and named
-    in ``DURABLE_EXECUTION_PLUGINS``. Two *different* factories that happen to
-    build the same plugin type will now both be registered.
+    it, but what a factory builds is unknown until ``create_plugin`` is called,
+    and calling it at load time is what this design avoids. Identity still covers
+    the case the plugin packages document -- the same factory object both passed
+    to the decorator and named in ``DURABLE_EXECUTION_PLUGINS``. Two *different*
+    factories that happen to build the same plugin type will now both be
+    registered.
     """
 
     resolved_factories = _validate_explicit_factories(explicit_plugins)

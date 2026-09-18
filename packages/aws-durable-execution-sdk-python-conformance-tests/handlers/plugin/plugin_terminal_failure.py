@@ -52,13 +52,28 @@ class TerminalFailurePlugin(DurableInstrumentationPlugin):
         )
 
 
+class TerminalFailurePluginFactory:
+    """Builds one :class:`TerminalFailurePlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> TerminalFailurePlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return TerminalFailurePlugin()
+
+
 @durable_step
 def failing_step(_step_context: StepContext) -> str:
     msg = "Something went wrong"
     raise RuntimeError(msg)
 
 
-@durable_execution(plugins=[lambda _info: TerminalFailurePlugin()])
+@durable_execution(plugins=[TerminalFailurePluginFactory()])
 def handler(_event: Any, context: DurableContext) -> str:
     result: str = context.step(
         failing_step(),

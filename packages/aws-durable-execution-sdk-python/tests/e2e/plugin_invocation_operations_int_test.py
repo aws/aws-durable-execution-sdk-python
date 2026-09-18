@@ -165,12 +165,13 @@ def test_operation_maps_across_suspend_and_replay():
 
     built: list[_MapRecordingPlugin] = []
 
-    def build_plugin(info: InvocationStartInfo) -> _MapRecordingPlugin:
-        plugin = _MapRecordingPlugin()
-        built.append(plugin)
-        return plugin
+    class _BuildingFactory:
+        def create_plugin(self, info: InvocationStartInfo) -> _MapRecordingPlugin:
+            plugin = _MapRecordingPlugin()
+            built.append(plugin)
+            return plugin
 
-    @durable_execution(plugins=[build_plugin])
+    @durable_execution(plugins=[_BuildingFactory()])
     def wait_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
         context.wait(Duration.from_seconds(60))
         return "done"

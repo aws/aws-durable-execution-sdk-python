@@ -22,6 +22,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
+    DurableInstrumentationPluginFactory,
     InvocationEndInfo,
     InvocationInfo,
     InvocationStatus,
@@ -37,6 +38,7 @@ from aws_durable_execution_sdk_python.plugin import (
     UserFunctionOutcome,
     UserFunctionStartInfo,
 )
+from aws_durable_execution_sdk_python.plugin_discovery import _is_plugin_factory
 from tests.test_helpers import plugin_factory
 
 
@@ -555,6 +557,38 @@ class TestDurableInstrumentationPlugin(unittest.TestCase):
 # endregion DurableInstrumentationPlugin Tests
 
 
+# region DurableInstrumentationPluginFactory Tests
+class TestDurableInstrumentationPluginFactory(unittest.TestCase):
+    def test_protocol_is_not_runtime_checkable(self):
+        """``isinstance`` against the protocol must stay unavailable.
+
+        A runtime-checkable protocol requires every declared member, so an
+        optional second member added later would break any caller's isinstance
+        check -- the additive extensibility this protocol exists for. The SDK
+        checks the shape with ``plugin_discovery._is_plugin_factory`` instead,
+        which also tests that ``create_plugin`` is callable rather than merely
+        present.
+        """
+        with self.assertRaises(TypeError):
+            isinstance(  # type: ignore[misc]  # noqa: B018
+                plugin_factory(_NoOpPlugin()), DurableInstrumentationPluginFactory
+            )
+
+    def test_factory_shape_check_requires_a_callable_create_plugin(self):
+        """The shape is one callable member, structurally, without importing it."""
+
+        class _Data:
+            create_plugin = "not callable"
+
+        self.assertTrue(_is_plugin_factory(plugin_factory(_NoOpPlugin())))
+        self.assertFalse(_is_plugin_factory(_Data()))
+        self.assertFalse(_is_plugin_factory(lambda info: _NoOpPlugin()))
+        self.assertFalse(_is_plugin_factory(_NoOpPlugin()))
+
+
+# endregion DurableInstrumentationPluginFactory Tests
+
+
 # region PluginExecutor Tests
 
 
@@ -585,14 +619,15 @@ class TestPluginLifetime(unittest.TestCase):
         """Two invocations of one handler never share a plugin instance."""
         built: list[_TrackingPlugin] = []
 
-        def build(info: InvocationStartInfo) -> _TrackingPlugin:
-            plugin = _TrackingPlugin()
-            built.append(plugin)
-            return plugin
+        class _BuildingFactory:
+            def create_plugin(self, info: InvocationStartInfo) -> _TrackingPlugin:
+                plugin = _TrackingPlugin()
+                built.append(plugin)
+                return plugin
 
         # One host for the handler, one executor per invocation -- the shape
         # durable_execution() uses.
-        host = PluginHost(plugins=[build])
+        host = PluginHost(plugins=[_BuildingFactory()])
 
         for request_id in ("req-1", "req-2"):
             lambda_context = MagicMock()
@@ -659,11 +694,12 @@ class TestPluginLifetime(unittest.TestCase):
             def on_invocation_start(self, info: InvocationStartInfo) -> None:
                 hook_infos.append(info)
 
-        def build(info: InvocationStartInfo) -> _RecordingPlugin:
-            factory_infos.append(info)
-            return _RecordingPlugin()
+        class _RecordingFactory:
+            def create_plugin(self, info: InvocationStartInfo) -> _RecordingPlugin:
+                factory_infos.append(info)
+                return _RecordingPlugin()
 
-        executor = PluginExecutor(plugins=[build])
+        executor = PluginExecutor(plugins=[_RecordingFactory()])
 
         with executor.run():
             executor.on_invocation_start(
@@ -691,14 +727,15 @@ class TestPluginLifetime(unittest.TestCase):
             def on_invocation_start(self, info: InvocationStartInfo) -> None:
                 events.append(f"hook:{self.label}")
 
-        def build(label: str):
-            def factory(info: InvocationStartInfo) -> _OrderedPlugin:
-                events.append(f"build:{label}")
-                return _OrderedPlugin(label)
+        class _OrderedFactory:
+            def __init__(self, label: str) -> None:
+                self._label = label
 
-            return factory
+            def create_plugin(self, info: InvocationStartInfo) -> _OrderedPlugin:
+                events.append(f"build:{self._label}")
+                return _OrderedPlugin(self._label)
 
-        executor = PluginExecutor(plugins=[build("a"), build("b")])
+        executor = PluginExecutor(plugins=[_OrderedFactory("a"), _OrderedFactory("b")])
 
         with executor.run():
             executor.on_invocation_start(
@@ -711,14 +748,11 @@ class TestPluginLifetime(unittest.TestCase):
         self.assertEqual(events, ["build:a", "build:b", "hook:a", "hook:b"])
 
     def test_failing_factory_is_contained(self):
-        """A raising factory is logged and skipped, like a raising hook."""
+        """A factory whose create_plugin raises is logged and skipped."""
         surviving = _TrackingPlugin()
 
-        def exploding(info: InvocationStartInfo) -> DurableInstrumentationPlugin:
-            raise RuntimeError("factory boom")
-
         executor = PluginExecutor(
-            plugins=[exploding, plugin_factory(surviving)],
+            plugins=[_ExplodingFactory(), plugin_factory(surviving)],
         )
 
         with self.assertLogs(
@@ -736,15 +770,48 @@ class TestPluginLifetime(unittest.TestCase):
         # The other factory's plugin still receives its hooks.
         self.assertEqual(surviving.calls, ["invocation_start:req-1"])
 
+    def test_bare_callable_builds_no_plugin(self):
+        """The executor calls ``create_plugin``, so a bare callable yields nothing.
+
+        A callable used to be a factory. It is not one now, and an entry that
+        reaches the executor anyway raises ``AttributeError`` there, which the
+        executor logs and skips. ``load_configured_plugins`` rejects such an entry
+        at handler initialization, so this path is only reachable by constructing
+        an executor directly.
+        """
+        surviving = _TrackingPlugin()
+
+        executor = PluginExecutor(
+            plugins=[
+                (lambda info: _TrackingPlugin()),  # type: ignore[list-item]
+                plugin_factory(surviving),
+            ],
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with executor.run():
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=LAMBDA_CTX,
+                    execution_start_time=START_TS,
+                    is_first_invocation=True,
+                )
+                self.assertEqual(executor._plugins, [surviving])
+
+        self.assertIn("create_plugin", "\n".join(logs.output))
+
     def test_factory_returning_none_is_contained(self):
         """A factory that returns nothing is logged and skipped."""
         surviving = _TrackingPlugin()
 
-        def returns_none(info: InvocationStartInfo):
-            return None
+        class _NoneFactory:
+            def create_plugin(self, info: InvocationStartInfo):
+                return None
 
         executor = PluginExecutor(
-            plugins=[returns_none, plugin_factory(surviving)],
+            plugins=[_NoneFactory(), plugin_factory(surviving)],
         )
 
         with self.assertLogs(
@@ -764,11 +831,7 @@ class TestPluginLifetime(unittest.TestCase):
 
     def test_every_failing_factory_leaves_the_executor_usable(self):
         """All factories failing is not distinguishable from having no plugins."""
-
-        def exploding(info: InvocationStartInfo) -> DurableInstrumentationPlugin:
-            raise RuntimeError("factory boom")
-
-        executor = PluginExecutor(plugins=[exploding])
+        executor = PluginExecutor(plugins=[_ExplodingFactory()])
 
         with self.assertLogs(
             "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
@@ -2061,6 +2124,13 @@ class _TrackingPlugin(DurableInstrumentationPlugin):
 
     def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
         self.calls.append(f"user_function_end:{info.operation_id}")
+
+
+class _ExplodingFactory:
+    """Factory whose ``create_plugin`` raises, for containment tests."""
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        raise RuntimeError("factory boom")
 
 
 class _FailingPlugin(DurableInstrumentationPlugin):

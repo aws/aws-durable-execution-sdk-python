@@ -33,12 +33,18 @@ class _PluginB(DurableInstrumentationPlugin):
     pass
 
 
-def _plugin_a_factory(info: InvocationStartInfo) -> _PluginA:
-    return _PluginA()
+class _PluginAFactory:
+    def create_plugin(self, info: InvocationStartInfo) -> _PluginA:
+        return _PluginA()
 
 
-def _plugin_b_factory(info: InvocationStartInfo) -> _PluginB:
-    return _PluginB()
+class _PluginBFactory:
+    def create_plugin(self, info: InvocationStartInfo) -> _PluginB:
+        return _PluginB()
+
+
+_plugin_a_factory = _PluginAFactory()
+_plugin_b_factory = _PluginBFactory()
 
 
 class _FakeDistribution:
@@ -119,7 +125,8 @@ def test_discovery_returns_factories_without_calling_them() -> None:
     Nothing is constructed at load time, so no plugin instance exists outside
     the invocation that will use it.
     """
-    factory = Mock(return_value=_PluginA())
+    factory = Mock()
+    factory.create_plugin = Mock(return_value=_PluginA())
     entry_point = _FakeEntryPoint("a", factory)
 
     with patch(
@@ -132,7 +139,7 @@ def test_discovery_returns_factories_without_calling_them() -> None:
         )
 
     assert result == [factory]
-    factory.assert_not_called()
+    factory.create_plugin.assert_not_called()
 
 
 def test_discovery_preserves_configured_order() -> None:
@@ -151,7 +158,9 @@ def test_discovery_preserves_configured_order() -> None:
         )
 
     assert result == [_plugin_a_factory, _plugin_b_factory]
-    assert [type(factory(INVOCATION_START_INFO)) for factory in result] == [
+    assert [
+        type(factory.create_plugin(INVOCATION_START_INFO)) for factory in result
+    ] == [
         _PluginA,
         _PluginB,
     ]
@@ -175,7 +184,7 @@ def test_explicit_factories_precede_discovered_factories() -> None:
 def test_explicit_registration_wins_over_the_same_discovered_factory(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The same callable passed explicitly and named in the env registers once.
+    """The same factory passed explicitly and named in the env registers once.
 
     This is the narrowed form of the old type-based precedence rule. Dedup by
     declared plugin type is gone with the provider object; identity still covers
@@ -206,14 +215,12 @@ def test_distinct_factories_for_one_plugin_type_are_both_registered() -> None:
     """Type-level dedup is gone: two distinct factories both register.
 
     Recorded deliberately. The provider object declared a ``plugin_type`` that
-    discovery could compare without constructing anything; a factory is opaque
-    until called, and calling it at load time would build an instance outside any
-    invocation. Callers that both pass a factory and name a different one in the
-    environment now get both plugins.
+    discovery could compare without constructing anything; what a factory builds
+    is unknown until ``create_plugin`` is called, and calling it at load time
+    would build an instance outside any invocation. Callers that both pass a
+    factory and name a different one in the environment now get both plugins.
     """
-
-    def another_plugin_a_factory(info: InvocationStartInfo) -> _PluginA:
-        return _PluginA()
+    another_plugin_a_factory = _PluginAFactory()
 
     entry_point = _FakeEntryPoint("a", another_plugin_a_factory)
 
@@ -386,17 +393,18 @@ def test_discovery_names_unknown_distribution_in_load_failure() -> None:
         (object(), "builtins.object"),
         ("not-a-factory", "builtins.str"),
         (None, "builtins.NoneType"),
+        (lambda info: _PluginA(), "builtins.function"),
     ],
 )
-def test_discovery_rejects_non_callable_entry_point(
+def test_discovery_rejects_entry_point_without_create_plugin(
     resolved_value: object,
     expected_type_name: str,
 ) -> None:
     """A plugin *instance* at the entry point is now the common mistake.
 
-    The old shape resolved to a provider object, so this replaces the
-    provider-type check with the only check that still means something: the
-    resolved value has to be callable. The message names what it actually was.
+    A bare callable is the other one, and it is rejected too: the registration
+    type is an object with ``create_plugin``, so a function that builds a plugin
+    no longer satisfies it. The message names what the target actually was.
     """
     entry_point = _FakeEntryPoint("a", resolved_value)
 
@@ -412,14 +420,13 @@ def test_discovery_rejects_non_callable_entry_point(
             environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
         )
 
-    assert "must resolve to a callable plugin factory, but resolved to" in str(
-        error.value
-    )
+    assert "must resolve to a plugin factory" in str(error.value)
+    assert "create_plugin(info) method" in str(error.value)
     assert expected_type_name in str(error.value)
 
 
-def test_discovery_accepts_a_plugin_class_as_factory() -> None:
-    """A class taking the info is callable, so it is a factory in its own right."""
+def test_discovery_rejects_a_plugin_class_at_the_entry_point() -> None:
+    """A plugin class carries no ``create_plugin``, so it is not a factory."""
 
     class _InfoAwarePlugin(DurableInstrumentationPlugin):
         def __init__(self, info: InvocationStartInfo) -> None:
@@ -427,27 +434,29 @@ def test_discovery_accepts_a_plugin_class_as_factory() -> None:
 
     entry_point = _FakeEntryPoint("a", _InfoAwarePlugin)
 
-    with patch(
-        "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
-        return_value=[entry_point],
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry_point],
+        ),
+        pytest.raises(PluginLoadError) as error,
     ):
-        result = load_configured_plugins(
+        load_configured_plugins(
             None,
             environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
         )
 
-    plugin = result[0](INVOCATION_START_INFO)
-    assert isinstance(plugin, _InfoAwarePlugin)
-    assert plugin.info is INVOCATION_START_INFO
+    assert "must resolve to a plugin factory" in str(error.value)
+    assert "not a plugin class" in str(error.value)
 
 
 def test_explicit_plugin_instance_is_rejected_with_its_position() -> None:
     """A plugin instance in ``plugins`` fails configuration, not every invocation.
 
-    An instance is not callable, so the per-invocation factory call raises
-    ``TypeError``, which the executor logs and swallows -- the plugin silently
-    never runs. The position is asserted because a caller passing several entries
-    has no other way to tell which one is wrong.
+    An instance has no ``create_plugin``, so the per-invocation factory call
+    raises ``AttributeError``, which the executor logs and swallows -- the plugin
+    silently never runs. The position is asserted because a caller passing several
+    entries has no other way to tell which one is wrong.
     """
     with pytest.raises(PluginLoadError) as error:
         load_configured_plugins(
@@ -456,12 +465,12 @@ def test_explicit_plugin_instance_is_rejected_with_its_position() -> None:
         )
 
     assert "plugins[1]" in str(error.value)
-    assert "must be a callable plugin factory" in str(error.value)
+    assert "must be a plugin factory" in str(error.value)
     assert "_PluginB" in str(error.value)
 
 
 @pytest.mark.parametrize(
-    ("non_callable", "expected_type_name"),
+    ("invalid_entry", "expected_type_name"),
     [
         (_PluginA(), "_PluginA"),
         (object(), "builtins.object"),
@@ -469,62 +478,129 @@ def test_explicit_plugin_instance_is_rejected_with_its_position() -> None:
         (None, "builtins.NoneType"),
     ],
 )
-def test_explicit_non_callable_entries_are_rejected(
-    non_callable: object,
+def test_explicit_entries_without_create_plugin_are_rejected(
+    invalid_entry: object,
     expected_type_name: str,
 ) -> None:
-    """Callability is the only property checkable without building an instance."""
+    """One callable member is all that is checkable without building an instance."""
     with pytest.raises(PluginLoadError) as error:
-        load_configured_plugins([non_callable], environment={})  # type: ignore[list-item]
+        load_configured_plugins([invalid_entry], environment={})  # type: ignore[list-item]
 
     assert "plugins[0]" in str(error.value)
     assert expected_type_name in str(error.value)
 
 
-def test_explicit_plugin_class_is_accepted_as_a_factory() -> None:
-    """Calling a class constructs an instance, so a class is a factory in Python.
+def test_explicit_non_callable_create_plugin_is_rejected() -> None:
+    """The attribute is tested for callability, not merely for presence.
 
-    This is the language difference against the TypeScript SDK, which rejects a
-    class because calling one there throws. Rejecting classes here would break
-    ``plugins=[MyPlugin]``, which works whenever ``__init__`` takes the info.
+    An object whose ``create_plugin`` is data would otherwise pass here and raise
+    ``TypeError`` on every invocation, where it is logged and swallowed.
+    """
+
+    class _NotAFactory:
+        create_plugin = "not callable"
+
+    with pytest.raises(PluginLoadError) as error:
+        load_configured_plugins([_NotAFactory()], environment={})  # type: ignore[list-item]
+
+    assert "plugins[0]" in str(error.value)
+    assert "_NotAFactory" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "bare_callable",
+    [
+        lambda info: _PluginA(),
+        _PluginAFactory.create_plugin,
+    ],
+)
+def test_explicit_bare_callable_is_rejected(bare_callable: object) -> None:
+    """A callable is no longer a factory, which reverses the previous rule.
+
+    The registration type was ``Callable[[InvocationStartInfo],
+    DurableInstrumentationPlugin]``, so a lambda or a plain function was a valid
+    factory. It is now an object with ``create_plugin``, and no compatibility
+    path accepts both: a bare callable fails at handler initialization with
+    guidance naming the replacement.
+    """
+    with pytest.raises(PluginLoadError) as error:
+        load_configured_plugins([bare_callable], environment={})  # type: ignore[list-item]
+
+    assert "plugins[0]" in str(error.value)
+    assert "must be a plugin factory" in str(error.value)
+    assert "plugins=[MyPluginFactory(exporter)]" in str(error.value)
+
+
+def test_explicit_plugin_class_is_rejected_as_a_factory() -> None:
+    """A plugin class is not a factory, reversing what this branch documented.
+
+    Calling a class constructs an instance, so a class satisfied the previous
+    ``Callable`` registration type and ``plugins=[MyPlugin]`` was accepted. A
+    class carries no ``create_plugin`` attribute, so it is now rejected at
+    handler initialization. The replacement is a factory class whose
+    ``create_plugin`` constructs the plugin, which also keeps setup work out of
+    the plugin's ``__init__``.
     """
 
     class _InfoAwarePlugin(DurableInstrumentationPlugin):
         def __init__(self, info: InvocationStartInfo) -> None:
             self.info = info
 
-    result = load_configured_plugins([_InfoAwarePlugin], environment={})
+    with pytest.raises(PluginLoadError) as error:
+        load_configured_plugins([_InfoAwarePlugin], environment={})  # type: ignore[list-item]
 
-    assert result == [_InfoAwarePlugin]
-    plugin = result[0](INVOCATION_START_INFO)
-    assert isinstance(plugin, _InfoAwarePlugin)
+    assert "plugins[0]" in str(error.value)
+    assert "a plugin class" in str(error.value)
+
+
+def test_explicit_class_declaring_create_plugin_is_accepted() -> None:
+    """The requirement is the member, not the kind of object.
+
+    A class that declares ``create_plugin`` as a ``@classmethod`` carries the
+    attribute, so the class object itself is a valid factory. Nothing in the
+    contract requires a factory to be an instance.
+    """
+
+    class _ClassFactoryPlugin(DurableInstrumentationPlugin):
+        def __init__(self, info: InvocationStartInfo) -> None:
+            self.info = info
+
+        @classmethod
+        def create_plugin(cls, info: InvocationStartInfo) -> _ClassFactoryPlugin:
+            return cls(info)
+
+    result = load_configured_plugins([_ClassFactoryPlugin], environment={})
+
+    assert result == [_ClassFactoryPlugin]
+    plugin = result[0].create_plugin(INVOCATION_START_INFO)
+    assert isinstance(plugin, _ClassFactoryPlugin)
     assert plugin.info is INVOCATION_START_INFO
 
 
-def test_explicit_plain_function_is_accepted_as_a_factory() -> None:
+def test_explicit_factory_object_is_accepted() -> None:
     result = load_configured_plugins([_plugin_a_factory], environment={})
 
     assert result == [_plugin_a_factory]
-    assert isinstance(result[0](INVOCATION_START_INFO), _PluginA)
+    assert isinstance(result[0].create_plugin(INVOCATION_START_INFO), _PluginA)
 
 
-def test_explicit_callable_object_is_accepted_as_a_factory() -> None:
-    """A ``__call__`` instance is the documented way to hold handler-lifetime state."""
+def test_explicit_factory_holds_handler_lifetime_state() -> None:
+    """A factory instance is where state spanning invocations belongs."""
 
-    class _CallableFactory:
+    class _StatefulFactory:
         def __init__(self) -> None:
             self.calls: list[InvocationStartInfo] = []
 
-        def __call__(self, info: InvocationStartInfo) -> _PluginA:
+        def create_plugin(self, info: InvocationStartInfo) -> _PluginA:
             self.calls.append(info)
             return _PluginA()
 
-    factory = _CallableFactory()
+    factory = _StatefulFactory()
 
     result = load_configured_plugins([factory], environment={})
 
     assert result == [factory]
-    assert isinstance(result[0](INVOCATION_START_INFO), _PluginA)
+    assert isinstance(result[0].create_plugin(INVOCATION_START_INFO), _PluginA)
     assert factory.calls == [INVOCATION_START_INFO]
 
 

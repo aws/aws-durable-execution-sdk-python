@@ -68,7 +68,22 @@ class WaitOperationPlugin(DurableInstrumentationPlugin):
         )
 
 
-@durable_execution(plugins=[lambda _info: WaitOperationPlugin()])
+class WaitOperationPluginFactory:
+    """Builds one :class:`WaitOperationPlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> WaitOperationPlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return WaitOperationPlugin()
+
+
+@durable_execution(plugins=[WaitOperationPluginFactory()])
 def handler(_event: Any, context: DurableContext) -> str:
     context.wait(Duration.from_seconds(2))
     return "Wait completed"

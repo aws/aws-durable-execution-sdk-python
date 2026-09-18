@@ -79,6 +79,21 @@ class AttemptInfoShapePlugin(DurableInstrumentationPlugin):
         _emit(record, self._execution_arn)
 
 
+class AttemptInfoShapePluginFactory:
+    """Builds one :class:`AttemptInfoShapePlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> AttemptInfoShapePlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return AttemptInfoShapePlugin()
+
+
 @durable_step
 def flaky(step_context: StepContext) -> str:
     if step_context.attempt < 2:
@@ -86,7 +101,7 @@ def flaky(step_context: StepContext) -> str:
     return "ok"
 
 
-@durable_execution(plugins=[lambda _info: AttemptInfoShapePlugin()])
+@durable_execution(plugins=[AttemptInfoShapePluginFactory()])
 def handler(_event: Any, context: DurableContext) -> str:
     retry_config = RetryStrategyConfig(
         max_attempts=3,

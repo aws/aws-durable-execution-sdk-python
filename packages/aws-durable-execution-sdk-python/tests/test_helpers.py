@@ -9,6 +9,7 @@ from aws_durable_execution_sdk_python.execution import ExecutionState
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     DurableInstrumentationPluginFactory,
+    InvocationStartInfo,
     PluginExecutor,
 )
 
@@ -27,17 +28,27 @@ def operation_id_sequence(parent_id: str | None = None):
         yield context._create_step_id()  # noqa: SLF001
 
 
-def plugin_factory(
-    plugin: DurableInstrumentationPlugin,
-) -> DurableInstrumentationPluginFactory:
-    """Wrap a plugin instance a test already holds a reference to as a factory.
+class _FixedPluginFactory:
+    """Returns one plugin instance the test already holds, for every invocation.
 
     Production factories build a fresh instance per invocation. A test that has
     to read what the plugin recorded needs the instance it passed in, so it
     supplies a factory that returns that one. Only valid for a single
     invocation, which is all these tests run.
     """
-    return lambda info: plugin
+
+    def __init__(self, plugin: DurableInstrumentationPlugin) -> None:
+        self._plugin = plugin
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        return self._plugin
+
+
+def plugin_factory(
+    plugin: DurableInstrumentationPlugin,
+) -> DurableInstrumentationPluginFactory:
+    """Wrap a plugin instance a test already holds a reference to as a factory."""
+    return _FixedPluginFactory(plugin)
 
 
 @contextlib.contextmanager

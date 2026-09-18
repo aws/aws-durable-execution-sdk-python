@@ -62,6 +62,21 @@ class TerminalPayloadPlugin(DurableInstrumentationPlugin):
         )
 
 
+class TerminalPayloadPluginFactory:
+    """Builds one :class:`TerminalPayloadPlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> TerminalPayloadPlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return TerminalPayloadPlugin()
+
+
 @durable_step
 def step_a(_step_context: StepContext) -> str:
     return "task-a"
@@ -73,7 +88,7 @@ def step_b(_step_context: StepContext) -> str:
     raise RuntimeError(msg)
 
 
-@durable_execution(plugins=[lambda _info: TerminalPayloadPlugin()])
+@durable_execution(plugins=[TerminalPayloadPluginFactory()])
 def handler(_event: Any, context: DurableContext) -> str:
     context.step(step_a())
     result: str = context.step(

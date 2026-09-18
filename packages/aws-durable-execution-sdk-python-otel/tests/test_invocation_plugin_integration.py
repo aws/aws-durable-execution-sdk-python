@@ -266,7 +266,7 @@ def test_global_proxy_disables_entire_invocation_until_sdk_provider_is_ready(
     )
     provider, exporter = _provider()
 
-    plugin = factory(_invocation_start())
+    plugin = factory.create_plugin(_invocation_start())
     plugin.on_invocation_start(_invocation_start())
     assert "telemetry is disabled for this invocation" in caplog.text
 
@@ -275,7 +275,7 @@ def test_global_proxy_disables_entire_invocation_until_sdk_provider_is_ready(
     plugin.on_invocation_end(_invocation_end())
     assert exporter.get_finished_spans() == ()
 
-    plugin = factory(_invocation_start())
+    plugin = factory.create_plugin(_invocation_start())
     plugin.on_invocation_start(_invocation_start())
     _run_step_lifecycle(plugin)
     plugin.on_invocation_end(_invocation_end())

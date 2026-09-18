@@ -60,15 +60,29 @@ class RecordingWaitPlugin(DurableInstrumentationPlugin):
             self.wait_end_infos.append(info)
 
 
+class RecordingWaitPluginFactory:
+    """Builds one :class:`RecordingWaitPlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, and this handler is built at
+    module import, so registering one would abort collection of this module. This
+    factory exists only to construct the plugin; the state the test asserts on is
+    class-level on the plugin, so the factory holds nothing.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> RecordingWaitPlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return RecordingWaitPlugin()
+
+
 def _wait_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
     """Suspend on a top-level wait, then finish."""
     context.wait(Duration.from_seconds(1), name=_WAIT_NAME)
     return "done"
 
 
-wait_handler = durable_execution(
-    _wait_handler, plugins=[lambda _info: RecordingWaitPlugin()]
-)
+wait_handler = durable_execution(_wait_handler, plugins=[RecordingWaitPluginFactory()])
 
 
 def test_wait_completed_during_suspend_is_delivered_as_new() -> None:

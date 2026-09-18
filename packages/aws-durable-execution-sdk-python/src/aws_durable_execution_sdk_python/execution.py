@@ -179,10 +179,10 @@ def durable_execution(
     Args:
         func: The user function to decorate
         boto3_client: Optional boto3 Lambda client to use
-        plugins: Optional list of instrumentation plugin factories. Each factory
-            is called once per invocation with that invocation's
-            ``InvocationStartInfo``, and the instance it returns serves only that
-            invocation.
+        plugins: Optional list of instrumentation plugin factories. Each
+            factory's ``create_plugin`` is called once per invocation with that
+            invocation's ``InvocationStartInfo``, and the instance it returns
+            serves only that invocation.
     """
     # Decorator called with parameters
     if func is None:

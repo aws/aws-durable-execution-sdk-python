@@ -9,7 +9,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, MutableMapping, cast
+from typing import Any, Callable, MutableMapping, Protocol, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -449,40 +449,79 @@ class DurableInstrumentationPlugin:
         pass
 
 
-DurableInstrumentationPluginFactory = Callable[
-    [InvocationStartInfo], DurableInstrumentationPlugin
-]
-"""Builds one plugin instance for one invocation.
+class DurableInstrumentationPluginFactory(Protocol):
+    """Builds one plugin instance for one invocation.
 
-Called once per invocation with that invocation's :class:`InvocationStartInfo` --
-the same object the instance's ``on_invocation_start`` then receives -- before any
-hook fires. The instance serves only that invocation and is dropped when it
-returns, so a plugin can hold per-execution state in ordinary instance
-attributes without keying it by execution ARN.
+    An object with a method rather than a bare callable, because the SDK will
+    grow process-level plugin hooks -- a flush when the execution environment
+    shuts down, for example. A callable type has no member to add such a hook to,
+    so growing one would have to change the registration type from callable to
+    object, which is a second breaking change on the same public surface. One
+    method on an object leaves room for an optional second member, which is
+    additive.
 
-A plain ``Callable`` alias rather than a ``Protocol``: the shape has exactly one
-call signature and no other members, so a Protocol would only add a name. The
-alias is also the more permissive of the two, because ``Callable`` parameters are
-positional-only -- a factory may name its parameter whatever reads best
-(``lambda info: ...``, ``def build(invocation): ...``), where a ``__call__``
-Protocol would pin that name.
+    Not ``@runtime_checkable``. Three facts decide it. An ``isinstance`` check
+    against a runtime-checkable protocol tests only that the member name is
+    present, not that it is callable, so it would accept an object whose
+    ``create_plugin`` is a string; the SDK needs the stronger test. The SDK also
+    has to name what an invalid entry actually was, which a boolean
+    ``isinstance`` result cannot supply. And ``isinstance`` against a
+    runtime-checkable protocol requires *every* declared member, so publishing
+    one would make the optional second member above non-additive for any caller
+    who wrote such a check. :func:`plugin_discovery._is_plugin_factory` performs
+    the check instead.
 
-Prefer a factory that constructs the plugin explicitly::
+    Register the factory, not a plugin::
 
-    plugins=[lambda info: MyPlugin(exporter)]
-    plugins=[MyPlugin.create]          # a @classmethod factory
+        class MyPluginFactory:
+            def __init__(self, exporter: Exporter) -> None:
+                self._exporter = exporter
 
-A constructor should only assign fields, so setup work that can fail or that
-reads the environment belongs in a factory rather than in ``__init__`` (see
-``CONTRIBUTING.md``, "Initialization and conversion"). An explicit factory is
-where that work goes, and it also lets the plugin take its own collaborators
-rather than deriving them from the hook info.
+            def create_plugin(self, info: InvocationStartInfo) -> MyPlugin:
+                return MyPlugin(self._exporter)
 
-Anything callable satisfies the alias: a lambda, a module-level function, a
-``functools.partial``, a ``@classmethod``, or a plugin class itself, since calling
-a class in Python constructs an instance. ``plugins=[MyPlugin]`` is therefore
-permitted whenever ``MyPlugin.__init__`` takes the info, and it stays permitted.
-"""
+        plugins=[MyPluginFactory(exporter)]
+
+    A plugin class is not a factory. ``plugins=[MyPlugin]`` used to work because
+    calling a class constructs an instance, and it now fails at handler
+    initialization because a class carries no ``create_plugin``. A class that
+    declares ``create_plugin`` itself -- as a ``@classmethod`` -- does satisfy the
+    shape, because the requirement is the member and not the kind of object.
+
+    The factory holds what outlives an invocation: an exporter, a resolved
+    configuration, a shared worker. The plugin instance holds what does not.
+    Setup work that can fail or that reads the environment belongs in the
+    factory's own constructor rather than in the plugin's, because a plugin
+    constructor should only assign fields (see ``CONTRIBUTING.md``,
+    "Initialization and conversion").
+    """
+
+    def create_plugin(
+        self, info: InvocationStartInfo, /
+    ) -> DurableInstrumentationPlugin:
+        """Return the plugin instance that serves the described invocation.
+
+        Called once per invocation, with that invocation's
+        :class:`InvocationStartInfo` -- the same object the returned instance's
+        ``on_invocation_start`` then receives -- and before any hook fires. The
+        instance serves only that invocation and is dropped when it returns, so a
+        plugin can hold per-execution state in ordinary instance attributes
+        without keying it by execution ARN.
+
+        ``info`` is positional-only, so an implementation may name the parameter
+        whatever reads best; a named protocol parameter would pin that name for
+        every implementation.
+
+        A call that raises, or that returns ``None``, is logged and skipped for
+        that invocation and never disrupts the execution.
+
+        Args:
+            info: The invocation the returned plugin instance will observe.
+
+        Returns:
+            The plugin instance for this invocation.
+        """
+        ...
 
 
 def _factory_name(factory: object) -> str:
@@ -561,14 +600,21 @@ class PluginExecutor:
         """Build this invocation's plugin instances from its start info.
 
         Called once per invocation, before the first hook is dispatched. A
-        factory that raises or returns ``None`` is contained exactly as a failing
-        hook is -- logged and skipped -- so a broken plugin cannot disrupt the
-        execution. The remaining factories still produce their instances.
+        factory whose ``create_plugin`` raises or returns ``None`` is contained
+        exactly as a failing hook is -- logged and skipped -- so a broken plugin
+        cannot disrupt the execution. The remaining factories still produce their
+        instances.
+
+        An entry without a usable ``create_plugin`` raises ``AttributeError``
+        here, which this containment then swallows once per invocation.
+        :func:`plugin_discovery.load_configured_plugins` rejects such an entry
+        while the handler is being initialized, so the silent case is not
+        reachable through ``durable_execution()``.
         """
         plugins: list[DurableInstrumentationPlugin] = []
         for factory in self._plugin_factories:
             try:
-                plugin = factory(info)
+                plugin = factory.create_plugin(info)
             except Exception:
                 # log and ignore the exception
                 logger.exception(

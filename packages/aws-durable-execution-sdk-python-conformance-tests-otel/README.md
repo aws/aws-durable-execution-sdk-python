@@ -182,8 +182,8 @@ write access; the runner identity needs list, read, and cleanup access.
 1. Find or add the requirement in the conformance repository under
    `test-requirements/<suite>/<id>.yaml`. New requirement IDs must be registered
    there first.
-2. Add `src/otel_<n>_<name>.py` exporting `handler`. Select the plugin with
-   `common.otel_plugin_factory()` and guard the input with
+2. Add `src/otel_<n>_<name>.py` exporting `handler`. Select the plugin factory
+   with `common.otel_plugin_factory()` and guard the input with
    `common.require_scenario()`.
    Use the SDK's real API; never hand-roll behavior to force an expected result.
 3. Register the function in `template.yaml` (or `template-long-running.yaml`)

@@ -1,11 +1,11 @@
 """Tests for the bundled OTel plugin factories and the entry points naming them.
 
-The SDK plugin contract is a factory called once per invocation, so what these
-tests have to establish is that the objects the package exposes -- and the ones
-its entry points name -- are callables that build a plugin, and that each call
-builds a NEW plugin. The old provider-shaped assertions (a declared
-``plugin_type`` and an API version) have no counterpart: the contract carries
-neither.
+The SDK plugin contract is a factory object whose ``create_plugin`` is called once
+per invocation, so what these tests have to establish is that the objects the
+package exposes -- and the ones its entry points name -- carry ``create_plugin``,
+that it builds a plugin, and that each call builds a NEW plugin. The old
+provider-shaped assertions (a declared ``plugin_type`` and an API version) have no
+counterpart: the contract carries neither.
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ def test_factory_builds_its_plugin_type(
 ) -> None:
     factory = factory_type(OtelPluginConfig(enrich_logger=False))
 
-    assert isinstance(factory(_invocation_start_info()), plugin_type)
+    assert isinstance(factory.create_plugin(_invocation_start_info()), plugin_type)
 
 
 @pytest.mark.parametrize(
@@ -113,8 +113,8 @@ def test_factory_builds_a_fresh_plugin_per_invocation(factory_type: type) -> Non
     """
     factory = factory_type(OtelPluginConfig(enrich_logger=False))
 
-    first = factory(_invocation_start_info())
-    second = factory(_invocation_start_info())
+    first = factory.create_plugin(_invocation_start_info())
+    second = factory.create_plugin(_invocation_start_info())
 
     assert first is not second
 
@@ -128,8 +128,8 @@ def test_factory_passes_its_config_to_every_plugin(factory_type: type) -> None:
     factory = factory_type(config)
 
     assert factory.config is config
-    assert factory(_invocation_start_info())._config is config
-    assert factory(_invocation_start_info())._config is config
+    assert factory.create_plugin(_invocation_start_info())._config is config
+    assert factory.create_plugin(_invocation_start_info())._config is config
 
 
 @pytest.mark.parametrize(
@@ -142,7 +142,7 @@ def test_factory_without_config_builds_a_default_configured_plugin(
     factory = factory_type()
 
     assert factory.config is None
-    assert factory(_invocation_start_info())._config == OtelPluginConfig()
+    assert factory.create_plugin(_invocation_start_info())._config == OtelPluginConfig()
 
 
 def test_module_level_factories_are_default_configured() -> None:
@@ -158,12 +158,14 @@ def test_declared_entry_points_name_the_bundled_factories() -> None:
     assert _resolve(entry_points["otel-execution"]) is EXECUTION_OTEL_PLUGIN_FACTORY
 
 
-def test_declared_entry_points_resolve_to_callables_that_build_plugins() -> None:
-    """The entry points must satisfy the SDK's factory contract, not a provider.
+def test_declared_entry_points_resolve_to_factories_that_build_plugins() -> None:
+    """The entry points must satisfy the SDK's factory contract.
 
-    ``plugin_discovery._load_factory`` accepts anything callable, so a target
-    that resolved to a plugin class -- or to a plugin instance -- would load
-    without complaint and only fail at invocation time.
+    ``plugin_discovery._load_factory`` requires an object with a callable
+    ``create_plugin``, so a target resolving to a plugin class, to a plugin
+    instance, or to a plain function now fails at handler initialization. The
+    check here mirrors the SDK's own, then calls the method to confirm what it
+    builds.
     """
     expected = {
         "otel-invocation": InvocationOtelPlugin,
@@ -172,6 +174,7 @@ def test_declared_entry_points_resolve_to_callables_that_build_plugins() -> None
 
     for name, spec in _declared_entry_points().items():
         factory = _resolve(spec)
-        assert callable(factory)
+        create_plugin = getattr(factory, "create_plugin", None)
+        assert callable(create_plugin)
         assert not isinstance(factory, type)
-        assert isinstance(factory(_invocation_start_info()), expected[name])
+        assert isinstance(create_plugin(_invocation_start_info()), expected[name])

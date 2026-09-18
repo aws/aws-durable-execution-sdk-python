@@ -43,22 +43,39 @@ variable preserves the existing behavior. The decorator's `plugins` argument
 remains supported; explicit factories run first, and a factory passed to the
 decorator is not registered a second time through the environment.
 
-A plugin is registered as a *factory*, not as an instance. A factory is any
-callable taking the invocation's `InvocationStartInfo` and returning a
-`DurableInstrumentationPlugin`; the SDK calls it once per invocation, so the
-instance it returns serves that one invocation only and can hold per-execution
-state in ordinary attributes.
+A plugin is registered as a *factory*, not as an instance. A factory is an object
+with a `create_plugin(info)` method taking the invocation's `InvocationStartInfo`
+and returning a `DurableInstrumentationPlugin`; the SDK calls that method once per
+invocation, so the instance it returns serves that one invocation only and can
+hold per-execution state in ordinary attributes.
 
-Write the factory as a function, a `lambda`, or a `@classmethod`, and construct
-the plugin inside it. A constructor should only assign fields, so a plugin class
-used directly as a factory invites setup work into `__init__`. A plugin class is
-callable and is accepted as a factory whenever its `__init__` takes the info, but
-prefer the explicit form:
+A factory is an object with a method rather than a plain callable so the
+registration type can grow a second, optional member later -- a process-level
+flush on execution-environment shutdown, for example -- without a second breaking
+change to this surface.
+
+Write a small factory class and construct the plugin in its `create_plugin`. The
+factory holds what outlives an invocation, such as an exporter or a resolved
+configuration, and setup work that can fail belongs in the factory's own
+constructor rather than the plugin's:
 
 ```python
-plugins=[lambda info: AuditPlugin(sink)]   # construct explicitly
-plugins=[AuditPlugin.create]               # a @classmethod factory
+class AuditPluginFactory:
+    def __init__(self, sink):
+        self._sink = sink
+
+    def create_plugin(self, info):
+        return AuditPlugin(self._sink)
+
+
+plugins=[AuditPluginFactory(sink)]
 ```
+
+A plugin class is not a factory, and neither is a bare callable. `plugins=[MyPlugin]`
+and `plugins=[lambda info: MyPlugin(sink)]` raise `PluginLoadError` during handler
+initialization, because neither carries `create_plugin`. A class that declares
+`create_plugin` as a `@classmethod` is accepted, since the requirement is the
+member and not the kind of object.
 
 Provider packages expose such a factory:
 
@@ -73,19 +90,23 @@ class AuditPlugin(DurableInstrumentationPlugin):
     pass
 
 
-def audit_plugin_factory(info: InvocationStartInfo) -> AuditPlugin:
-    return AuditPlugin()
+class AuditPluginFactory:
+    def create_plugin(self, info: InvocationStartInfo) -> AuditPlugin:
+        return AuditPlugin()
+
+
+AUDIT_PLUGIN_FACTORY = AuditPluginFactory()
 ```
 
-Register the factory in the package's `pyproject.toml`:
+Register the factory instance in the package's `pyproject.toml`:
 
 ```toml
 [project.entry-points."aws_durable_execution.plugins"]
-example_audit = "example_audit:audit_plugin_factory"
+example_audit = "example_audit:AUDIT_PLUGIN_FACTORY"
 ```
 
 Provider names must be unique across installed distributions. Missing,
-ambiguous, or non-callable providers raise `PluginLoadError` during handler
+ambiguous, or wrongly shaped providers raise `PluginLoadError` during handler
 initialization with the provider and distribution details.
 
 ## 🚀 Quick Start

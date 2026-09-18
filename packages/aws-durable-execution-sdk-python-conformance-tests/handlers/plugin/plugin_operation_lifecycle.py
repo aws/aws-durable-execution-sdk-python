@@ -72,12 +72,27 @@ class OperationLifecyclePlugin(DurableInstrumentationPlugin):
         )
 
 
+class OperationLifecyclePluginFactory:
+    """Builds one :class:`OperationLifecyclePlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> OperationLifecyclePlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return OperationLifecyclePlugin()
+
+
 @durable_step
 def greet(_step_context: StepContext, name: str) -> str:
     return f"Hello, {name}!"
 
 
-@durable_execution(plugins=[lambda _info: OperationLifecyclePlugin()])
+@durable_execution(plugins=[OperationLifecyclePluginFactory()])
 def handler(event: Any, context: DurableContext) -> str:
     result: str = context.step(greet(event))
     return result

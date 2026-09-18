@@ -156,7 +156,7 @@ def _invocation(factory, info: InvocationStartInfo) -> WorkflowInsightPlugin:
     start info and dispatches the very same object to its first hook. A test that
     drives hooks directly does both.
     """
-    plugin = factory(info)
+    plugin = factory.create_plugin(info)
     plugin.on_invocation_start(info)
     return plugin
 
@@ -827,7 +827,7 @@ def test_reentrant_finalizer_in_a_hook_does_not_deadlock():
     )
     op = _step("s", op_id="1")
     start = _start(operations={})
-    plugin = factory(start)
+    plugin = factory.create_plugin(start)
     holder["plugin"] = plugin
     holder["ops"] = _ops(op)
     change = OperationChangeInfo(
@@ -1093,7 +1093,7 @@ def test_reentrant_invocation_end_stops_the_outer_running_record():
         )
     )
     start = _start(operations={})
-    plugin = factory(start)
+    plugin = factory.create_plugin(start)
     holder["plugin"] = plugin
 
     # On a bounded thread, so a regression that makes the lock non-reentrant

@@ -23,8 +23,9 @@ def otel_plugin_factory() -> DurableInstrumentationPluginFactory:
     """Select the telemetry view configured for this deployed function.
 
     Returns a factory, which is what ``durable_execution(plugins=[...])`` takes:
-    the SDK calls it once per invocation to build that invocation's plugin. The
-    view is still resolved once, when the handler module is imported.
+    the SDK calls its ``create_plugin`` once per invocation to build that
+    invocation's plugin. The view is still resolved once, when the handler module
+    is imported.
     """
 
     if os.environ.get("OTEL_PLUGIN_MODE") == "execution":
