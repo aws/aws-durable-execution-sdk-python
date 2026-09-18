@@ -49,6 +49,17 @@ callable taking the invocation's `InvocationStartInfo` and returning a
 instance it returns serves that one invocation only and can hold per-execution
 state in ordinary attributes.
 
+Write the factory as a function, a `lambda`, or a `@classmethod`, and construct
+the plugin inside it. A constructor should only assign fields, so a plugin class
+used directly as a factory invites setup work into `__init__`. A plugin class is
+callable and is accepted as a factory whenever its `__init__` takes the info, but
+prefer the explicit form:
+
+```python
+plugins=[lambda info: AuditPlugin(sink)]   # construct explicitly
+plugins=[AuditPlugin.create]               # a @classmethod factory
+```
+
 Provider packages expose such a factory:
 
 ```python

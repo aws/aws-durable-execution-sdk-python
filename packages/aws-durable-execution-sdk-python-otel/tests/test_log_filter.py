@@ -22,7 +22,7 @@ from aws_durable_execution_sdk_python.plugin import (
 from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import (
     NonRecordingSpan,
@@ -35,6 +35,7 @@ from aws_durable_execution_sdk_python_otel import log_filter as log_filter_modul
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     _to_otel_trace_id,
 )
+from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
 from aws_durable_execution_sdk_python_otel.log_filter import (
     OtelContextLogFilter,
     install_log_filter,
@@ -262,18 +263,22 @@ def test_concurrent_invocations_each_stamp_their_own_span_context():
     assert stamped["b"] == own["b"]
 
 
-def test_record_on_an_unclaimed_thread_uses_the_only_open_invocation():
-    """A thread carrying no claim still correlates to the one open invocation.
+def test_record_on_an_unclaimed_thread_is_not_stamped_with_the_open_invocation():
+    """A thread carrying no claim is not correlated, even to a lone invocation.
 
     A thread that carries no claim -- one customer code started itself, since
     ``threading.Thread`` does not copy the starting thread's context -- has no
-    invocation of its own. With a single invocation open there is no ambiguity to
-    resolve, so the record is correlated to it.
+    invocation of its own. Resolving it to the single open invocation would be
+    right only when that invocation is the one that emitted the record, and two
+    orderings make it the wrong one: a thread still carrying a finished
+    invocation's claim, and an invocation's own thread before its start hook has
+    run. Correlation for such records is given up so neither ordering can stamp
+    one execution's record with another's trace.
     """
     plugin, _ = _create_plugin(enrich_logger=False)
     plugin.on_invocation_start(_invocation_start_info())
     try:
-        expected = _own_identifiers(plugin)
+        open_identifiers = _own_identifiers(plugin)
         stamped: list[tuple[str | None, str | None]] = []
 
         def emit() -> None:
@@ -285,9 +290,97 @@ def test_record_on_an_unclaimed_thread_uses_the_only_open_invocation():
         worker.start()
         worker.join(timeout=10)
 
-        assert stamped == [expected]
+        assert stamped == [(None, None)]
+        assert stamped[0] != open_identifiers
     finally:
         plugin.on_invocation_end(_invocation_end_info())
+
+
+def test_a_stale_claim_is_not_resolved_to_the_only_open_invocation():
+    """A thread still claimed by a finished invocation is not given a live one.
+
+    ``unbind_invocation`` cannot reset the claim on any thread but its own, so a
+    thread the first invocation claimed still names that invocation after it
+    ends. A second invocation is then the only open one. Resolving by the number
+    of open invocations would stamp the first invocation's record with the
+    second's trace, which is one customer execution's identifiers on another's
+    record.
+    """
+    first, _ = _create_plugin(enrich_logger=False)
+    first.on_invocation_start(_invocation_start_info(suffix="first"))
+    first_identifiers = _own_identifiers(first)
+
+    # A worker running in a copy of the claiming thread's context, which is what
+    # the SDK submits the handler body as, so the claim reaches it.
+    claimed_context = contextvars.copy_context()
+    second_is_open = threading.Event()
+    stamped: list[tuple[str | None, str | None]] = []
+
+    def emit() -> None:
+        assert second_is_open.wait(timeout=10)
+        record = _make_record()
+        OtelContextLogFilter().filter(record)
+        stamped.append(_stamped(record))
+
+    worker = threading.Thread(
+        target=claimed_context.run, args=(emit,), name="claimed-by-first"
+    )
+    worker.start()
+    try:
+        first.on_invocation_end(_invocation_end_info(suffix="first"))
+        second, _ = _create_plugin(enrich_logger=False)
+        second.on_invocation_start(_invocation_start_info(suffix="second"))
+        try:
+            second_identifiers = _own_identifiers(second)
+            second_is_open.set()
+            worker.join(timeout=10)
+
+            assert len(stamped) == 1
+            assert stamped[0] != second_identifiers
+            assert stamped[0] != first_identifiers
+            assert stamped[0] == (None, None)
+        finally:
+            second.on_invocation_end(_invocation_end_info(suffix="second"))
+    finally:
+        second_is_open.set()
+        worker.join(timeout=10)
+
+
+def test_a_record_emitted_before_its_invocation_binds_is_not_given_the_open_one():
+    """A record emitted before its own invocation binds is not correlated.
+
+    An invocation emits records on its own thread before its invocation-start
+    hook runs -- while the SDK fetches initial state, for instance -- and that
+    thread carries no claim yet. Another invocation can be open at that moment.
+    Resolving by the number of open invocations would stamp the starting
+    invocation's record with the open invocation's trace.
+    """
+    first, _ = _create_plugin(enrich_logger=False)
+    first.on_invocation_start(_invocation_start_info(suffix="first"))
+    second, _ = _create_plugin(enrich_logger=False)
+    stamped: list[tuple[str | None, str | None]] = []
+    try:
+        first_identifiers = _own_identifiers(first)
+
+        def start_second_invocation() -> None:
+            # This thread belongs to the second invocation, which has not bound
+            # itself yet, so nothing here carries a claim.
+            record = _make_record()
+            OtelContextLogFilter().filter(record)
+            stamped.append(_stamped(record))
+            second.on_invocation_start(_invocation_start_info(suffix="second"))
+
+        worker = threading.Thread(target=start_second_invocation, name="second-wrapper")
+        worker.start()
+        worker.join(timeout=10)
+
+        assert len(stamped) == 1
+        assert stamped[0] != first_identifiers
+        assert stamped[0] != _own_identifiers(second)
+        assert stamped[0] == (None, None)
+    finally:
+        first.on_invocation_end(_invocation_end_info(suffix="first"))
+        second.on_invocation_end(_invocation_end_info(suffix="second"))
 
 
 def test_context_propagated_into_a_worker_resolves_the_claiming_invocation():
@@ -482,6 +575,56 @@ def test_finished_invocation_does_not_correlate_later_records():
 
     assert not hasattr(record, "traceId")
     assert not hasattr(record, "spanId")
+
+
+class _SpanProcessorFailingOnEnd(SpanProcessor):
+    """Raises when a span ends, standing in for customer span-processor code."""
+
+    def on_start(self, span, parent_context=None) -> None:
+        pass
+
+    def on_end(self, span) -> None:
+        raise RuntimeError("span processor on_end failed")
+
+
+@pytest.mark.parametrize(
+    "plugin_class",
+    [InvocationOtelPlugin, ExecutionOtelPlugin],
+    ids=lambda c: c.__name__,
+)
+def test_invocation_is_released_when_span_shutdown_fails(plugin_class):
+    """A failing span shutdown still releases the invocation.
+
+    Ending a span calls the configured span processors, which are customer code
+    and can raise. The plugin executor contains that exception, so the invocation
+    survives it. An invocation left registered would stay open for the life of
+    the environment, and a thread still carrying its claim would keep correlating
+    records to its finished spans.
+    """
+    provider = TracerProvider()
+    provider.add_span_processor(_SpanProcessorFailingOnEnd())
+    plugin = plugin_class(
+        OtelPluginConfig(
+            tracer_provider=provider,
+            context_extractor=lambda _: None,
+            enrich_logger=False,
+        )
+    )
+    plugin.on_invocation_start(_invocation_start_info())
+
+    with pytest.raises(RuntimeError, match="span processor on_end failed"):
+        plugin.on_invocation_end(_invocation_end_info())
+
+    assert plugin not in log_filter_module._open_invocations
+    # This thread carried the claim, so it is the thread a later record would be
+    # mis-attributed on.
+    assert log_filter_module._resolve_provider() is not plugin
+    record = _make_record()
+    OtelContextLogFilter().filter(record)
+    assert _stamped(record) == (None, None)
+    # The OTel context stack belongs to the thread, so a scope the plugin left
+    # attached would stay current after the invocation returned.
+    assert plugin._context_tokens == {}
 
 
 def test_install_log_filter_attaches_to_handlers():

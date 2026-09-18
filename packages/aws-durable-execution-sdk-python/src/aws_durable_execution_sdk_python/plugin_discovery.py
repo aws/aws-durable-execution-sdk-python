@@ -100,9 +100,12 @@ def _validate_explicit_factories(
     otherwise tell which one is wrong.
 
     A plugin *class* is callable and stays valid: calling it constructs an
-    instance, so ``plugins=[MyPlugin]`` is a factory whenever ``MyPlugin``
-    accepts the info argument. Only a plugin *instance*, or any other
-    non-callable value, is rejected.
+    instance, so ``plugins=[MyPlugin]`` is accepted whenever ``MyPlugin`` accepts
+    the info argument. It is permitted rather than recommended, because a
+    constructor should only assign fields and a class used directly as a factory
+    invites setup work into ``__init__``. ``plugins=[lambda info: MyPlugin(...)]``
+    or a ``@classmethod`` factory keeps that work out of the constructor. Only a
+    plugin *instance*, or any other non-callable value, is rejected.
     """
     factories = list(explicit_plugins or [])
     for index, factory in enumerate(factories):

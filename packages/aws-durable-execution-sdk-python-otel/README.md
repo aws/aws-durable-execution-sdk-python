@@ -331,20 +331,22 @@ operation, and holds when several invocations run concurrently in one
 environment (Lambda Managed Instances): the plugin claims the invocation thread
 at invocation start and the SDK runs the handler body in a copy of that thread's
 context, so each record resolves to the invocation that emitted it rather than
-to whichever invocation started last.
+to whichever invocation started last. A branch of a `map` or `parallel` runs on
+a pool thread the invocation's context was not copied into, and the plugin
+claims that thread from the hooks that run on it before your branch body does.
 
 Two cases are left unstamped, so any log formatter or schema must treat the
 fields as optional:
 
 - No invocation is open — for example during environment initialization or
   teardown.
-- The record is emitted on a thread that carries no invocation claim, while more
-  than one invocation is open in the environment. A thread your code starts
-  itself is such a thread, since Python does not copy context into a new thread,
-  as is the SDK's background checkpointing thread. With exactly one invocation
-  open, such a record is correlated to it. With several open there is no way to
-  tell which one it belongs to, and an uncorrelated record is preferred over one
-  attributed to another execution.
+- The record is emitted on a thread that carries no invocation claim. A thread
+  your code starts itself is such a thread, since Python does not copy context
+  into a new thread, as is the SDK's background checkpointing thread. The number
+  of invocations open in the environment does not change this: attributing an
+  unclaimed record to the single open invocation would be wrong whenever the
+  emitting thread belongs to a different invocation, and an uncorrelated record
+  is preferred over one carrying another execution's trace.
 
 ## Verification
 

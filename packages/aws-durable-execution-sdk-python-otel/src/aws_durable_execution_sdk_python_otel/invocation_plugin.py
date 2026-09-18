@@ -715,12 +715,29 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         workflow_span.end()
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
-        """Called at the end of each invocation. Ends the invocation span and flushes."""
+        """Called at the end of each invocation. Ends the invocation span and flushes.
+
+        Ending a span and exporting the Workflow span call the configured tracer
+        and span processors, which are customer-supplied and can raise. The
+        invocation must still be released: until it is, the log filter counts it
+        as open and any OTel scope this plugin attached stays current on a warm
+        environment's thread. The release and the flush therefore run in a
+        ``finally``.
+        """
         logger.debug("Durable invocation ended: %s", info)
         if not self._tracing_enabled:
             self._release_invocation_scope()
             return
 
+        try:
+            self._end_invocation_spans(info)
+        finally:
+            self._release_invocation_scope()
+            # Flush before Lambda freeze.
+            self._force_flush()
+
+    def _end_invocation_spans(self, info: InvocationEndInfo) -> None:
+        """End this invocation's open spans and export the Workflow span."""
         # Spans are registered parent-first, so close pending spans in reverse
         # order to keep every child contained within its parent.
         with self._operation_spans_lock:
@@ -766,11 +783,20 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         if info.status in _TERMINAL_INVOCATION_STATUSES:
             self._export_workflow_span(info)
 
-        self._release_invocation_scope()
+    def _force_flush(self) -> None:
+        """Flush pending spans, containing any error the flush raises.
 
-        # Flush before Lambda freeze
-        if hasattr(self._provider, "force_flush"):
+        A flush calls the configured span processors and exporters, which are
+        customer-supplied and can raise. This runs in a ``finally`` block, where
+        an escaping exception would replace the exception that ended the
+        invocation and hide its cause, so the error is logged and dropped.
+        """
+        if not hasattr(self._provider, "force_flush"):
+            return
+        try:
             self._provider.force_flush()
+        except Exception:  # noqa: BLE001
+            logger.exception("force_flush failed at invocation end")
 
     def _release_invocation_scope(self) -> None:
         """Release what this invocation attached, and stop instrumenting.
@@ -785,9 +811,11 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
           detached here or it would stay current on a warm environment's thread
           after the invocation returns.
         * The log filter's record of open invocations is process-global, so this
-          invocation must be removed from it. Until it is, a record emitted on an
-          unclaimed thread could still be correlated to this finished
-          invocation's spans.
+          invocation must be removed from it. A thread this invocation claimed
+          keeps that claim, because a context variable can only be reset by the
+          thread that set it, so until the invocation is removed a record emitted
+          on such a thread is still correlated to this finished invocation's
+          spans.
         * ``_tracing_enabled`` is cleared so a hook that arrives after the
           invocation end -- one dispatched off the checkpointing path, for
           instance -- cannot start a span after the invocation span was ended and

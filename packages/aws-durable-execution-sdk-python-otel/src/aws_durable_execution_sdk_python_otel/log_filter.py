@@ -38,14 +38,25 @@ So the binding is per invocation, not per filter:
       code therefore resolve to their own invocation, including the first
       statement of the handler, before any durable operation has claimed the
       thread directly.
-    - A record emitted on a thread that carries no claim resolves to the one
-      open invocation, if exactly one is open. Threads the SDK does not submit
-      the invocation's context into land here: a thread customer code starts
-      itself, since Python does not copy context into a new thread, and the
-      SDK's background checkpointing thread.
-    - If several invocations are open and the thread carries no claim, the record
-      is left unstamped. An unattributed record is a smaller defect than one
-      attributed to another customer execution.
+    - A branch of a map or parallel runs on a pool thread the invocation's
+      context was not copied into, so the plugins claim that thread from the
+      hooks that run on it before the branch body does.
+    - A record emitted on a thread that carries no live claim is left unstamped,
+      whatever the number of open invocations. Two threads carry no claim: the
+      SDK's background checkpointing thread, and a thread customer code starts
+      itself, since Python does not copy context into a new thread. Correlation
+      is lost for those records.
+
+Resolving an unclaimed record against the single open invocation, when exactly
+one is open, would be wrong in two orderings. A thread claimed by invocation A
+keeps that claim after A ends, because a :class:`contextvars.ContextVar` can only
+be reset by the thread that set it, so a record A's thread emits while B is the
+only open invocation would be stamped with B's trace. A record emitted on
+invocation B's own thread before B reaches its invocation-start hook carries no
+claim at all, so while A is the only open invocation it would be stamped with A's
+trace. Both stamp one customer's execution onto another's, which is a larger
+defect than an unattributed record, so a live claim is required and the count of
+open invocations is never consulted.
 
 Reading the active span straight from the OTel context (as the Java plugin's
 static ``MdcSpanEnricher`` does) is not sufficient here: the invocation span is
@@ -137,13 +148,26 @@ def unbind_invocation(provider: _SpanContextProvider) -> None:
 
 
 def _resolve_provider() -> _SpanContextProvider | None:
-    """Return the invocation to correlate a record emitted right here against."""
+    """Return the invocation to correlate a record emitted right here against.
+
+    A claim is only honoured while the invocation naming it is still open. A
+    :class:`contextvars.ContextVar` can only be reset by the thread that set it,
+    so ``unbind_invocation`` leaves the claim in place on every other thread the
+    invocation claimed; without the liveness check a pooled thread would keep
+    correlating records to a finished invocation.
+
+    A thread with no live claim resolves to nothing, even when exactly one
+    invocation is open. Deciding by count would attribute the record to that
+    invocation, and two orderings make that the wrong one: a thread still
+    carrying a finished invocation's claim, and an invocation's own thread that
+    has not reached its invocation-start hook yet.
+    """
     claimed = _current_invocation.get()
+    if claimed is None:
+        return None
     with _registry_lock:
-        if claimed is not None and claimed in _open_invocations:
+        if claimed in _open_invocations:
             return claimed
-        if len(_open_invocations) == 1:
-            return next(iter(_open_invocations))
     return None
 
 

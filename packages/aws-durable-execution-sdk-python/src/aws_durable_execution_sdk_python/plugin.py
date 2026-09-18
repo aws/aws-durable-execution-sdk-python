@@ -465,9 +465,23 @@ call signature and no other members, so a Protocol would only add a name. The
 alias is also the more permissive of the two, because ``Callable`` parameters are
 positional-only -- a factory may name its parameter whatever reads best
 (``lambda info: ...``, ``def build(invocation): ...``), where a ``__call__``
-Protocol would pin that name. Anything callable satisfies it: a lambda, a
-module-level function, a ``functools.partial``, or a class whose ``__init__``
-takes the info.
+Protocol would pin that name.
+
+Prefer a factory that constructs the plugin explicitly::
+
+    plugins=[lambda info: MyPlugin(exporter)]
+    plugins=[MyPlugin.create]          # a @classmethod factory
+
+A constructor should only assign fields, so setup work that can fail or that
+reads the environment belongs in a factory rather than in ``__init__`` (see
+``CONTRIBUTING.md``, "Initialization and conversion"). An explicit factory is
+where that work goes, and it also lets the plugin take its own collaborators
+rather than deriving them from the hook info.
+
+Anything callable satisfies the alias: a lambda, a module-level function, a
+``functools.partial``, a ``@classmethod``, or a plugin class itself, since calling
+a class in Python constructs an instance. ``plugins=[MyPlugin]`` is therefore
+permitted whenever ``MyPlugin.__init__`` takes the info, and it stays permitted.
 """
 
 
@@ -943,9 +957,12 @@ class PluginHost:
     :class:`PluginExecutor` and the caller keeps it in the invocation's own
     frame.
 
-    Mirrors the JS SDK's ``createInvocationPluginRunner`` and the Java SDK's
-    per-invocation ``PluginRunner``: the handler holds factories, the invocation
-    holds instances.
+    The handler holds factories and the invocation holds instances. The other
+    SDKs are moving to the same split, in aws/aws-durable-execution-sdk-js#924
+    (``createInvocationPluginRunner``) and aws/aws-durable-execution-sdk-java#721
+    (``PluginRunner`` constructed from factories). Both are open pull requests, so
+    neither shape is on those repositories' default branches: ``createPluginRunner``
+    on JS and ``PluginRunner`` on Java both still hold plugin instances directly.
     """
 
     def __init__(self, plugins: list[DurableInstrumentationPluginFactory] | None):
