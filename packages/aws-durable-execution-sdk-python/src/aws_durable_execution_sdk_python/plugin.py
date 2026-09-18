@@ -569,6 +569,10 @@ class PluginExecutor:
         # on_invocation_start and emptied when the invocation scope exits.
         self._plugin_factories = list(plugins or [])
         self._plugins: list[DurableInstrumentationPlugin] = []
+        # The subset of _plugins whose invocation-start hook has been dispatched.
+        # Every later hook is dispatched to this list, so a plugin that never
+        # received its start hook never receives its end hook.
+        self._started: list[DurableInstrumentationPlugin] = []
         self._executor: ThreadPoolExecutor | None = None
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
@@ -611,6 +615,7 @@ class PluginExecutor:
             # drained, so no queued dispatch still holds one: nothing outlives
             # the invocation.
             self._plugins = []
+            self._started = []
 
     def _create_plugins(self, info: InvocationStartInfo) -> None:
         """Build this invocation's plugin instances from its start info.
@@ -704,9 +709,27 @@ class PluginExecutor:
             logger.exception("Plugin %s exception ignored", plugin.__class__.__name__)
 
     def execute_plugins(self, info, sync):
+        """Dispatch one hook to this invocation's plugins.
+
+        A plugin receives a hook only once it has received the invocation-start
+        hook, which makes the pairing an invariant rather than a coincidence.
+        Without it one dispatch order breaks the pairing: a start hook that raises
+        one of the three exceptions :data:`_PLUGIN_THREAD_CONTROL_EXCEPTIONS`
+        names propagates out of this loop, so plugins later in the list never
+        receive their start hook -- and the invocation-end hook that the
+        propagating exception then triggers used to reach them anyway, leaving a
+        plugin to tear down state it had never been told to build.
+
+        A plugin is counted as started before its start hook is dispatched rather
+        than after, because a hook that begins and then fails may already have
+        allocated what its end hook releases.
+        """
         if not self._executor:
             return
-        for plugin in self._plugins:
+        starting = isinstance(info, InvocationStartInfo)
+        for plugin in self._plugins if starting else self._started:
+            if starting:
+                self._started.append(plugin)
             if sync:
                 # this is called synchronously, so plugins will be able to manipulate thread local objects
                 self._dispatch_plugin(plugin, info)

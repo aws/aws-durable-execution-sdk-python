@@ -903,9 +903,15 @@ def test_drain_from_the_export_worker_is_refused_rather_than_deadlocking(
         scheduler.schedule(ARN_A, _record("r1"))
 
         assert exporter.returned.wait(timeout=10), "the refused drain must return"
+        assert _wait_until(lambda: "refused rather than deadlocking" in caplog.text)
 
     assert ("export", "r1") in exporter.calls
-    assert "refused rather than deadlocking" in caplog.text
+    # The refused drain still leaves a flush behind, with no external drain to ask
+    # for one. The re-entering hook may have queued a record, and the worker exits
+    # once nothing is pending and no flush is requested, so without the request a
+    # buffering exporter would be holding that record when the environment froze.
+    assert _wait_until(lambda: ("flush", None) in exporter.calls), (
+        "a refused drain must request a flush on its way out"
+    )
     # The worker is still serving: a drain from any other thread completes.
     scheduler.drain(ARN_B)
-    assert ("flush", None) in exporter.calls

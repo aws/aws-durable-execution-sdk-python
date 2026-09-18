@@ -647,6 +647,35 @@ class TestPluginLifetime(unittest.TestCase):
         self.assertEqual(built[0].calls, ["invocation_start:req-1"])
         self.assertEqual(built[1].calls, ["invocation_start:req-2"])
 
+    def test_a_start_hook_that_stops_the_thread_leaves_later_plugins_unpaired(self):
+        """A plugin that never received the start hook never receives the end hook.
+
+        A start hook raising one of the three control exceptions propagates out of
+        the dispatch loop, so plugins after it in the list never receive their
+        start hook. The invocation-end hook that the propagating exception then
+        triggers used to reach them anyway, leaving a plugin to tear down state it
+        had never been told to build.
+        """
+        later = _TrackingPlugin()
+        host = PluginHost(
+            plugins=[plugin_factory(_ControlOnStartPlugin()), plugin_factory(later)]
+        )
+
+        @host.handle_durable_output
+        def handler(event, context, plugin_executor):
+            plugin_executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+            )
+            raise AssertionError("unreachable: the start hook stops the thread")
+
+        with self.assertRaises(KeyboardInterrupt):
+            handler({}, LAMBDA_CTX)
+
+        self.assertEqual(later.calls, [])
+
     def test_an_end_hook_that_stops_the_thread_is_not_reported_twice(self):
         """Exactly one end notification per invocation, whatever the hook does.
 
@@ -2332,6 +2361,13 @@ class _ControlOnEndPlugin(DurableInstrumentationPlugin):
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         self.end_statuses.append(info.status)
+        raise KeyboardInterrupt
+
+
+class _ControlOnStartPlugin(DurableInstrumentationPlugin):
+    """Plugin whose start hook stops the thread, so later plugins never start."""
+
+    def on_invocation_start(self, info: InvocationStartInfo) -> None:
         raise KeyboardInterrupt
 
 

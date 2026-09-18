@@ -201,8 +201,8 @@ class _ExportScheduler:
         exporter re-enters a plugin hook and the hook reaches an invocation end.
         The call is refused and reported rather than deadlocking the invocation;
         the record stays queued and this same worker exports it once it resumes
-        its loop. (Mirrors the Java
-        ``ExportScheduler.refuseWaitThatWouldBlockThePump``.)
+        its loop, and a flush covering it is requested on the way out. (Mirrors
+        the Java ``ExportScheduler.refuseWaitThatWouldBlockThePump``.)
         """
         if self._is_export_worker():
             _logger.warning(
@@ -211,6 +211,14 @@ class _ExportScheduler:
                 "refused rather than deadlocking the invocation; an exporter "
                 "re-entered a plugin hook"
             )
+            # The refused call still leaves a flush behind. The hook that
+            # re-entered may have queued a record, and this worker exits its loop
+            # once nothing is pending and no flush is requested -- so without the
+            # request the record would be handed to the exporters and the worker
+            # would stop, leaving a buffering exporter holding an execution's
+            # terminal telemetry when Lambda freezes the environment. Requesting
+            # it rather than waiting for it is what keeps the worker unblocked.
+            self._request_flush()
             return
         failed_pending: _Dropped | None = None
         start_error: Exception | None = None
@@ -285,6 +293,20 @@ class _ExportScheduler:
         """
         with self._condition:
             return self._worker is threading.current_thread()
+
+    def _request_flush(self) -> None:
+        """Ask the worker for a flush covering everything scheduled so far.
+
+        Returns without waiting, so it is safe to call from the worker itself. The
+        barrier is raised to the current schedule counter, which is what makes the
+        flush cover a record queued moments ago rather than running before it.
+        """
+        with self._condition:
+            if self._disabled:
+                return
+            self._flush_requested = True
+            self._flush_barrier = max(self._flush_barrier, self._seq)
+            self._condition.notify_all()
 
     def _disable_locked(self) -> _Dropped:
         """Latch asynchronous export off for good and surrender everything queued.
