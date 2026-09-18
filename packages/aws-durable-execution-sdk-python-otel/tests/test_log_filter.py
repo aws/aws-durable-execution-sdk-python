@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import contextvars
+import gc
 import logging
 import threading
+import weakref
 from datetime import UTC, datetime
 
 import opentelemetry.context as otel_context
@@ -343,6 +345,47 @@ def test_a_stale_claim_is_not_resolved_to_the_only_open_invocation():
             second.on_invocation_end(_invocation_end_info(suffix="second"))
     finally:
         second_is_open.set()
+        worker.join(timeout=10)
+
+
+def test_a_claimed_worker_does_not_pin_the_finished_invocation():
+    """A claim left on a pool thread does not keep the plugin alive.
+
+    ``unbind_invocation`` resets the claim only on the thread that ends the
+    invocation, so a pool thread that is never used again keeps the claim it was
+    given. The claim is a weak reference, so what it keeps is nothing: once the
+    invocation ends and the SDK releases the plugin, the plugin is collectable
+    even while the claimed thread is still running.
+    """
+    plugin, _ = _create_plugin(enrich_logger=False)
+    plugin.on_invocation_start(_invocation_start_info(suffix="only"))
+
+    # A worker running in a copy of the claiming thread's context, held alive for
+    # the length of the test, as a pooled worker would be.
+    claimed_context = contextvars.copy_context()
+    release_worker = threading.Event()
+    resolved_while_open: list[bool] = []
+
+    def hold_the_claim() -> None:
+        resolved_while_open.append(log_filter_module._resolve_provider() is not None)
+        assert release_worker.wait(timeout=10)
+
+    worker = threading.Thread(
+        target=claimed_context.run, args=(hold_the_claim,), name="claimed-worker"
+    )
+    worker.start()
+    try:
+        collected = threading.Event()
+        weakref.finalize(plugin, collected.set)
+        plugin.on_invocation_end(_invocation_end_info(suffix="only"))
+
+        del plugin
+        gc.collect()
+
+        assert resolved_while_open == [True], "the claim must resolve while open"
+        assert collected.is_set(), "the claimed worker must not pin the plugin"
+    finally:
+        release_worker.set()
         worker.join(timeout=10)
 
 

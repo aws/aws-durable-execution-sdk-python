@@ -30,7 +30,8 @@ So the binding is per invocation, not per filter:
       thread/task for it, through a :class:`contextvars.ContextVar`. A record
       emitted on a claimed thread resolves to the invocation that claimed it,
       which is per-thread and per-task and so cannot be overwritten by a
-      concurrent invocation.
+      concurrent invocation. The claim is a weak reference, so a pool thread
+      that is never used again cannot pin a finished invocation's plugin.
     - ``unbind_invocation`` marks the invocation closed.
     - The claim reaches the thread running the handler body because the SDK
       submits that work with a copy of the invocation thread's context, taken
@@ -104,9 +105,19 @@ _open_invocations: weakref.WeakSet[_SpanContextProvider] = weakref.WeakSet()
 
 # The invocation owning the current thread/task. Set by bind_invocation on every
 # thread the owning plugin is given control on.
-_current_invocation: contextvars.ContextVar[_SpanContextProvider | None] = (
-    contextvars.ContextVar("durable_execution_otel_invocation", default=None)
-)
+#
+# A weak reference, because a claim outlives the invocation that made it on every
+# thread except the one that ends it: a ContextVar can only be reset by the
+# thread that set it, so a pool thread that is never used again keeps whatever
+# the claim holds. A strong claim would therefore pin a finished invocation's
+# plugin, its spans and its context tokens for the life of the execution
+# environment, and would also defeat _open_invocations being weak, since a
+# plugin whose end hook never ran would stay reachable through the claim. While
+# an invocation is open the SDK holds its plugin, which is what keeps the
+# referent alive for every record the filter resolves.
+_current_invocation: contextvars.ContextVar[
+    weakref.ref[_SpanContextProvider] | None
+] = contextvars.ContextVar("durable_execution_otel_invocation", default=None)
 
 # Serializes installation so two invocations starting at once cannot both find
 # a handler filterless and both add a filter to it.
@@ -126,7 +137,7 @@ def bind_invocation(provider: _SpanContextProvider) -> None:
     """
     with _registry_lock:
         _open_invocations.add(provider)
-    _current_invocation.set(provider)
+    _current_invocation.set(weakref.ref(provider))
 
 
 def unbind_invocation(provider: _SpanContextProvider) -> None:
@@ -143,7 +154,8 @@ def unbind_invocation(provider: _SpanContextProvider) -> None:
     """
     with _registry_lock:
         _open_invocations.discard(provider)
-    if _current_invocation.get() is provider:
+    claim = _current_invocation.get()
+    if claim is not None and claim() is provider:
         _current_invocation.set(None)
 
 
@@ -161,8 +173,16 @@ def _resolve_provider() -> _SpanContextProvider | None:
     invocation, and two orderings make that the wrong one: a thread still
     carrying a finished invocation's claim, and an invocation's own thread that
     has not reached its invocation-start hook yet.
+
+    A claim whose referent has been collected resolves to nothing as well. The
+    claim is weak, so a plugin the SDK has released can be gone while the claim
+    that named it remains on a pool thread. A collected referent means the
+    invocation is over, which is the same answer the liveness check gives.
     """
-    claimed = _current_invocation.get()
+    claim = _current_invocation.get()
+    if claim is None:
+        return None
+    claimed = claim()
     if claimed is None:
         return None
     with _registry_lock:
