@@ -750,7 +750,10 @@ def test_durable_function_test_runner_init(
     mock_processor.assert_called_once()
     mock_client.assert_called_once()
     mock_invoker.assert_called_once_with(
-        handler, mock_client.return_value, max_page_bytes=5 * 1024 * 1024
+        handler,
+        mock_client.return_value,
+        max_page_bytes=5 * 1024 * 1024,
+        region="us-west-2",
     )
     mock_executor.assert_called_once()
 
@@ -1031,7 +1034,10 @@ def test_durable_context_test_runner_init(
     mock_processor.assert_called_once()
     mock_client.assert_called_once()
     mock_invoker.assert_called_once_with(
-        decorated_handler, mock_client.return_value, max_page_bytes=5 * 1024 * 1024
+        decorated_handler,
+        mock_client.return_value,
+        max_page_bytes=5 * 1024 * 1024,
+        region="us-west-2",
     )
     mock_executor.assert_called_once()
 
@@ -1084,7 +1090,10 @@ def test_durable_child_context_test_runner_init_with_args(
     mock_processor.assert_called_once()
     mock_client.assert_called_once()
     mock_invoker.assert_called_once_with(
-        decorated_handler, mock_client.return_value, max_page_bytes=5 * 1024 * 1024
+        decorated_handler,
+        mock_client.return_value,
+        max_page_bytes=5 * 1024 * 1024,
+        region="us-west-2",
     )
     mock_executor.assert_called_once()
 

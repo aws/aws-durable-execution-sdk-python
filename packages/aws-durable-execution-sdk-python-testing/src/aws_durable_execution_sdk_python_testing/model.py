@@ -279,6 +279,26 @@ class GetDurableExecutionResponse:
         return result
 
 
+LATEST_PUBLISHED_QUALIFIER = "$LATEST.PUBLISHED"
+
+
+def executed_version(qualifier: str | None) -> str:
+    """The function version an invocation runs, as Lambda reports it.
+
+    The service records the version Lambda executed: a numeric qualifier
+    names it, ``$LATEST.PUBLISHED`` is reported as itself, and an alias
+    resolves to the version it points at. The runner keeps no published
+    versions or aliases. So a numeric qualifier and ``$LATEST.PUBLISHED``
+    are reported as given, and no qualifier, ``$LATEST`` or an alias is
+    reported as ``$LATEST``.
+    """
+    if qualifier is not None and (
+        qualifier.isdigit() or qualifier == LATEST_PUBLISHED_QUALIFIER
+    ):
+        return qualifier
+    return "$LATEST"
+
+
 @dataclass(frozen=True)
 class Execution:
     """Execution summary structure from Smithy model."""
@@ -317,14 +337,18 @@ class Execution:
         return result
 
     @classmethod
-    def from_execution(cls, execution, status: str) -> Execution:
-        """Create ExecutionSummary from Execution object."""
+    def from_execution(cls, execution, status: str, default_region: str) -> Execution:
+        """Create ExecutionSummary from Execution object.
+
+        ``default_region`` serves an execution stored before the runner
+        recorded regions; every other execution reports its own.
+        """
 
         execution_op = execution.get_operation_execution_started()
         return cls(
             durable_execution_arn=execution.durable_execution_arn,
             durable_execution_name=execution.start_input.execution_name,
-            function_arn=f"arn:aws:lambda:us-east-1:123456789012:function:{execution.start_input.function_name}",
+            function_arn=execution.function_arn(default_region),
             status=status,
             start_timestamp=execution_op.start_timestamp
             if execution_op.start_timestamp
@@ -1004,46 +1028,39 @@ class StepFailedDetails:
 
 
 @dataclass(frozen=True)
-class ChainedInvokePendingDetails:
-    """Chained Invoke Pending event details."""
+class ChainedInvokeStartedDetails:
+    """Chained invoke started event details.
 
-    input: EventInput | None = None
+    ExecutedVersion is omitted: the local runner performs no function
+    version resolution, so it has no resolved version to report.
+    """
+
     function_name: str | None = None
+    tenant_id: str | None = None
+    input: EventInput | None = None
+    durable_execution_arn: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict) -> ChainedInvokePendingDetails:
+    def from_dict(cls, data: dict) -> ChainedInvokeStartedDetails:
         input_data = None
         if input_dict := data.get("Input"):
             input_data = EventInput.from_dict(input_dict)
 
         return cls(
-            input=input_data,
             function_name=data.get("FunctionName"),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        if self.input is not None:
-            result["Input"] = self.input.to_dict()
-        if self.function_name is not None:
-            result["FunctionName"] = self.function_name
-        return result
-
-
-@dataclass(frozen=True)
-class ChainedInvokeStartedDetails:
-    """Chained invoke started event details."""
-
-    durable_execution_arn: str | None = None
-
-    @classmethod
-    def from_dict(cls, data: dict) -> ChainedInvokeStartedDetails:
-        return cls(
+            tenant_id=data.get("TenantId"),
+            input=input_data,
             durable_execution_arn=data.get("DurableExecutionArn"),
         )
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {}
+        if self.function_name is not None:
+            result["FunctionName"] = self.function_name
+        if self.tenant_id is not None:
+            result["TenantId"] = self.tenant_id
+        if self.input is not None:
+            result["Input"] = self.input.to_dict()
         if self.durable_execution_arn is not None:
             result["DurableExecutionArn"] = self.durable_execution_arn
         return result
@@ -1288,6 +1305,7 @@ class EventCreationContext:
     durable_execution_invocation_output: DurableExecutionInvocationOutput | None = None
     operation_update: OperationUpdate | None = None
     include_execution_data: bool = False  # noqa: FBT001, FBT002
+    child_execution_arn: str | None = None
 
     @classmethod
     def create(
@@ -1373,7 +1391,6 @@ class Event:
     step_started_details: StepStartedDetails | None = None
     step_succeeded_details: StepSucceededDetails | None = None
     step_failed_details: StepFailedDetails | None = None
-    chained_invoke_pending_details: ChainedInvokePendingDetails | None = None
     chained_invoke_started_details: ChainedInvokeStartedDetails | None = None
     chained_invoke_succeeded_details: ChainedInvokeSucceededDetails | None = None
     chained_invoke_failed_details: ChainedInvokeFailedDetails | None = None
@@ -1447,12 +1464,6 @@ class Event:
         step_failed_details = None
         if details_data := data.get("StepFailedDetails"):
             step_failed_details = StepFailedDetails.from_dict(details_data)
-
-        chained_invoke_pending_details = None
-        if details_data := data.get("ChainedInvokePendingDetails"):
-            chained_invoke_pending_details = ChainedInvokePendingDetails.from_dict(
-                details_data
-            )
 
         chained_invoke_started_details = None
         if details_data := data.get("ChainedInvokeStartedDetails"):
@@ -1530,7 +1541,6 @@ class Event:
             step_started_details=step_started_details,
             step_succeeded_details=step_succeeded_details,
             step_failed_details=step_failed_details,
-            chained_invoke_pending_details=chained_invoke_pending_details,
             chained_invoke_started_details=chained_invoke_started_details,
             chained_invoke_succeeded_details=chained_invoke_succeeded_details,
             chained_invoke_failed_details=chained_invoke_failed_details,
@@ -1589,10 +1599,6 @@ class Event:
             result["StepSucceededDetails"] = self.step_succeeded_details.to_dict()
         if self.step_failed_details is not None:
             result["StepFailedDetails"] = self.step_failed_details.to_dict()
-        if self.chained_invoke_pending_details is not None:
-            result["ChainedInvokePendingDetails"] = (
-                self.chained_invoke_pending_details.to_dict()
-            )
         if self.chained_invoke_started_details is not None:
             result["ChainedInvokeStartedDetails"] = (
                 self.chained_invoke_started_details.to_dict()
@@ -2011,30 +2017,19 @@ class Event:
 
     # region chained_invoke
     @classmethod
-    def create_chained_invoke_event_pending(
-        cls, context: EventCreationContext
-    ) -> Event:
-        input: EventInput = EventInput.from_start_durable_execution_input(
-            context.start_durable_execution_input, context.include_execution_data
-        )
-        return cls(
-            event_type=EventType.CHAINED_INVOKE_STARTED.value,
-            event_timestamp=context.start_timestamp,
-            sub_type=context.sub_type,
-            event_id=context.event_id,
-            operation_id=context.operation.operation_id,
-            name=context.operation.name,
-            parent_id=context.operation.parent_id,
-            chained_invoke_pending_details=ChainedInvokePendingDetails(
-                input=input,
-                function_name=context.start_durable_execution_input.function_name,
-            ),
-        )
-
-    @classmethod
     def create_chained_invoke_event_started(
         cls, context: EventCreationContext
     ) -> Event:
+        update: OperationUpdate | None = context.operation_update
+        function_name: str | None = None
+        payload: str | None = None
+        if update is not None:
+            payload = update.payload
+            if update.chained_invoke_options is not None:
+                function_name = update.chained_invoke_options.function_name
+        # The API shape has TenantId here; the service's history does not
+        # return it for this event. The runner matches the service, so a
+        # history assertion that passes locally passes against it.
         return cls(
             event_type=EventType.CHAINED_INVOKE_STARTED.value,
             event_timestamp=context.start_timestamp,
@@ -2044,7 +2039,16 @@ class Event:
             name=context.operation.name,
             parent_id=context.operation.parent_id,
             chained_invoke_started_details=ChainedInvokeStartedDetails(
-                durable_execution_arn=context.durable_execution_arn
+                function_name=function_name,
+                # No stored input, as for a target the runner could not
+                # resolve, means no Input on the event, as at the service.
+                input=EventInput(
+                    payload=payload if context.include_execution_data else None,
+                    truncated=not context.include_execution_data,
+                )
+                if payload is not None
+                else None,
+                durable_execution_arn=context.child_execution_arn,
             ),
         )
 
@@ -2157,7 +2161,7 @@ class Event:
         """Create chained invoke event based on action."""
         match context.operation.status:
             case OperationStatus.PENDING:
-                return cls.create_chained_invoke_event_pending(context)
+                return cls.create_chained_invoke_event_started(context)
             case OperationStatus.STARTED:
                 return cls.create_chained_invoke_event_started(context)
             case OperationStatus.SUCCEEDED:
@@ -2357,7 +2361,6 @@ class Event:
             step_started_details=event.step_started_details,
             step_succeeded_details=event.step_succeeded_details,
             step_failed_details=event.step_failed_details,
-            chained_invoke_pending_details=event.chained_invoke_pending_details,
             chained_invoke_started_details=event.chained_invoke_started_details,
             chained_invoke_succeeded_details=event.chained_invoke_succeeded_details,
             chained_invoke_failed_details=event.chained_invoke_failed_details,

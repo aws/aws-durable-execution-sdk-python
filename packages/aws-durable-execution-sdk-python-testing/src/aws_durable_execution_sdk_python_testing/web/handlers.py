@@ -809,17 +809,28 @@ class UpdateLambdaEndpointHandler(EndpointHandler):
         try:
             body = self._parse_json_body(request)
             endpoint_url = body.get("EndpointUrl")
-            region_name = body.get("RegionName", "us-east-1")
+            region_name = body.get("RegionName")
 
             if not endpoint_url:
                 return self._handle_aws_exception(
                     InvalidParameterValueException("EndpointUrl is required")
                 )
+            # The runner emulates one region, fixed at startup, and every
+            # execution is created in it. A request that names another
+            # region would give the runner two regions at once, so it is
+            # rejected instead of applied to the invoker alone.
+            if region_name is not None and region_name != self.executor.region:
+                return self._handle_aws_exception(
+                    InvalidParameterValueException(
+                        f"RegionName must be {self.executor.region}, "
+                        f"the region this runner emulates; got {region_name}"
+                    )
+                )
 
             # Update the invoker's Lambda endpoint
             invoker = self.executor._invoker  # noqa: SLF001
             logger.info("Updating lambda endpoint to %s", endpoint_url)
-            invoker.update_endpoint(endpoint_url, region_name)
+            invoker.update_endpoint(endpoint_url, self.executor.region)
             return self._success_response(
                 {"message": "Lambda endpoint updated successfully"}
             )

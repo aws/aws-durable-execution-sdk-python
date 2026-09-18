@@ -3,11 +3,13 @@
 This module tests all the event creation factory methods in the Event class.
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from unittest.mock import Mock
 
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
+    ChainedInvokeOptions,
     ErrorObject,
     OperationStatus,
     OperationType,
@@ -1873,21 +1875,23 @@ class TestFromOperationFinished:
 # endregion from_operation_finished_tests
 
 
-def test_chained_invoke_pending_details_from_dict():
-    """Test ChainedInvokePendingDetails parsing in Event.from_dict."""
+def test_chained_invoke_started_details_full_from_dict():
+    """Test ChainedInvokeStartedDetails parsing in Event.from_dict."""
     data = {
         "EventType": "ChainedInvokeStarted",
         "EventTimestamp": datetime.now(UTC),
-        "ChainedInvokePendingDetails": {
-            "Input": {"Payload": "test-input", "Truncated": False},
+        "ChainedInvokeStartedDetails": {
             "FunctionName": "test-function",
+            "Input": {"Payload": "test-input", "Truncated": False},
+            "DurableExecutionArn": "child-arn",
         },
     }
 
     event = Event.from_dict(data)
-    assert event.chained_invoke_pending_details is not None
-    assert event.chained_invoke_pending_details.input.payload == "test-input"
-    assert event.chained_invoke_pending_details.function_name == "test-function"
+    assert event.chained_invoke_started_details is not None
+    assert event.chained_invoke_started_details.function_name == "test-function"
+    assert event.chained_invoke_started_details.input.payload == "test-input"
+    assert event.chained_invoke_started_details.durable_execution_arn == "child-arn"
 
 
 def test_event_creation_context_sub_type_property():
@@ -2003,8 +2007,8 @@ def test_event_creation_context_get_retry_details():
     assert retry_details is None
 
 
-def test_create_chained_invoke_event_pending():
-    """Test Event.create_chained_invoke_event_pending method."""
+def test_create_chained_invoke_event_started_from_start_update():
+    """Test Event.create_chained_invoke_event_started with a START update."""
     operation = Mock()
     operation.operation_id = "invoke-1"
     operation.name = "test_invoke"
@@ -2012,6 +2016,16 @@ def test_create_chained_invoke_event_pending():
     operation.status = OperationStatus.PENDING
     operation.start_timestamp = datetime.now(UTC)
     operation.sub_type = None
+
+    update = OperationUpdate(
+        operation_id="invoke-1",
+        operation_type=OperationType.CHAINED_INVOKE,
+        action=OperationAction.START,
+        payload='{"n": 1}',
+        chained_invoke_options=ChainedInvokeOptions(
+            function_name="child-function", tenant_id=None
+        ),
+    )
 
     context = EventCreationContext.create(
         operation=operation,
@@ -2025,13 +2039,61 @@ def test_create_chained_invoke_event_pending():
             execution_timeout_seconds=300,
             execution_retention_period_days=7,
         ),
+        operation_update=update,
         include_execution_data=True,
     )
+    context = replace(context, child_execution_arn="child-arn")
 
-    event = Event.create_chained_invoke_event_pending(context)
+    event = Event.create_chained_invoke_event_started(context)
 
     assert event.event_type == "ChainedInvokeStarted"
     assert event.operation_id == "invoke-1"
     assert event.name == "test_invoke"
-    assert event.chained_invoke_pending_details is not None
-    assert event.chained_invoke_pending_details.function_name == "test"
+    assert event.chained_invoke_started_details is not None
+    assert event.chained_invoke_started_details.function_name == "child-function"
+    assert event.chained_invoke_started_details.input.payload == '{"n": 1}'
+    assert event.chained_invoke_started_details.durable_execution_arn == "child-arn"
+
+
+def test_create_chained_invoke_event_started_omits_the_tenant_id():
+    """The service's history does not return TenantId for this event, so
+    the runner omits it too: a history assertion written locally must hold
+    against the service."""
+    operation = Mock()
+    operation.operation_id = "invoke-1"
+    operation.name = "test_invoke"
+    operation.parent_id = None
+    operation.status = OperationStatus.PENDING
+    operation.start_timestamp = datetime.now(UTC)
+    operation.sub_type = None
+
+    update = OperationUpdate(
+        operation_id="invoke-1",
+        operation_type=OperationType.CHAINED_INVOKE,
+        action=OperationAction.START,
+        payload="{}",
+        chained_invoke_options=ChainedInvokeOptions(
+            function_name="child-function", tenant_id="tenant-a"
+        ),
+    )
+    context = EventCreationContext.create(
+        operation=operation,
+        event_id=1,
+        durable_execution_arn="arn:test",
+        start_input=StartDurableExecutionInput(
+            account_id="123",
+            function_name="test",
+            function_qualifier="$LATEST",
+            execution_name="test",
+            execution_timeout_seconds=300,
+            execution_retention_period_days=7,
+        ),
+        operation_update=update,
+        include_execution_data=True,
+    )
+
+    event = Event.create_chained_invoke_event_started(context)
+
+    assert event.chained_invoke_started_details is not None
+    assert event.chained_invoke_started_details.tenant_id is None
+    assert "TenantId" not in event.to_dict()["ChainedInvokeStartedDetails"]
