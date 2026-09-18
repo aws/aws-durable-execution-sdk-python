@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any
@@ -862,3 +863,49 @@ def test_blocked_export_never_loses_another_executions_terminal_record() -> None
         assert exported < returned_at
         assert ("flush", None, None) in events[exported:returned_at]
     assert _wait_until(lambda: _scheduler_is_empty(scheduler))
+
+
+class ReentrantDrainExporter(CaptureExporter):
+    """Exporter that drains from inside export(), as a plugin hook would.
+
+    An exporter that re-enters a plugin hook reaches ``on_invocation_end``, and
+    that hook drains. The re-entry therefore arrives on the export worker thread,
+    which is the one thread able to serve the wait.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scheduler: _ArnScheduler | None = None
+        self.returned = threading.Event()
+
+    def export(self, record: dict[str, Any]) -> None:
+        super().export(record)
+        assert self.scheduler is not None
+        self.scheduler.drain(ARN_A)
+        self.returned.set()
+
+
+def test_drain_from_the_export_worker_is_refused_rather_than_deadlocking(
+    caplog,
+) -> None:
+    """A drain on the worker thread returns instead of parking it.
+
+    Only the export worker exports records and completes flushes. A drain made on
+    that thread would wait for work only that thread can do, so the wait never
+    ends and the invocation hangs until Lambda times it out. The call is refused
+    and reported, and the worker goes back to its loop.
+    """
+    exporter = ReentrantDrainExporter()
+    scheduler = _ArnScheduler([exporter])
+    exporter.scheduler = scheduler
+
+    with caplog.at_level(logging.WARNING):
+        scheduler.schedule(ARN_A, _record("r1"))
+
+        assert exporter.returned.wait(timeout=10), "the refused drain must return"
+
+    assert ("export", "r1") in exporter.calls
+    assert "refused rather than deadlocking" in caplog.text
+    # The worker is still serving: a drain from any other thread completes.
+    scheduler.drain(ARN_B)
+    assert ("flush", None) in exporter.calls

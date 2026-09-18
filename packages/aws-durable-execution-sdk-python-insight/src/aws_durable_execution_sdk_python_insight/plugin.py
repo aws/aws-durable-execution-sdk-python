@@ -42,10 +42,12 @@ Operation-map sourcing:
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import json
 import math
 import threading
+from collections.abc import Iterator
 from typing import Any, Callable
 
 from aws_durable_execution_sdk_python.plugin import (
@@ -174,6 +176,26 @@ def _apply_result_override(
         return None
 
 
+class _HookFrames(threading.local):
+    """Nested plugin hook frames on one thread, and the drains they owe.
+
+    Per thread, and shared by every plugin instance on that thread. A hook runs
+    customer code while holding a plugin's ``_lock``, and that code can call a
+    hook on *any* live instance, so the frame that must run a deferred drain is
+    the outermost one on the thread whatever instance it belongs to.
+
+    ``threading.local`` runs ``__init__`` once per thread, so each thread gets its
+    own counter and its own list.
+    """
+
+    def __init__(self) -> None:
+        self.depth = 0
+        self.pending: list[WorkflowInsightPlugin] = []
+
+
+_hook_frames = _HookFrames()
+
+
 class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
     """Everything this environment holds for one invocation of one execution.
 
@@ -284,10 +306,54 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
 
     # -- hooks ----------------------------------------------------------------
 
+    @contextlib.contextmanager
+    def _hook_frame(self) -> Iterator[None]:
+        """Mark a hook frame on this thread and run the drains it owes on exit.
+
+        A hook runs customer code -- the input/output transforms, a result
+        override, ``__del__`` on an object a displaced record carried -- while
+        holding ``_lock``, which is reentrant so that such code re-entering a hook
+        on this thread does not self-deadlock. A re-entrant
+        ``on_invocation_end`` therefore used to run its drain while the outer
+        frame still held ``_lock``. A drain waits for the export worker, and an
+        exporter that re-enters a hook blocks that worker on the very ``_lock``
+        the waiting thread holds, so neither side can proceed and the invocation
+        hangs until Lambda times it out.
+
+        A drain a nested frame asks for is therefore deferred to the outermost
+        frame, which runs it after every ``_lock`` hold on this thread has been
+        released. The unnested case is unchanged: the frame is the outermost one,
+        so its drain runs at the same point it always did.
+
+        The frame state is per thread and shared by every instance, because
+        customer code inside one execution's build can call a hook on another
+        execution's instance, and a drain deferred to the outer frame of a
+        *different* instance is still a drain outside every lock.
+        """
+        state = _hook_frames
+        state.depth += 1
+        try:
+            yield
+        finally:
+            state.depth -= 1
+            if state.depth == 0 and state.pending:
+                owed, state.pending = state.pending, []
+                for plugin in owed:
+                    plugin._drain()
+
+    def _request_drain(self) -> None:
+        """Ask for a drain once the outermost hook frame on this thread unwinds."""
+        pending = _hook_frames.pending
+        if not any(plugin is self for plugin in pending):
+            pending.append(self)
+
+    def _drain(self) -> None:
+        self._shared._scheduler.drain(self)
+
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         if not self._sampled_in:
             return
-        with self._lock:
+        with self._hook_frame(), self._lock:
             if self._closed:
                 return
             # Seed the operation map from the full snapshot. On a cold resume
@@ -305,7 +371,7 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
         # fabricate it in, and the instance it reaches is its own.
         if not self._sampled_in:
             return
-        with self._lock:
+        with self._hook_frame(), self._lock:
             if self._closed:
                 return
             # Replace state with the full operations snapshot carried by the hook.
@@ -322,64 +388,71 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
             # nothing.
             return
         emit_mode = self._shared._emit_mode
-        with self._lock:
-            if not self._closed:
-                # Close the gate before emitting so a concurrent late hook for
-                # this execution cannot append a RUNNING record after the
-                # terminal one.
-                self._closed = True
-                # Refresh from the fresh end-of-invocation snapshot before
-                # emitting so the terminal record reflects the final operation
-                # map.
-                self._adopt_operations_locked(info.operations)
-                status = _STATUS_MAP.get(info.status, "RUNNING")
-                is_terminal = status in ("SUCCEEDED", "FAILED")
-                is_failure = status == "FAILED"
+        with self._hook_frame():
+            with self._lock:
+                if not self._closed:
+                    # Close the gate before emitting so a concurrent late hook for
+                    # this execution cannot append a RUNNING record after the
+                    # terminal one.
+                    self._closed = True
+                    # Refresh from the fresh end-of-invocation snapshot before
+                    # emitting so the terminal record reflects the final operation
+                    # map.
+                    self._adopt_operations_locked(info.operations)
+                    status = _STATUS_MAP.get(info.status, "RUNNING")
+                    is_terminal = status in ("SUCCEEDED", "FAILED")
+                    is_failure = status == "FAILED"
 
-                if emit_mode == EmitMode.ON_CHANGE:
-                    should_emit = True
-                elif emit_mode == EmitMode.ON_FAILURE:
-                    should_emit = is_failure
-                else:  # on-complete
-                    should_emit = is_terminal
+                    if emit_mode == EmitMode.ON_CHANGE:
+                        should_emit = True
+                    elif emit_mode == EmitMode.ON_FAILURE:
+                        should_emit = is_failure
+                    else:  # on-complete
+                        should_emit = is_terminal
 
-                if should_emit:
-                    # Only terminal (SUCCEEDED/FAILED) records carry an end time;
-                    # a PENDING/RETRY invocation end maps to RUNNING (still in
-                    # flight) and must omit endTime/durationMs. Passing
-                    # end_time=None makes _emit drop both fields. Output and
-                    # error likewise belong only to a terminal record.
-                    self._emit(
-                        status=status,
-                        end_time=datetime.datetime.now(datetime.UTC)
-                        if is_terminal
-                        else None,
-                        output_raw=info.execution_result if is_terminal else None,
-                        error=info.error if is_terminal else None,
-                        # This is the emit that closed the gate, so it always runs
-                        # with `_closed` already set and must never drop itself.
-                        closing=True,
-                    )
+                    if should_emit:
+                        # Only terminal (SUCCEEDED/FAILED) records carry an end time;
+                        # a PENDING/RETRY invocation end maps to RUNNING (still in
+                        # flight) and must omit endTime/durationMs. Passing
+                        # end_time=None makes _emit drop both fields. Output and
+                        # error likewise belong only to a terminal record.
+                        self._emit(
+                            status=status,
+                            end_time=datetime.datetime.now(datetime.UTC)
+                            if is_terminal
+                            else None,
+                            output_raw=info.execution_result if is_terminal else None,
+                            error=info.error if is_terminal else None,
+                            # This is the emit that closed the gate, so it always runs
+                            # with `_closed` already set and must never drop itself.
+                            closing=True,
+                        )
 
-        # Nothing has to be cleared after an invocation end, including a
-        # PENDING/RETRY one: this instance IS the state, and the SDK drops it
-        # when the invocation scope exits. A suspended execution that resumes
-        # here later gets a fresh instance, seeded from
-        # InvocationStartInfo.operations.
-        #
-        # Drain on EVERY sampled-in invocation end, emitted record or not: JS and
-        # Java flush once per sampled-in invocation end regardless, and a
-        # buffering exporter has to see the same rhythm in all three languages
-        # (an on-failure/on-complete mode that emits nothing for this invocation
-        # may still be holding records another execution handed it). A sampled-out
-        # execution returns above, so it neither exports nor flushes.
-        #
-        # The drain covers this execution only -- it names this instance, which
-        # carries its own export bookkeeping: it returns once this execution's
-        # own record, if any, reached the exporters and a flush that completed
-        # after this call is done, without waiting on records scheduled after the
-        # call by other executions.
-        self._shared._scheduler.drain(self)
+            # Nothing has to be cleared after an invocation end, including a
+            # PENDING/RETRY one: this instance IS the state, and the SDK drops it
+            # when the invocation scope exits. A suspended execution that resumes
+            # here later gets a fresh instance, seeded from
+            # InvocationStartInfo.operations.
+            #
+            # Drain on EVERY sampled-in invocation end, emitted record or not: JS and
+            # Java flush once per sampled-in invocation end regardless, and a
+            # buffering exporter has to see the same rhythm in all three languages
+            # (an on-failure/on-complete mode that emits nothing for this invocation
+            # may still be holding records another execution handed it). A sampled-out
+            # execution returns above, so it neither exports nor flushes.
+            #
+            # The drain covers this execution only -- it names this instance, which
+            # carries its own export bookkeeping: it returns once this execution's
+            # own record, if any, reached the exporters and a flush that completed
+            # after this call is done, without waiting on records scheduled after the
+            # call by other executions.
+            #
+            # Asked for rather than performed here, so it runs when the outermost
+            # hook frame on this thread unwinds and every `_lock` hold is released.
+            # See `_hook_frame`: an invocation end that customer code re-entered
+            # from inside another hook's build would otherwise wait for the export
+            # worker while holding the lock that worker may need.
+            self._request_drain()
 
     # -- emission -------------------------------------------------------------
 

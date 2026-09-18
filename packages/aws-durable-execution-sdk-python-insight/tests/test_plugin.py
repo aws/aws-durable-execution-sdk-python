@@ -1125,6 +1125,89 @@ def test_reentrant_invocation_end_stops_the_outer_running_record():
     assert _wait_until(lambda: not factory._scheduler._worker_alive())
 
 
+def test_a_reentrant_invocation_end_drains_after_the_lock_is_released():
+    # The nested end hook used to drain from inside the outer frame's lock hold. A
+    # drain waits for the export worker, and an exporter that re-enters a hook
+    # blocks that worker on the very lock the waiting thread holds, so neither
+    # side can proceed and the invocation hangs until Lambda times it out. The
+    # drain a nested frame asks for is therefore deferred to the outermost hook
+    # frame, which runs it with every lock hold on this thread released.
+    exporter = ConcurrentCaptureExporter()
+    holder: dict[str, Any] = {}
+    reentered = threading.Event()
+    events: list[str] = []
+    lock_free_at_drain: list[bool] = []
+
+    def reentering_input(value: Any) -> Any:
+        if not reentered.is_set():
+            reentered.set()
+            holder["plugin"].on_invocation_end(_end(operations=_ops(_step("s"))))
+            events.append("nested-end-returned")
+        return value
+
+    factory = workflow_insight(
+        WorkflowInsightConfig(
+            exporters=[exporter],
+            emit_mode="on-change",
+            content=ContentConfig(input=reentering_input),
+        )
+    )
+    start = _start(operations={})
+    plugin = factory.create_plugin(start)
+    holder["plugin"] = plugin
+
+    original_drain = factory._scheduler.drain
+
+    def recording_drain(execution: Any) -> None:
+        events.append("drain")
+        lock_free_at_drain.append(_free_for_another_thread(plugin._lock))
+        original_drain(execution)
+
+    factory._scheduler.drain = recording_drain  # type: ignore[method-assign]
+
+    returned = threading.Event()
+
+    def hook() -> None:
+        plugin.on_invocation_start(start)
+        returned.set()
+
+    thread = threading.Thread(target=hook, daemon=True)
+    thread.start()
+    assert returned.wait(10.0), "the hook never returned"
+    thread.join(5.0)
+    assert not thread.is_alive()
+    assert reentered.is_set()
+
+    assert events == ["nested-end-returned", "drain"], (
+        "the nested end hook drained before its frame unwound, so the drain ran "
+        f"inside the outer lock hold: {events}"
+    )
+    assert lock_free_at_drain == [True], (
+        "the drain ran while this thread still held the execution's lock, which "
+        "an exporter re-entering a hook turns into a deadlock"
+    )
+
+
+def _free_for_another_thread(lock: Any) -> bool:
+    """Report whether a lock is unheld, as seen from a thread that never took it.
+
+    Asked from another thread on purpose: the lock is reentrant, so the thread
+    that owns it can always acquire it again and would learn nothing.
+    """
+    acquired: list[bool] = []
+
+    def probe() -> None:
+        got = lock.acquire(blocking=False)
+        acquired.append(got)
+        if got:
+            lock.release()
+
+    prober = threading.Thread(target=probe, daemon=True)
+    prober.start()
+    prober.join(5.0)
+    return acquired == [True]
+
+
 # -- a build overtaken by one customer code started from inside it -------------
 
 

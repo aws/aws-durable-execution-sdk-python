@@ -194,7 +194,24 @@ class _ExportScheduler:
         returns without a flush: failing to start the export worker, and an export
         worker that has died ``_MAX_CONSECUTIVE_WORKER_FAULTS`` times without
         completing any work.
+
+        A third path returns immediately: a call made on the export worker thread
+        itself. Only that worker exports records and completes flushes, so a wait
+        there would park the one thread able to release it. That happens when an
+        exporter re-enters a plugin hook and the hook reaches an invocation end.
+        The call is refused and reported rather than deadlocking the invocation;
+        the record stays queued and this same worker exports it once it resumes
+        its loop. (Mirrors the Java
+        ``ExportScheduler.refuseWaitThatWouldBlockThePump``.)
         """
+        if self._is_export_worker():
+            _logger.warning(
+                "workflow-insight: drain() was called on the export worker "
+                "thread, the only thread able to serve it, so the call was "
+                "refused rather than deadlocking the invocation; an exporter "
+                "re-entered a plugin hook"
+            )
+            return
         failed_pending: _Dropped | None = None
         start_error: Exception | None = None
         with self._condition:
@@ -259,6 +276,15 @@ class _ExportScheduler:
             )
 
     # -- internals ------------------------------------------------------------
+
+    def _is_export_worker(self) -> bool:
+        """Report whether the calling thread is this scheduler's export worker.
+
+        Read under the condition's lock, because ``_worker`` is replaced by the
+        waiter that starts a replacement and cleared by a worker that exits.
+        """
+        with self._condition:
+            return self._worker is threading.current_thread()
 
     def _disable_locked(self) -> _Dropped:
         """Latch asynchronous export off for good and surrender everything queued.
