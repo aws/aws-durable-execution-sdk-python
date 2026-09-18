@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import datetime
 import logging
@@ -646,6 +647,41 @@ class TestPluginLifetime(unittest.TestCase):
         self.assertEqual(built[0].calls, ["invocation_start:req-1"])
         self.assertEqual(built[1].calls, ["invocation_start:req-2"])
 
+    def test_a_body_raising_cancellation_still_fires_the_end_hook(self):
+        """Every exit fires the end hook, not only the ones deriving from Exception.
+
+        A handler that surfaces an ``asyncio.CancelledError`` left the invocation
+        without its end hook, so Insight never drained the records it held for the
+        execution and OTel never ended the spans it had opened. Nothing failed
+        visibly, which is why the gap was silent.
+        """
+        for raised in (
+            asyncio.CancelledError("cancelled"),
+            KeyboardInterrupt(),
+            SystemExit(),
+        ):
+            with self.subTest(raised=type(raised).__name__):
+                plugin = _TrackingPlugin()
+                host = PluginHost(plugins=[plugin_factory(plugin)])
+
+                @host.handle_durable_output
+                def handler(event, context, plugin_executor):
+                    plugin_executor.on_invocation_start(
+                        execution_arn="arn:exec",
+                        lambda_context=LAMBDA_CTX,
+                        execution_start_time=START_TS,
+                        is_first_invocation=True,
+                    )
+                    raise raised
+
+                with self.assertRaises(type(raised)):
+                    handler({}, LAMBDA_CTX)
+
+                self.assertEqual(
+                    plugin.calls,
+                    ["invocation_start:req-1", "invocation_end:req-1"],
+                )
+
     def test_host_hands_out_a_new_executor_per_invocation(self):
         """The host itself holds no per-invocation state to overwrite."""
         host = PluginHost(plugins=[plugin_factory(_TrackingPlugin())])
@@ -890,6 +926,69 @@ class TestPluginLifetime(unittest.TestCase):
                         error=None,
                     ),
                 )
+
+    def test_a_factory_raising_cancellation_is_contained(self):
+        """Containment is not limited to ``Exception``.
+
+        ``asyncio.CancelledError`` derives from ``BaseException``, so a factory
+        that awaits a cancelled task used to abort the invocation it was only
+        instrumenting and stop the remaining factories from running.
+        """
+        surviving = _TrackingPlugin()
+
+        executor = PluginExecutor(
+            plugins=[_CancellingFactory(), plugin_factory(surviving)],
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with executor.run():
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=LAMBDA_CTX,
+                    execution_start_time=START_TS,
+                    is_first_invocation=True,
+                )
+
+        self.assertIn("factory cancelled", "\n".join(logs.output))
+        self.assertEqual(surviving.calls, ["invocation_start:req-1"])
+
+    def test_a_factory_raising_thread_control_still_propagates(self):
+        """The three that tell the thread to stop are not contained.
+
+        Containing one would drop the instruction and hand the thread back to the
+        work that follows the plugin.
+        """
+        for control in (KeyboardInterrupt, SystemExit, GeneratorExit):
+            with self.subTest(control=control.__name__):
+                executor = PluginExecutor(
+                    plugins=[_ThreadControlFactory(control)],
+                )
+
+                with executor.run(), self.assertRaises(control):
+                    executor.on_invocation_start(
+                        execution_arn="arn:exec",
+                        lambda_context=LAMBDA_CTX,
+                        execution_start_time=START_TS,
+                        is_first_invocation=True,
+                    )
+
+    def test_a_hook_raising_cancellation_is_contained(self):
+        """The hook boundary uses the same rule as the factory boundary."""
+        tracking = _TrackingPlugin()
+        executor = PluginExecutor(
+            plugins=[plugin_factory(_CancellingPlugin()), plugin_factory(tracking)]
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with _invocation(executor, tracking):
+                executor.execute_plugins(OPERATION_START_INFO, sync=True)
+
+        self.assertIn("hook cancelled", "\n".join(logs.output))
+        self.assertIn("operation_start:op-2", tracking.calls)
 
 
 class TestPluginExecutor(unittest.TestCase):
@@ -2169,6 +2268,30 @@ class _ExplodingFactory:
 
     def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
         raise RuntimeError("factory boom")
+
+
+class _CancellingFactory:
+    """Factory whose ``create_plugin`` raises outside the ``Exception`` hierarchy."""
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        raise asyncio.CancelledError("factory cancelled")
+
+
+class _ThreadControlFactory:
+    """Factory that raises one of the three exceptions that must propagate."""
+
+    def __init__(self, control: type[BaseException]) -> None:
+        self._control = control
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        raise self._control
+
+
+class _CancellingPlugin(DurableInstrumentationPlugin):
+    """Plugin whose hook raises outside the ``Exception`` hierarchy."""
+
+    def on_operation_start(self, info):
+        raise asyncio.CancelledError("hook cancelled")
 
 
 class _FailingPlugin(DurableInstrumentationPlugin):

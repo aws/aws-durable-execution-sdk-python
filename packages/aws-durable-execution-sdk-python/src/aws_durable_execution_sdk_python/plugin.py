@@ -530,6 +530,21 @@ def _factory_name(factory: object) -> str:
     return getattr(factory, "__qualname__", None) or type(factory).__name__
 
 
+# Raised out of plugin code, these three are not reports of a plugin defect but
+# instructions to the thread that is running: stop. Containing one would drop the
+# instruction and return a thread that was told to unwind to the work after the
+# plugin. They are re-raised; every other BaseException is contained.
+#
+# asyncio.CancelledError is deliberately NOT here. It derives from BaseException
+# and it does mean "stop" for the task that was cancelled, but the task here is
+# the SDK's, not the plugin's: nothing cancels the invocation thread or the
+# single-worker plugin pool. A CancelledError arriving from plugin code therefore
+# came from the plugin's own asyncio use -- an awaited task it let be cancelled --
+# which is a plugin defect and belongs on the contained side, or the plugin's
+# failure would fail an execution it was only observing.
+_PLUGIN_THREAD_CONTROL_EXCEPTIONS = (KeyboardInterrupt, SystemExit, GeneratorExit)
+
+
 class PluginExecutor:
     """One invocation's plugin instances, metadata and dispatch.
 
@@ -611,12 +626,21 @@ class PluginExecutor:
         :func:`plugin_discovery.load_configured_plugins` rejects such an entry
         while the handler is being initialized, so the silent case is not
         reachable through ``durable_execution()``.
+
+        Containment covers every ``BaseException`` except the three that instruct
+        the calling thread to stop; see
+        :data:`_PLUGIN_THREAD_CONTROL_EXCEPTIONS`. Narrowing it to ``Exception``
+        left the contract conditional on a factory never raising outside that
+        hierarchy, and a factory that awaits a cancelled task raises
+        ``asyncio.CancelledError``, which is outside it.
         """
         plugins: list[DurableInstrumentationPlugin] = []
         for factory in self._plugin_factories:
             try:
                 plugin = factory.create_plugin(info)
-            except Exception:
+            except _PLUGIN_THREAD_CONTROL_EXCEPTIONS:
+                raise
+            except BaseException:  # noqa: BLE001 - a factory must not fail the execution
                 # log and ignore the exception
                 logger.exception(
                     "Plugin factory %s exception ignored", _factory_name(factory)
@@ -647,7 +671,14 @@ class PluginExecutor:
 
     @staticmethod
     def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> None:
-        """Invoke the appropriate plugin callback. Runs inside the thread pool."""
+        """Invoke the appropriate plugin callback. Runs inside the thread pool.
+
+        Contains every ``BaseException`` except the three that instruct the
+        calling thread to stop, the same rule the factory boundary uses. The
+        thread here is the executor's own single worker, which nothing outside
+        this class cancels or interrupts, so an exception outside the ``Exception``
+        hierarchy arriving here was raised by the plugin.
+        """
         try:
             match info:
                 case InvocationStartInfo():
@@ -666,7 +697,9 @@ class PluginExecutor:
                     plugin.on_user_function_end(info)
                 case _:
                     raise RuntimeError(f"Unknown info type: {type(info)}")
-        except Exception:
+        except _PLUGIN_THREAD_CONTROL_EXCEPTIONS:
+            raise
+        except BaseException:  # noqa: BLE001 - a hook must not fail the execution
             # log and ignore the exception
             logger.exception("Plugin %s exception ignored", plugin.__class__.__name__)
 
@@ -1068,7 +1101,25 @@ class PluginHost:
                             output=DurableExecutionInvocationOutput.from_dict(output),
                         )
                         return output
-                    except Exception as e:
+                    except BaseException as e:
+                        # Every exit fires the end hook, not only the ones that
+                        # derive from Exception. A handler that surfaces an
+                        # asyncio.CancelledError -- user code that awaited a
+                        # cancelled task, most simply -- leaves the invocation by
+                        # a BaseException, and an invocation that ends without
+                        # its end hook costs the plugins the only point at which
+                        # they can finish: Insight never drains, so the records it
+                        # holds for this execution are dropped, and OTel never
+                        # ends the spans it opened, so they are never exported.
+                        # The teardown below still runs either way, which is why
+                        # the gap was silent rather than a leak.
+                        #
+                        # KeyboardInterrupt and SystemExit reach here too, and
+                        # they also fire the hook. The hook is what a plugin needs
+                        # to flush, and a process being torn down is when flushing
+                        # matters; the cost is the same bounded work any
+                        # invocation end does. The exception itself is re-raised
+                        # unchanged, so what the caller sees is untouched.
                         plugin_executor.on_invocation_end(
                             output=DurableExecutionInvocationOutput.create_retry(
                                 ErrorObject.from_exception(e)
