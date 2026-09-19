@@ -191,6 +191,11 @@ class _HookFrames(threading.local):
     def __init__(self) -> None:
         self.depth = 0
         self.pending: list[WorkflowInsightPlugin] = []
+        # Records displaced from the scheduler's pending slots, held until every
+        # plugin lock on this thread is released. Releasing one can run a customer
+        # finalizer, and a finalizer that reaches another execution's plugin must
+        # not do so while this thread holds a plugin lock.
+        self.releases: list[Any] = []
 
 
 _hook_frames = _HookFrames()
@@ -341,10 +346,16 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
             yield
         finally:
             state.depth -= 1
-            if state.depth == 0 and state.pending:
-                owed, state.pending = state.pending, []
-                for plugin in owed:
-                    plugin._drain()
+            if state.depth == 0:
+                # Released before the drains, and with no lock held: a finalizer
+                # that schedules a record is then covered by the drain that
+                # follows it.
+                if state.releases:
+                    state.releases.clear()
+                if state.pending:
+                    owed, state.pending = state.pending, []
+                    for plugin in owed:
+                        plugin._drain()
 
     def _request_drain(self) -> None:
         """Ask for a drain once the outermost hook frame on this thread unwinds."""
@@ -645,7 +656,13 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
         # every later non-terminal record is rejected above.
         if not closing and (self._closed or revision != self._build_revision):
             return
-        self._shared._scheduler.schedule(self, record)
+        # The records this hand-off displaces are released by the hook frame, not
+        # here: this runs inside `_lock`, and a displaced record can carry a
+        # customer object whose `__del__` re-enters a hook. Re-entering *this*
+        # execution's hook is safe because `_lock` is reentrant; re-entering
+        # another execution's is not, and two threads doing it to each other at
+        # once would hang both invocations. See `_hook_frame`.
+        _hook_frames.releases.extend(self._shared._scheduler.schedule(self, record))
 
 
 class _WorkflowInsightFactory:

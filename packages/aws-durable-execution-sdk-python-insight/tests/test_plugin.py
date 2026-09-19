@@ -1240,6 +1240,62 @@ def test_an_end_transform_that_fails_still_drains_what_was_scheduled():
     assert _wait_until(lambda: not factory._scheduler._worker_alive())
 
 
+def test_a_displaced_records_finalizer_runs_with_no_plugin_lock_held():
+    # `_emit` hands the record to the scheduler while holding this instance's
+    # `_lock`, and that hand-off displaces the record already pending for this
+    # execution. Releasing the displaced one can run a customer `__del__` -- it is
+    # a snapshot of customer data -- and a finalizer that reaches ANOTHER
+    # execution's plugin blocks on that instance's lock. Two threads doing that to
+    # each other at once hang both invocations, which the reentrant lock does not
+    # help with: it only covers re-entry on the same instance. The hook frame
+    # therefore releases displaced records after every lock is dropped.
+    exporter = ConcurrentCaptureExporter()
+    observed: list[bool] = []
+    holder: dict[str, Any] = {}
+
+    class _FinalizerProbe:
+        def __del__(self) -> None:
+            plugin = holder.get("plugin")
+            if plugin is None:
+                return
+            # `_is_owned()` answers "does the calling thread hold this lock",
+            # which is the question here. Acquiring it would not: an RLock lets
+            # its owner acquire it again.
+            observed.append(not plugin._lock._is_owned())
+
+    # A transform returning a fresh object per emit is what makes the record the
+    # only reference to it, so releasing the displaced record is what collects it.
+    factory = workflow_insight(
+        WorkflowInsightConfig(
+            exporters=[exporter],
+            emit_mode="on-change",
+            content=ContentConfig(input=lambda value: _FinalizerProbe()),
+        )
+    )
+    plugin = factory.create_plugin(_start(operations={}))
+    holder["plugin"] = plugin
+
+    # The first emit queues a record holding a probe; the next displaces it while
+    # the worker is still parked, so the release happens on this thread.
+    plugin.on_invocation_start(_start(operations={}))
+    plugin.on_operation_change(
+        OperationChangeInfo(
+            execution_arn=ARN,
+            updated_operations=_ops(_step("s")),
+            operations=_ops(_step("s")),
+        )
+    )
+    plugin.on_invocation_end(_end(operations=_ops(_step("s"))))
+
+    assert observed, "the displaced record's finalizer must have run"
+    assert all(observed), (
+        "a displaced record was released while this thread still held the "
+        "plugin's lock, which is what deadlocks two invocations whose finalizers "
+        "reach each other"
+    )
+    assert _wait_until(lambda: not factory._scheduler._worker_alive())
+
+
 def _free_for_another_thread(lock: Any) -> bool:
     """Report whether a lock is unheld, as seen from a thread that never took it.
 

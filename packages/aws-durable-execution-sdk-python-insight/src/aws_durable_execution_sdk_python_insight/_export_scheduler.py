@@ -144,14 +144,28 @@ class _ExportScheduler:
         # a worker that keeps making progress never approaches the bound.
         self._worker_faults = 0
 
-    def schedule(self, execution: _ExportState, record: dict[str, Any]) -> None:
-        """Replace this execution's pending snapshot; never runs exporters inline."""
+    def schedule(self, execution: _ExportState, record: dict[str, Any]) -> list[Any]:
+        """Replace this execution's pending snapshot; never runs exporters inline.
+
+        Returns the records this call displaced, for the caller to release once it
+        holds no lock. They are handed back rather than dropped here because
+        releasing one can run a customer ``__del__``, and this method is called
+        from inside the calling plugin's own lock. A finalizer that re-entered a
+        *different* execution's plugin would then block on that instance's lock
+        while holding this one, which deadlocks both invocations if the mirror
+        image happens on another thread at the same time. The plugin's hook frame
+        drops them when the outermost hook returns; see
+        ``WorkflowInsightPlugin._hook_frame``.
+
+        A caller with no frame to defer to may drop the returned list
+        immediately: doing so is only unsafe while a plugin lock is held.
+        """
         displaced: dict[str, Any] | None = None
         failed_pending: _Dropped | None = None
         start_error: Exception | None = None
         with self._condition:
             if self._disabled:
-                return
+                return []
             self._seq += 1
             execution.scheduled_seq = self._seq
             displaced = execution.pending_record
@@ -161,14 +175,13 @@ class _ExportScheduler:
             self._pending[execution] = None
             failed_pending, start_error = self._ensure_worker_locked()
             self._condition.notify_all()
-        # Releasing either record may run custom finalizers, so do it unlocked.
-        del displaced, failed_pending
         if start_error is not None:
             _logger.warning(
                 "workflow-insight: could not start export worker; disabling "
                 "asynchronous export: %s",
                 start_error,
             )
+        return [item for item in (displaced, failed_pending) if item is not None]
 
     def drain(self, execution: _ExportState) -> None:
         """Wait until this execution's latest record is exported and exporters flush.
