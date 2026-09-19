@@ -6,7 +6,6 @@ import datetime
 import functools
 import logging
 from collections.abc import Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, MutableMapping, Protocol, cast
@@ -603,7 +602,6 @@ class PluginExecutor:
         # Every later hook is dispatched to this list, so a plugin that never
         # received its start hook never receives its end hook.
         self._started: list[DurableInstrumentationPlugin] = []
-        self._executor: ThreadPoolExecutor | None = None
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
         self._run_entered = False
@@ -625,25 +623,14 @@ class PluginExecutor:
             )
             raise RuntimeError(msg)
         self._run_entered = True
-        if self._plugin_factories:
-            self._executor = ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="plugin-executor",
-            )
         try:
             yield
         finally:
             self._invocation_status = None
             self._operations_provider = None
-            # Shut down the thread pool, waiting for pending tasks to complete.
-            # The pool belongs to this invocation, so this drains only this
-            # invocation's queued dispatches and cannot cut short a concurrent
-            # invocation's.
-            if self._executor:
-                self._executor.shutdown(wait=True)
-            # Drop this invocation's plugin instances. After the pool has
-            # drained, so no queued dispatch still holds one: nothing outlives
-            # the invocation.
+            # Drop this invocation's plugin instances: nothing outlives the
+            # invocation. Every dispatch is synchronous, so there is no queued
+            # work still holding one.
             self._plugins = []
             self._started = []
 
@@ -739,7 +726,7 @@ class PluginExecutor:
             if control is not None:
                 raise control from None
 
-    def execute_plugins(self, info, sync):
+    def execute_plugins(self, info):
         """Dispatch one hook to this invocation's plugins.
 
         A plugin receives a hook only once it has received the invocation-start
@@ -770,8 +757,18 @@ class PluginExecutor:
         ``BaseException`` rather than naming the three again. Naming them would
         miss a :class:`BaseExceptionGroup` carrying one, which is what
         :func:`_contain_plugin_failure` hands back.
+
+        Every hook is dispatched on the calling thread. That is what lets a
+        plugin set a ``ThreadLocal`` or an MDC key the SDK's own logging then
+        reads, and it is what makes the pairing and re-raise rules above
+        enforceable: a hook dispatched to a pool would land in a
+        :class:`~concurrent.futures.Future` nobody reads, so a control exception
+        raised there would be swallowed and the end-hook fan-out could not hold
+        it. An earlier ``sync`` parameter offered the pool path; no caller ever
+        passed it, and it is removed rather than left as a way to opt out of
+        those rules.
         """
-        if not self._executor:
+        if not self._plugin_factories:
             return
         starting = isinstance(info, InvocationStartInfo)
         ending = isinstance(info, InvocationEndInfo)
@@ -779,11 +776,6 @@ class PluginExecutor:
         for plugin in self._plugins if starting else self._started:
             if starting:
                 self._started.append(plugin)
-            if not sync:
-                # this is called asynchronously, so plugins cannot manipulate thread local objects
-                self._executor.submit(self._dispatch_plugin, plugin, info)
-                continue
-            # this is called synchronously, so plugins will be able to manipulate thread local objects
             if not ending:
                 self._dispatch_plugin(plugin, info)
                 continue
@@ -870,7 +862,7 @@ class PluginExecutor:
         # Build this invocation's plugin instances from the very info their first
         # hook receives, and before that hook is dispatched.
         self._create_plugins(self._invocation_status)
-        self.execute_plugins(self._invocation_status, sync=True)
+        self.execute_plugins(self._invocation_status)
 
     def _snapshot_execution_input(self, execution_input: Any) -> Any:
         """Deep-copy the execution input so the plugin view is isolated.
@@ -918,7 +910,7 @@ class PluginExecutor:
                 operations=self._snapshot_operation_infos(self._operations_provider),
             )
         )
-        self.execute_plugins(invocation_end_info, sync=True)
+        self.execute_plugins(invocation_end_info)
 
     def on_user_function_start(
         self,
@@ -939,7 +931,7 @@ class PluginExecutor:
             is_replay_children=is_replay_children,
             attempt=attempt,
         )
-        self.execute_plugins(start_info, sync=True)
+        self.execute_plugins(start_info)
         return start_info
 
     def on_user_function_end(
@@ -952,7 +944,6 @@ class PluginExecutor:
         """Execute plugins when a user function returns, fails, or is incomplete."""
         self.execute_plugins(
             UserFunctionEndInfo.from_start_info(start_info, error, outcome=outcome),
-            sync=True,
         )
 
     def on_operation_action(
@@ -982,7 +973,6 @@ class PluginExecutor:
                     is_replayed=previous_operation is not None,
                     status=OperationStatus.STARTED,
                 ),
-                sync=True,
             )
 
     def on_operation_replay(self, operation: Operation) -> None:
@@ -1000,7 +990,7 @@ class PluginExecutor:
             is_replayed=True,
             status=operation.status,
         )
-        self.execute_plugins(start_info, sync=True)
+        self.execute_plugins(start_info)
 
     def on_child_context_end(
         self,
@@ -1025,7 +1015,6 @@ class PluginExecutor:
                 error=error,
                 is_replayed=is_replayed,
             ),
-            sync=True,
         )
 
     def on_operation_update(
@@ -1075,7 +1064,6 @@ class PluginExecutor:
                         ),
                         is_replayed=False,
                     ),
-                    sync=True,
                 )
 
         if (
@@ -1103,7 +1091,6 @@ class PluginExecutor:
                 },
                 operations=_to_operation_info_map(operations),
             ),
-            sync=True,
         )
 
     @staticmethod
@@ -1204,13 +1191,30 @@ class PluginHost:
                         # they also fire the hook. The hook is what a plugin needs
                         # to flush, and a process being torn down is when flushing
                         # matters; the cost is the same bounded work any
-                        # invocation end does. The exception itself is re-raised
-                        # unchanged, so what the caller sees is untouched.
-                        plugin_executor.on_invocation_end(
-                            output=DurableExecutionInvocationOutput.create_retry(
-                                ErrorObject.from_exception(e)
-                            ),
-                        )
+                        # invocation end does.
+                        #
+                        # The handler's exception is what the caller sees,
+                        # whatever the hook does. The end-hook dispatch can raise
+                        # -- it re-raises the control exceptions it holds through
+                        # the fan-out -- and letting that replace the handler's
+                        # failure would report an instrumentation problem as the
+                        # execution's outcome and leave the real failure reachable
+                        # only as __context__. Instrumentation does not decide
+                        # what an execution failed with, so the hook's exception
+                        # is contained here and the original is re-raised
+                        # unchanged.
+                        try:
+                            plugin_executor.on_invocation_end(
+                                output=DurableExecutionInvocationOutput.create_retry(
+                                    ErrorObject.from_exception(e)
+                                ),
+                            )
+                        except BaseException:  # noqa: BLE001 - the handler's failure wins
+                            logger.exception(
+                                "Plugin invocation-end hook failed while the "
+                                "invocation was already failing; the original "
+                                "failure is raised"
+                            )
                         raise
                     plugin_executor.on_invocation_end(output=completed)
                     return output
