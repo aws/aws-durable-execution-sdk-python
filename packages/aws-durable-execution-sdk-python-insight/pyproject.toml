@@ -21,12 +21,15 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
 ]
 dependencies = [
-  # >=3.0.0: the first release whose `plugins` argument takes factories.
+  # >=3.0.0,<4: 3.0.0 is the first release whose `plugins` argument takes
+  # factories, and the ceiling is the same reasoning applied forwards -- the next
+  # core major that changes the plugin contract would install and then fail at
+  # handler initialization exactly as 2.x does below.
   # `workflow_insight()` returns a factory, which core 2.x cannot call, so an
   # install resolved against 2.x fails at handler initialization. 3.0.0 also
   # carries the invocation-hook fields this plugin reads
   # (InvocationInfo.execution_input / InvocationEndInfo.execution_result).
-  "aws-durable-execution-sdk-python>=3.0.0",
+  "aws-durable-execution-sdk-python>=3.0.0,<4",
 ]
 
 [project.optional-dependencies]

@@ -2,13 +2,14 @@ import re
 import tomllib
 from pathlib import Path
 
+from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
 CORE_DISTRIBUTION = "aws-durable-execution-sdk-python"
-CORE_DEPENDENCY = "aws-durable-execution-sdk-python>=3.0.0"
+CORE_DEPENDENCY = "aws-durable-execution-sdk-python>=3.0.0,<4"
 TEST_OTEL_DEPENDENCIES = {
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-propagator-aws-xray",
@@ -112,7 +113,7 @@ def _core_dependency_lower_bound() -> str:
         "dependencies"
     ]
     bounds = [
-        dependency.removeprefix(CORE_DISTRIBUTION + ">=")
+        dependency.removeprefix(CORE_DISTRIBUTION + ">=").split(",", 1)[0]
         for dependency in dependencies
         if dependency.startswith(CORE_DISTRIBUTION + ">=")
     ]
@@ -157,3 +158,48 @@ def test_layer_sdk_pin_matches_the_core_version_in_this_repository() -> None:
         pinned_version = tomllib.load(metadata_file)["layer"]["sdk-version"]
 
     assert pinned_version == _core_version()
+
+
+def test_core_dependency_excludes_the_next_core_major() -> None:
+    """A lower bound alone is the same defect one major later.
+
+    The lower bound exists because this package's entry points resolve to plugin
+    factories, which the core major below cannot call: pip accepts the resolution
+    and the handler fails at initialization. Without a ceiling the next core major
+    that changes the plugin contract reproduces exactly that, so the specifier has
+    to reject it rather than only reject what came before.
+    """
+    dependencies = _load_pyproject(PACKAGE_ROOT / "pyproject.toml")["project"][
+        "dependencies"
+    ]
+    specifiers = [
+        SpecifierSet(dependency.removeprefix(CORE_DISTRIBUTION))
+        for dependency in dependencies
+        if dependency.startswith(CORE_DISTRIBUTION)
+    ]
+    assert len(specifiers) == 1
+
+    core_major = _major(_core_version())
+    assert specifiers[0].contains(_core_version(), prereleases=True)
+    assert not specifiers[0].contains(f"{core_major + 1}.0.0", prereleases=True)
+
+
+def test_core_dependency_admits_a_later_core_patch() -> None:
+    """The ceiling belongs on the major, not on the version built here.
+
+    A ``<=`` ceiling looks equivalent and is not: it excludes the next core patch,
+    so the first core patch release puts this claim out of date for a change that
+    cannot have touched the plugin contract.
+    """
+    dependencies = _load_pyproject(PACKAGE_ROOT / "pyproject.toml")["project"][
+        "dependencies"
+    ]
+    specifier = next(
+        SpecifierSet(dependency.removeprefix(CORE_DISTRIBUTION))
+        for dependency in dependencies
+        if dependency.startswith(CORE_DISTRIBUTION)
+    )
+
+    core = Version(_core_version())
+    next_patch = f"{core.major}.{core.minor}.{core.micro + 1}"
+    assert specifier.contains(next_patch, prereleases=True)

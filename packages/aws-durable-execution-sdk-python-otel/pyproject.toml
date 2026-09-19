@@ -22,11 +22,14 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
-  # >=3.0.0: the first release whose `plugins` argument takes factories.
+  # >=3.0.0,<4: 3.0.0 is the first release whose `plugins` argument takes
+  # factories, and the ceiling is the same reasoning applied forwards -- the next
+  # core major that changes the plugin contract would install and then fail at
+  # handler initialization exactly as 2.x does below.
   # DurableInstrumentationPluginProvider was removed in 3.0.0, and this package's
   # entry points resolve to factories, so core 2.x accepts the install and then
   # fails at handler initialization.
-  "aws-durable-execution-sdk-python>=3.0.0",
+  "aws-durable-execution-sdk-python>=3.0.0,<4",
 ]
 
 [project.entry-points."aws_durable_execution.plugins"]
