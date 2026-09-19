@@ -9,20 +9,28 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
+from aws_durable_execution_sdk_python.plugin import (
+    DurableInstrumentationPluginFactory,
+)
 from aws_durable_execution_sdk_python_otel import (
-    ExecutionOtelPlugin,
-    InvocationOtelPlugin,
+    ExecutionOtelPluginFactory,
+    InvocationOtelPluginFactory,
     OtelPluginConfig,
 )
 
 
-def otel_plugin() -> DurableInstrumentationPlugin:
-    """Select the telemetry view configured for this deployed function."""
+def otel_plugin_factory() -> DurableInstrumentationPluginFactory:
+    """Select the telemetry view configured for this deployed function.
+
+    Returns a factory, which is what ``durable_execution(plugins=[...])`` takes:
+    the SDK calls its ``create_plugin`` once per invocation to build that
+    invocation's plugin. The view is still resolved once, when the handler module
+    is imported.
+    """
 
     if os.environ.get("OTEL_PLUGIN_MODE") == "execution":
-        return ExecutionOtelPlugin(OtelPluginConfig())
-    return InvocationOtelPlugin(OtelPluginConfig())
+        return ExecutionOtelPluginFactory(OtelPluginConfig())
+    return InvocationOtelPluginFactory(OtelPluginConfig())
 
 
 def require_scenario(event: Mapping[str, Any], expected: str) -> None:

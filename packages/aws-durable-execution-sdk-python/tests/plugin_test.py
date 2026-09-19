@@ -1,7 +1,11 @@
+import asyncio
+import contextlib
 import datetime
 import logging
 import pickle
+import threading
 import unittest
+from collections.abc import Iterator
 from copy import deepcopy
 from dataclasses import asdict, fields
 from unittest.mock import MagicMock, patch
@@ -20,6 +24,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
+    DurableInstrumentationPluginFactory,
     InvocationEndInfo,
     InvocationInfo,
     InvocationStatus,
@@ -30,10 +35,13 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationStartInfo,
     OperationType,
     PluginExecutor,
+    PluginHost,
     UserFunctionEndInfo,
     UserFunctionOutcome,
     UserFunctionStartInfo,
 )
+from aws_durable_execution_sdk_python.plugin_discovery import _is_plugin_factory
+from tests.test_helpers import plugin_factory
 
 
 # region Dataclass Tests
@@ -43,6 +51,35 @@ START_TS = datetime.datetime(2025, 1, 1, tzinfo=datetime.UTC)
 END_TS = datetime.datetime(2025, 1, 2, tzinfo=datetime.UTC)
 LAMBDA_CTX = MagicMock()
 LAMBDA_CTX.aws_request_id = "req-1"
+
+
+@contextlib.contextmanager
+def _invocation(
+    executor: PluginExecutor,
+    *recorders: "_TrackingPlugin",
+) -> Iterator[None]:
+    """Open the executor's per-invocation scope around a single-hook test.
+
+    Plugin instances are built by ``on_invocation_start`` and dropped when the
+    scope exits, so a hook dispatched outside an invocation reaches no plugin at
+    all. A test that exercises one hook therefore has to establish the invocation
+    that hook belongs to.
+
+    The invocation-start hook this fires is scaffolding for the hook under test,
+    so it is cleared from the given recorders before the body runs. The
+    assertions that follow are about the hook under test only.
+    """
+    with executor.run():
+        executor.on_invocation_start(
+            execution_arn="arn:exec",
+            lambda_context=LAMBDA_CTX,
+            execution_start_time=START_TS,
+            is_first_invocation=False,
+        )
+        for recorder in recorders:
+            recorder.calls.clear()
+        yield
+
 
 OPERATION_START_INFO = OperationStartInfo(
     operation_id="op-2",
@@ -522,39 +559,686 @@ class TestDurableInstrumentationPlugin(unittest.TestCase):
 # endregion DurableInstrumentationPlugin Tests
 
 
+# region DurableInstrumentationPluginFactory Tests
+class TestDurableInstrumentationPluginFactory(unittest.TestCase):
+    def test_protocol_is_not_runtime_checkable(self):
+        """``isinstance`` against the protocol must stay unavailable.
+
+        A runtime-checkable protocol requires every declared member, so an
+        optional second member added later would break any caller's isinstance
+        check -- the additive extensibility this protocol exists for. The SDK
+        checks the shape with ``plugin_discovery._is_plugin_factory`` instead,
+        which also tests that ``create_plugin`` is callable rather than merely
+        present.
+        """
+        with self.assertRaises(TypeError):
+            isinstance(  # type: ignore[misc]  # noqa: B018
+                plugin_factory(_NoOpPlugin()), DurableInstrumentationPluginFactory
+            )
+
+    def test_factory_shape_check_requires_a_callable_create_plugin(self):
+        """The shape is one callable member, structurally, without importing it."""
+
+        class _Data:
+            create_plugin = "not callable"
+
+        self.assertTrue(_is_plugin_factory(plugin_factory(_NoOpPlugin())))
+        self.assertFalse(_is_plugin_factory(_Data()))
+        self.assertFalse(_is_plugin_factory(lambda info: _NoOpPlugin()))
+        self.assertFalse(_is_plugin_factory(_NoOpPlugin()))
+
+
+# endregion DurableInstrumentationPluginFactory Tests
+
+
 # region PluginExecutor Tests
 
 
 class TestPluginExecutorInit(unittest.TestCase):
     def test_init_with_none(self):
         executor = PluginExecutor(plugins=None)
+        self.assertEqual(executor._plugin_factories, [])
         self.assertEqual(executor._plugins, [])
 
     def test_init_with_empty_list(self):
         executor = PluginExecutor(plugins=[])
+        self.assertEqual(executor._plugin_factories, [])
         self.assertEqual(executor._plugins, [])
 
-    def test_init_with_plugins(self):
+    def test_init_records_factories_without_building_plugins(self):
+        """Construction stores factories only; instances belong to an invocation."""
         p1 = _NoOpPlugin()
         p2 = _TrackingPlugin()
-        executor = PluginExecutor(plugins=[p1, p2])
-        self.assertEqual(len(executor._plugins), 2)
+        executor = PluginExecutor(plugins=[plugin_factory(p1), plugin_factory(p2)])
+        self.assertEqual(len(executor._plugin_factories), 2)
+        self.assertEqual(executor._plugins, [])
+
+
+class TestPluginLifetime(unittest.TestCase):
+    """The per-invocation plugin lifetime."""
+
+    def test_each_invocation_gets_its_own_instance(self):
+        """Two invocations of one handler never share a plugin instance."""
+        built: list[_TrackingPlugin] = []
+
+        class _BuildingFactory:
+            def create_plugin(self, info: InvocationStartInfo) -> _TrackingPlugin:
+                plugin = _TrackingPlugin()
+                built.append(plugin)
+                return plugin
+
+        # One host for the handler, one executor per invocation -- the shape
+        # durable_execution() uses.
+        host = PluginHost(plugins=[_BuildingFactory()])
+
+        for request_id in ("req-1", "req-2"):
+            lambda_context = MagicMock()
+            lambda_context.aws_request_id = request_id
+            with host.invocation() as executor:
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=lambda_context,
+                    execution_start_time=START_TS,
+                    is_first_invocation=False,
+                )
+
+        self.assertEqual(len(built), 2)
+        self.assertIsNot(built[0], built[1])
+        # Each instance saw only its own invocation.
+        self.assertEqual(built[0].calls, ["invocation_start:req-1"])
+        self.assertEqual(built[1].calls, ["invocation_start:req-2"])
+
+    def test_a_hostile_factory_attribute_hook_does_not_escape_containment(self):
+        """Naming a failing factory must not be what fails the invocation.
+
+        ``_factory_name`` runs while a factory failure is being contained, so it
+        reads the factory's type rather than the factory: an instance
+        ``__getattr__`` belongs to customer code and can raise.
+        """
+        surviving = _TrackingPlugin()
+        executor = PluginExecutor(
+            plugins=[_HostileAttributeFactory(), plugin_factory(surviving)],
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with executor.run():
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=LAMBDA_CTX,
+                    execution_start_time=START_TS,
+                    is_first_invocation=True,
+                )
+
+        self.assertIn("_HostileAttributeFactory", "\n".join(logs.output))
+        self.assertEqual(surviving.calls, ["invocation_start:req-1"])
+
+    def test_a_factory_raising_a_group_with_a_control_exception_propagates(self):
+        """A group carrying a control exception is not contained.
+
+        ``BaseExceptionGroup`` is neither of the two cases an ``isinstance`` chain
+        covers: a group holding a ``KeyboardInterrupt`` is not an instance of one,
+        so naming the three in a handler does not match it and a broad handler
+        would swallow the interrupt inside it. Plugin code produces such a group
+        without asking for one -- an ``asyncio.TaskGroup`` whose task is
+        interrupted raises it.
+        """
+        group = BaseExceptionGroup(
+            "plugin group", [ValueError("contained"), KeyboardInterrupt()]
+        )
+        executor = PluginExecutor(plugins=[_GroupRaisingFactory(group)])
+
+        with (
+            self.assertLogs(
+                "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+            ) as logs,
+            executor.run(),
+            self.assertRaises(BaseExceptionGroup) as raised,
+        ):
+            executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+            )
+
+        # Only the control leaf propagates; the rest was logged as a contained
+        # plugin failure.
+        self.assertEqual(
+            [type(leaf) for leaf in raised.exception.exceptions], [KeyboardInterrupt]
+        )
+        self.assertIn("contained", "\n".join(logs.output))
+
+    def test_a_factory_raising_a_group_without_a_control_exception_is_contained(self):
+        """A group of ordinary failures is contained like any other."""
+        surviving = _TrackingPlugin()
+        group = BaseExceptionGroup("plugin group", [ValueError("boom")])
+        executor = PluginExecutor(
+            plugins=[_GroupRaisingFactory(group), plugin_factory(surviving)],
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with executor.run():
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=LAMBDA_CTX,
+                    execution_start_time=START_TS,
+                    is_first_invocation=True,
+                )
+
+        self.assertIn("boom", "\n".join(logs.output))
+        self.assertEqual(surviving.calls, ["invocation_start:req-1"])
+
+    def test_a_failing_end_hook_does_not_replace_the_handlers_failure(self):
+        """Instrumentation does not decide what an execution failed with.
+
+        The end-hook dispatch can raise: it re-raises the control exceptions it
+        holds through the fan-out. On the failure exit that raise used to leave
+        the ``except`` block before the handler's own exception was re-raised, so
+        the caller saw the plugin's exception and the real failure survived only
+        as ``__context__``.
+        """
+        plugin = _ControlOnEndPlugin()
+        host = PluginHost(plugins=[plugin_factory(plugin)])
+
+        @host.handle_durable_output
+        def handler(event, context, plugin_executor):
+            plugin_executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+            )
+            raise ValueError("the real failure")
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ):
+            with self.assertRaises(ValueError) as raised:
+                handler({}, LAMBDA_CTX)
+
+        self.assertEqual(str(raised.exception), "the real failure")
+        # The hook still ran, and still saw the failing outcome.
+        self.assertEqual(plugin.end_statuses, [InvocationStatus.RETRY])
+
+    def test_an_end_hook_that_stops_the_thread_still_finishes_the_dispatch(self):
+        """Every started plugin receives the end hook, then the thread stops.
+
+        The end hook is a plugin's only chance to finish -- Insight drains there
+        and OTel ends its spans -- so a plugin raising one of the three control
+        exceptions must not cost the plugins after it in the list their own end
+        hook. The exception is held and re-raised once every plugin has been
+        called.
+        """
+        later = _TrackingPlugin()
+        host = PluginHost(
+            plugins=[plugin_factory(_ControlOnEndPlugin()), plugin_factory(later)]
+        )
+
+        @host.handle_durable_output
+        def handler(event, context, plugin_executor):
+            plugin_executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+            )
+            return {
+                "Status": ServiceInvocationStatus.SUCCEEDED.value,
+                "Result": None,
+            }
+
+        with self.assertRaises(KeyboardInterrupt):
+            handler({}, LAMBDA_CTX)
+
+        self.assertEqual(
+            later.calls, ["invocation_start:req-1", "invocation_end:req-1"]
+        )
+
+    def test_a_start_hook_that_stops_the_thread_leaves_later_plugins_unpaired(self):
+        """A plugin that never received the start hook never receives the end hook.
+
+        A start hook raising one of the three control exceptions propagates out of
+        the dispatch loop, so plugins after it in the list never receive their
+        start hook. The invocation-end hook that the propagating exception then
+        triggers used to reach them anyway, leaving a plugin to tear down state it
+        had never been told to build.
+        """
+        later = _TrackingPlugin()
+        host = PluginHost(
+            plugins=[plugin_factory(_ControlOnStartPlugin()), plugin_factory(later)]
+        )
+
+        @host.handle_durable_output
+        def handler(event, context, plugin_executor):
+            plugin_executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+            )
+            raise AssertionError("unreachable: the start hook stops the thread")
+
+        with self.assertRaises(KeyboardInterrupt):
+            handler({}, LAMBDA_CTX)
+
+        self.assertEqual(later.calls, [])
+
+    def test_an_end_hook_that_stops_the_thread_is_not_reported_twice(self):
+        """Exactly one end notification per invocation, whatever the hook does.
+
+        ``_dispatch_plugin`` re-raises the three exceptions that instruct the
+        calling thread to stop, so a hook can raise. With the success dispatch
+        inside the try, that raise was caught as a handler failure and the hook
+        ran a second time with a RETRY outcome -- the wrong outcome for an
+        invocation that succeeded, and a second export for an exporter.
+        """
+        plugin = _ControlOnEndPlugin()
+        host = PluginHost(plugins=[plugin_factory(plugin)])
+
+        @host.handle_durable_output
+        def handler(event, context, plugin_executor):
+            plugin_executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+            )
+            return {
+                "Status": ServiceInvocationStatus.SUCCEEDED.value,
+                "Result": None,
+            }
+
+        with self.assertRaises(KeyboardInterrupt):
+            handler({}, LAMBDA_CTX)
+
+        self.assertEqual(plugin.end_statuses, [InvocationStatus.SUCCEEDED])
+
+    def test_a_body_raising_cancellation_still_fires_the_end_hook(self):
+        """Every exit fires the end hook, not only the ones deriving from Exception.
+
+        A handler that surfaces an ``asyncio.CancelledError`` left the invocation
+        without its end hook, so Insight never drained the records it held for the
+        execution and OTel never ended the spans it had opened. Nothing failed
+        visibly, which is why the gap was silent.
+        """
+        for raised in (
+            asyncio.CancelledError("cancelled"),
+            KeyboardInterrupt(),
+            SystemExit(),
+        ):
+            with self.subTest(raised=type(raised).__name__):
+                plugin = _TrackingPlugin()
+                host = PluginHost(plugins=[plugin_factory(plugin)])
+
+                @host.handle_durable_output
+                def handler(event, context, plugin_executor):
+                    plugin_executor.on_invocation_start(
+                        execution_arn="arn:exec",
+                        lambda_context=LAMBDA_CTX,
+                        execution_start_time=START_TS,
+                        is_first_invocation=True,
+                    )
+                    raise raised
+
+                with self.assertRaises(type(raised)):
+                    handler({}, LAMBDA_CTX)
+
+                self.assertEqual(
+                    plugin.calls,
+                    ["invocation_start:req-1", "invocation_end:req-1"],
+                )
+
+    def test_host_hands_out_a_new_executor_per_invocation(self):
+        """The host itself holds no per-invocation state to overwrite."""
+        host = PluginHost(plugins=[plugin_factory(_TrackingPlugin())])
+
+        with host.invocation() as first, host.invocation() as second:
+            self.assertIsNot(first, second)
+
+    def test_executor_refuses_a_second_invocation(self):
+        """An executor that has served an invocation cannot serve another.
+
+        The lifetime is enforced by the class, not just by how
+        ``durable_execution()`` happens to call it, so reintroducing a shared
+        executor fails loudly instead of silently mixing two invocations.
+        """
+        executor = PluginExecutor(plugins=[plugin_factory(_TrackingPlugin())])
+
+        with executor.run():
+            pass
+
+        with self.assertRaisesRegex(RuntimeError, "single-use"):
+            with executor.run():
+                pass
+
+    def test_instances_are_dropped_when_the_invocation_returns(self):
+        """Nothing on the handler-lifetime executor still references the instance."""
+        plugin = _TrackingPlugin()
+        executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+
+        with executor.run():
+            executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=False,
+            )
+            self.assertEqual(executor._plugins, [plugin])
+
+        self.assertEqual(executor._plugins, [])
+
+    def test_factory_receives_the_info_the_first_hook_receives(self):
+        """The factory argument is the identical object, not a copy."""
+        factory_infos: list[InvocationStartInfo] = []
+        hook_infos: list[InvocationStartInfo] = []
+
+        class _RecordingPlugin(DurableInstrumentationPlugin):
+            def on_invocation_start(self, info: InvocationStartInfo) -> None:
+                hook_infos.append(info)
+
+        class _RecordingFactory:
+            def create_plugin(self, info: InvocationStartInfo) -> _RecordingPlugin:
+                factory_infos.append(info)
+                return _RecordingPlugin()
+
+        executor = PluginExecutor(plugins=[_RecordingFactory()])
+
+        with executor.run():
+            executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+                execution_input={"name": "World"},
+            )
+
+        self.assertEqual(len(factory_infos), 1)
+        self.assertEqual(len(hook_infos), 1)
+        self.assertIs(factory_infos[0], hook_infos[0])
+        self.assertEqual(factory_infos[0].execution_arn, "arn:exec")
+        self.assertEqual(factory_infos[0].execution_input, {"name": "World"})
+
+    def test_factories_run_before_the_first_hook_is_dispatched(self):
+        """Every instance exists before any of them receives a hook."""
+        events: list[str] = []
+
+        class _OrderedPlugin(DurableInstrumentationPlugin):
+            def __init__(self, label: str) -> None:
+                self.label = label
+
+            def on_invocation_start(self, info: InvocationStartInfo) -> None:
+                events.append(f"hook:{self.label}")
+
+        class _OrderedFactory:
+            def __init__(self, label: str) -> None:
+                self._label = label
+
+            def create_plugin(self, info: InvocationStartInfo) -> _OrderedPlugin:
+                events.append(f"build:{self._label}")
+                return _OrderedPlugin(self._label)
+
+        executor = PluginExecutor(plugins=[_OrderedFactory("a"), _OrderedFactory("b")])
+
+        with executor.run():
+            executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+            )
+
+        self.assertEqual(events, ["build:a", "build:b", "hook:a", "hook:b"])
+
+    def test_failing_factory_is_contained(self):
+        """A factory whose create_plugin raises is logged and skipped."""
+        surviving = _TrackingPlugin()
+
+        executor = PluginExecutor(
+            plugins=[_ExplodingFactory(), plugin_factory(surviving)],
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with executor.run():
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=LAMBDA_CTX,
+                    execution_start_time=START_TS,
+                    is_first_invocation=True,
+                )
+
+        self.assertIn("factory boom", "\n".join(logs.output))
+        # The other factory's plugin still receives its hooks.
+        self.assertEqual(surviving.calls, ["invocation_start:req-1"])
+
+    def test_bare_callable_builds_no_plugin(self):
+        """The executor calls ``create_plugin``, so a bare callable yields nothing.
+
+        A callable used to be a factory. It is not one now, and an entry that
+        reaches the executor anyway raises ``AttributeError`` there, which the
+        executor logs and skips. ``load_configured_plugins`` rejects such an entry
+        at handler initialization, so this path is only reachable by constructing
+        an executor directly.
+        """
+        surviving = _TrackingPlugin()
+
+        executor = PluginExecutor(
+            plugins=[
+                (lambda info: _TrackingPlugin()),  # type: ignore[list-item]
+                plugin_factory(surviving),
+            ],
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with executor.run():
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=LAMBDA_CTX,
+                    execution_start_time=START_TS,
+                    is_first_invocation=True,
+                )
+                self.assertEqual(executor._plugins, [surviving])
+
+        self.assertIn("create_plugin", "\n".join(logs.output))
+
+    def test_factory_returning_none_is_contained(self):
+        """A factory that returns nothing is logged and skipped."""
+        surviving = _TrackingPlugin()
+
+        class _NoneFactory:
+            def create_plugin(self, info: InvocationStartInfo):
+                return None
+
+        executor = PluginExecutor(
+            plugins=[_NoneFactory(), plugin_factory(surviving)],
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with executor.run():
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=LAMBDA_CTX,
+                    execution_start_time=START_TS,
+                    is_first_invocation=True,
+                )
+                self.assertEqual(executor._plugins, [surviving])
+
+        self.assertIn("returned None", "\n".join(logs.output))
+        self.assertEqual(surviving.calls, ["invocation_start:req-1"])
+
+    def test_factory_returning_a_non_plugin_is_contained(self):
+        """A factory whose return is not a plugin is logged once and skipped.
+
+        The load-time shape check establishes only that the factory has a
+        callable ``create_plugin``; what that call returns is knowable only
+        here. A value that is not a plugin fails every hook, so registering it
+        would log one error per hook per invocation and still provide no
+        telemetry.
+        """
+        surviving = _TrackingPlugin()
+
+        class _WrongTypeFactory:
+            def create_plugin(self, info: InvocationStartInfo):
+                return object()
+
+        executor = PluginExecutor(
+            plugins=[_WrongTypeFactory(), plugin_factory(surviving)],
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with executor.run():
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=LAMBDA_CTX,
+                    execution_start_time=START_TS,
+                    is_first_invocation=True,
+                )
+                self.assertEqual(executor._plugins, [surviving])
+
+        output = "\n".join(logs.output)
+        self.assertIn("not a DurableInstrumentationPlugin", output)
+        self.assertIn("object", output)
+        # One error, not one per hook: the value never reaches the dispatch.
+        self.assertEqual(len(logs.output), 1)
+        self.assertEqual(surviving.calls, ["invocation_start:req-1"])
+
+    def test_every_failing_factory_leaves_the_executor_usable(self):
+        """All factories failing is not distinguishable from having no plugins."""
+        executor = PluginExecutor(plugins=[_ExplodingFactory()])
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ):
+            with executor.run():
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=LAMBDA_CTX,
+                    execution_start_time=START_TS,
+                    is_first_invocation=True,
+                )
+                self.assertEqual(executor._plugins, [])
+                # Later hooks are no-ops rather than errors.
+                executor.on_invocation_end(
+                    output=DurableExecutionInvocationOutput(
+                        status=ServiceInvocationStatus.SUCCEEDED,
+                        result=None,
+                        error=None,
+                    ),
+                )
+
+    def test_a_factory_raising_cancellation_is_contained(self):
+        """Containment is not limited to ``Exception``.
+
+        ``asyncio.CancelledError`` derives from ``BaseException``, so a factory
+        that awaits a cancelled task used to abort the invocation it was only
+        instrumenting and stop the remaining factories from running.
+        """
+        surviving = _TrackingPlugin()
+
+        executor = PluginExecutor(
+            plugins=[_CancellingFactory(), plugin_factory(surviving)],
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with executor.run():
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=LAMBDA_CTX,
+                    execution_start_time=START_TS,
+                    is_first_invocation=True,
+                )
+
+        self.assertIn("factory cancelled", "\n".join(logs.output))
+        self.assertEqual(surviving.calls, ["invocation_start:req-1"])
+
+    def test_a_factory_raising_thread_control_still_propagates(self):
+        """The three that tell the thread to stop are not contained.
+
+        Containing one would drop the instruction and hand the thread back to the
+        work that follows the plugin.
+        """
+        for control in (KeyboardInterrupt, SystemExit, GeneratorExit):
+            with self.subTest(control=control.__name__):
+                executor = PluginExecutor(
+                    plugins=[_ThreadControlFactory(control)],
+                )
+
+                with executor.run(), self.assertRaises(control):
+                    executor.on_invocation_start(
+                        execution_arn="arn:exec",
+                        lambda_context=LAMBDA_CTX,
+                        execution_start_time=START_TS,
+                        is_first_invocation=True,
+                    )
+
+    def test_a_hook_raising_cancellation_is_contained(self):
+        """The hook boundary uses the same rule as the factory boundary."""
+        tracking = _TrackingPlugin()
+        executor = PluginExecutor(
+            plugins=[plugin_factory(_CancellingPlugin()), plugin_factory(tracking)]
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with _invocation(executor, tracking):
+                executor.execute_plugins(OPERATION_START_INFO)
+
+        self.assertIn("hook cancelled", "\n".join(logs.output))
+        self.assertIn("operation_start:op-2", tracking.calls)
 
 
 class TestPluginExecutor(unittest.TestCase):
-    def test_no_thread_pool_when_plugins_is_none(self):
-        """Tests that PluginExecutor does not create a thread pool when plugins is empty."""
-        executor = PluginExecutor(plugins=None)
-        self.assertIsNone(executor._executor)
+    def test_dispatch_is_a_no_op_when_no_factory_is_registered(self):
+        """An executor with no factories dispatches nothing and needs no thread.
 
-    def test_no_thread_pool_when_plugins_is_empty_list(self):
-        executor = PluginExecutor(plugins=[])
-        self.assertIsNone(executor._executor)
+        Hooks are dispatched on the calling thread, which is what lets a plugin
+        set thread-affine state the SDK's own logging then reads, and what makes
+        the end-hook pairing and re-raise rules enforceable. There is therefore no
+        pool to create, and an executor with nothing registered returns before it
+        touches anything.
+        """
+        for plugins in (None, []):
+            with self.subTest(plugins=plugins):
+                executor = PluginExecutor(plugins=plugins)
+                self.assertEqual(executor._plugin_factories, [])
+                with executor.run():
+                    # Nothing registered, so no hook reaches a plugin and no
+                    # dispatch raises on the way through.
+                    executor.execute_plugins(INVOCATION_START_INFO)
+                    executor.execute_plugins(OPERATION_START_INFO)
 
-    def test_thread_pool_created_when_plugins_provided(self):
-        executor = PluginExecutor(plugins=[_NoOpPlugin()])
+    def test_hooks_are_dispatched_on_the_calling_thread(self):
+        """Thread affinity is the contract, so it is asserted rather than assumed."""
+        seen: list[str] = []
+
+        class _ThreadRecordingPlugin(DurableInstrumentationPlugin):
+            def on_invocation_start(self, info: InvocationStartInfo) -> None:
+                seen.append(threading.current_thread().name)
+
+        executor = PluginExecutor(plugins=[plugin_factory(_ThreadRecordingPlugin())])
         with executor.run():
-            self.assertIsNotNone(executor._executor)
+            executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+            )
+
+        self.assertEqual(seen, [threading.current_thread().name])
 
     def test_start_is_noop_when_empty(self):
         executor = PluginExecutor(plugins=[])
@@ -629,41 +1313,41 @@ class TestPluginExecutorExecutePlugins(unittest.TestCase):
 
     def setUp(self):
         self.plugin = _TrackingPlugin()
-        self.executor = PluginExecutor(plugins=[self.plugin])
+        self.executor = PluginExecutor(plugins=[plugin_factory(self.plugin)])
 
     def test_dispatch_invocation_start_info(self):
-        with self.executor.run():
-            self.executor.execute_plugins(INVOCATION_START_INFO, sync=True)
+        with _invocation(self.executor, self.plugin):
+            self.executor.execute_plugins(INVOCATION_START_INFO)
         self.assertIn("invocation_start:req-1", self.plugin.calls)
 
     def test_dispatch_invocation_end_info(self):
-        with self.executor.run():
-            self.executor.execute_plugins(INVOCATION_END_INFO, sync=True)
+        with _invocation(self.executor, self.plugin):
+            self.executor.execute_plugins(INVOCATION_END_INFO)
         self.assertIn("invocation_end:req-1", self.plugin.calls)
 
     def test_dispatch_operation_end_info(self):
-        with self.executor.run():
-            self.executor.execute_plugins(OPERATION_END_INFO, sync=False)
+        with _invocation(self.executor, self.plugin):
+            self.executor.execute_plugins(OPERATION_END_INFO)
         self.assertIn("operation_end:op-1", self.plugin.calls)
 
     def test_dispatch_operation_start_info(self):
-        with self.executor.run():
-            self.executor.execute_plugins(OPERATION_START_INFO, sync=False)
+        with _invocation(self.executor, self.plugin):
+            self.executor.execute_plugins(OPERATION_START_INFO)
         self.assertIn("operation_start:op-2", self.plugin.calls)
 
     def test_dispatch_operation_change_info(self):
-        with self.executor.run():
-            self.executor.execute_plugins(OPERATION_CHANGE_INFO, sync=False)
+        with _invocation(self.executor, self.plugin):
+            self.executor.execute_plugins(OPERATION_CHANGE_INFO)
         self.assertIn("operation_change:op-1", self.plugin.calls)
 
     def test_dispatch_user_function_start_info(self):
-        with self.executor.run():
-            self.executor.execute_plugins(USER_FUNCTION_START_INFO, sync=True)
+        with _invocation(self.executor, self.plugin):
+            self.executor.execute_plugins(USER_FUNCTION_START_INFO)
         self.assertIn("user_function_start:op-1", self.plugin.calls)
 
     def test_dispatch_user_function_end_info(self):
-        with self.executor.run():
-            self.executor.execute_plugins(USER_FUNCTION_END_INFO, sync=True)
+        with _invocation(self.executor, self.plugin):
+            self.executor.execute_plugins(USER_FUNCTION_END_INFO)
         self.assertIn("user_function_end:op-1", self.plugin.calls)
 
     def test_dispatch_unknown_type_logs_exception(self):
@@ -671,20 +1355,22 @@ class TestPluginExecutorExecutePlugins(unittest.TestCase):
         with self.assertLogs(
             "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
         ):
-            with self.executor.run():
-                self.executor.execute_plugins("not a valid info type", sync=True)
+            with _invocation(self.executor, self.plugin):
+                self.executor.execute_plugins("not a valid info type")
 
     def test_plugin_exception_is_swallowed(self):
         """If a plugin raises, the exception is logged and execution continues."""
         failing_plugin = _FailingPlugin()
         tracking_plugin = _TrackingPlugin()
-        executor = PluginExecutor(plugins=[failing_plugin, tracking_plugin])
+        executor = PluginExecutor(
+            plugins=[plugin_factory(failing_plugin), plugin_factory(tracking_plugin)]
+        )
 
         with self.assertLogs(
             "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
         ):
-            with executor.run():
-                executor.execute_plugins(OPERATION_START_INFO, sync=True)
+            with _invocation(executor, tracking_plugin):
+                executor.execute_plugins(OPERATION_START_INFO)
 
         # The second plugin should still have been called
         self.assertIn("operation_start:op-2", tracking_plugin.calls)
@@ -692,10 +1378,10 @@ class TestPluginExecutorExecutePlugins(unittest.TestCase):
     def test_multiple_plugins_all_called(self):
         p1 = _TrackingPlugin()
         p2 = _TrackingPlugin()
-        executor = PluginExecutor(plugins=[p1, p2])
+        executor = PluginExecutor(plugins=[plugin_factory(p1), plugin_factory(p2)])
 
-        with executor.run():
-            executor.execute_plugins(OPERATION_START_INFO, sync=True)
+        with _invocation(executor, p1, p2):
+            executor.execute_plugins(OPERATION_START_INFO)
 
         self.assertIn("operation_start:op-2", p1.calls)
         self.assertIn("operation_start:op-2", p2.calls)
@@ -706,7 +1392,7 @@ class TestPluginExecutorOnInvocationStart(unittest.TestCase):
 
     def setUp(self):
         self.plugin = _TrackingPlugin()
-        self.executor = PluginExecutor(plugins=[self.plugin])
+        self.executor = PluginExecutor(plugins=[plugin_factory(self.plugin)])
         self.ts = datetime.datetime(2025, 1, 1, tzinfo=datetime.UTC)
 
     def _make_operation(self, start_time=None):
@@ -780,7 +1466,7 @@ class TestPluginExecutorOnInvocationEnd(unittest.TestCase):
 
     def setUp(self):
         self.plugin = _TrackingPlugin()
-        self.executor = PluginExecutor(plugins=[self.plugin])
+        self.executor = PluginExecutor(plugins=[plugin_factory(self.plugin)])
         self.ts = datetime.datetime(2025, 1, 1, tzinfo=datetime.UTC)
 
     def _make_operation(self, start_ts=None, end_ts=None):
@@ -857,7 +1543,7 @@ class TestInvocationHookOperationMaps(unittest.TestCase):
             def on_invocation_end(_self, info):  # noqa: N805
                 self.captured.append(info)
 
-        self.executor = PluginExecutor(plugins=[_CapturingPlugin()])
+        self.executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
 
     @staticmethod
     def _operation(operation_id, status=OperationStatus.SUCCEEDED):
@@ -1030,7 +1716,7 @@ class TestInvocationHookOperationMaps(unittest.TestCase):
             def on_invocation_start(_self, info):  # noqa: N805
                 seen.append(info)
 
-        executor = PluginExecutor(plugins=[_CapturingPlugin()])
+        executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
         with executor.run():
             executor.on_invocation_start(
                 execution_arn="arn:exec",
@@ -1209,7 +1895,7 @@ class TestInvocationInfoCopySafety(unittest.TestCase):
             def on_invocation_end(_self, info):  # noqa: N805
                 self.captured.append(info)
 
-        self.executor = PluginExecutor(plugins=[_CapturingPlugin()])
+        self.executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
 
     def _fire_hooks(self):
         with self.executor.run():
@@ -1281,7 +1967,7 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
 
     def setUp(self):
         self.plugin = _TrackingPlugin()
-        self.executor = PluginExecutor(plugins=[self.plugin])
+        self.executor = PluginExecutor(plugins=[plugin_factory(self.plugin)])
 
     def test_start_action_fires_operation_start(self):
         captured: list[OperationStartInfo] = []
@@ -1292,7 +1978,7 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
                 captured.append(info)
 
         self.plugin = _CapturingPlugin()
-        self.executor = PluginExecutor(plugins=[self.plugin])
+        self.executor = PluginExecutor(plugins=[plugin_factory(self.plugin)])
         update = MagicMock()
         update.action = OperationAction.START
         update.operation_id = "op-1"
@@ -1301,7 +1987,7 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
         update.name = "my-step"
         update.parent_id = "parent-1"
 
-        with self.executor.run():
+        with _invocation(self.executor, self.plugin):
             self.executor.on_operation_action(update)
 
         self.assertIn("operation_start:op-1", self.plugin.calls)
@@ -1318,7 +2004,7 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
                 captured.append(info)
 
         self.plugin = _CapturingPlugin()
-        self.executor = PluginExecutor(plugins=[self.plugin])
+        self.executor = PluginExecutor(plugins=[plugin_factory(self.plugin)])
         update = MagicMock()
         update.action = OperationAction.START
         update.operation_id = "op-1"
@@ -1334,7 +2020,7 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
             start_timestamp=START_TS,
         )
 
-        with self.executor.run():
+        with _invocation(self.executor, self.plugin):
             self.executor.on_operation_action(update, operation)
 
         self.assertEqual(captured[0].start_time, START_TS)
@@ -1348,7 +2034,7 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
                 captured.append(info)
 
         self.plugin = _CapturingPlugin()
-        self.executor = PluginExecutor(plugins=[self.plugin])
+        self.executor = PluginExecutor(plugins=[plugin_factory(self.plugin)])
         update = MagicMock()
         update.action = OperationAction.START
         update.operation_id = "op-1"
@@ -1368,7 +2054,7 @@ class TestPluginExecutorOnOperationAction(unittest.TestCase):
             status=OperationStatus.READY,
         )
 
-        with self.executor.run():
+        with _invocation(self.executor, self.plugin):
             self.executor.on_operation_action(
                 update,
                 operation=current_operation,
@@ -1411,28 +2097,28 @@ class TestPluginExecutorOnOperationReplay(unittest.TestCase):
         for status in terminal_statuses:
             with self.subTest(status=status):
                 plugin = _TrackingPlugin()
-                executor = PluginExecutor(plugins=[plugin])
+                executor = PluginExecutor(plugins=[plugin_factory(plugin)])
                 operation = Operation(
                     operation_id="op-1",
                     operation_type=ServiceOperationType.STEP,
                     status=status,
                 )
 
-                with executor.run():
+                with _invocation(executor, plugin):
                     executor.on_operation_replay(operation)
 
                 self.assertEqual(plugin.calls, [])
 
     def test_non_terminal_operation_fires_operation_start(self):
         plugin = _TrackingPlugin()
-        executor = PluginExecutor(plugins=[plugin])
+        executor = PluginExecutor(plugins=[plugin_factory(plugin)])
         operation = Operation(
             operation_id="op-1",
             operation_type=ServiceOperationType.WAIT,
             status=OperationStatus.STARTED,
         )
 
-        with executor.run():
+        with _invocation(executor, plugin):
             executor.on_operation_replay(operation)
 
         self.assertEqual(plugin.calls, ["operation_start:op-1"])
@@ -1450,7 +2136,7 @@ class TestPluginExecutorOnChildContextEnd(unittest.TestCase):
                 captured.append(info)
 
         plugin = _CapturingPlugin()
-        executor = PluginExecutor(plugins=[plugin])
+        executor = PluginExecutor(plugins=[plugin_factory(plugin)])
         identifier = OperationIdentifier(
             operation_id="context-1",
             sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
@@ -1459,7 +2145,7 @@ class TestPluginExecutorOnChildContextEnd(unittest.TestCase):
         )
         before = datetime.datetime.now(datetime.UTC)
 
-        with executor.run():
+        with _invocation(executor, plugin):
             executor.on_child_context_end(
                 identifier,
                 OperationStatus.FAILED,
@@ -1487,13 +2173,13 @@ class TestPluginExecutorOnChildContextEnd(unittest.TestCase):
 
 class TestPluginExecutorOnUserFunction(unittest.TestCase):
     def test_user_function_info_uses_plugin_operation_type(self):
-        executor = PluginExecutor(plugins=[_TrackingPlugin()])
+        executor = PluginExecutor(plugins=[plugin_factory(_TrackingPlugin())])
         identifier = OperationIdentifier(
             operation_id="step-1",
             sub_type=OperationSubType.STEP,
         )
 
-        with executor.run():
+        with _invocation(executor):
             info = executor.on_user_function_start(identifier)
 
         self.assertIs(info.operation_type, OperationType.STEP)
@@ -1504,7 +2190,7 @@ class TestPluginExecutorOnOperationUpdate(unittest.TestCase):
 
     def setUp(self):
         self.plugin = _TrackingPlugin()
-        self.executor = PluginExecutor(plugins=[self.plugin])
+        self.executor = PluginExecutor(plugins=[plugin_factory(self.plugin)])
 
     def _make_operation(
         self,
@@ -1532,7 +2218,7 @@ class TestPluginExecutorOnOperationUpdate(unittest.TestCase):
     def test_terminal_status_without_step_details_fires_operation_only(self):
         op = self._make_operation(status=OperationStatus.FAILED, step_details=None)
 
-        with self.executor.run():
+        with _invocation(self.executor, self.plugin):
             self.executor.on_operation_update(op)
 
         self.assertIn("operation_end:op-1", self.plugin.calls)
@@ -1540,7 +2226,7 @@ class TestPluginExecutorOnOperationUpdate(unittest.TestCase):
     def test_non_terminal_status_without_step_details_fires_nothing(self):
         op = self._make_operation(status=OperationStatus.STARTED, step_details=None)
 
-        with self.executor.run():
+        with _invocation(self.executor, self.plugin):
             self.executor.on_operation_update(op)
 
         self.assertEqual(self.plugin.calls, [])
@@ -1548,7 +2234,7 @@ class TestPluginExecutorOnOperationUpdate(unittest.TestCase):
     def test_ready_status_fires_nothing(self):
         op = self._make_operation(status=OperationStatus.READY, step_details=None)
 
-        with self.executor.run():
+        with _invocation(self.executor, self.plugin):
             self.executor.on_operation_update(op)
 
         self.assertEqual(self.plugin.calls, [])
@@ -1556,7 +2242,7 @@ class TestPluginExecutorOnOperationUpdate(unittest.TestCase):
     def test_timed_out_is_terminal(self):
         op = self._make_operation(status=OperationStatus.TIMED_OUT, step_details=None)
 
-        with self.executor.run():
+        with _invocation(self.executor, self.plugin):
             self.executor.on_operation_update(op)
 
         self.assertIn("operation_end:op-1", self.plugin.calls)
@@ -1564,7 +2250,7 @@ class TestPluginExecutorOnOperationUpdate(unittest.TestCase):
     def test_cancelled_is_terminal(self):
         op = self._make_operation(status=OperationStatus.CANCELLED, step_details=None)
 
-        with self.executor.run():
+        with _invocation(self.executor, self.plugin):
             self.executor.on_operation_update(op)
 
         self.assertIn("operation_end:op-1", self.plugin.calls)
@@ -1572,7 +2258,7 @@ class TestPluginExecutorOnOperationUpdate(unittest.TestCase):
     def test_stopped_is_terminal(self):
         op = self._make_operation(status=OperationStatus.STOPPED, step_details=None)
 
-        with self.executor.run():
+        with _invocation(self.executor, self.plugin):
             self.executor.on_operation_update(op)
 
         self.assertIn("operation_end:op-1", self.plugin.calls)
@@ -1583,7 +2269,7 @@ class TestPluginExecutorOnOperationChange(unittest.TestCase):
 
     def setUp(self):
         self.plugin = _TrackingPlugin()
-        self.executor = PluginExecutor(plugins=[self.plugin])
+        self.executor = PluginExecutor(plugins=[plugin_factory(self.plugin)])
 
     def test_operation_change_uses_invocation_and_operation_maps(self):
         updated_operation = Operation(
@@ -1612,7 +2298,7 @@ class TestPluginExecutorOnOperationChange(unittest.TestCase):
                 captured.append(info)
 
         self.plugin = _CapturingPlugin()
-        self.executor = PluginExecutor(plugins=[self.plugin])
+        self.executor = PluginExecutor(plugins=[plugin_factory(self.plugin)])
 
         with self.executor.run():
             self.executor.on_invocation_start(
@@ -1644,11 +2330,19 @@ class TestPluginExecutorOnOperationChange(unittest.TestCase):
         self.assertEqual(updated_info.end_time, END_TS)
         self.assertFalse(updated_info.is_replayed)
 
-    def test_operation_change_without_invocation_start_is_noop(self):
+    def test_hooks_outside_an_invocation_reach_no_plugin(self):
+        """Nothing is dispatched before an invocation establishes the instances.
+
+        This used to assert the ``_invocation_status is None`` guard inside
+        ``on_operation_update``. That guard is now redundant with the plugin
+        lifetime itself: instances are built by ``on_invocation_start`` and
+        dropped when the invocation scope exits, so outside an invocation there
+        is no instance to dispatch to in the first place.
+        """
         operation = Operation(
             operation_id="op-1",
             operation_type=ServiceOperationType.STEP,
-            status=OperationStatus.STARTED,
+            status=OperationStatus.SUCCEEDED,
         )
 
         with self.executor.run():
@@ -1658,6 +2352,7 @@ class TestPluginExecutorOnOperationChange(unittest.TestCase):
                 previous_operations={},
             )
 
+        self.assertEqual(self.executor._plugins, [])
         self.assertEqual(self.plugin.calls, [])
 
 
@@ -1800,6 +2495,81 @@ class _TrackingPlugin(DurableInstrumentationPlugin):
 
     def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
         self.calls.append(f"user_function_end:{info.operation_id}")
+
+
+class _ExplodingFactory:
+    """Factory whose ``create_plugin`` raises, for containment tests."""
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        raise RuntimeError("factory boom")
+
+
+class _CancellingFactory:
+    """Factory whose ``create_plugin`` raises outside the ``Exception`` hierarchy."""
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        raise asyncio.CancelledError("factory cancelled")
+
+
+class _ThreadControlFactory:
+    """Factory that raises one of the three exceptions that must propagate."""
+
+    def __init__(self, control: type[BaseException]) -> None:
+        self._control = control
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        raise self._control
+
+
+class _GroupRaisingFactory:
+    """Factory that raises a ``BaseExceptionGroup``, as an ``asyncio.TaskGroup`` does."""
+
+    def __init__(self, group: BaseExceptionGroup) -> None:
+        self._group = group
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        raise self._group
+
+
+class _HostileAttributeFactory:
+    """Factory that fails, and whose attribute hook fails too.
+
+    The second failure is the point: naming a failing factory for the log must not
+    reach customer code that raises, or containment raises instead of containing.
+    """
+
+    def __getattr__(self, name: str) -> object:
+        msg = f"attribute hook refuses {name}"
+        raise RuntimeError(msg)
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        msg = "factory boom"
+        raise RuntimeError(msg)
+
+
+class _CancellingPlugin(DurableInstrumentationPlugin):
+    """Plugin whose hook raises outside the ``Exception`` hierarchy."""
+
+    def on_operation_start(self, info):
+        raise asyncio.CancelledError("hook cancelled")
+
+
+class _ControlOnEndPlugin(DurableInstrumentationPlugin):
+    """Plugin whose end hook records the outcome and then stops the thread."""
+
+    def __init__(self) -> None:
+        self.end_statuses: list[InvocationStatus] = []
+
+    def on_invocation_end(self, info: InvocationEndInfo) -> None:
+        self.end_statuses.append(info.status)
+        raise KeyboardInterrupt
+
+
+class _ControlOnStartPlugin(DurableInstrumentationPlugin):
+    """Plugin whose start hook stops the thread, so later plugins never start."""
+
+    def on_invocation_start(self, info: InvocationStartInfo) -> None:
+        raise KeyboardInterrupt
 
 
 class _FailingPlugin(DurableInstrumentationPlugin):

@@ -63,7 +63,11 @@ from aws_durable_execution_sdk_python.waits import (
     WaitForConditionDecision,
 )
 from tests.serdes_test import CustomDictSerDes
-from tests.test_helpers import operation_id_sequence
+from tests.test_helpers import (
+    operation_id_sequence,
+    plugin_factory,
+    plugin_invocation,
+)
 
 
 def create_test_context(
@@ -3014,9 +3018,9 @@ def test_operation_identity_is_validated_before_replay_hooks(
         def on_operation_end(self, info):
             captured.append(f"end:{info.operation_id}")
 
-    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
     step_body_calls: list[bool] = []
-    with plugin_executor.run():
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="arn",
             initial_checkpoint_token="token",  # noqa: S106
@@ -3062,8 +3066,8 @@ def test_replay_aware_emits_update_hook_for_operation_updated_since_last_invocat
         def on_operation_end(self, info):
             captured.append(("end", info.operation_id, info.is_replayed, info.status))
 
-    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="arn",
             initial_checkpoint_token="token",  # noqa: S106
@@ -3100,8 +3104,8 @@ def test_replay_aware_updated_callback_with_following_op_stays_replaying():
         def on_operation_end(self, info):
             captured.append(("end", info.operation_id, info.is_replayed, info.status))
 
-    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="arn",
             initial_checkpoint_token="token",  # noqa: S106
