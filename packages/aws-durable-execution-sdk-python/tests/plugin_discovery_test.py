@@ -403,18 +403,21 @@ def test_discovery_names_unknown_distribution_in_load_failure() -> None:
 
 
 @pytest.mark.parametrize(
-    ("resolved_value", "expected_type_name"),
+    ("resolved_value", "expected_description"),
     [
         (_PluginA(), "_PluginA"),
         (object(), "builtins.object"),
         ("not-a-factory", "builtins.str"),
         (None, "builtins.NoneType"),
-        (lambda info: _PluginA(), "builtins.function"),
+        # A function is named by its own qualified name, not by its type. Its type
+        # is ``builtins.function`` for every function ever written, so naming the
+        # type would identify no particular one.
+        (lambda info: _PluginA(), "<lambda>"),
     ],
 )
 def test_discovery_rejects_entry_point_without_create_plugin(
     resolved_value: object,
-    expected_type_name: str,
+    expected_description: str,
 ) -> None:
     """A plugin *instance* at the entry point is now the common mistake.
 
@@ -438,7 +441,7 @@ def test_discovery_rejects_entry_point_without_create_plugin(
 
     assert "must resolve to a plugin factory" in str(error.value)
     assert "create_plugin(info) method" in str(error.value)
-    assert expected_type_name in str(error.value)
+    assert expected_description in str(error.value)
 
 
 def test_discovery_rejects_a_plugin_class_at_the_entry_point() -> None:
@@ -483,6 +486,9 @@ def test_explicit_plugin_instance_is_rejected_with_its_position() -> None:
     assert "plugins[1]" in str(error.value)
     assert "must be a plugin factory" in str(error.value)
     assert "_PluginB" in str(error.value)
+    # An instance and the class it was built from share one qualified name, so the
+    # message states which of the two was passed.
+    assert "an instance of" in str(error.value)
 
 
 @pytest.mark.parametrize(
@@ -651,6 +657,62 @@ def test_discovery_rejects_a_factory_class_at_the_entry_point(
 
     assert "must resolve to a plugin factory" in str(error.value)
     assert "not the factory class" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "rejected_class",
+    [_PluginA, _PluginAFactory],
+    ids=["plugin-class", "factory-class"],
+)
+def test_a_rejected_class_is_named_by_itself_not_by_its_metaclass(
+    rejected_class: type,
+) -> None:
+    """The message has to name the class that was passed.
+
+    The type of a class is its metaclass, which is ``builtins.type`` for both
+    classes here. Both are rejected shapes a caller reaches by accident:
+    ``plugins=[MyPlugin]`` is what the previous major accepted, and
+    ``plugins=[MyPluginFactory]`` is this major's shape with the parentheses left
+    off. Naming the type would report ``builtins.type`` for either one and
+    distinguish neither. So the class is named directly, and the message says it
+    was a class rather than an instance.
+    """
+    with pytest.raises(PluginLoadError) as error:
+        load_configured_plugins([rejected_class], environment={})  # type: ignore[list-item]
+
+    message = str(error.value)
+    qualified = f"{rejected_class.__module__}.{rejected_class.__qualname__}"
+    assert f"the class {qualified}" in message
+    assert "builtins.type" not in message
+
+
+@pytest.mark.parametrize(
+    "rejected_class",
+    [_PluginA, _PluginAFactory],
+    ids=["plugin-class", "factory-class"],
+)
+def test_a_rejected_class_at_the_entry_point_is_named_by_itself(
+    rejected_class: type,
+) -> None:
+    """The entry-point path applies the same naming rule."""
+    entry_point = _FakeEntryPoint("a", rejected_class)
+
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry_point],
+        ),
+        pytest.raises(PluginLoadError) as error,
+    ):
+        load_configured_plugins(
+            None,
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"},
+        )
+
+    message = str(error.value)
+    qualified = f"{rejected_class.__module__}.{rejected_class.__qualname__}"
+    assert f"the class {qualified}" in message
+    assert "builtins.type" not in message
 
 
 def test_explicit_class_holding_a_callable_create_plugin_is_accepted() -> None:

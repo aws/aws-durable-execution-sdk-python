@@ -54,9 +54,42 @@ def _distribution_name(entry_point: metadata.EntryPoint) -> str:
     return distribution.metadata.get("Name", "unknown distribution")
 
 
-def _qualified_type_name(value: object) -> str:
-    value_type = type(value)
-    return f"{value_type.__module__}.{value_type.__qualname__}"
+def _module_qualified_name(named: object) -> str:
+    """Join a class's or function's module and qualified name.
+
+    Both attributes are read with a default, because a rejected entry can be any
+    object at all. A missing name must not replace the configuration error with an
+    ``AttributeError``.
+    """
+    module = getattr(named, "__module__", None) or "unknown module"
+    qualified = getattr(named, "__qualname__", None) or getattr(named, "__name__", None)
+    return f"{module}.{qualified or '<unnamed>'}"
+
+
+def _describe_value(value: object) -> str:
+    """Describe a rejected registration entry so the caller can identify it.
+
+    Two kinds of value are named by themselves rather than by their type. A
+    class's type is its metaclass, which is ``builtins.type`` for an ordinary
+    class. A function's type is ``builtins.function``. Neither of those two names
+    says which value was passed.
+
+    Both of the likeliest migration mistakes are classes: ``plugins=[MyPlugin]``
+    is the shape the previous major accepted, and ``plugins=[MyPluginFactory]`` is
+    this major's shape with the parentheses left off. Naming the type would report
+    ``builtins.type`` for both. So a class and a function are named directly, and
+    every other value is named by its type.
+
+    The kind is named alongside the name -- "the class", "the function", "an
+    instance of" -- because a factory class and an instance of that factory class
+    share one qualified name, and passing the class where an instance is required
+    is itself one of the rejected shapes.
+    """
+    if isinstance(value, type):
+        return f"the class {_module_qualified_name(value)}"
+    if inspect.isroutine(value):
+        return f"the function {_module_qualified_name(value)}"
+    return f"an instance of {_module_qualified_name(type(value))}"
 
 
 def _is_plugin_factory(value: object) -> bool:
@@ -182,7 +215,7 @@ def _load_factory(
             "resolve to a plugin factory -- an object with a "
             "create_plugin(info) method returning a "
             "DurableInstrumentationPlugin -- but resolved to "
-            f"{_qualified_type_name(factory)}. Name the factory instance, not a "
+            f"{_describe_value(factory)}. Name the factory instance, not a "
             "plugin, not a plugin class, and not the factory class."
         )
 
@@ -201,7 +234,10 @@ def _validate_explicit_factories(
     for the lifetime of the function, and nothing fails. Raising here converts
     that into one configuration failure while the handler is being initialized.
     The position is named because a caller passing several entries cannot
-    otherwise tell which one is wrong.
+    otherwise tell which one is wrong. The entry itself is named too, by
+    :func:`_describe_value`, which names a class and a function directly rather
+    than by type: the type of a class is ``builtins.type``, and that would
+    identify no particular class.
 
     A plugin *class* is rejected, and so is any bare callable. Both were
     accepted while the registration type was ``Callable``: a lambda satisfied it
@@ -223,7 +259,7 @@ def _validate_explicit_factories(
                 f"Durable instrumentation plugin at plugins[{index}] must be a "
                 "plugin factory -- an object with a create_plugin(info) method "
                 "returning a DurableInstrumentationPlugin -- but is "
-                f"{_qualified_type_name(factory)}. Pass a factory rather than a "
+                f"{_describe_value(factory)}. Pass a factory rather than a "
                 "plugin, a plugin class, or a plain callable, and pass a factory "
                 "instance rather than the factory class, for example "
                 "plugins=[MyPluginFactory(exporter)]."
