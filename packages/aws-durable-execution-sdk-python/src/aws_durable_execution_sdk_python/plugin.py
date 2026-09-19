@@ -534,8 +534,25 @@ class DurableInstrumentationPluginFactory(Protocol):
 
 
 def _factory_name(factory: object) -> str:
-    """Best available name for a factory, for log messages."""
-    return getattr(factory, "__qualname__", None) or type(factory).__name__
+    """Best available name for a factory, for log messages.
+
+    Read from the factory's *type*, not from the factory. This runs while a
+    factory failure is being contained, and a ``getattr`` on the instance would
+    call a custom ``__getattr__`` or ``__getattribute__`` -- so a factory whose
+    attribute hook raises would make the containment itself raise, turning a
+    contained plugin failure into a failed execution. A class registered directly
+    as a factory is read through the class object, which carries its own
+    ``__qualname__``.
+
+    Wrapped as well, because diagnostics must not be the thing that fails: a name
+    that cannot be produced is reported as unavailable rather than raised.
+    """
+    try:
+        if isinstance(factory, type):
+            return factory.__qualname__
+        return type(factory).__qualname__
+    except BaseException:  # noqa: BLE001 - a name is never worth failing a hook for
+        return "<unnamed factory>"
 
 
 # Raised out of plugin code, these three are not reports of a plugin defect but

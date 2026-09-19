@@ -165,7 +165,10 @@ class _ExportScheduler:
         start_error: Exception | None = None
         with self._condition:
             if self._disabled:
-                return []
+                # The record is handed back rather than dropped here for the same
+                # reason a displaced one is: this runs inside the calling plugin's
+                # lock, and releasing the record can run a customer finalizer.
+                return [record]
             self._seq += 1
             execution.scheduled_seq = self._seq
             displaced = execution.pending_record

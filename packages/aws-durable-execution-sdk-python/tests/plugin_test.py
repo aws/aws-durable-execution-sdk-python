@@ -648,6 +648,32 @@ class TestPluginLifetime(unittest.TestCase):
         self.assertEqual(built[0].calls, ["invocation_start:req-1"])
         self.assertEqual(built[1].calls, ["invocation_start:req-2"])
 
+    def test_a_hostile_factory_attribute_hook_does_not_escape_containment(self):
+        """Naming a failing factory must not be what fails the invocation.
+
+        ``_factory_name`` runs while a factory failure is being contained, so it
+        reads the factory's type rather than the factory: an instance
+        ``__getattr__`` belongs to customer code and can raise.
+        """
+        surviving = _TrackingPlugin()
+        executor = PluginExecutor(
+            plugins=[_HostileAttributeFactory(), plugin_factory(surviving)],
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with executor.run():
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=LAMBDA_CTX,
+                    execution_start_time=START_TS,
+                    is_first_invocation=True,
+                )
+
+        self.assertIn("_HostileAttributeFactory", "\n".join(logs.output))
+        self.assertEqual(surviving.calls, ["invocation_start:req-1"])
+
     def test_a_factory_raising_a_group_with_a_control_exception_propagates(self):
         """A group carrying a control exception is not contained.
 
@@ -2503,6 +2529,22 @@ class _GroupRaisingFactory:
 
     def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
         raise self._group
+
+
+class _HostileAttributeFactory:
+    """Factory that fails, and whose attribute hook fails too.
+
+    The second failure is the point: naming a failing factory for the log must not
+    reach customer code that raises, or containment raises instead of containing.
+    """
+
+    def __getattr__(self, name: str) -> object:
+        msg = f"attribute hook refuses {name}"
+        raise RuntimeError(msg)
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        msg = "factory boom"
+        raise RuntimeError(msg)
 
 
 class _CancellingPlugin(DurableInstrumentationPlugin):
