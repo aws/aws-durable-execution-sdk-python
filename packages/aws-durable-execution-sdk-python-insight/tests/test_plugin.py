@@ -50,6 +50,7 @@ from aws_durable_execution_sdk_python_insight import (
     LambdaLogExporter,
     OperationOverride,
     WorkflowInsightConfig,
+    WorkflowInsightPluginFactory,
     workflow_insight,
 )
 from aws_durable_execution_sdk_python_insight._export_scheduler import _ExportState
@@ -184,6 +185,46 @@ def _run(
         _end(operations=operations, status=status, result=result, error=error)
     )
     return plugin
+
+
+# -- public surface ----------------------------------------------------------
+
+
+def test_the_factory_type_is_public_and_re_exported():
+    """A consumer must be able to name the type ``workflow_insight()`` returns.
+
+    The package ships ``py.typed``, so a consumer annotating the value it holds
+    needs the name. A private name would force an import from a private module.
+    The sibling OTel package exports ``InvocationOtelPluginFactory`` and
+    ``ExecutionOtelPluginFactory`` for the same reason, so this keeps the two
+    plugin packages consistent.
+    """
+    import aws_durable_execution_sdk_python_insight as pkg
+
+    factory = workflow_insight(WorkflowInsightConfig(exporters=[CaptureExporter()]))
+
+    assert type(factory) is WorkflowInsightPluginFactory
+    assert not WorkflowInsightPluginFactory.__name__.startswith("_")
+    assert "WorkflowInsightPluginFactory" in pkg.__all__
+    assert pkg.WorkflowInsightPluginFactory is WorkflowInsightPluginFactory
+
+
+def test_the_plugin_exposes_no_public_attributes():
+    """Export bookkeeping must not become part of the plugin's public surface.
+
+    ``WorkflowInsightPlugin`` is exported from the package root, and it mixes in
+    :class:`_ExportState`, so every field that mixin sets lands on the exported
+    class. Those fields belong to the export scheduler, which owns them under its
+    own lock. A public name among them would advertise scheduler bookkeeping as
+    something a consumer may read or set. So every field on the instance is
+    underscore-prefixed.
+    """
+    exporter = CaptureExporter()
+    factory = workflow_insight(WorkflowInsightConfig(exporters=[exporter]))
+    plugin = _invocation(factory, _start())
+
+    public = sorted(name for name in vars(plugin) if not name.startswith("_"))
+    assert public == []
 
 
 # -- existing record-building coverage ---------------------------------------

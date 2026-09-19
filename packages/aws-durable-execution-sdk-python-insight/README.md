@@ -46,7 +46,8 @@ def handler(event, context):
 `plugins` argument takes: the SDK calls its `create_plugin` once per invocation to
 build that invocation's plugin instance. The factory holds the resolved
 configuration and the exporters, so configuration is per handler while record
-state is per invocation.
+state is per invocation. Its type is `WorkflowInsightPluginFactory`, exported from
+the package root for annotating a value you hold.
 
 With no exporter configured, records are written to the function's own
 CloudWatch log group as single JSON lines (the `LambdaLogExporter` default),

@@ -231,7 +231,7 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
     """
 
     def __init__(
-        self, shared: _WorkflowInsightFactory, info: InvocationStartInfo
+        self, shared: WorkflowInsightPluginFactory, info: InvocationStartInfo
     ) -> None:
         _ExportState.__init__(self)
         self._shared = shared
@@ -665,8 +665,12 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
         _hook_frames.releases.extend(self._shared._scheduler.schedule(self, record))
 
 
-class _WorkflowInsightFactory:
+class WorkflowInsightPluginFactory:
     """The handler-lifetime half of the plugin: what is NOT per-execution.
+
+    Built by :func:`workflow_insight`, which is the supported way to obtain one.
+    The class is public because it is the declared return type of that function,
+    and a ``py.typed`` consumer must be able to name the type it holds.
 
     Satisfies the SDK's ``DurableInstrumentationPluginFactory`` -- its
     ``create_plugin`` is called with an ``InvocationStartInfo`` and returns the
@@ -722,11 +726,11 @@ class _WorkflowInsightFactory:
         return WorkflowInsightPlugin(self, info)
 
 
-def workflow_insight(config: WorkflowInsightConfig) -> _WorkflowInsightFactory:
+def workflow_insight(config: WorkflowInsightConfig) -> WorkflowInsightPluginFactory:
     """Create a Workflow Insight plugin factory. Mirrors the JS ``workflowInsight()``.
 
     Pass the result straight to ``@durable_execution(plugins=[...])``: the SDK
     calls its ``create_plugin`` once per invocation to build that invocation's
     plugin instance.
     """
-    return _WorkflowInsightFactory(config)
+    return WorkflowInsightPluginFactory(config)

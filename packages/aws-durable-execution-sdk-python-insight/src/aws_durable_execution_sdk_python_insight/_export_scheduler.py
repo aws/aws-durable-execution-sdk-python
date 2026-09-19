@@ -62,27 +62,34 @@ class _ExportState:
     Every field here is guarded by ``_ExportScheduler._condition``. They belong to
     the scheduler: nothing outside it reads or writes them, and it never touches
     the hook-facing state on the same object.
+
+    Every field is underscore-prefixed, because the mixin's fields land on
+    :class:`WorkflowInsightPlugin`, which the package exports. A public name there
+    would advertise scheduler bookkeeping as part of the plugin's API. The
+    scheduler reads these names directly, which is why they are not name-mangled:
+    :class:`_ExportScheduler` is declared in this module, so this class's private
+    fields are within its own module's reach.
     """
 
     def __init__(self) -> None:
         # Newest sequence number the scheduler assigned to this execution.
-        self.scheduled_seq = 0
+        self._scheduled_seq = 0
         # This execution's latest record, waiting for the export worker, or None
         # when nothing of its own is outstanding. A repeat emission replaces it,
         # which is what per-execution coalescing means; the scheduler's queue
         # holds this object exactly while this field is set.
-        self.pending_record: dict[str, Any] | None = None
+        self._pending_record: dict[str, Any] | None = None
         # Newest sequence number already handed to every exporter.
-        self.exported_seq = 0
+        self._exported_seq = 0
         # Value of the scheduler's export counter when that export finished, so
         # a waiter can tell whether a completed flush covered its own record.
-        self.exported_at = 0
+        self._exported_at = 0
         # drain() calls currently parked on this execution. Nothing depends on
         # it: a waiter holds this object directly, so the bookkeeping it waits
         # on can no longer be reclaimed from under it. It is kept because it is
         # the only way to observe that a drain really parked rather than raced
         # past.
-        self.waiters = 0
+        self._waiters = 0
 
 
 # What a caller has to release once it is back outside the lock: the records the
@@ -101,7 +108,7 @@ class _ExportScheduler:
         # set, keyed by the execution object itself. A repeat schedule for an
         # execution replaces the record the object carries and keeps the object's
         # position, so coalescing never lets one execution jump the queue. An
-        # execution is in here exactly while its `pending_record` is set.
+        # execution is in here exactly while its `_pending_record` is set.
         self._pending: dict[_ExportState, None] = {}
         self._seq = 0
         self._export_count = 0
@@ -170,9 +177,9 @@ class _ExportScheduler:
                 # lock, and releasing the record can run a customer finalizer.
                 return [record]
             self._seq += 1
-            execution.scheduled_seq = self._seq
-            displaced = execution.pending_record
-            execution.pending_record = record
+            execution._scheduled_seq = self._seq
+            displaced = execution._pending_record
+            execution._pending_record = record
             # Re-queuing an execution that is already queued is a no-op that
             # keeps its arrival position.
             self._pending[execution] = None
@@ -247,9 +254,9 @@ class _ExportScheduler:
         with self._condition:
             if self._disabled:
                 return
-            execution.waiters += 1
+            execution._waiters += 1
             try:
-                want_seq = execution.scheduled_seq
+                want_seq = execution._scheduled_seq
                 # A drain always flushes, so require a flush that covers every
                 # export completed before this call as well as our own.
                 want_flush = self._export_count
@@ -261,11 +268,11 @@ class _ExportScheduler:
                     # Export counter value a flush has to cover to release us:
                     # our own record's export plus everything already exported
                     # when this call started. Recomputed every pass, because
-                    # execution.exported_at only becomes ours once our record is
+                    # execution._exported_at only becomes ours once our record is
                     # out.
-                    need = max(execution.exported_at, want_flush)
+                    need = max(execution._exported_at, want_flush)
                     if (
-                        execution.exported_seq >= want_seq
+                        execution._exported_seq >= want_seq
                         and self._flushed_through >= need
                         and self._flushes_completed > want_flushes
                     ):
@@ -296,7 +303,7 @@ class _ExportScheduler:
                     self._condition.notify_all()
                     self._condition.wait()
             finally:
-                execution.waiters -= 1
+                execution._waiters -= 1
         del failed_pending
         if start_error is not None:
             _logger.warning(
@@ -361,9 +368,11 @@ class _ExportScheduler:
         """
         self._disabled = True
         self._worker = None
-        dropped = [(execution, execution.pending_record) for execution in self._pending]
+        dropped = [
+            (execution, execution._pending_record) for execution in self._pending
+        ]
         for execution, _ in dropped:
-            execution.pending_record = None
+            execution._pending_record = None
         self._pending = {}
         self._flush_requested = False
         self._flush_barrier = 0
@@ -390,7 +399,7 @@ class _ExportScheduler:
     def _blocking_pending_locked(self) -> bool:
         """True while a record scheduled at or before the flush barrier is pending."""
         barrier = self._flush_barrier
-        return any(execution.scheduled_seq <= barrier for execution in self._pending)
+        return any(execution._scheduled_seq <= barrier for execution in self._pending)
 
     def _run(self) -> None:
         # The worker slot must be empty whenever no worker is running, or
@@ -470,9 +479,9 @@ class _ExportScheduler:
                     if self._pending:
                         execution = next(iter(self._pending))
                         del self._pending[execution]
-                        record = execution.pending_record
-                        execution.pending_record = None
-                        seq = execution.scheduled_seq
+                        record = execution._pending_record
+                        execution._pending_record = None
+                        seq = execution._scheduled_seq
                         break
                     self._condition.wait()
 
@@ -481,7 +490,7 @@ class _ExportScheduler:
                 # Taking the record consumed this execution's pending slot, so
                 # nothing will ever export that snapshot again. The bookkeeping
                 # must therefore advance whatever export() did: skip it and
-                # execution.exported_seq never reaches a waiter's want_seq, so a
+                # execution._exported_seq never reaches a waiter's want_seq, so a
                 # drain parked on this execution is never released. Count the
                 # attempt in a finally so that holds even if _export() raises.
                 #
@@ -503,9 +512,9 @@ class _ExportScheduler:
                     del record
                     with self._condition:
                         self._export_count += 1
-                        if seq > execution.exported_seq:
-                            execution.exported_seq = seq
-                        execution.exported_at = self._export_count
+                        if seq > execution._exported_seq:
+                            execution._exported_seq = seq
+                        execution._exported_at = self._export_count
                         if exported:
                             # This worker completed work, so any earlier worker
                             # death was not the start of a fault the work

@@ -507,7 +507,7 @@ def _scheduler_is_empty(scheduler: _ExportScheduler) -> bool:
 def _drain_waiters(scheduler: _ArnScheduler, arn: str) -> int:
     """How many drain() calls are currently parked on this execution."""
     with scheduler._condition:
-        return scheduler._execution(arn).waiters
+        return scheduler._execution(arn)._waiters
 
 
 def test_drain_stays_parked_until_a_flush_covering_its_record_completes() -> None:
@@ -672,7 +672,7 @@ def test_concurrent_drains_with_nothing_to_export_share_one_flush() -> None:
             if second is None:
                 return False
             with scheduler._condition:
-                return first.waiters == 1 and second.waiters == 1
+                return first._waiters == 1 and second._waiters == 1
 
         assert _wait_until(both_parked), "a drain raced past the flush it needs"
         with returned_lock:
@@ -740,7 +740,7 @@ def test_disabled_latch_retains_no_lanes_or_pending_records(monkeypatch) -> None
         # bookkeeping that used to need clearing in a second map is on these
         # objects now, so the queue and the records are one thing to release.
         assert all(
-            execution.pending_record is None
+            execution._pending_record is None
             for execution in scheduler.executions.values()
         )
         assert scheduler._flush_requested is False
