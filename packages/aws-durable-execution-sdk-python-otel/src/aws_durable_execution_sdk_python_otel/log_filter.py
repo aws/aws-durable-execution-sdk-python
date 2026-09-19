@@ -132,9 +132,17 @@ def bind_invocation(provider: _SpanContextProvider) -> None:
     executing user code. Idempotent, so a plugin can call it from every such
     hook without tracking which threads it has already claimed.
 
+    A thread that already carries this provider's claim returns before taking the
+    registry lock. Every operation-start and user-function-start hook calls this,
+    and after the first call on a thread there is nothing to add: membership in
+    the open-invocation set is idempotent, and the claim is already in place.
+
     Args:
         provider: The plugin serving the invocation that owns this thread.
     """
+    claim = _current_invocation.get()
+    if claim is not None and claim() is provider:
+        return
     with _registry_lock:
         _open_invocations.add(provider)
     _current_invocation.set(weakref.ref(provider))

@@ -230,6 +230,19 @@ Behavior is validated cross-SDK by the `insight` conformance suite
 > cadence the JS and Java plugins have. Only a sampled-out execution neither
 > exports nor flushes.
 
+> **Note (invocation-end latency under concurrency).** The drain an invocation
+> end performs waits for every record any execution had pending when it was
+> called, and one worker serializes all exports and all flushes, so every
+> concurrently ending invocation is released together at the slowest one. The wait
+> therefore grows with the number of executions the environment is running, not
+> just with this execution's own work: measured with a 30 ms exporter, one
+> execution ended in ~72 ms and 48 concurrent executions in ~1.8 s each. That is
+> the deliberate trade against the alternative — releasing an end before its
+> record reached the exporters, which is what silently lost terminal records
+> before. It matters for an exporter that makes a network call per record: budget
+> invocation-end time against the environment's concurrency, not against one
+> execution.
+
 ## Requirements
 
 - `aws-durable-execution-sdk-python` with the plugin invocation hooks that

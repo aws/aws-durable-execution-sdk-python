@@ -281,11 +281,16 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
         self._build_revision = 0
         # Guards `_closed`, `_build_revision`, the operations rebind and record
         # emission, so a late hook can never slip a RUNNING record in after the
-        # terminal one. Still earns its place with one instance per invocation: the
-        # SDK dispatches every hook synchronously on the thread that produced the
-        # event, so an operation-change raised off the checkpointing path runs
-        # concurrently with the invocation thread's on_invocation_end -- two hooks,
-        # one instance, genuinely racing.
+        # terminal one.
+        #
+        # What it protects against is reentrancy, not two threads. The SDK
+        # dispatches every hook synchronously on the thread that produced the
+        # event, and it joins the checkpoint thread and the branch pools before
+        # the invocation-end hook is dispatched, so a checkpoint-path
+        # operation-change cannot overlap `on_invocation_end` -- an earlier
+        # version of this comment claimed it could. The lock still earns its place
+        # for the reason below, and it stays because a guard whose correctness
+        # rests on the SDK's join ordering is one refactor away from being wrong.
         #
         # Reentrant on purpose: `_emit` runs the scheduler's `schedule()` inside
         # this hold, and `schedule()` releases the record it displaces, which can
