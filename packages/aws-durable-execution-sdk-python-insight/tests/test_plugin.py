@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import gc
 import itertools
 import threading
 import time
@@ -1249,7 +1250,6 @@ def test_a_displaced_records_finalizer_runs_with_no_plugin_lock_held():
     # each other at once hang both invocations, which the reentrant lock does not
     # help with: it only covers re-entry on the same instance. The hook frame
     # therefore releases displaced records after every lock is dropped.
-    exporter = ConcurrentCaptureExporter()
     observed: list[bool] = []
     holder: dict[str, Any] = {}
 
@@ -1263,11 +1263,31 @@ def test_a_displaced_records_finalizer_runs_with_no_plugin_lock_held():
             # its owner acquire it again.
             observed.append(not plugin._lock._is_owned())
 
+    class _DiscardingExporter:
+        """Keeps no record, so the displaced one is the last reference to a probe.
+
+        An exporter that retained records would decide this test by a race: if the
+        worker exported the first record before it was displaced, the probe stays
+        reachable from the exporter and no finalizer runs.
+        """
+
+        max_record_size_bytes = None
+        exports = 0
+
+        def render(self, record: dict[str, Any]) -> Any:
+            return record
+
+        def export(self, record: dict[str, Any]) -> None:
+            type(self).exports += 1
+
+        def flush(self) -> None:
+            pass
+
     # A transform returning a fresh object per emit is what makes the record the
     # only reference to it, so releasing the displaced record is what collects it.
     factory = workflow_insight(
         WorkflowInsightConfig(
-            exporters=[exporter],
+            exporters=[_DiscardingExporter()],
             emit_mode="on-change",
             content=ContentConfig(input=lambda value: _FinalizerProbe()),
         )
@@ -1275,8 +1295,8 @@ def test_a_displaced_records_finalizer_runs_with_no_plugin_lock_held():
     plugin = factory.create_plugin(_start(operations={}))
     holder["plugin"] = plugin
 
-    # The first emit queues a record holding a probe; the next displaces it while
-    # the worker is still parked, so the release happens on this thread.
+    # The first emit queues a record holding a probe; the next displaces it, and
+    # the hook frame releases it on this thread.
     plugin.on_invocation_start(_start(operations={}))
     plugin.on_operation_change(
         OperationChangeInfo(
@@ -1286,6 +1306,7 @@ def test_a_displaced_records_finalizer_runs_with_no_plugin_lock_held():
         )
     )
     plugin.on_invocation_end(_end(operations=_ops(_step("s"))))
+    gc.collect()
 
     assert observed, "the displaced record's finalizer must have run"
     assert all(observed), (
