@@ -19,11 +19,14 @@ same info to its first hook.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import itertools
 import threading
 import time
 from typing import Any
+
+import pytest
 
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
@@ -680,6 +683,7 @@ class ConcurrentCaptureExporter:
 
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
+        self.flushes = 0
         self._lock = threading.Lock()
 
     def render(self, record: dict[str, Any]) -> Any:
@@ -690,7 +694,8 @@ class ConcurrentCaptureExporter:
             self.records.append(record)
 
     def flush(self) -> None:
-        pass
+        with self._lock:
+            self.flushes += 1
 
     def snapshot(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -1186,6 +1191,53 @@ def test_a_reentrant_invocation_end_drains_after_the_lock_is_released():
         "the drain ran while this thread still held the execution's lock, which "
         "an exporter re-entering a hook turns into a deadlock"
     )
+
+
+def test_an_end_transform_that_fails_still_drains_what_was_scheduled():
+    # `_emit` runs customer code between the snapshot and the hand-off: the content
+    # transforms, a result override, and __del__ on an object a displaced record
+    # carried. A failure there leaves the hook through the SDK's containment, and
+    # the drain used to be requested after the build, so that failure skipped it --
+    # leaving records this execution had already scheduled in a buffering exporter
+    # when the environment froze. The drain is now requested on entry.
+    exporter = ConcurrentCaptureExporter()
+    calls: list[str] = []
+
+    def failing_on_the_second_call(value: Any) -> Any:
+        calls.append("input")
+        if len(calls) > 1:
+            # CancelledError rather than an ordinary exception on purpose:
+            # _apply_data_content contains Exception so that a failing redactor
+            # cannot leak the raw value, and a BaseException is what escapes the
+            # build and leaves the hook.
+            raise asyncio.CancelledError("transform cancelled")
+        return value
+
+    factory = workflow_insight(
+        WorkflowInsightConfig(
+            exporters=[exporter],
+            emit_mode="on-change",
+            content=ContentConfig(input=failing_on_the_second_call),
+        )
+    )
+    start = _start(operations={})
+    plugin = factory.create_plugin(start)
+
+    # The first emit succeeds and schedules a RUNNING record.
+    plugin.on_invocation_start(start)
+
+    # The terminal emit fails inside the transform, so this hook raises. The SDK
+    # contains that; here it is raised directly, which is the same code path.
+    with pytest.raises(asyncio.CancelledError):
+        plugin.on_invocation_end(_end(operations=_ops(_step("s"))))
+
+    statuses = [record["status"] for record in exporter.snapshot()]
+    assert statuses == ["RUNNING"], (
+        "the record scheduled before the failing transform must have been drained "
+        f"to the exporters, not left pending: {statuses}"
+    )
+    assert exporter.flushes >= 1, "the drain must have flushed"
+    assert _wait_until(lambda: not factory._scheduler._worker_alive())
 
 
 def _free_for_another_thread(lock: Any) -> bool:

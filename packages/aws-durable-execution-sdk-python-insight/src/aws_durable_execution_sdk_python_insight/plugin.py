@@ -389,6 +389,16 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
             return
         emit_mode = self._shared._emit_mode
         with self._hook_frame():
+            # The drain is registered before anything can fail, not after the
+            # record is built. `_emit` runs customer code -- the content and
+            # result transforms, and `__del__` on an object a displaced record
+            # carried -- and a failure there leaves this hook by way of the SDK's
+            # containment. Registering afterwards meant such a failure skipped
+            # the drain, so records this execution had already scheduled stayed
+            # in a buffering exporter when the environment froze. Registering
+            # here costs nothing when the hook succeeds: the frame runs the drain
+            # once, on the way out, either way.
+            self._request_drain()
             with self._lock:
                 if not self._closed:
                     # Close the gate before emitting so a concurrent late hook for
@@ -447,12 +457,13 @@ class WorkflowInsightPlugin(DurableInstrumentationPlugin, _ExportState):
             # after this call is done, without waiting on records scheduled after the
             # call by other executions.
             #
-            # Asked for rather than performed here, so it runs when the outermost
-            # hook frame on this thread unwinds and every `_lock` hold is released.
-            # See `_hook_frame`: an invocation end that customer code re-entered
-            # from inside another hook's build would otherwise wait for the export
-            # worker while holding the lock that worker may need.
-            self._request_drain()
+            # Asked for rather than performed, so it runs when the outermost hook
+            # frame on this thread unwinds and every `_lock` hold is released. See
+            # `_hook_frame`: an invocation end that customer code re-entered from
+            # inside another hook's build would otherwise wait for the export
+            # worker while holding the lock that worker may need. The request
+            # itself is made at the top of this hook, so a failure in the build
+            # below cannot skip it.
 
     # -- emission -------------------------------------------------------------
 

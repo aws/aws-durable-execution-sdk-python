@@ -545,6 +545,36 @@ def _factory_name(factory: object) -> str:
 _PLUGIN_THREAD_CONTROL_EXCEPTIONS = (KeyboardInterrupt, SystemExit, GeneratorExit)
 
 
+def _contain_plugin_failure(
+    error: BaseException, message: str, *message_args: object
+) -> BaseException | None:
+    """Log what plugin code raised, and return the part that must not be contained.
+
+    Returns ``None`` when the whole failure was contained, or the part that
+    instructs the calling thread to stop, which the caller re-raises.
+
+    A :class:`BaseExceptionGroup` is split rather than tested, because it is
+    neither of the two cases a plain ``isinstance`` chain covers: a group carrying
+    a :class:`KeyboardInterrupt` is not an instance of one, so a tuple handler
+    naming the three does not match it and a broad handler would contain the
+    interrupt inside it. Plugin code produces such a group without asking for it
+    -- an ``asyncio.TaskGroup`` whose task is interrupted raises one -- so the
+    group is partitioned: the control leaves are returned to be re-raised, and
+    what remains is logged like any other contained plugin failure.
+    """
+    control: BaseException | None
+    contained: BaseException | None
+    if isinstance(error, BaseExceptionGroup):
+        control, contained = error.split(_PLUGIN_THREAD_CONTROL_EXCEPTIONS)
+    elif isinstance(error, _PLUGIN_THREAD_CONTROL_EXCEPTIONS):
+        control, contained = error, None
+    else:
+        control, contained = None, error
+    if contained is not None:
+        logger.error(message, *message_args, exc_info=contained)
+    return control
+
+
 class PluginExecutor:
     """One invocation's plugin instances, metadata and dispatch.
 
@@ -632,24 +662,24 @@ class PluginExecutor:
         while the handler is being initialized, so the silent case is not
         reachable through ``durable_execution()``.
 
-        Containment covers every ``BaseException`` except the three that instruct
+        Containment covers every ``BaseException`` except the parts that instruct
         the calling thread to stop; see
-        :data:`_PLUGIN_THREAD_CONTROL_EXCEPTIONS`. Narrowing it to ``Exception``
-        left the contract conditional on a factory never raising outside that
-        hierarchy, and a factory that awaits a cancelled task raises
+        :data:`_PLUGIN_THREAD_CONTROL_EXCEPTIONS` and
+        :func:`_contain_plugin_failure`. Narrowing it to ``Exception`` left the
+        contract conditional on a factory never raising outside that hierarchy,
+        and a factory that awaits a cancelled task raises
         ``asyncio.CancelledError``, which is outside it.
         """
         plugins: list[DurableInstrumentationPlugin] = []
         for factory in self._plugin_factories:
             try:
                 plugin = factory.create_plugin(info)
-            except _PLUGIN_THREAD_CONTROL_EXCEPTIONS:
-                raise
-            except BaseException:  # noqa: BLE001 - a factory must not fail the execution
-                # log and ignore the exception
-                logger.exception(
-                    "Plugin factory %s exception ignored", _factory_name(factory)
+            except BaseException as error:  # noqa: BLE001 - a factory must not fail the execution
+                control = _contain_plugin_failure(
+                    error, "Plugin factory %s exception ignored", _factory_name(factory)
                 )
+                if control is not None:
+                    raise control from None
                 continue
             if plugin is None:
                 logger.error(
@@ -678,11 +708,11 @@ class PluginExecutor:
     def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> None:
         """Invoke the appropriate plugin callback. Runs inside the thread pool.
 
-        Contains every ``BaseException`` except the three that instruct the
-        calling thread to stop, the same rule the factory boundary uses. The
-        thread here is the executor's own single worker, which nothing outside
-        this class cancels or interrupts, so an exception outside the ``Exception``
-        hierarchy arriving here was raised by the plugin.
+        Contains every ``BaseException`` except the parts that instruct the calling
+        thread to stop, the same rule the factory boundary uses. The thread here
+        is the executor's own single worker, which nothing outside this class
+        cancels or interrupts, so an exception outside the ``Exception`` hierarchy
+        arriving here was raised by the plugin.
         """
         try:
             match info:
@@ -702,11 +732,12 @@ class PluginExecutor:
                     plugin.on_user_function_end(info)
                 case _:
                     raise RuntimeError(f"Unknown info type: {type(info)}")
-        except _PLUGIN_THREAD_CONTROL_EXCEPTIONS:
-            raise
-        except BaseException:  # noqa: BLE001 - a hook must not fail the execution
-            # log and ignore the exception
-            logger.exception("Plugin %s exception ignored", plugin.__class__.__name__)
+        except BaseException as error:  # noqa: BLE001 - a hook must not fail the execution
+            control = _contain_plugin_failure(
+                error, "Plugin %s exception ignored", plugin.__class__.__name__
+            )
+            if control is not None:
+                raise control from None
 
     def execute_plugins(self, info, sync):
         """Dispatch one hook to this invocation's plugins.
@@ -725,14 +756,20 @@ class PluginExecutor:
         allocated what its end hook releases.
 
         The invocation-end hook is the one hook that finishes dispatching even
-        when a plugin raises one of those three. Every plugin it reaches has
-        already started, so cutting the loop short costs a plugin its only chance
-        to finish: Insight would not drain, and OTel would leave spans unended.
-        The first such exception is held and re-raised once every plugin has been
+        when a plugin raises one of those. Every plugin it reaches has already
+        started, so cutting the loop short costs a plugin its only chance to
+        finish: Insight would not drain, and OTel would leave spans unended. The
+        first such exception is held and re-raised once every plugin has been
         called, so the thread still stops and nothing is swallowed. No other hook
         defers: stopping a start-hook loop early leaves later plugins with nothing
         to clean up, because the pairing rule above then withholds their end hook
         too.
+
+        Anything :meth:`_dispatch_plugin` raises is already a thread-control
+        failure -- it contains everything else -- so the end path catches
+        ``BaseException`` rather than naming the three again. Naming them would
+        miss a :class:`BaseExceptionGroup` carrying one, which is what
+        :func:`_contain_plugin_failure` hands back.
         """
         if not self._executor:
             return
@@ -752,7 +789,7 @@ class PluginExecutor:
                 continue
             try:
                 self._dispatch_plugin(plugin, info)
-            except _PLUGIN_THREAD_CONTROL_EXCEPTIONS as control:
+            except BaseException as control:  # noqa: BLE001 - held and re-raised below
                 if deferred_control is None:
                     deferred_control = control
         if deferred_control is not None:

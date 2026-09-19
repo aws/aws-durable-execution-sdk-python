@@ -647,6 +647,64 @@ class TestPluginLifetime(unittest.TestCase):
         self.assertEqual(built[0].calls, ["invocation_start:req-1"])
         self.assertEqual(built[1].calls, ["invocation_start:req-2"])
 
+    def test_a_factory_raising_a_group_with_a_control_exception_propagates(self):
+        """A group carrying a control exception is not contained.
+
+        ``BaseExceptionGroup`` is neither of the two cases an ``isinstance`` chain
+        covers: a group holding a ``KeyboardInterrupt`` is not an instance of one,
+        so naming the three in a handler does not match it and a broad handler
+        would swallow the interrupt inside it. Plugin code produces such a group
+        without asking for one -- an ``asyncio.TaskGroup`` whose task is
+        interrupted raises it.
+        """
+        group = BaseExceptionGroup(
+            "plugin group", [ValueError("contained"), KeyboardInterrupt()]
+        )
+        executor = PluginExecutor(plugins=[_GroupRaisingFactory(group)])
+
+        with (
+            self.assertLogs(
+                "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+            ) as logs,
+            executor.run(),
+            self.assertRaises(BaseExceptionGroup) as raised,
+        ):
+            executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=True,
+            )
+
+        # Only the control leaf propagates; the rest was logged as a contained
+        # plugin failure.
+        self.assertEqual(
+            [type(leaf) for leaf in raised.exception.exceptions], [KeyboardInterrupt]
+        )
+        self.assertIn("contained", "\n".join(logs.output))
+
+    def test_a_factory_raising_a_group_without_a_control_exception_is_contained(self):
+        """A group of ordinary failures is contained like any other."""
+        surviving = _TrackingPlugin()
+        group = BaseExceptionGroup("plugin group", [ValueError("boom")])
+        executor = PluginExecutor(
+            plugins=[_GroupRaisingFactory(group), plugin_factory(surviving)],
+        )
+
+        with self.assertLogs(
+            "aws_durable_execution_sdk_python.plugin", level=logging.ERROR
+        ) as logs:
+            with executor.run():
+                executor.on_invocation_start(
+                    execution_arn="arn:exec",
+                    lambda_context=LAMBDA_CTX,
+                    execution_start_time=START_TS,
+                    is_first_invocation=True,
+                )
+
+        self.assertIn("boom", "\n".join(logs.output))
+        self.assertEqual(surviving.calls, ["invocation_start:req-1"])
+
     def test_an_end_hook_that_stops_the_thread_still_finishes_the_dispatch(self):
         """Every started plugin receives the end hook, then the thread stops.
 
@@ -2378,6 +2436,16 @@ class _ThreadControlFactory:
 
     def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
         raise self._control
+
+
+class _GroupRaisingFactory:
+    """Factory that raises a ``BaseExceptionGroup``, as an ``asyncio.TaskGroup`` does."""
+
+    def __init__(self, group: BaseExceptionGroup) -> None:
+        self._group = group
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        raise self._group
 
 
 class _CancellingPlugin(DurableInstrumentationPlugin):
