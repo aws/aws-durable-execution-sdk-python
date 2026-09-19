@@ -47,7 +47,18 @@ A plugin is registered as a *factory*, not as an instance. A factory is an objec
 with a `create_plugin(info)` method taking the invocation's `InvocationStartInfo`
 and returning a `DurableInstrumentationPlugin`; the SDK calls that method once per
 invocation, so the instance it returns serves that one invocation only and can
-hold per-execution state in ordinary attributes.
+hold **per-invocation** state in ordinary attributes.
+
+Per-invocation is narrower than per-execution, and the difference matters. A
+durable execution spans as many invocations as it waits, retries or resumes, and
+the instance is dropped when each of those returns — so anything a plugin keeps in
+its attributes is gone by the next invocation of the same execution. State that
+has to survive that has two honest homes: rebuild it from the operation map the
+invocation hooks carry (`InvocationStartInfo.operations` is a full snapshot,
+which is how the bundled Insight plugin reports operations that completed in an
+earlier invocation), or put it on the factory, which outlives every invocation —
+keyed by execution ARN, and pruned by the owner, because the SDK will not tell the
+factory when an execution ends for good.
 
 A factory is an object with a method rather than a plain callable so the
 registration type can grow a second, optional member later -- a process-level

@@ -505,8 +505,17 @@ class DurableInstrumentationPluginFactory(Protocol):
         :class:`InvocationStartInfo` -- the same object the returned instance's
         ``on_invocation_start`` then receives -- and before any hook fires. The
         instance serves only that invocation and is dropped when it returns, so a
-        plugin can hold per-execution state in ordinary instance attributes
+        plugin can hold that invocation's state in ordinary instance attributes
         without keying it by execution ARN.
+
+        Per invocation is narrower than per execution. A durable execution spans
+        as many invocations as it waits, retries or resumes, so state a plugin
+        leaves in its attributes is gone by the next invocation of the same
+        execution. Anything that has to survive that is rebuilt from the operation
+        map the invocation hooks carry -- ``InvocationStartInfo.operations`` is a
+        full snapshot, including operations that completed in an earlier
+        invocation -- or kept on the factory, which outlives every invocation and
+        is therefore the caller's to key and to prune.
 
         ``info`` is positional-only, so an implementation may name the parameter
         whatever reads best; a named protocol parameter would pin that name for

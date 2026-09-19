@@ -301,22 +301,27 @@ class _ExportScheduler:
             return self._worker is threading.current_thread()
 
     def _request_flush_for_pending_records(self) -> None:
-        """Ask the worker for a flush, but only if a record is waiting for one.
+        """Ask the worker for a flush, unless a flush already in flight covers it.
 
         Returns without waiting, so it is safe to call from the worker itself. The
         barrier is raised to the current schedule counter, which is what makes the
         flush cover a record queued moments ago rather than running before it.
 
-        A pending record is the condition, not a formality. This is called from a
-        drain refused on the worker thread, and one way to reach that is an
-        exporter whose ``flush()`` re-enters a plugin hook: the call then arrives
-        from inside a flush, and requesting the next one unconditionally would
-        produce a flush that re-enters, requests, and flushes again for as long as
-        the environment lives -- after the invocation has returned. Nothing is
-        pending in that case, so nothing is requested.
+        The condition separates the two ways a refused drain is reached, because
+        they need opposite answers. Re-entered from an exporter's ``export()``,
+        the record has already left ``_pending`` -- the worker takes it before it
+        calls the exporter -- so a pending-only test would skip the request and
+        leave that snapshot buffered until the environment froze. Re-entered from
+        an exporter's ``flush()``, a flush is in flight and covers what was
+        exported before it, so requesting another would produce a flush that
+        re-enters, requests, and flushes again for as long as the environment
+        lived -- after the invocation returned. A flush in flight with nothing
+        newly pending is therefore the one case that asks for nothing.
         """
         with self._condition:
-            if self._disabled or not self._pending:
+            if self._disabled:
+                return
+            if not self._pending and self._flush_in_flight is not None:
                 return
             self._flush_requested = True
             self._flush_barrier = max(self._flush_barrier, self._seq)

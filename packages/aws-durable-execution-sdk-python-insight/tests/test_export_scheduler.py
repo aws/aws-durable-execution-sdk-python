@@ -968,3 +968,50 @@ def test_a_drain_refused_from_inside_a_flush_does_not_re_arm_it() -> None:
     # assertion: an unconditional request never settles.
     assert not _wait_until(lambda: exporter.flushes > flushes_after_drain, timeout=1.0)
     assert _wait_until(lambda: not scheduler._worker_alive())
+
+
+class ReentrantDrainDuringExportExporter(CaptureExporter):
+    """Exporter whose export() drains without queueing anything new.
+
+    The worker takes a record out of the pending map before it calls the
+    exporter, so a hook re-entered from inside ``export()`` and reaching an
+    invocation end that emits no record finds nothing pending -- while the record
+    it was just handed is still only in the exporter's buffer.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scheduler: _ArnScheduler | None = None
+        self.returned = threading.Event()
+        self._reentered = False
+
+    def export(self, record: dict[str, Any]) -> None:
+        super().export(record)
+        assert self.scheduler is not None
+        if self._reentered:
+            return
+        self._reentered = True
+        self.scheduler.drain(ARN_B)
+        self.returned.set()
+
+
+def test_a_drain_refused_from_inside_an_export_still_flushes() -> None:
+    """A refused drain from inside an export asks for a flush.
+
+    The record it must cover has already left the pending map, so a
+    pending-only condition would leave that snapshot in a buffering exporter
+    when the environment froze -- which is the loss the refusal path exists to
+    prevent, arriving by the other door.
+    """
+    exporter = ReentrantDrainDuringExportExporter()
+    scheduler = _ArnScheduler([exporter])
+    exporter.scheduler = scheduler
+
+    scheduler.schedule(ARN_A, _record("r1"))
+
+    assert exporter.returned.wait(timeout=10), "the refused drain must return"
+    assert _wait_until(lambda: ("flush", None) in exporter.calls), (
+        "the exported record must be flushed even though nothing was pending"
+    )
+    assert ("export", "r1") in exporter.calls
+    assert _wait_until(lambda: not scheduler._worker_alive())
