@@ -533,6 +533,20 @@ class DurableInstrumentationPluginFactory(Protocol):
         ...
 
 
+def _type_name(value: object) -> str:
+    """Best available name for a value's type, for log messages.
+
+    Reads the type rather than the value, so no instance ``__getattr__`` or
+    ``__getattribute__`` runs, and wraps the lookup, because these names are built
+    while a plugin failure is being contained: a name that raises would turn a
+    contained failure into a failed execution.
+    """
+    try:
+        return type(value).__qualname__
+    except BaseException:  # noqa: BLE001 - a name is never worth failing a hook for
+        return "<unnamed>"
+
+
 def _factory_name(factory: object) -> str:
     """Best available name for a factory, for log messages.
 
@@ -550,9 +564,9 @@ def _factory_name(factory: object) -> str:
     try:
         if isinstance(factory, type):
             return factory.__qualname__
-        return type(factory).__qualname__
     except BaseException:  # noqa: BLE001 - a name is never worth failing a hook for
         return "<unnamed factory>"
+    return _type_name(factory)
 
 
 # Raised out of plugin code, these three are not reports of a plugin defect but
@@ -711,7 +725,7 @@ class PluginExecutor:
                     "Plugin factory %s returned %s, which is not a "
                     "DurableInstrumentationPlugin; plugin ignored",
                     _factory_name(factory),
-                    type(plugin).__qualname__,
+                    _type_name(plugin),
                 )
                 continue
             plugins.append(plugin)
