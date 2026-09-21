@@ -33,6 +33,7 @@ from aws_durable_execution_sdk_python_insight.operations_index import (
 )
 from aws_durable_execution_sdk_python_insight.plugin import (
     WorkflowInsightPlugin,
+    WorkflowInsightPluginFactory,
     workflow_insight,
 )
 from aws_durable_execution_sdk_python_insight.truncation import truncate_record
@@ -77,6 +78,7 @@ __all__ = [
     "SQSExporter",
     "WorkflowInsightConfig",
     "WorkflowInsightPlugin",
+    "WorkflowInsightPluginFactory",
     "apply_operations_format",
     "build_operations_by_name",
     "truncate_record",

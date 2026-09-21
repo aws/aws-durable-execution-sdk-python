@@ -1,8 +1,8 @@
 """10-5: Multiple registered plugins all receive lifecycle hooks.
 
 Two instrumentation plugins are registered together, in order A then B, through
-the SDK's real ``plugins=[...]`` parameter. Each emits its own prefixed lines
-from the invocation-start / invocation-end hooks.
+the SDK's real ``plugins=[...]`` parameter, which takes their factories. Each
+emits its own prefixed lines from the invocation-start / invocation-end hooks.
 """
 
 import json
@@ -45,6 +45,21 @@ class PluginA(DurableInstrumentationPlugin):
         )
 
 
+class PluginAFactory:
+    """Builds one :class:`PluginA` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> PluginA:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return PluginA()
+
+
 class PluginB(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         _emit(
@@ -60,12 +75,27 @@ class PluginB(DurableInstrumentationPlugin):
         )
 
 
+class PluginBFactory:
+    """Builds one :class:`PluginB` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> PluginB:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return PluginB()
+
+
 @durable_step
 def greet(_step_context: StepContext, name: str) -> str:
     return f"Hello, {name}!"
 
 
-@durable_execution(plugins=[PluginA(), PluginB()])
+@durable_execution(plugins=[PluginAFactory(), PluginBFactory()])
 def handler(event: Any, context: DurableContext) -> str:
     result: str = context.step(greet(event))
     return result

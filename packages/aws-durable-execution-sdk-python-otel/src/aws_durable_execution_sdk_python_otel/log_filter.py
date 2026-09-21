@@ -13,11 +13,67 @@ The span/trace identifiers are added as ``LogRecord`` attributes:
 These attributes are only set when a valid span context is active. Records
 emitted outside an active invocation (e.g. during Lambda teardown) pass through
 unmodified, so any log formatter or schema must treat the fields as optional.
+
+Resolving *which* invocation a record belongs to
+-----------------------------------------------
+
+A logging handler is process-global and outlives every invocation, while a
+plugin instance serves exactly one invocation. Concurrent executions in one
+environment (Lambda Managed Instances) therefore have several plugin instances
+alive at once, all reachable from one installed filter. The filter must not hold
+a single mutable reference to "the" plugin: whichever invocation started last
+would win, and every other invocation's records would be stamped with its trace.
+
+So the binding is per invocation, not per filter:
+
+    - ``bind_invocation`` marks an invocation open and claims the calling
+      thread/task for it, through a :class:`contextvars.ContextVar`. A record
+      emitted on a claimed thread resolves to the invocation that claimed it,
+      which is per-thread and per-task and so cannot be overwritten by a
+      concurrent invocation. The claim is a weak reference, so a pool thread
+      that is never used again cannot pin a finished invocation's plugin.
+    - ``unbind_invocation`` marks the invocation closed.
+    - The claim reaches the thread running the handler body because the SDK
+      submits that work with a copy of the invocation thread's context, taken
+      after the invocation-start hook has run. Records from top-level handler
+      code therefore resolve to their own invocation, including the first
+      statement of the handler, before any durable operation has claimed the
+      thread directly.
+    - A branch of a map or parallel runs on a pool thread the invocation's
+      context was not copied into, so the plugins claim that thread from the
+      hooks that run on it before the branch body does.
+    - A record emitted on a thread that carries no live claim is left unstamped,
+      whatever the number of open invocations. Two threads carry no claim: the
+      SDK's background checkpointing thread, and a thread customer code starts
+      itself, since Python does not copy context into a new thread. Correlation
+      is lost for those records.
+
+Resolving an unclaimed record against the single open invocation, when exactly
+one is open, would be wrong in two orderings. A thread claimed by invocation A
+keeps that claim after A ends, because a :class:`contextvars.ContextVar` can only
+be reset by the thread that set it, so a record A's thread emits while B is the
+only open invocation would be stamped with B's trace. A record emitted on
+invocation B's own thread before B reaches its invocation-start hook carries no
+claim at all, so while A is the only open invocation it would be stamped with A's
+trace. Both stamp one customer's execution onto another's, which is a larger
+defect than an unattributed record, so a live claim is required and the count of
+open invocations is never consulted.
+
+Reading the active span straight from the OTel context (as the Java plugin's
+static ``MdcSpanEnricher`` does) is not sufficient here: the invocation span is
+never attached to the OTel context, so a record emitted between durable
+operations would find no durable span current and silently lose correlation. The
+plugin's ``get_current_span_context()`` still reads the OTel context first, so
+records emitted inside a step or child context resolve to the active operation
+span exactly as before.
 """
 
 from __future__ import annotations
 
+import contextvars
 import logging
+import threading
+import weakref
 from typing import TYPE_CHECKING, Protocol
 
 from opentelemetry.trace import TraceFlags
@@ -38,30 +94,132 @@ class _SpanContextProvider(Protocol):
     def get_current_span_context(self) -> SpanContext | None: ...
 
 
+# Guards the open-invocation registry. Held for the length of a set membership
+# test or a single mutation, never while a plugin is called.
+_registry_lock = threading.Lock()
+
+# Invocations that have started and not yet ended. Weak so that a plugin whose
+# end hook never ran (a process torn down mid-invocation) cannot keep itself,
+# and the spans it holds, alive for the life of the environment.
+_open_invocations: weakref.WeakSet[_SpanContextProvider] = weakref.WeakSet()
+
+# The invocation owning the current thread/task. Set by bind_invocation on every
+# thread the owning plugin is given control on.
+#
+# A weak reference, because a claim outlives the invocation that made it on every
+# thread except the one that ends it: a ContextVar can only be reset by the
+# thread that set it, so a pool thread that is never used again keeps whatever
+# the claim holds. A strong claim would therefore pin a finished invocation's
+# plugin, its spans and its context tokens for the life of the execution
+# environment, and would also defeat _open_invocations being weak, since a
+# plugin whose end hook never ran would stay reachable through the claim. While
+# an invocation is open the SDK holds its plugin, which is what keeps the
+# referent alive for every record the filter resolves.
+_current_invocation: contextvars.ContextVar[
+    weakref.ref[_SpanContextProvider] | None
+] = contextvars.ContextVar("durable_execution_otel_invocation", default=None)
+
+# Serializes installation so two invocations starting at once cannot both find
+# a handler filterless and both add a filter to it.
+_install_lock = threading.Lock()
+
+
+def bind_invocation(provider: _SpanContextProvider) -> None:
+    """Mark ``provider``'s invocation open and claim this thread/task for it.
+
+    Called by a plugin when it takes control on a thread: at invocation start on
+    the Lambda handler thread, and again from the hooks that run on the threads
+    executing user code. Idempotent, so a plugin can call it from every such
+    hook without tracking which threads it has already claimed.
+
+    A thread that already carries this provider's claim returns before taking the
+    registry lock. Every operation-start and user-function-start hook calls this,
+    and after the first call on a thread there is nothing to add: membership in
+    the open-invocation set is idempotent, and the claim is already in place.
+
+    Args:
+        provider: The plugin serving the invocation that owns this thread.
+    """
+    claim = _current_invocation.get()
+    if claim is not None and claim() is provider:
+        return
+    with _registry_lock:
+        _open_invocations.add(provider)
+    _current_invocation.set(weakref.ref(provider))
+
+
+def unbind_invocation(provider: _SpanContextProvider) -> None:
+    """Mark ``provider``'s invocation closed and release its claim on this thread.
+
+    Claims made on other threads are not released here -- a context can only be
+    reset from the thread that set it -- so :func:`_resolve_provider` also checks
+    that a claim names a still-open invocation. That check is what keeps a
+    pooled thread outliving its invocation from correlating a later record to a
+    finished one.
+
+    Args:
+        provider: The plugin whose invocation has ended.
+    """
+    with _registry_lock:
+        _open_invocations.discard(provider)
+    claim = _current_invocation.get()
+    if claim is not None and claim() is provider:
+        _current_invocation.set(None)
+
+
+def _resolve_provider() -> _SpanContextProvider | None:
+    """Return the invocation to correlate a record emitted right here against.
+
+    A claim is only honoured while the invocation naming it is still open. A
+    :class:`contextvars.ContextVar` can only be reset by the thread that set it,
+    so ``unbind_invocation`` leaves the claim in place on every other thread the
+    invocation claimed; without the liveness check a pooled thread would keep
+    correlating records to a finished invocation.
+
+    A thread with no live claim resolves to nothing, even when exactly one
+    invocation is open. Deciding by count would attribute the record to that
+    invocation, and two orderings make that the wrong one: a thread still
+    carrying a finished invocation's claim, and an invocation's own thread that
+    has not reached its invocation-start hook yet.
+
+    A claim whose referent has been collected resolves to nothing as well. The
+    claim is weak, so a plugin the SDK has released can be gone while the claim
+    that named it remains on a pool thread. A collected referent means the
+    invocation is over, which is the same answer the liveness check gives.
+    """
+    claim = _current_invocation.get()
+    if claim is None:
+        return None
+    claimed = claim()
+    if claimed is None:
+        return None
+    with _registry_lock:
+        if claimed in _open_invocations:
+            return claimed
+    return None
+
+
 class OtelContextLogFilter(logging.Filter):
     """Logging filter that injects the active OTel span context onto records.
 
-    The filter is a pure reader of the plugin's current span context. It
-    resolves the span at emit time, on the thread that emits the record, via
-    ``plugin.get_current_span_context()``. That method returns the active
-    operation span inside steps and child contexts (attached to the worker
-    thread's OTel context) and falls back to the invocation span for top-level
-    handler code.
+    The filter holds no state: it resolves the invocation and the span at emit
+    time, on the thread that emits the record, so one installed filter serves
+    any number of concurrent invocations. Resolution is described in the module
+    docstring; the span itself comes from that invocation's
+    ``get_current_span_context()``, which returns the active operation span
+    inside steps and child contexts and falls back to the invocation span for
+    top-level handler code.
 
     The filter never caches identifiers and always returns ``True`` so it never
     drops a record.
-
-    Args:
-        plugin: The OTel plugin instance that resolves the current span context.
     """
-
-    def __init__(self, plugin: _SpanContextProvider) -> None:
-        super().__init__()
-        self._plugin = plugin
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Stamp the active span context onto the record, then allow it through."""
-        span_context = self._plugin.get_current_span_context()
+        provider = _resolve_provider()
+        if provider is None:
+            return True
+        span_context = provider.get_current_span_context()
         if span_context and span_context.is_valid:
             record.traceId = format(span_context.trace_id, "032x")
             record.spanId = format(span_context.span_id, "016x")
@@ -72,7 +230,6 @@ class OtelContextLogFilter(logging.Filter):
 
 
 def install_log_filter(
-    plugin: _SpanContextProvider,
     target_logger: logging.Logger | None = None,
 ) -> OtelContextLogFilter | None:
     """Attach an OtelContextLogFilter to a logger's handlers, idempotently.
@@ -82,13 +239,14 @@ def install_log_filter(
     records propagated from child loggers are also enriched, since handler
     filters run for every record reaching the handler.
 
-    This is safe to call on every invocation: if a handler already has an
-    OtelContextLogFilter, it is left as-is, so warm Lambda reuse will not stack
-    duplicate filters. A single shared filter instance is reused across all
-    handlers.
+    This is safe to call on every invocation, and from several at once: the
+    check for an already-installed filter and the install that follows it happen
+    under one lock, so concurrent first-time callers cannot stack duplicate
+    filters on a handler. Installation carries no invocation identity -- see
+    :func:`bind_invocation` for that -- so a warm environment reuses the
+    filter installed by the first invocation as is.
 
     Args:
-        plugin: The OTel plugin that resolves the current span context.
         target_logger: Logger whose handlers receive the filter. Defaults to the
             root logger, which in AWS Lambda is where runtime log handlers live.
 
@@ -98,18 +256,20 @@ def install_log_filter(
     """
     logger = target_logger if target_logger is not None else logging.getLogger()
 
-    context_filter: OtelContextLogFilter | None = None
-    for handler in logger.handlers:
-        existing = next(
-            (f for f in handler.filters if isinstance(f, OtelContextLogFilter)),
-            None,
-        )
-        if existing is not None:
-            # Reuse the already-installed filter so a single instance is shared.
-            context_filter = existing
-            continue
-        if context_filter is None:
-            context_filter = OtelContextLogFilter(plugin)
-        handler.addFilter(context_filter)
+    with _install_lock:
+        context_filter: OtelContextLogFilter | None = None
+        for handler in logger.handlers:
+            existing = next(
+                (f for f in handler.filters if isinstance(f, OtelContextLogFilter)),
+                None,
+            )
+            if existing is not None:
+                # Reuse the already-installed filter so a single instance is
+                # shared by every handler.
+                context_filter = existing
+                continue
+            if context_filter is None:
+                context_filter = OtelContextLogFilter()
+            handler.addFilter(context_filter)
 
-    return context_filter
+        return context_filter

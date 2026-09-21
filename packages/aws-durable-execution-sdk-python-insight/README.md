@@ -42,6 +42,13 @@ def handler(event, context):
     ...
 ```
 
+`workflow_insight()` returns a plugin *factory*, which is what the SDK's
+`plugins` argument takes: the SDK calls its `create_plugin` once per invocation to
+build that invocation's plugin instance. The factory holds the resolved
+configuration and the exporters, so configuration is per handler while record
+state is per invocation. Its type is `WorkflowInsightPluginFactory`, exported from
+the package root for annotating a value you hold.
+
 With no exporter configured, records are written to the function's own
 CloudWatch log group as single JSON lines (the `LambdaLogExporter` default),
 carrying the name-keyed `operationsByName` summary. The `S3Exporter` writes the
@@ -215,11 +222,27 @@ Behavior is validated cross-SDK by the `insight` conformance suite
 (`aws-durable-execution-conformance-tests-insight`).
 
 > **Note (asynchronous export).** Export rendering, truncation, `export()`, and
-> `flush()` run on one lazy background worker per plugin. Checkpoint hooks only
-> replace the latest pending snapshot and wake the worker. Consecutive
-> `on-change` snapshots may coalesce while an export is in flight. An invocation
-> that emits a record drains the latest snapshot and flushes exporters before it
-> returns; invocations that emit nothing do not start or flush the worker.
+> `flush()` run on one lazy background worker per registered factory. Checkpoint
+> hooks only replace the latest pending snapshot and wake the worker. Consecutive
+> `on-change` snapshots may coalesce while an export is in flight. Every
+> sampled-in invocation end drains the latest snapshot and flushes exporters
+> before it returns, including an end that emitted no record: a buffering
+> exporter therefore sees one flush per sampled-in invocation end, which is the
+> cadence the JS and Java plugins have. Only a sampled-out execution neither
+> exports nor flushes.
+
+> **Note (invocation-end latency under concurrency).** The drain an invocation
+> end performs waits for every record any execution had pending when it was
+> called, and one worker serializes all exports and all flushes, so every
+> concurrently ending invocation is released together at the slowest one. The wait
+> therefore grows with the number of executions the environment is running, not
+> just with this execution's own work: measured with a 30 ms exporter, one
+> execution ended in ~72 ms and 48 concurrent executions in ~1.8 s each. That is
+> the deliberate trade against the alternative — releasing an end before its
+> record reached the exporters, which is what silently lost terminal records
+> before. It matters for an exporter that makes a network call per record: budget
+> invocation-end time against the environment's concurrency, not against one
+> execution.
 
 ## Requirements
 

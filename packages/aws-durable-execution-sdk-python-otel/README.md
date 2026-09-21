@@ -39,8 +39,14 @@ processors, and exporter.
 
 1. Add the [ADOT Lambda Layer](#1-adot-lambda-layer) to your function and set `AWS_LAMBDA_EXEC_WRAPPER=/opt/otel-instrument`
 2. Enable [X-Ray Active Tracing](#2-aws-x-ray-active-tracing) on the function
-3. Pass `InvocationOtelPlugin` to your handler's `plugins` list
+3. Pass `InvocationOtelPluginFactory()` to your handler's `plugins` list
 4. Add X-Ray write permissions
+
+The SDK's `plugins` list takes plugin *factories*, not plugin instances: it calls
+each factory's `create_plugin` once per invocation and the plugin it returns
+serves that one invocation. `InvocationOtelPluginFactory` and
+`ExecutionOtelPluginFactory` are the factories for the two bundled plugins; each
+takes the optional `OtelPluginConfig` that every plugin it builds will use.
 
 Alternatively, install this package in the function artifact or a Lambda layer
 and select either OTel plugin by entry-point name:
@@ -50,10 +56,11 @@ DURABLE_EXECUTION_PLUGINS=otel-invocation
 DURABLE_EXECUTION_PLUGINS=otel-execution
 ```
 
-`otel-invocation` creates `InvocationOtelPlugin`; `otel-execution` creates
-`ExecutionOtelPlugin`. The SDK discovers the selected package entry point at
-cold start, so the handler does not need to import or explicitly register the
-plugin.
+`otel-invocation` names a default-configured `InvocationOtelPluginFactory`;
+`otel-execution` names a default-configured `ExecutionOtelPluginFactory`. The SDK
+discovers the selected package entry point at cold start and calls its
+`create_plugin` once per invocation, so the handler does not need to import or
+explicitly register the plugin.
 
 ### 1. ADOT Lambda Layer
 
@@ -161,10 +168,10 @@ lambda_.Function(
 ```python
 from aws_durable_execution_sdk_python import DurableContext
 from aws_durable_execution_sdk_python.execution import durable_execution
-from aws_durable_execution_sdk_python_otel import InvocationOtelPlugin
+from aws_durable_execution_sdk_python_otel import InvocationOtelPluginFactory
 
 
-@durable_execution(plugins=[InvocationOtelPlugin()])
+@durable_execution(plugins=[InvocationOtelPluginFactory()])
 def handler(event: dict, context: DurableContext) -> dict:
     result = context.step(lambda _: fetch_data(event["id"]), name="fetch-data")
 
@@ -199,12 +206,12 @@ See the [ADOT sampling configuration](https://aws-otel.github.io/docs/getting-st
 
 ```python
 from aws_durable_execution_sdk_python_otel import (
-    InvocationOtelPlugin,
+    InvocationOtelPluginFactory,
     OtelPluginConfig,
     xray_context_extractor,
 )
 
-plugin = InvocationOtelPlugin(
+plugin_factory = InvocationOtelPluginFactory(
     OtelPluginConfig(
         # Use a custom context extractor (default: xray_context_extractor).
         context_extractor=xray_context_extractor,
@@ -217,6 +224,9 @@ plugin = InvocationOtelPlugin(
     )
 )
 ```
+
+The config is resolved once and shared by every plugin the factory builds, so
+configuration is per handler while plugin state is per invocation.
 
 ### Context Extractors
 
@@ -232,17 +242,19 @@ context:
 
 ```python
 from aws_durable_execution_sdk_python_otel import (
-    InvocationOtelPlugin,
+    InvocationOtelPluginFactory,
     OtelPluginConfig,
     w3c_client_context_extractor,
     xray_context_extractor,
 )
 
 # Default: X-Ray trace header (recommended for most Lambda deployments).
-InvocationOtelPlugin(OtelPluginConfig(context_extractor=xray_context_extractor))
+InvocationOtelPluginFactory(OtelPluginConfig(context_extractor=xray_context_extractor))
 
 # W3C Trace Context via clientContext (placeholder for backend propagation support).
-InvocationOtelPlugin(OtelPluginConfig(context_extractor=w3c_client_context_extractor))
+InvocationOtelPluginFactory(
+    OtelPluginConfig(context_extractor=w3c_client_context_extractor)
+)
 ```
 
 Custom extractors should return `ExtractedContext`, not an OpenTelemetry
@@ -300,15 +312,41 @@ each durable span in the same invocation.
 ### Log Correlation
 
 When `enrich_logger=True` (the default), the plugin installs a logging filter on
-the root logger at invocation start. The filter stamps the active OTel trace
-context onto every emitted log record using these attributes:
+the root logger at invocation start. The filter stamps the trace context that is
+active for the emitting invocation onto log records, using these attributes:
 
 - `traceId`: 32-char hex trace identifier
 - `spanId`: 16-char hex span identifier
 - `otelTraceSampled`: boolean indicating if the trace is sampled
 
-These attributes are only set when a valid span context is active, so any log
-formatter or schema must treat the fields as optional.
+Which span a record carries follows the emitting thread: the operation attempt
+span inside a step, the context span inside a child context, and the Invocation
+span for top-level handler code. A span you start yourself on the execution
+trace is used for records emitted inside it. A span the runtime already had
+active when the invocation started — the Lambda invocation span the ADOT layer
+creates under X-Ray active tracing — is the parent of the Invocation span rather
+than a substitute for it, so a top-level record still names the Invocation span.
+Correlation holds from the first statement of the handler, before any durable
+operation, and holds when several invocations run concurrently in one
+environment (Lambda Managed Instances): the plugin claims the invocation thread
+at invocation start and the SDK runs the handler body in a copy of that thread's
+context, so each record resolves to the invocation that emitted it rather than
+to whichever invocation started last. A branch of a `map` or `parallel` runs on
+a pool thread the invocation's context was not copied into, and the plugin
+claims that thread from the hooks that run on it before your branch body does.
+
+Two cases are left unstamped, so any log formatter or schema must treat the
+fields as optional:
+
+- No invocation is open — for example during environment initialization or
+  teardown.
+- The record is emitted on a thread that carries no invocation claim. A thread
+  your code starts itself is such a thread, since Python does not copy context
+  into a new thread, as is the SDK's background checkpointing thread. The number
+  of invocations open in the environment does not change this: attributing an
+  unclaimed record to the single open invocation would be wrong whenever the
+  emitting thread belongs to a different invocation, and an uncorrelated record
+  is preferred over one carrying another execution's trace.
 
 ## Verification
 
@@ -339,12 +377,15 @@ After deploying your function with the plugin configured:
 
 ## API Reference
 
-### `InvocationOtelPlugin`
+### `InvocationOtelPluginFactory`
 
-Invocation-rooted view. Implements `DurableInstrumentationPlugin` from `aws_durable_execution_sdk_python`.
+Factory for the invocation-rooted plugin, and what belongs in the SDK's `plugins`
+list. Satisfies `DurableInstrumentationPluginFactory` from
+`aws_durable_execution_sdk_python`: its `create_plugin(info)` takes an
+`InvocationStartInfo` and returns the `InvocationOtelPlugin` for that invocation.
 
 ```python
-InvocationOtelPlugin(
+InvocationOtelPluginFactory(
     OtelPluginConfig(
         tracer_provider=None,
         context_extractor=None,
@@ -356,13 +397,36 @@ InvocationOtelPlugin(
 ```
 
 Pass `tracer_provider=...` when the application owns the OpenTelemetry SDK
-provider. When omitted, the globally configured provider is used.
+provider. When omitted, the globally configured provider is used, resolved per
+invocation so a provider installed after the handler module is imported is still
+picked up.
+
+`INVOCATION_OTEL_PLUGIN_FACTORY` is the default-configured instance the
+`otel-invocation` entry point names.
+
+### `ExecutionOtelPluginFactory`
+
+Factory for the execution-rooted plugin, with the same construction and config as
+`InvocationOtelPluginFactory`. `EXECUTION_OTEL_PLUGIN_FACTORY` is the
+default-configured instance the `otel-execution` entry point names.
+
+### `InvocationOtelPlugin`
+
+Invocation-rooted view. Implements `DurableInstrumentationPlugin` from
+`aws_durable_execution_sdk_python`. One instance serves exactly one invocation:
+the SDK builds it from the factory before the first hook fires and drops it when
+the invocation ends, so it holds its span registry and context tokens in ordinary
+instance state. Construct it directly only when driving the hooks yourself; in a
+handler, register the factory instead.
 
 ### `ExecutionOtelPlugin`
 
 Execution-rooted view. Uses the same execution ancestor and sampling behavior as
 `InvocationOtelPlugin`, but parents operation spans under Workflow and links
-them to Invocation.
+them to Invocation. Also one instance per invocation; the identities that must
+agree across invocations (the trace ID, the Workflow span ID, and each
+operation's span ID) are derived deterministically from the execution ARN rather
+than carried in memory.
 
 ### `DeterministicIdGenerator`
 
@@ -392,12 +456,15 @@ Structured trace context and sampling decision returned by context extractors.
 
 The logging filter (and its installer) used to stamp trace context onto log
 records. Installed automatically when `enrich_logger=True`; exported for manual
-setups.
+setups, where `install_log_filter(target_logger)` attaches it to a logger of your
+choice. The filter carries no invocation identity of its own: it resolves the
+invocation a record belongs to at emit time, so one filter serves every
+invocation the environment runs, including concurrent ones.
 
 ## Requirements
 
 - Python >= 3.11
-- `aws-durable-execution-sdk-python` >= 2.0.0
+- `aws-durable-execution-sdk-python` >= 3.0.0
 - An ADOT/community OpenTelemetry Lambda layer, or the `standalone` extra
 
 ## License
