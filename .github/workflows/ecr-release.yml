@@ -46,7 +46,7 @@ jobs:
 
       - name: Set up QEMU for multi-platform builds
         if: matrix.arch == 'arm64'
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           platforms: arm64
 
@@ -62,7 +62,7 @@ jobs:
           echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.ECR_UPLOAD_IAM_ROLE_ARN }}
           aws-region: ${{ env.aws_region }}
@@ -93,7 +93,7 @@ jobs:
     needs: [build-and-upload-image-to-ecr]
     steps:
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.ECR_UPLOAD_IAM_ROLE_ARN }}
           aws-region: ${{ env.aws_region }}
