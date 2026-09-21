@@ -13,8 +13,10 @@ map on ``InvocationStartInfo`` / ``InvocationEndInfo`` / ``OperationChangeInfo``
 from __future__ import annotations
 
 import datetime
+import threading
 from typing import Any
 
+import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationStatus,
@@ -368,10 +370,14 @@ def test_cold_resume_reports_prior_terminal_ops_with_fresh_plugin():
     assert rec["durationMs"] is not None and rec["durationMs"] >= 0
 
 
-# -- on-change schedules progress and delivers terminal state ----------------
+# -- on-change delivers every record when nothing coalesces ------------------
 
 
-def test_on_change_schedules_running_and_delivers_terminal():
+def test_on_change_delivers_every_record_when_drained_between_hooks():
+    # Draining after each hook removes the worker race, so this pins the
+    # "no back-pressure means no loss" contract: one RUNNING per start/change
+    # plus the terminal record, in order. (The coalescing contract itself is
+    # pinned in test_export_scheduler.py with a blocked exporter.)
     exporter = CaptureExporter()
     plugin = workflow_insight(
         WorkflowInsightConfig(exporters=[exporter], emit_mode="on-change")
@@ -380,26 +386,71 @@ def test_on_change_schedules_running_and_delivers_terminal():
     op2 = _step("s2", op_id="2")
 
     plugin.on_invocation_start(_start(operations={}))
+    plugin._scheduler.drain()
     plugin.on_operation_change(
         OperationChangeInfo(
             execution_arn=ARN, updated_operations=_ops(op1), operations=_ops(op1)
         )
     )
+    plugin._scheduler.drain()
     plugin.on_operation_change(
         OperationChangeInfo(
             execution_arn=ARN, updated_operations=_ops(op2), operations=_ops(op1, op2)
         )
     )
+    plugin._scheduler.drain()
     plugin.on_invocation_end(_end(operations=_ops(op1, op2)))
 
     statuses = [record["status"] for record in exporter.records]
-    assert statuses
-    assert statuses[-1] == "SUCCEEDED"
-    assert set(statuses[:-1]) <= {"RUNNING"}
+    assert statuses == ["RUNNING", "RUNNING", "RUNNING", "SUCCEEDED"]
     final = exporter.records[-1]
     assert [op["name"] for op in final["operations"]] == ["s1", "s2"]
     ids = [op["id"] for op in final["operations"]]
     assert len(ids) == len(set(ids))
+
+
+# -- concurrent executions on one plugin keep their terminal records ---------
+
+
+@pytest.mark.parametrize("emit_mode", ["on-complete", "on-change"])
+def test_concurrent_executions_on_one_plugin_each_deliver_terminal_record(
+    emit_mode,
+):
+    # Two executions in flight on one plugin (as the local runner does). Each
+    # invocation end must deliver its own terminal record; a shared pending
+    # slot let one execution's RUNNING snapshot displace the other's terminal.
+    rounds = 50
+    exporter = CaptureExporter()
+    plugin = workflow_insight(
+        WorkflowInsightConfig(exporters=[exporter], emit_mode=emit_mode)
+    )
+
+    def drive(arn: str) -> None:
+        op = _step(f"{arn}-step", op_id=f"{arn}-1")
+        for _ in range(rounds):
+            plugin.on_invocation_start(_start(arn, operations={}))
+            plugin.on_operation_change(
+                OperationChangeInfo(
+                    execution_arn=arn, updated_operations=_ops(op), operations=_ops(op)
+                )
+            )
+            plugin.on_invocation_end(_end(arn, operations=_ops(op)))
+
+    threads = [threading.Thread(target=drive, args=(arn,)) for arn in (ARN, ARN_B)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30.0)
+    assert not any(thread.is_alive() for thread in threads)
+
+    for arn in (ARN, ARN_B):
+        terminal = [
+            r
+            for r in exporter.records
+            if r["executionArn"] == arn and r["status"] == "SUCCEEDED"
+        ]
+        assert len(terminal) == rounds
+    assert plugin._state == {}
 
 
 # -- no cross-execution contamination (comment 3) ----------------------------
