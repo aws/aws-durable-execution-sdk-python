@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       region:
@@ -44,13 +44,12 @@ jobs:
 
   cloud:
     needs: harness
-    # Start with manual runs and explicit trusted PR opt-in; no scheduled cloud job.
+    # Run on every main push and trusted PR update, including drafts.
+    # Match the repository's cloud credential restrictions for forks/Dependabot.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       github.actor != 'dependabot[bot]' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       contains(github.event.pull_request.labels.*.name, 'run-lmi-e2e'))
+      github.event_name != 'pull_request' ||
+      (github.actor != 'dependabot[bot]' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 55
     permissions:
@@ -62,9 +61,6 @@ jobs:
       matrix:
         python: ['3.13', '3.14']
         concurrency: [1, 2]
-    concurrency:
-      group: python-lmi-e2e-${{ matrix.python }}-${{ matrix.concurrency }}
-      cancel-in-progress: false
     env:
       AWS_REGION: ${{ inputs.region || 'us-west-2' }}
       CAPACITY_PROVIDER_ARN: ${{ secrets.CAPACITY_PROVIDER_ARN }}

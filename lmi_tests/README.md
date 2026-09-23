@@ -7,9 +7,10 @@ It follows the separate cloud-suite approach in
 [Java PR #728](https://github.com/aws/aws-durable-execution-sdk-java/pull/728).
 It changes no production SDK code. The deadline and early-completion regressions
 are **expected to fail on the current SDK**. They are ordinary failing assertions,
-with no `xfail`, swallowed failure, or expected-failure success status. Cloud tests
-and local red regressions require explicit opt-in; the ordinary test suite remains
-usable while the fix is designed.
+with no `xfail`, swallowed failure, or expected-failure success status. CI runs the
+cloud suite automatically on every trusted PR update and main push. Local cloud
+runs and local red regressions require explicit commands; the ordinary local test
+suite remains usable while the fix is designed.
 
 ## Run locally
 
@@ -156,13 +157,21 @@ An unexecuted scenario is never summarized as passing.
 
 ## CI and resource ownership
 
-The dedicated workflow runs the green harness checks on PRs and main pushes.
-Cloud tests initially run on `workflow_dispatch` or same-repository PRs labeled
-`run-lmi-e2e`, excluding Dependabot and forks. It reuses `TEST_ROLE_ARN`,
-`TEST_ACCOUNT_ID`, and `TEST_LAMBDA_EXECUTION_ROLE_ARN` with OIDC. Cloud checks are
-intentionally not required green until #741 is implemented and cloud placement /
-timing has been validated. Scheduled and larger stress runs can be added after
-this suite is stable.
+The dedicated workflow runs the harness and full LMI cloud matrix automatically
+when a same-repository PR is opened, updated, or reopened (including Draft PRs),
+and on every push to `main`, including merged changes. There are no path filters,
+label requirements, or ready-for-review requirements. `workflow_dispatch` remains
+available for manual reruns; there are no scheduled jobs.
+
+Each workflow run has its own resources and runs its four matrix entries
+sequentially. Runs do not share a GitHub concurrency group, so a new PR update or
+main push cannot replace another commit's pending cloud job.
+
+Privileged cloud jobs retain the repository's existing restrictions for forked PRs
+and Dependabot; the harness still runs for those PRs. Cloud jobs reuse
+`TEST_ROLE_ARN`, `TEST_ACCOUNT_ID`, and `TEST_LAMBDA_EXECUTION_ROLE_ARN` with OIDC.
+The #741 regression assertions remain visibly failing until its fix lands; they
+are not skipped or converted into expected-success results to keep CI green.
 
 The workflow collects evidence before teardown, even after test failure or ordinary
 cancellation. Cleanup sends external releases, stops running durable executions,
