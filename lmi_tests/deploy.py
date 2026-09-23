@@ -1,6 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Build, provision, verify, collect, and retire run-owned LMI resources."""
+"""Build, update, verify, and exercise persistent LMI test resources."""
 
 import argparse
 import base64
@@ -28,6 +28,7 @@ OWNER = "python-sdk-lmi-e2e"
 SCALING = {"MinExecutionEnvironments": 1, "MaxExecutionEnvironments": 1}
 QUALIFIER = "$LATEST.PUBLISHED"
 CONCURRENCIES = {"c1": 1, "c2": 2}
+DEFAULT_STACK = "python-lmi-e2e"
 
 
 def client(service, region=None):
@@ -128,9 +129,10 @@ def template(manifest, functions=True):
                 "LifecycleConfiguration": {
                     "Rules": [
                         {
-                            "Id": "expiry",
+                            "Id": "expire-run-data",
                             "Status": "Enabled",
-                            "ExpirationInDays": 2,
+                            "Prefix": "runs/",
+                            "ExpirationInDays": 1,
                             "AbortIncompleteMultipartUpload": {
                                 "DaysAfterInitiation": 1
                             },
@@ -151,8 +153,7 @@ def template(manifest, functions=True):
                             "Principal": {"AWS": manifest["role"]},
                             "Action": ["s3:GetObject", "s3:PutObject"],
                             "Resource": [
-                                f"arn:aws:s3:::{bucket}/events/*",
-                                f"arn:aws:s3:::{bucket}/control/*",
+                                f"arn:aws:s3:::{bucket}/runs/*",
                             ],
                         },
                         {
@@ -257,7 +258,7 @@ def wait_stack(cfn, name, expected, seconds=1500):
             )
             raise ProvisioningError(f"{name}: {status}; no fallback to standard Lambda")
         time.sleep(3)
-    raise ProvisioningError(f"{name}: provisioning/retirement deadline exceeded")
+    raise ProvisioningError(f"{name}: provisioning deadline exceeded; stack retained")
 
 
 def verify(config, scaling, manifest, key):
@@ -294,6 +295,10 @@ def deploy(args):
         raise ProvisioningError(
             "run-id must be 1-24 lowercase letters, digits or hyphens"
         )
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,49}", args.stack_name):
+        raise ProvisioningError(
+            "stack-name must be 1-50 lowercase letters, digits or hyphens, starting with a letter"
+        )
     provider = os.environ["CAPACITY_PROVIDER_ARN"]
     account = client("sts").get_caller_identity()["Account"]
     if account != os.environ["TEST_ACCOUNT_ID"] or provider.split(":")[3:5] != [
@@ -323,12 +328,15 @@ def deploy(args):
     built = json.loads((ARTIFACTS / "build.json").read_text())
     if built["sha256"] != digest.hex():
         raise ProvisioningError("Artifact changed since build")
-    suffix = args.runtime.replace("python", "").replace(".", "")
-    name = f"py-lmi-{args.run_id}-{suffix}"
+    name = args.stack_name
+    bucket_scope = hashlib.sha256(
+        f"{os.environ['AWS_REGION']}:{name}".encode()
+    ).hexdigest()[:12]
     manifest = {
         "run": args.run_id,
         "stack": name,
-        "bucket": name + "-" + account,
+        "bucket": f"py-lmi-e2e-{account}-{bucket_scope}",
+        "persistent": True,
         "account": account,
         "region": os.environ["AWS_REGION"],
         "provider": provider,
@@ -343,35 +351,70 @@ def deploy(args):
         "driverTimeout": 120,
         "cleanupGrace": 5,
         "created": time.time(),
-        "expires": int(time.time()) + 4 * 3600,
         "functions": {},
     }
-    save(
-        ARTIFACTS / "manifest.json", manifest
-    )  # enough to clean up partial provisioning
+    save(ARTIFACTS / "manifest.json", manifest)
+    deploy_stack(manifest, data)
+
+
+def deploy_stack(manifest, data):
+    """Bootstrap the bucket once, then update the same two functions in place."""
     cfn = client("cloudformation")
     tags = [
         {"Key": "Suite", "Value": OWNER},
-        {"Key": "RunId", "Value": args.run_id},
-        {"Key": "Expires", "Value": str(manifest["expires"])},
+        {"Key": "Stack", "Value": manifest["stack"]},
+        {"Key": "Persistent", "Value": "true"},
     ]
-    # Create only. A collision cannot take over another run or mutate shared fixtures.
-    cfn.create_stack(
-        StackName=name, TemplateBody=json.dumps(template(manifest, False)), Tags=tags
-    )
+    stack = owned_stack(cfn, manifest)
+    if stack is None:
+        cfn.create_stack(
+            StackName=manifest["stack"],
+            TemplateBody=json.dumps(template(manifest, False)),
+            Tags=tags,
+        )
+        manifest["owned"] = True
+        save(ARTIFACTS / "manifest.json", manifest)
+        wait_stack(cfn, manifest["stack"], "CREATE_COMPLETE", 180)
+    else:
+        if stack["StackStatus"] not in {
+            "CREATE_COMPLETE",
+            "UPDATE_COMPLETE",
+            "UPDATE_ROLLBACK_COMPLETE",
+        }:
+            raise ProvisioningError(
+                f"Persistent stack requires recovery from {stack['StackStatus']}; it was retained"
+            )
+        wait_for_idle_functions(stack)
     manifest["owned"] = True
     save(ARTIFACTS / "manifest.json", manifest)
-    wait_stack(cfn, name, "CREATE_COMPLETE", 180)
     client("s3").put_object(
         Bucket=manifest["bucket"], Key=manifest["codeKey"], Body=data
     )
     client("s3").put_object(
-        Bucket=manifest["bucket"], Key="control/release-all", Body=b"hold"
+        Bucket=manifest["bucket"],
+        Key=f"runs/{manifest['run']}/control/release-all",
+        Body=b"hold",
     )
-    cfn.update_stack(
-        StackName=name, TemplateBody=json.dumps(template(manifest)), Tags=tags
-    )
-    stack = wait_stack(cfn, name, "UPDATE_COMPLETE")
+    spec = template(manifest)
+    save(ARTIFACTS / "template.json", spec)
+    try:
+        cfn.update_stack(
+            StackName=manifest["stack"], TemplateBody=json.dumps(spec), Tags=tags
+        )
+    except ClientError as error:
+        if "No updates are to be performed" not in error.response["Error"].get(
+            "Message", ""
+        ):
+            raise
+        stack = owned_stack(cfn, manifest)
+    else:
+        stack = wait_stack(cfn, manifest["stack"], "UPDATE_COMPLETE")
+    if {output["OutputKey"] for output in stack.get("Outputs", [])} != set(
+        CONCURRENCIES
+    ):
+        raise ProvisioningError(
+            "The persistent stack must expose both shared LMI functions"
+        )
     for output in stack["Outputs"]:
         key, arn = output["OutputKey"], output["OutputValue"]
         manifest["functions"][key] = arn
@@ -398,134 +441,97 @@ def owned_stack(cfn, manifest):
     try:
         stack = cfn.describe_stacks(StackName=manifest["stack"])["Stacks"][0]
     except ClientError as error:
-        if "does not exist" in str(error):
+        if error.response["Error"][
+            "Code"
+        ] == "ValidationError" and "does not exist" in str(error):
             return None
         raise
     tags = {t["Key"]: t["Value"] for t in stack.get("Tags", [])}
     if (
         tags.get("Suite") != OWNER
-        or tags.get("RunId") != manifest["run"]
-        or not manifest["stack"].startswith("py-lmi-")
+        or tags.get("Stack") != manifest["stack"]
+        or tags.get("Persistent") != "true"
     ):
         raise ProvisioningError(
-            "Refusing to delete resources not owned by this suite/run"
+            "Refusing to modify a stack not owned by this persistent suite"
         )
     return stack
 
 
+def wait_for_idle_functions(stack, seconds=270):
+    """Wait for prior runs without stopping them or updating active functions."""
+    lam = client("lambda")
+    deadline = time.monotonic() + seconds
+    while True:
+        running = []
+        for output in stack.get("Outputs", []):
+            if output["OutputKey"] not in CONCURRENCIES:
+                raise ProvisioningError(
+                    "Unexpected function in persistent stack outputs"
+                )
+            for page in lam.get_paginator(
+                "list_durable_executions_by_function"
+            ).paginate(
+                FunctionName=output["OutputValue"].rsplit(":", 1)[0],
+                Statuses=["RUNNING"],
+            ):
+                running.extend(page.get("DurableExecutions", []))
+                if page.get("NextMarker") and time.monotonic() >= deadline:
+                    raise ProvisioningError(
+                        "Could not finish checking previous executions; code was not updated"
+                    )
+        save(ARTIFACTS / "pre-deploy-executions.json", running)
+        if not running:
+            return
+        if time.monotonic() >= deadline:
+            raise ProvisioningError(
+                "Previous durable executions are still running; persistent code was not updated"
+            )
+        time.sleep(2)
+
+
 def cleanup(manifest):
+    """Release only this run's work; retain functions, stack, bucket, and code."""
     if not manifest.get("owned"):
-        return  # create failed (including a name collision): do not delete that stack
-    cfn, s3, lam = client("cloudformation"), client("s3"), client("lambda")
-    stack = owned_stack(cfn, manifest)
-    if stack is None:
+        return
+    cfn = client("cloudformation")
+    if owned_stack(cfn, manifest) is None:
         return
     resources = cfn.describe_stack_resources(StackName=manifest["stack"])[
         "StackResources"
     ]
-    bucket_exists = any(
+    if any(
         r["ResourceType"] == "AWS::S3::Bucket"
         and r.get("PhysicalResourceId") == manifest["bucket"]
         and r["ResourceStatus"] != "DELETE_COMPLETE"
         for r in resources
-    )
-    if bucket_exists:
-        s3.put_object(
-            Bucket=manifest["bucket"], Key="control/release-all", Body=b"release"
+    ):
+        client("s3").put_object(
+            Bucket=manifest["bucket"],
+            Key=f"runs/{manifest['run']}/control/release-all",
+            Body=b"release",
         )
-    errors = []
-    stop_errors = []
-    for resource in resources:
-        if (
-            resource["ResourceType"] != "AWS::Lambda::Function"
-            or resource["ResourceStatus"] == "DELETE_COMPLETE"
-        ):
-            continue
-        try:
-            for page in lam.get_paginator(
-                "list_durable_executions_by_function"
-            ).paginate(
-                FunctionName=resource["PhysicalResourceId"], Statuses=["RUNNING"]
-            ):
-                for execution in page.get("DurableExecutions", []):
-                    lam.stop_durable_execution(
-                        DurableExecutionArn=execution["DurableExecutionArn"]
-                    )
-        except ClientError as error:
-            stop_errors.append(str(error))
-        try:
-            # Delete functions BEFORE emptying the bucket. This is the retirement
-            # path; stopping a logical execution alone cannot stop LMI Python code.
-            lam.delete_function(FunctionName=resource["PhysicalResourceId"])
-        except ClientError as error:
-            if error.response["Error"]["Code"] != "ResourceNotFoundException":
-                errors.append(str(error))
-    if errors:
-        raise ProvisioningError("Function retirement failed: " + "; ".join(errors))
-    if stop_errors:
-        save(ARTIFACTS / "cleanup-stop-errors.json", stop_errors)
-    # Bounded retries account for already in-flight diagnostic PUTs during retirement.
-    for _attempt in range(6):
-        if bucket_exists:
-            for page in s3.get_paginator("list_objects_v2").paginate(
-                Bucket=manifest["bucket"]
-            ):
-                keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
-                if keys:
-                    deleted = s3.delete_objects(
-                        Bucket=manifest["bucket"], Delete={"Objects": keys}
-                    )
-                    if deleted.get("Errors"):
-                        raise ProvisioningError(
-                            "Could not empty run-owned bucket: "
-                            + str(deleted["Errors"])
-                        )
-        cfn.delete_stack(StackName=manifest["stack"])
-        try:
-            wait_stack(cfn, manifest["stack"], "DELETE_COMPLETE", 180)
-            save(
-                ARTIFACTS / "cleanup.json",
-                {"stack": manifest["stack"], "status": "DELETED"},
-            )
-            return
-        except ProvisioningError:
-            # A non-bucket failure stays visible after this finite retry budget.
-            time.sleep(2)
-    raise ProvisioningError(
-        "Run-owned stack retirement failed; use reconcile after investigating stack-events.json"
+        from lmi_tests.cloud import Cloud
+
+        driver = Cloud(manifest)
+        driver.invocations = driver.run_invocations()
+        driver.settle_case()
+    save(
+        ARTIFACTS / "cleanup.json",
+        {
+            "stack": manifest["stack"],
+            "run": manifest["run"],
+            "status": "RETAINED",
+            "message": "Run work released; persistent functions, bucket, and code retained",
+        },
     )
-
-
-def reconcile():
-    """Only expired, suite-tagged stacks; never mutate/delete the shared provider."""
-    cfn = client("cloudformation")
-    for page in cfn.get_paginator("describe_stacks").paginate():
-        for stack in page["Stacks"]:
-            tags = {t["Key"]: t["Value"] for t in stack.get("Tags", [])}
-            if (
-                tags.get("Suite") != OWNER
-                or int(tags.get("Expires", "0")) >= time.time()
-            ):
-                continue
-            if not tags.get("Expires") or not stack["StackName"].startswith("py-lmi-"):
-                continue
-            account = client("sts").get_caller_identity()["Account"]
-            cleanup(
-                {
-                    "owned": True,
-                    "stack": stack["StackName"],
-                    "bucket": stack["StackName"] + "-" + account,
-                    "run": tags["RunId"],
-                }
-            )
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "command", choices=["build", "deploy", "collect", "cleanup", "reconcile"]
-    )
+    parser.add_argument("command", choices=["build", "deploy", "collect", "cleanup"])
     parser.add_argument("--run-id")
+    parser.add_argument("--stack-name", default=DEFAULT_STACK)
     parser.add_argument("--runtime", choices=["python3.14"], default="python3.14")
     args = parser.parse_args()
     try:
@@ -533,8 +539,6 @@ def main():
             build()
         elif args.command == "deploy":
             deploy(args)
-        elif args.command == "reconcile":
-            reconcile()
         else:
             manifest = json.loads((ARTIFACTS / "manifest.json").read_text())
             if args.command == "cleanup":

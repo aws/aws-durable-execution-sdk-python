@@ -19,13 +19,13 @@ from lmi_tests.fixture import Trace, nested_progress, resources, workflow
 class Controls:
     def __init__(self):
         self.condition = threading.Condition()
-        self.objects = {"control/release-all": b"hold"}
+        self.objects = {"runs/unit/control/release-all": b"hold"}
         self.events = []
 
     def put_object(self, *, Key, Body, **_kwargs):
         with self.condition:
             self.objects[Key] = Body
-            if Key.startswith("events/"):
+            if Key.startswith("runs/unit/events/"):
                 self.events.append(json.loads(Body))
             self.condition.notify_all()
 
@@ -49,6 +49,7 @@ class Controls:
         trace.s3, trace.bucket = self, "unit"
         trace.payload = {"marker": marker, "scenario": scenario}
         trace.identity = {
+            "run": "unit",
             "marker": marker,
             "request": uuid.uuid4().hex,
             "environment": "local",
@@ -65,7 +66,7 @@ class Controls:
 
 def test_pending_waits_for_finally_then_replays_without_repeating_body():
     controls = Controls()
-    controls.put_object(Key="control/local-cleanup", Body=b"hold")
+    controls.put_object(Key="runs/unit/control/local-cleanup", Body=b"hold")
 
     def entry(event, context):
         trace = controls.trace("local", "suspend-cleanup")
@@ -83,7 +84,7 @@ def test_pending_waits_for_finally_then_replays_without_repeating_body():
                 e for e in controls.snapshot() if e["phase"] == "WRAPPER_RETURN"
             ], "PENDING returned before finally completed"
         finally:
-            controls.put_object(Key="control/local-cleanup", Body=b"release")
+            controls.put_object(Key="runs/unit/control/local-cleanup", Body=b"release")
         result = runner.wait_for_result(arn, timeout=10)
         history = runner.get_execution_history(arn).to_dict()["Events"]
     assert result.status.value == "SUCCEEDED"
@@ -143,7 +144,7 @@ def test_only_missed_admission_retries_environment_pair(monkeypatch):
 def run_inflight_case(scenario, status):
     controls = Controls()
     for suffix in ("loser", "loser-started"):
-        controls.put_object(Key="control/local-" + suffix, Body=b"hold")
+        controls.put_object(Key="runs/unit/control/local-" + suffix, Body=b"hold")
 
     def entry(event, context):
         trace = controls.trace("local", scenario)
@@ -159,7 +160,7 @@ def run_inflight_case(scenario, status):
             evidence.held_loser(controls.snapshot())
             evidence.scope_exit(controls.snapshot(), "local-loser")
         finally:
-            controls.put_object(Key="control/local-loser", Body=b"release")
+            controls.put_object(Key="runs/unit/control/local-loser", Body=b"release")
         result = runner.wait_for_result(arn, timeout=5)
         history = runner.get_execution_history(arn).to_dict()["Events"]
     assert result.status.value == status

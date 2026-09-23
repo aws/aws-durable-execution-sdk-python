@@ -97,18 +97,24 @@ class Trace:
             print("LMI_TEST " + json.dumps(event), flush=True)
             self.s3.put_object(
                 Bucket=self.bucket,
-                Key=f"events/{self.identity['marker']}/{self.identity['request']}/{self.sequence:06d}.json",
+                Key=f"runs/{self.identity['run']}/events/{self.identity['marker']}/{self.identity['request']}/{self.sequence:06d}.json",
                 Body=json.dumps(event).encode(),
                 ContentType="application/json",
             )
         return event
 
     def signal(self, name):
-        self.s3.put_object(Bucket=self.bucket, Key="control/" + name, Body=b"release")
+        self.s3.put_object(
+            Bucket=self.bucket,
+            Key=f"runs/{self.identity['run']}/control/{name}",
+            Body=b"release",
+        )
 
     def released(self, name):
         try:
-            response = self.s3.get_object(Bucket=self.bucket, Key="control/" + name)
+            response = self.s3.get_object(
+                Bucket=self.bucket, Key=f"runs/{self.identity['run']}/control/{name}"
+            )
             with response["Body"] as body:
                 state = body.read()
             if state not in {b"hold", b"release"}:

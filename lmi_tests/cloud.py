@@ -127,7 +127,7 @@ class Cloud:
         try:
             self.s3.put_object(
                 Bucket=self.manifest["bucket"],
-                Key="control/" + gate,
+                Key=f"runs/{self.manifest['run']}/control/{gate}",
                 Body=b"hold",
                 IfNoneMatch="*",
             )
@@ -140,7 +140,9 @@ class Cloud:
 
     def release(self, gate):
         self.s3.put_object(
-            Bucket=self.manifest["bucket"], Key="control/" + gate, Body=b"release"
+            Bucket=self.manifest["bucket"],
+            Key=f"runs/{self.manifest['run']}/control/{gate}",
+            Body=b"release",
         )
 
     def refresh(self, markers=None, *, validate_controls=True):
@@ -148,9 +150,8 @@ class Cloud:
         # observe its first event. Explicit [] requests the complete run for collection.
         if markers is None:
             markers = [item["marker"] for item in self.invocations]
-        prefixes = (
-            [f"events/{marker}/" for marker in markers] if markers else ["events/"]
-        )
+        prefix = f"runs/{self.manifest['run']}/events/"
+        prefixes = [f"{prefix}{marker}/" for marker in markers] if markers else [prefix]
         missing = []
         try:
             for prefix in prefixes:
@@ -341,6 +342,32 @@ class Cloud:
         for gate in self.gates:
             self.release(gate)
         self.gates.clear()
+
+    def run_invocations(self):
+        """Recover only this run's invocations, including failed Invoke responses."""
+        events = self.refresh(markers=[], validate_controls=False)
+        items = {
+            e["execution"]: {"arn": e["execution"], "marker": e["marker"]}
+            for e in events
+        }
+        for path in (ARTIFACTS / "invocations").glob("*.json"):
+            record = json.loads(path.read_text())
+            if (
+                record.get("arn")
+                and record.get("payload", {}).get("run") == self.manifest["run"]
+            ):
+                items[record["arn"]] = {
+                    "arn": record["arn"],
+                    "marker": record["payload"]["marker"],
+                }
+        targets = tuple(
+            arn + "/durable-execution/" for arn in self.manifest["functions"].values()
+        )
+        if any(not item["arn"].startswith(targets) for item in items.values()):
+            raise CollectionError(
+                "Refusing to stop an execution outside this deployment"
+            )
+        return list(items.values())
 
     def settle_case(self):
         """Release fault work and drain this case before reusing its function."""

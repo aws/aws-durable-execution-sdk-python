@@ -29,6 +29,7 @@ def trace():
         aws_secret_access_key="test",
     )
     value.bucket = "test-bucket"
+    value.identity = {"run": "unit"}
     value.emit = Mock()
     return value
 
@@ -40,7 +41,7 @@ def test_control_reads_explicit_state_and_closes_body(trace, state, released):
         stub.add_response(
             "get_object",
             {"Body": body},
-            {"Bucket": "test-bucket", "Key": "control/gate"},
+            {"Bucket": "test-bucket", "Key": "runs/unit/control/gate"},
         )
         assert trace.released("gate") is released
     assert body.closed
@@ -92,9 +93,9 @@ def test_fault_gate_outlives_invocation_deadline_but_remains_bounded(
 
 def test_winner_is_signalled_only_after_loser_actually_enters_held_io(trace):
     controls = {
-        "control/loser": b"hold",
-        "control/ready": b"hold",
-        "control/release-all": b"hold",
+        "runs/unit/control/loser": b"hold",
+        "runs/unit/control/ready": b"hold",
+        "runs/unit/control/release-all": b"hold",
     }
     trace.s3 = Mock()
     trace.s3.get_object.side_effect = lambda **kw: {
@@ -102,10 +103,12 @@ def test_winner_is_signalled_only_after_loser_actually_enters_held_io(trace):
     }
 
     def signal(**kwargs):
-        assert kwargs["Key"] == "control/ready" and kwargs["Body"] == b"release"
+        assert (
+            kwargs["Key"] == "runs/unit/control/ready" and kwargs["Body"] == b"release"
+        )
         assert [c.args[0] for c in trace.emit.call_args_list] == ["BLOCKED", "EFFECT"]
         controls[kwargs["Key"]] = kwargs["Body"]
-        controls["control/loser"] = b"release"
+        controls["runs/unit/control/loser"] = b"release"
 
     trace.s3.put_object.side_effect = signal
     trace.gate("loser", effects=True, ready="ready")
@@ -114,18 +117,19 @@ def test_winner_is_signalled_only_after_loser_actually_enters_held_io(trace):
         "EFFECT",
         "IO_EXIT",
     ]
-    assert controls["control/release-all"] == b"hold"
+    assert controls["runs/unit/control/release-all"] == b"hold"
 
 
 def test_emitted_records_are_partitioned_by_case_and_request(trace):
     trace.s3 = Mock()
-    trace.identity = {"marker": "case", "request": "request"}
+    trace.identity = {"run": "unit", "marker": "case", "request": "request"}
     trace.sequence = 0
     trace.deadline = 10
     trace.lock = threading.Lock()
     Trace.emit(trace, "BODY")
     assert (
-        trace.s3.put_object.call_args.kwargs["Key"] == "events/case/request/000001.json"
+        trace.s3.put_object.call_args.kwargs["Key"]
+        == "runs/unit/events/case/request/000001.json"
     )
 
 
@@ -133,9 +137,9 @@ def test_emitted_records_are_partitioned_by_case_and_request(trace):
 def test_full_fixture_establishes_a_real_blocked_loser(scenario):
     """Exercise fixture wiring and SDK APIs; valid evidence survives future SDK fixes."""
     objects = {
-        "control/release-all": b"hold",
-        "control/local-loser": b"hold",
-        "control/local-loser-started": b"hold",
+        "runs/unit/control/release-all": b"hold",
+        "runs/unit/control/local-loser": b"hold",
+        "runs/unit/control/local-loser-started": b"hold",
     }
     events = []
     computed = threading.Event()
@@ -144,7 +148,7 @@ def test_full_fixture_establishes_a_real_blocked_loser(scenario):
     def put(**kwargs):
         with lock:
             objects[kwargs["Key"]] = kwargs["Body"]
-            if kwargs["Key"].startswith("events/"):
+            if kwargs["Key"].startswith("runs/unit/events/"):
                 event = json.loads(kwargs["Body"])
                 events.append(event)
                 if event["phase"] == "WINNER_SELECTED":
@@ -157,7 +161,7 @@ def test_full_fixture_establishes_a_real_blocked_loser(scenario):
     trace = Trace.__new__(Trace)
     trace.s3, trace.bucket = Mock(), "test-bucket"
     trace.s3.put_object.side_effect, trace.s3.get_object.side_effect = put, get
-    trace.identity = {"marker": "local", "request": "request"}
+    trace.identity = {"run": "unit", "marker": "local", "request": "request"}
     trace.lock, trace.sequence, trace.deadline = threading.Lock(), 0, time.time() + 30
     handler = durable_execution(
         lambda _e, c: workflow({"marker": "local", "scenario": scenario}, c, trace)
@@ -173,5 +177,5 @@ def test_full_fixture_establishes_a_real_blocked_loser(scenario):
             evidence.held_loser(snapshot)
             assert any(e["phase"] == "EFFECT" for e in snapshot)
         finally:
-            put(Key="control/local-loser", Body=b"release")
+            put(Key="runs/unit/control/local-loser", Body=b"release")
             assert future.result(timeout=3)["Status"] == "SUCCEEDED"

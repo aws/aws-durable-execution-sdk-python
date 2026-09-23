@@ -47,9 +47,9 @@ def summarize(directory):
         lines.append(f"- {path.stem}: {data['type']}")
     cleanup = directory / "cleanup.json"
     lines.append(
-        "Resources retired."
+        "Run work released; persistent stack, functions, bucket, and code retained."
         if cleanup.exists()
-        else "Resource retirement not confirmed; inspect cleanup diagnostics and run reconcile if needed."
+        else "Run cleanup not confirmed; persistent resources are retained. Inspect cleanup diagnostics before updating."
     )
     return "\n\n".join(lines)
 

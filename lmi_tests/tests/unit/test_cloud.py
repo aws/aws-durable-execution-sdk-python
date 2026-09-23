@@ -220,14 +220,18 @@ def test_controls_exist_before_invocation_and_shared_barriers_are_not_reset(
     )
     item = driver.start(scenario)
     assert calls == [
-        ("hold", "control/" + item["marker"] + "-loser", b"hold"),
-        ("hold", "control/" + item["marker"] + "-loser-started", b"hold"),
+        ("hold", "runs/unit/control/" + item["marker"] + "-loser", b"hold"),
+        ("hold", "runs/unit/control/" + item["marker"] + "-loser-started", b"hold"),
         ("invoke",),
     ]
     calls.clear()
     driver.start("barrier", gate="shared")
     driver.start("barrier", gate="shared")
-    assert calls == [("hold", "control/shared", b"hold"), ("invoke",), ("invoke",)]
+    assert calls == [
+        ("hold", "runs/unit/control/shared", b"hold"),
+        ("invoke",),
+        ("invoke",),
+    ]
     assert "release-all" not in driver.gates
 
 
@@ -244,9 +248,49 @@ def test_finally_control_is_initialized_before_invocation(driver):
     )
     item = driver.start("suspend-cleanup")
     assert calls == [
-        ("hold", "control/" + item["marker"] + "-cleanup", b"hold"),
+        ("hold", "runs/unit/control/" + item["marker"] + "-cleanup", b"hold"),
         ("invoke",),
     ]
+
+
+def test_runs_share_functions_but_never_controls_or_event_prefixes(driver):
+    other = module.Cloud({**driver.manifest, "run": "other"}, "c1")
+    other.s3 = driver.s3
+    objects = {}
+    driver.s3.put_object.side_effect = lambda **kw: objects.update(
+        {kw["Key"]: kw["Body"]}
+    )
+    driver.hold("same-gate")
+    other.hold("same-gate")
+    driver.release("same-gate")
+    assert objects == {
+        "runs/unit/control/same-gate": b"release",
+        "runs/other/control/same-gate": b"hold",
+    }
+    driver.s3.get_paginator.return_value.paginate.return_value = []
+    driver.refresh(markers=[])
+    other.refresh(markers=[])
+    assert [
+        c.kwargs["Prefix"]
+        for c in driver.s3.get_paginator.return_value.paginate.call_args_list
+    ] == ["runs/unit/events/", "runs/other/events/"]
+
+
+def test_cleanup_discovery_ignores_other_runs_and_rejects_foreign_functions(
+    driver, tmp_path
+):
+    arn = driver.manifest["functions"]["c1"] + "/durable-execution/case/id"
+    driver.refresh = Mock(return_value=[{"execution": arn, "marker": "case"}])
+    records = tmp_path / "invocations"
+    records.mkdir()
+    (records / "old.json").write_text(
+        json.dumps({"payload": {"run": "previous", "marker": "old"}, "arn": "foreign"})
+    )
+    assert driver.run_invocations() == [{"arn": arn, "marker": "case"}]
+    driver.refresh.assert_called_once_with(markers=[], validate_controls=False)
+    driver.refresh.return_value = [{"execution": "foreign", "marker": "bad"}]
+    with pytest.raises(CollectionError, match="outside this deployment"):
+        driver.run_invocations()
 
 
 def test_polling_reads_only_current_case_and_surfaces_control_errors(driver):
@@ -262,7 +306,7 @@ def test_polling_reads_only_current_case_and_surfaces_control_errors(driver):
         "gate": "g",
         "error": "403 Forbidden",
     }
-    key = "events/current/r/000001.json"
+    key = "runs/unit/events/current/r/000001.json"
     driver.s3.get_paginator.return_value.paginate.return_value = [
         {"Contents": [{"Key": key}]}
     ]
@@ -272,14 +316,14 @@ def test_polling_reads_only_current_case_and_surfaces_control_errors(driver):
     with pytest.raises(CollectionError, match="403"):
         driver.refresh()
     driver.s3.get_paginator.return_value.paginate.assert_called_once_with(
-        Bucket="unit-bucket", Prefix="events/current/"
+        Bucket="unit-bucket", Prefix="runs/unit/events/current/"
     )
     driver.s3.get_object.assert_called_once_with(Bucket="unit-bucket", Key=key)
     # Full diagnostic collection preserves errors without turning itself into a
     # second failing test or omitting evidence from earlier cases.
     assert driver.refresh(markers=[]) == [event]
     driver.s3.get_paginator.return_value.paginate.assert_called_with(
-        Bucket="unit-bucket", Prefix="events/"
+        Bucket="unit-bucket", Prefix="runs/unit/events/"
     )
 
 

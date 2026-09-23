@@ -1,4 +1,7 @@
 import copy
+import json
+
+from botocore.exceptions import ClientError
 from unittest.mock import Mock
 
 import pytest
@@ -11,12 +14,13 @@ from lmi_tests.evidence import ProvisioningError
 def manifest():
     return {
         "run": "unit",
-        "stack": "py-lmi-unit-314",
+        "stack": "python-lmi-e2e",
         "bucket": "test-bucket",
         "role": "role",
         "provider": "provider",
         "runtime": "python3.14",
         "concurrencies": deploy.CONCURRENCIES,
+        "functions": {},
         "commit": "sha",
         "codeKey": "code/sha.zip",
         "codeSha256": "hash",
@@ -106,75 +110,206 @@ def test_cleanup_refuses_foreign_owner_and_failed_create(manifest, monkeypatch):
     cfn.delete_stack.assert_not_called()
 
 
-def test_cleanup_releases_stops_and_retires_before_bucket_deletion(
-    manifest, monkeypatch
+def stack(manifest, status="UPDATE_COMPLETE"):
+    return {
+        "StackStatus": status,
+        "Tags": [
+            {"Key": "Suite", "Value": deploy.OWNER},
+            {"Key": "Stack", "Value": manifest["stack"]},
+            {"Key": "Persistent", "Value": "true"},
+        ],
+        "Outputs": [
+            {
+                "OutputKey": key,
+                "OutputValue": f"arn:aws:lambda:us-west-2:123456789012:function:{manifest['stack']}-{key}:$LATEST.PUBLISHED",
+            }
+            for key in deploy.CONCURRENCIES
+        ],
+    }
+
+
+@pytest.fixture
+def apis(monkeypatch, tmp_path):
+    clients = {name: Mock() for name in ("cloudformation", "s3", "lambda")}
+    monkeypatch.setattr(deploy, "client", clients.__getitem__)
+    monkeypatch.setattr(deploy, "ARTIFACTS", tmp_path)
+    return clients
+
+
+def test_later_run_updates_fixed_functions_without_recreating_resources(
+    manifest, apis, monkeypatch
 ):
-    calls = []
-    cfn, s3, lam = Mock(), Mock(), Mock()
+    cfn, lam = apis["cloudformation"], apis["lambda"]
     monkeypatch.setattr(
-        deploy,
-        "client",
-        lambda name: {"cloudformation": cfn, "s3": s3, "lambda": lam}[name],
+        deploy, "owned_stack", Mock(side_effect=[None, stack(manifest)])
     )
-    monkeypatch.setattr(deploy, "owned_stack", lambda *_: {})
-    monkeypatch.setattr(deploy, "wait_stack", lambda *_: calls.append("stack-gone"))
-    monkeypatch.setattr(deploy, "save", lambda *_: None)
+    monkeypatch.setattr(deploy, "wait_stack", Mock(return_value=stack(manifest)))
+    idle = Mock()
+    monkeypatch.setattr(deploy, "wait_for_idle_functions", idle)
+    verify = Mock()
+    monkeypatch.setattr(deploy, "verify", verify)
+    deploy.deploy_stack(manifest, b"first-code")
+    second = {
+        **manifest,
+        "run": "second",
+        "codeKey": "code/new-digest.zip",
+        "functions": {},
+    }
+    deploy.deploy_stack(second, b"second-code")
+    cfn.create_stack.assert_called_once()
+    assert cfn.update_stack.call_count == 2
+    templates = [
+        json.loads(call.kwargs["TemplateBody"])
+        for call in cfn.update_stack.call_args_list
+    ]
+    assert templates[0]["Outputs"] == templates[1]["Outputs"]
+    assert templates[0]["Resources"].keys() == templates[1]["Resources"].keys()
+    for key in deploy.CONCURRENCIES:
+        before = templates[0]["Resources"][key + "Function"]["Properties"]
+        after = templates[1]["Resources"][key + "Function"]["Properties"]
+        assert before["FunctionName"] == after["FunctionName"]
+        assert before["Code"]["S3Key"] != after["Code"]["S3Key"]
+        assert after["Environment"]["Variables"]["LMI_RUN_ID"] == "second"
+    idle.assert_called_once()
+    assert verify.call_count == 4
+    assert lam.get_function_configuration.call_count == 4
+    cfn.delete_stack.assert_not_called()
+    lam.delete_function.assert_not_called()
+
+
+def test_unchanged_update_still_verifies_functions(manifest, apis, monkeypatch):
+    cfn = apis["cloudformation"]
+    cfn.describe_stacks.return_value = {"Stacks": [stack(manifest)]}
+    cfn.update_stack.side_effect = ClientError(
+        {
+            "Error": {
+                "Code": "ValidationError",
+                "Message": "No updates are to be performed.",
+            }
+        },
+        "UpdateStack",
+    )
+    monkeypatch.setattr(deploy, "wait_for_idle_functions", Mock())
+    wait = Mock()
+    monkeypatch.setattr(deploy, "wait_stack", wait)
+    verify = Mock()
+    monkeypatch.setattr(deploy, "verify", verify)
+    deploy.deploy_stack(manifest, b"code")
+    wait.assert_not_called()
+    assert verify.call_count == 2
+    cfn.create_stack.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "status", ["ROLLBACK_COMPLETE", "UPDATE_IN_PROGRESS", "UPDATE_ROLLBACK_FAILED"]
+)
+def test_failed_or_busy_persistent_stack_is_retained(manifest, apis, status):
+    cfn = apis["cloudformation"]
+    cfn.describe_stacks.return_value = {"Stacks": [stack(manifest, status)]}
+    with pytest.raises(ProvisioningError, match="retained"):
+        deploy.deploy_stack(manifest, b"code")
+    cfn.update_stack.assert_not_called()
+    cfn.delete_stack.assert_not_called()
+    apis["s3"].put_object.assert_not_called()
+
+
+def test_foreign_stack_cannot_be_adopted(manifest, apis):
+    cfn = apis["cloudformation"]
+    cfn.describe_stacks.return_value = {"Stacks": [{"Tags": []}]}
+    with pytest.raises(ProvisioningError, match="not owned"):
+        deploy.deploy_stack(manifest, b"code")
+    cfn.update_stack.assert_not_called()
+    cfn.create_stack.assert_not_called()
+
+
+def test_failed_creation_does_not_trigger_deletion(manifest, apis):
+    cfn = apis["cloudformation"]
+    cfn.describe_stacks.side_effect = ClientError(
+        {"Error": {"Code": "ValidationError", "Message": "Stack does not exist"}},
+        "DescribeStacks",
+    )
+    cfn.create_stack.side_effect = RuntimeError("create failed")
+    with pytest.raises(RuntimeError, match="create failed"):
+        deploy.deploy_stack(manifest, b"code")
+    cfn.delete_stack.assert_not_called()
+
+
+def test_prior_executions_must_finish_before_code_updates(manifest, apis, monkeypatch):
+    lam = apis["lambda"]
+    one_function = {"Outputs": stack(manifest)["Outputs"][:1]}
+    lam.get_paginator.return_value.paginate.side_effect = [
+        [{"DurableExecutions": [{"DurableExecutionArn": "old"}]}],
+        [{"DurableExecutions": []}],
+    ]
+    sleep = Mock()
+    monkeypatch.setattr(deploy.time, "sleep", sleep)
+    deploy.wait_for_idle_functions(one_function)
+    sleep.assert_called_once_with(2)
+    lam.stop_durable_execution.assert_not_called()
+    lam.get_paginator.return_value.paginate.assert_called_with(
+        FunctionName=one_function["Outputs"][0]["OutputValue"].rsplit(":", 1)[0],
+        Statuses=["RUNNING"],
+    )
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        {"DurableExecutions": [{"DurableExecutionArn": "old"}]},
+        {"DurableExecutions": [], "NextMarker": "more"},
+    ],
+)
+def test_busy_or_incompletely_listed_functions_block_updates(
+    manifest, apis, monkeypatch, page
+):
+    apis["lambda"].get_paginator.return_value.paginate.return_value = [page]
+    cfn = apis["cloudformation"]
+    cfn.describe_stacks.return_value = {"Stacks": [stack(manifest)]}
+    wait = deploy.wait_for_idle_functions
+    monkeypatch.setattr(
+        deploy, "wait_for_idle_functions", lambda value: wait(value, seconds=0)
+    )
+    with pytest.raises(ProvisioningError, match="code was not updated"):
+        deploy.deploy_stack(manifest, b"code")
+    cfn.update_stack.assert_not_called()
+    apis["s3"].put_object.assert_not_called()
+    apis["lambda"].stop_durable_execution.assert_not_called()
+
+
+def test_only_run_data_expires_and_code_is_retained(manifest):
+    rules = deploy.template(manifest)["Resources"]["Bucket"]["Properties"][
+        "LifecycleConfiguration"
+    ]["Rules"]
+    assert all(rule.get("Prefix") == "runs/" for rule in rules)
+    assert all(rule["ExpirationInDays"] == 1 for rule in rules)
+
+
+def test_cleanup_releases_only_current_run_and_keeps_infrastructure(
+    manifest, apis, monkeypatch, tmp_path
+):
+    from lmi_tests import cloud
+
+    cfn, s3, lam = apis["cloudformation"], apis["s3"], apis["lambda"]
+    cfn.describe_stacks.return_value = {"Stacks": [stack(manifest)]}
     cfn.describe_stack_resources.return_value = {
         "StackResources": [
             {
                 "ResourceType": "AWS::S3::Bucket",
                 "PhysicalResourceId": manifest["bucket"],
                 "ResourceStatus": "CREATE_COMPLETE",
-            },
-            {
-                "ResourceType": "AWS::Lambda::Function",
-                "PhysicalResourceId": "function",
-                "ResourceStatus": "CREATE_COMPLETE",
-            },
+            }
         ]
     }
-    s3.put_object.side_effect = lambda **_: calls.append("release")
-    lam.get_paginator.return_value.paginate.return_value = [
-        {"DurableExecutions": [{"DurableExecutionArn": "execution"}]}
-    ]
-    lam.stop_durable_execution.side_effect = lambda **_: calls.append("stop")
-    lam.delete_function.side_effect = lambda **_: calls.append("retire")
-    s3.get_paginator.return_value.paginate.return_value = [
-        {"Contents": [{"Key": "evidence"}]}
-    ]
-    s3.delete_objects.side_effect = lambda **_: calls.append("empty") or {}
-    cfn.delete_stack.side_effect = lambda **_: calls.append("delete-stack")
+    driver = Mock()
+    driver.run_invocations.return_value = [{"arn": "this-run"}]
+    monkeypatch.setattr(cloud, "Cloud", Mock(return_value=driver))
     deploy.cleanup(manifest)
-    assert calls == ["release", "stop", "retire", "empty", "delete-stack", "stack-gone"]
-
-
-def test_reconcile_only_deletes_expired_suite_owned_runs(monkeypatch):
-    cfn = Mock()
-    monkeypatch.setattr(deploy, "client", lambda _: cfn)
-    cfn.get_caller_identity.return_value = {"Account": "123"}
-
-    def stack(name, owner, expires):
-        return {
-            "StackName": name,
-            "Tags": [
-                {"Key": "Suite", "Value": owner},
-                {"Key": "RunId", "Value": "run"},
-                {"Key": "Expires", "Value": expires},
-            ],
-        }
-
-    cfn.get_paginator.return_value.paginate.return_value = [
-        {
-            "Stacks": [
-                stack("py-lmi-old", deploy.OWNER, "1"),
-                stack("py-lmi-active", deploy.OWNER, "9999999999"),
-                stack("py-lmi-other", "other", "1"),
-                stack("unrelated", deploy.OWNER, "1"),
-            ]
-        }
-    ]
-    cleanup = Mock()
-    monkeypatch.setattr(deploy, "cleanup", cleanup)
-    deploy.reconcile()
-    assert cleanup.call_count == 1
-    assert cleanup.call_args.args[0]["stack"] == "py-lmi-old"
+    s3.put_object.assert_called_once_with(
+        Bucket=manifest["bucket"], Key="runs/unit/control/release-all", Body=b"release"
+    )
+    assert driver.invocations == [{"arn": "this-run"}]
+    driver.settle_case.assert_called_once()
+    cfn.delete_stack.assert_not_called()
+    lam.delete_function.assert_not_called()
+    s3.delete_objects.assert_not_called()
+    assert json.loads((tmp_path / "cleanup.json").read_text())["status"] == "RETAINED"

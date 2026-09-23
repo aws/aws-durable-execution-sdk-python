@@ -31,7 +31,8 @@ waits. They establish the SDK defects, not real LMI worker recovery.
 
 The green harness tests exercise negative evidence controls, process-shared marker
 initialization, real public-API replay/callback/retry with the local runner,
-checkpoint response/error forwarding, deployment readback, and ownership/retirement.
+checkpoint response/error forwarding, persistent create/update, ownership checks,
+and run-scoped cleanup.
 They also exercise the real parallel/map/nested fixtures with controlled I/O and
 reject an early-completion pass when the losing branch failed before the winner.
 
@@ -55,18 +56,17 @@ Set:
 | `TEST_LAMBDA_EXECUTION_ROLE_ARN` | Lambda role with LMI/durable execution and logging permissions |
 
 The deployment identity needs CloudFormation stack operations, S3 bucket/policy/
-object operations, Lambda deployment/configuration/invoke/history/stop/delete,
+object operations, Lambda deployment/configuration/invoke/history/list/stop,
 `iam:PassRole` for the supplied role, CloudWatch Logs read/create/delete, and
 read access to the provider. The stack's private bucket policy grants that function
-role access **only** to this run's event and control objects. The SDK and dependencies
+role access **only** to the suite's `runs/` event and control objects. The SDK and dependencies
 come from a wheel built from the checked-out core package; no published SDK wheel
 is substituted. The artifact hash, SDK wheel version, and commit are retained.
 
 ```sh
 hatch run lmi:build
-hatch run lmi:python -m lmi_tests.deploy reconcile
 hatch run lmi:python -m lmi_tests.deploy deploy \
-  --run-id local-20260923-a --runtime python3.14
+  --stack-name python-lmi-e2e --run-id local-20260923-a --runtime python3.14
 hatch run lmi:cloud --junitxml=lmi_tests/artifacts/cloud.xml
 # Run both commands below even when a scenario fails:
 hatch run lmi:python -m lmi_tests.deploy collect
@@ -76,14 +76,17 @@ python -m lmi_tests.summary
 
 For unattended local runs, install a shell `EXIT`/`INT`/`TERM` trap that calls
 `collect` followed by `cleanup`; the workflow already has unconditional steps.
-Use a fresh run ID for each deployment. This one deployment supplies both native
+Use a fresh run ID for each run and reuse the same stack name. This deployment supplies both native
 environment-concurrency settings, `1` and `2`, on Python 3.14. The single cloud
 command runs all 14 scenarios for each setting (28 cases), sequentially, without
 redeploying or changing function configuration between cases. Independent SDK
 branch-concurrency settings include 1, 2, and 3.
 
-Each run creates one unique stack, one private bucket, and two functions/log
-groups (`c1`, `c2`). All scenarios, including deadlines and healthy-peer probes,
+The first run creates the persistent `python-lmi-e2e` stack, one private bucket,
+and two functions/log groups (`python-lmi-e2e-c1`, `python-lmi-e2e-c2`). Later runs
+update these same resources and preserve their names/ARNs. Select another dedicated
+stack with `--stack-name`; its bucket name is stable for the account/region/stack.
+All scenarios, including deadlines and healthy-peer probes,
 reuse the function for their concurrency setting and the same handler artifact.
 Both functions use a 60-second invocation timeout. Deadline tests wait for the
 real platform timeout, leaving ordinary scenarios their existing invocation
@@ -140,7 +143,7 @@ has requested suspension; it does not schedule another durable operation or chan
 the handler's result/operation sequence. Ordinary orchestration delays still use
 `context.wait`. Local shared-root tests run under a subprocess watchdog, so an
 executor-starvation regression cannot hang the test process. Cloud progress tests
-have bounded driver budgets and the existing run-owned-function retirement path.
+have bounded driver budgets and post-assertion release/settlement of run-owned work.
 
 Healthy-peer cases checkpoint an admission decision before running fault work.
 If an environment rotation places the victim elsewhere, it returns without
@@ -216,7 +219,8 @@ transport timeout). Invocation and callback writes are not retried by this layer
 | Fault-fixture emergency I/O release | 150 s |
 | Per-case retirement after assertions | 30 s |
 | Workflow cloud assertions (all 28 cases) | 20 min |
-| Single cloud job including provisioning/retirement | 70 min |
+| Waiting for prior executions before updating | 270 s |
+| Single cloud job including deployment/run cleanup | 80 min |
 
 Artifacts contain JUnit, configuration/provider readbacks, qualified targets,
 commit/wheel/code hash, invocation inputs/ARNs, all lifecycle and side-effect records,
@@ -234,7 +238,7 @@ and on every push to `main`, including merged changes. There are no path filters
 label requirements, or ready-for-review requirements. `workflow_dispatch` remains
 available for manual reruns; there are no scheduled jobs.
 
-Each workflow run has one harness job and one cloud job with its own resources.
+Each workflow run has one harness job and one cloud job using the persistent resources.
 All cloud jobs share the repository-wide `lmi-e2e-shared-capacity-provider`
 concurrency group, across PRs, main pushes, and manual runs. Only one cloud job can
 deploy, test, or clean up at a time; the slot is held until the entire job finishes.
@@ -262,16 +266,27 @@ before invoking the shared function. Collection remains scoped to the case, and
 the final collector gathers the entire run. These post-assertion releases and
 stops cannot satisfy a deadline, cleanup-grace, or capacity-recovery assertion.
 
-The workflow collects evidence before teardown, even after test failure or ordinary
-cancellation. Cleanup sends external releases, stops running durable executions,
-deletes the run's functions to retire their environments, empties the bucket, and
-waits for stack deletion. Stopping an execution alone is not evidence that Python
-code stopped. Only suite/run-tagged resources are eligible for deletion. A failed
-create/name collision cannot cause another run's stack to be deleted.
+Before updating, the driver checks persistent ownership tags and waits for earlier
+durable executions on both functions to finish. Incomplete execution listings,
+active executions past the wait budget, and failed/busy stacks block updates.
+The driver never deletes and recreates a failed stack; CloudFormation's normal
+deployment rollback behavior still applies. Every run updates `LMI_RUN_ID` and
+`LMI_COMMIT` in the function configuration, refreshing runtime state while keeping
+function names and ARNs stable, as in Java PR #728. Readback and trace identity must
+match the tested run and commit. No code/configuration changes occur during tests.
 
-Forced runner termination may prevent an `always()` step. Each stack has a four-hour
-expiry tag; `reconcile` runs before the next cloud deployment and can also be invoked
-manually. It retires only expired stacks owned by this suite. S3 objects additionally
-expire after two days; object expiry does not retire compute. Inspect cleanup errors
-and run reconciliation if `cleanup.json` does not confirm deletion. The shared
-capacity provider remains under its owner's explicit lifecycle policy.
+The workflow collects evidence before final run cleanup, even after test failure or
+ordinary cancellation. `cleanup` releases `runs/RUN_ID/control/release-all`, discovers
+only the current run's invocations from its ledger/artifacts, stops unfinished
+executions, and waits for observed wrappers to exit. It never deletes functions,
+the stack, bucket, or code artifacts. A terminal service status alone does not prove
+that LMI worker code stopped. Other runs' controls and executions are not released
+or stopped by this cleanup.
+
+Events and controls use `runs/RUN_ID/events/` and `runs/RUN_ID/control/`; only `runs/`
+objects expire after one day. Content-addressed `code/` artifacts are retained for
+updates and CloudFormation rollback. Logs and durable histories retain one day,
+and GitHub artifacts retain seven days. There is no automatic infrastructure deletion
+or janitor. The test-account owner manages final retirement of the persistent stack,
+functions, bucket, and provider. A forced runner termination can interrupt run
+cleanup; inspect artifacts and let prior executions settle before the next update.
