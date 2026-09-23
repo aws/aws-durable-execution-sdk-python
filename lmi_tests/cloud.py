@@ -3,6 +3,7 @@
 """Bounded real-service driver using the repository's cloud runner."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 import time
 import uuid
 
@@ -10,7 +11,7 @@ from botocore.exceptions import ClientError
 
 from aws_durable_execution_sdk_python_testing import DurableFunctionCloudTestRunner
 from lmi_tests.deploy import ARTIFACTS, QUALIFIER, client, save, verify
-from lmi_tests.evidence import CollectionError, select
+from lmi_tests.evidence import CollectionError, check_controls, select
 
 
 class Cloud:
@@ -34,8 +35,12 @@ class Cloud:
         payload = {"scenario": scenario, "marker": marker, "run": self.manifest["run"]}
         if gate:
             payload["gate"] = gate
-            self.gates.add(gate)
-        self.gates.update({marker + "-loser", marker + "-checkpoint"})
+            self.hold(gate)
+        if scenario in {"parallel", "map", "nested"}:
+            self.hold(marker + "-loser")
+            self.hold(marker + "-loser-started")
+        elif scenario == "checkpoint":
+            self.hold(marker + "-checkpoint")
         runner = DurableFunctionCloudTestRunner(
             self.manifest["functions"][fixture], region=self.manifest["region"]
         )
@@ -70,30 +75,62 @@ class Cloud:
         )
         return item
 
+    def hold(self, gate):
+        if gate in self.gates:
+            return  # another invocation in this case uses the same barrier
+        try:
+            self.s3.put_object(
+                Bucket=self.manifest["bucket"],
+                Key="control/" + gate,
+                Body=b"hold",
+                IfNoneMatch="*",
+            )
+        except ClientError as error:
+            if error.response["Error"]["Code"] != "PreconditionFailed":
+                raise CollectionError(
+                    f"Cannot initialize control {gate}: {error}"
+                ) from error
+        self.gates.add(gate)
+
     def release(self, gate):
         self.s3.put_object(
             Bucket=self.manifest["bucket"], Key="control/" + gate, Body=b"release"
         )
 
-    def refresh(self):
+    def refresh(self, markers=None):
+        # A new pytest fixture must not scan every earlier case before it can
+        # observe its first event. Explicit [] requests the complete run for collection.
+        if markers is None:
+            markers = [item["marker"] for item in self.invocations]
+        prefixes = (
+            [f"events/{marker}/" for marker in markers] if markers else ["events/"]
+        )
+        missing = []
         try:
-            for page in self.s3.get_paginator("list_objects_v2").paginate(
-                Bucket=self.manifest["bucket"], Prefix="events/"
-            ):
-                for obj in page.get("Contents", []):
-                    if obj["Key"] in self.events:
-                        continue
-                    response = self.s3.get_object(
-                        Bucket=self.manifest["bucket"], Key=obj["Key"]
+            for prefix in prefixes:
+                for page in self.s3.get_paginator("list_objects_v2").paginate(
+                    Bucket=self.manifest["bucket"], Prefix=prefix
+                ):
+                    missing.extend(
+                        obj["Key"]
+                        for obj in page.get("Contents", [])
+                        if obj["Key"] not in self.events
                     )
-                    with response["Body"] as stream:
-                        event = json.loads(stream.read())
-                    if (
-                        event["run"] != self.manifest["run"]
-                        or event["commit"] != self.manifest["commit"]
-                    ):
-                        raise CollectionError("Event came from another build/run")
-                    self.events[obj["Key"]] = event
+
+            def read(key):
+                response = self.s3.get_object(Bucket=self.manifest["bucket"], Key=key)
+                with response["Body"] as stream:
+                    event = json.loads(stream.read())
+                if (
+                    event["run"] != self.manifest["run"]
+                    or event["commit"] != self.manifest["commit"]
+                ):
+                    raise CollectionError("Event came from another build/run")
+                return key, event
+
+            if missing:
+                with ThreadPoolExecutor(max_workers=8) as readers:
+                    self.events.update(readers.map(read, missing))
         except ClientError as error:
             raise CollectionError(
                 "Could not retrieve external lifecycle/side-effect ledger"
@@ -102,10 +139,13 @@ class Cloud:
             self.events.values(), key=lambda e: (e["time"], e["request"], e["sequence"])
         )
         save(ARTIFACTS / "events.json", events)
-        return events
+        selected = [e for e in events if not markers or e["marker"] in markers]
+        if markers:
+            check_controls(selected)
+        return selected
 
     def for_item(self, item):
-        return [e for e in self.refresh() if e["marker"] == item["marker"]]
+        return self.refresh(markers=[item["marker"]])
 
     def poll(
         self,
@@ -183,7 +223,7 @@ class Cloud:
     def collect(self):
         errors = []
         try:
-            events = self.refresh()
+            events = self.refresh(markers=[])
             # Independent collect steps can recover execution ARNs without the
             # pytest process or successful invoke response.
             items = {

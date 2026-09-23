@@ -96,7 +96,7 @@ class Trace:
             print("LMI_TEST " + json.dumps(event), flush=True)
             self.s3.put_object(
                 Bucket=self.bucket,
-                Key=f"events/{self.identity['request']}/{self.sequence:06d}.json",
+                Key=f"events/{self.identity['marker']}/{self.identity['request']}/{self.sequence:06d}.json",
                 Body=json.dumps(event).encode(),
                 ContentType="application/json",
             )
@@ -107,18 +107,25 @@ class Trace:
 
     def released(self, name):
         try:
-            self.s3.head_object(Bucket=self.bucket, Key="control/" + name)
-            return True
-        except ClientError as error:
-            if error.response["Error"]["Code"] not in {"404", "NoSuchKey", "NotFound"}:
-                raise
-            return False
+            response = self.s3.get_object(Bucket=self.bucket, Key="control/" + name)
+            with response["Body"] as body:
+                state = body.read()
+            if state not in {b"hold", b"release"}:
+                raise ValueError(f"Invalid control state for {name}")
+            return state == b"release"
+        except (ClientError, ValueError) as error:
+            # Every key must exist before Invoke. Missing/forbidden objects are
+            # fixture errors, never an implicit hold or release signal.
+            self.emit("CONTROL_ERROR", gate=name, error=str(error))
+            raise
 
-    def gate(self, name, *, effects=False, attempt=1):
-        self.emit("BLOCKED", gate=name)
+    def gate(self, name, *, effects=False, attempt=1, ready=None):
         end = time.monotonic() + 75
+        entered = False
         try:
             while not self.released(name) and not self.released("release-all"):
+                if not entered:
+                    self.emit("BLOCKED", gate=name)
                 if time.monotonic() >= end:
                     self.emit("ESCAPE", gate=name)
                     raise TimeoutError(
@@ -133,9 +140,12 @@ class Trace:
                     )
                 else:
                     self.emit("ALIVE", gate=name)
+                if not entered and ready:
+                    self.signal(ready)
+                entered = True
                 time.sleep(0.2)  # fault-injected blocking I/O, not a durable delay
-        except BaseException:
-            self.emit("IO_INTERRUPTED", gate=name)
+        except BaseException as error:
+            self.emit("IO_INTERRUPTED", gate=name, error=type(error).__name__)
             raise
         finally:
             self.emit("IO_EXIT", gate=name)
@@ -209,8 +219,12 @@ def workflow(event, context, trace):
 
             def losing(child):
                 def io(step):
-                    trace.signal(marker + "-loser-started")
-                    trace.gate(marker + "-loser", effects=True, attempt=step.attempt)
+                    trace.gate(
+                        marker + "-loser",
+                        effects=True,
+                        attempt=step.attempt,
+                        ready=marker + "-loser-started",
+                    )
                     return marker
 
                 return child.step(io, name="losing-io", config=NO_RETRY)
@@ -218,6 +232,7 @@ def workflow(event, context, trace):
             def winning(child):
                 def io(_):
                     trace.gate(marker + "-loser-started")
+                    trace.emit("WINNER_READY")
                     return marker
 
                 return child.step(io, name="winner", config=NO_RETRY)

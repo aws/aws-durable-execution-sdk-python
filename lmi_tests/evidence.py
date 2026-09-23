@@ -23,6 +23,52 @@ def select(events, phase, marker=None):
     ]
 
 
+def check_controls(events):
+    errors = select(events, "CONTROL_ERROR")
+    if errors:
+        error = errors[0]
+        raise CollectionError(f"Control {error['gate']} failed: {error['error']}")
+
+
+def held_loser(events):
+    """Establish the fault before asserting SDK cleanup; a failed loser is invalid."""
+    check_controls(events)
+    ready = select(events, "WINNER_READY")
+    if not ready:
+        raise CollectionError(
+            "Missing winner-ready evidence for the blocked-loser fixture"
+        )
+    cutoff = ready[0]
+    gate = cutoff["marker"] + "-loser"
+    local = [
+        e for e in events if e["request"] == cutoff["request"] and e.get("gate") == gate
+    ]
+    if not any(
+        e["phase"] == "EFFECT" and e["sequence"] < cutoff["sequence"] for e in local
+    ) or any(
+        e["phase"] == "IO_EXIT" and e["sequence"] < cutoff["sequence"] for e in local
+    ):
+        raise CollectionError("Losing branch was not held when the winner became ready")
+
+
+def checkpoint_held(events, gate):
+    check_controls(events)
+    blocked = [e for e in select(events, "BLOCKED") if e.get("gate") == gate]
+    if not blocked:
+        raise CollectionError("Checkpoint response was not held by the control gate")
+    held = blocked[0]
+    local = [e for e in events if e["request"] == held["request"]]
+    assert any(e["sequence"] < held["sequence"] for e in select(local, "ACK_HELD")), (
+        "No real acknowledged checkpoint was held"
+    )
+    assert not [
+        e
+        for e in local
+        if e["sequence"] > held["sequence"]
+        and e["phase"] in {"WRAPPER_RETURN", "WRAPPER_RAISE", "CHECKPOINT_EXIT"}
+    ], "Wrapper/checkpoint exited before the held response settled"
+
+
 def overlap(events, markers, count, environment=None):
     blocked = [e for e in select(events, "BLOCKED") if e["marker"] in markers]
     for start in blocked:
@@ -139,6 +185,7 @@ def replay(events, history, marker):
 
 
 def early_completion(events, grace):
+    held_loser(events)
     winners = select(events, "WINNER_SELECTED")
     assert winners, "Completion policy did not select a winner"
     winner = winners[0]
@@ -155,6 +202,7 @@ def early_completion(events, grace):
 
 def deadline(events, request, grace):
     local = [e for e in events if e["request"] == request]
+    check_controls(local)
     entry = select(local, "WRAPPER_ENTER")[0]
     cutoff = entry["deadline"] + grace
     assert not [

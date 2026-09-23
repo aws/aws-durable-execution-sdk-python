@@ -31,6 +31,8 @@ waits. They establish the SDK defects, not real LMI worker recovery.
 The green harness tests exercise negative evidence controls, process-shared marker
 initialization, real public-API replay/callback/retry with the local runner,
 checkpoint response/error forwarding, deployment readback, and ownership/retirement.
+They also exercise the real parallel/map/nested fixtures with controlled I/O and
+reject an early-completion pass when the losing branch failed before the winner.
 
 ## Cloud prerequisites and configuration
 
@@ -134,6 +136,21 @@ logical execution's `TIMED_OUT` status alone cannot satisfy invocation-timeout
 assertions. Missing service retry evidence is a collection/precondition failure,
 never a passing retry test. No explicit second logical execution is mislabeled as
 a service retry.
+
+Control objects are created with `hold` before invocation and updated to `release`
+explicitly. Fixtures read their content with `GetObject`; missing objects, 403s,
+and invalid states emit `CONTROL_ERROR` and fail as test infrastructure errors.
+This avoids relying on `HeadObject` returning 404 for missing keys when the
+function role has no `s3:ListBucket` permission. The winner is released only after
+the losing step has validated its controls and emitted an actual side-effect
+record. A loser that exits before `WINNER_READY` cannot satisfy the regression.
+
+Lifecycle objects are partitioned by case marker and request ID. Live polling
+reads only the current case's prefixes with a bounded pool of readers; final
+collection retrieves the complete run. Earlier cases therefore do not consume a
+later case's short observation budget. Checkpoint holds and returns are correlated
+to the same request, and stale-attempt effects are checked before waiting for a
+retry that might itself be unable to start on a pinned worker.
 
 ## Independent budgets and results
 

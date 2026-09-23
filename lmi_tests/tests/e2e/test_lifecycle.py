@@ -95,14 +95,9 @@ def test_early_completion_reclaims_losing_branches(cloud, scenario):
 
 def test_real_synchronous_checkpoint_settles_before_branch_join(cloud):
     item = cloud.start("checkpoint")
-    cloud.phase(item, "ACK_HELD")
+    cloud.phase(item, "BLOCKED")
     held = cloud.for_item(item)
-    assert not evidence.select(held, "WRAPPER_RETURN"), (
-        "Wrapper returned with an unsettled synchronous checkpoint"
-    )
-    assert evidence.select(held, "CHECKPOINT_ACK"), (
-        "A fake checkpoint cannot establish settlement"
-    )
+    evidence.checkpoint_held(held, item["marker"] + "-checkpoint")
     cloud.release(item["marker"] + "-checkpoint")
     cloud.finish(item)
     evidence.lifecycle(cloud.for_item(item))
@@ -150,6 +145,13 @@ def test_service_timeout_retry_does_not_repeat_completed_step(cloud):
     fault = cloud.start("deadline", "deadline", "retry-" + uuid.uuid4().hex)
     first = cloud.phase(fault, "BLOCKED")[0]
     cloud.platform_timeout(fault, first["request"])
+    # Diagnose stale side effects before waiting for a retry that may itself be
+    # unable to start because the old attempt has pinned the only worker.
+    cutoff = first["deadline"] + cloud.manifest["cleanupGrace"]
+    cloud.poll(lambda: time.time() > cutoff + 1, seconds=15)
+    evidence.deadline(
+        cloud.for_item(fault), first["request"], cloud.manifest["cleanupGrace"]
+    )
 
     def retry_observed():
         entries = evidence.select(cloud.for_item(fault), "WRAPPER_ENTER")

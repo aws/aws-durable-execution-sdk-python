@@ -40,6 +40,14 @@ def lifecycle_events():
     ]
 
 
+def race_events():
+    return lifecycle_events() + [
+        event("BLOCKED", 1.1, gate="a-loser"),
+        event("EFFECT", 1.2, gate="a-loser"),
+        event("WINNER_READY", 1.3),
+    ]
+
+
 def alive(events):
     return events + [
         {**e, "phase": "ALIVE", "time": max(v["time"] for v in events) + 1}
@@ -117,12 +125,49 @@ def test_return_with_threads_or_without_user_exit_fails():
 
 def test_winner_without_wrapper_return_and_emergency_release_fail():
     with pytest.raises(AssertionError, match="wrapper pinned"):
-        evidence.early_completion(lifecycle_events()[:-1], 5)
+        evidence.early_completion(
+            [e for e in race_events() if e["phase"] != "WRAPPER_RETURN"], 5
+        )
     with pytest.raises(AssertionError, match="emergency"):
-        evidence.early_completion(lifecycle_events() + [event("ESCAPE", 3)], 5)
+        evidence.early_completion(race_events() + [event("ESCAPE", 3)], 5)
     with pytest.raises(AssertionError, match="grace"):
-        evidence.early_completion(lifecycle_events(), 1)
-    evidence.early_completion(lifecycle_events(), 5)
+        evidence.early_completion(race_events(), 1)
+    evidence.early_completion(race_events(), 5)
+
+
+def test_early_completion_rejects_the_cloud_false_positive():
+    with pytest.raises(evidence.CollectionError, match="not held"):
+        evidence.early_completion(
+            [e for e in race_events() if e["phase"] != "EFFECT"], 5
+        )
+    with pytest.raises(evidence.CollectionError, match="not held"):
+        evidence.early_completion(
+            race_events() + [event("IO_EXIT", 1.25, gate="a-loser")], 5
+        )
+    with pytest.raises(evidence.CollectionError, match="403"):
+        evidence.early_completion(
+            race_events()
+            + [event("CONTROL_ERROR", gate="a-loser", error="403 Forbidden")],
+            5,
+        )
+    # SDK cancellation after the winning step is ready, before the public
+    # parallel call returns, is legitimate cleanup rather than a fixture error.
+    evidence.early_completion(
+        race_events() + [event("IO_EXIT", 1.5, gate="a-loser")], 5
+    )
+
+
+def test_checkpoint_hold_requires_real_blocking_and_correlates_the_request():
+    held = [event("ACK_HELD", 1), event("BLOCKED", 2, gate="checkpoint")]
+    evidence.checkpoint_held(held, "checkpoint")
+    with pytest.raises(evidence.CollectionError, match="not held"):
+        evidence.checkpoint_held(held[:1], "checkpoint")
+    with pytest.raises(AssertionError, match="before the held"):
+        evidence.checkpoint_held(held + [event("WRAPPER_RETURN", 3)], "checkpoint")
+    # An unrelated request's return is not evidence that this waiter settled.
+    evidence.checkpoint_held(
+        held + [event("WRAPPER_RETURN", 3, request="other")], "checkpoint"
+    )
 
 
 @pytest.mark.parametrize(

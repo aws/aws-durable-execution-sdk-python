@@ -1,4 +1,5 @@
 import json
+import io
 from unittest.mock import Mock
 
 import boto3
@@ -33,8 +34,11 @@ def driver(monkeypatch, tmp_path):
             },
             "region": "us-west-2",
             "run": "unit",
+            "bucket": "unit-bucket",
+            "commit": "commit",
         }
     )
+    driver.s3 = Mock()
     return driver
 
 
@@ -106,3 +110,61 @@ def test_summary_never_claims_unexecuted_or_skipped_cloud_success(tmp_path):
         json.dumps({"type": "ProvisioningError"})
     )
     assert "ProvisioningError" in summarize(tmp_path)
+
+
+def test_controls_exist_before_invocation_and_shared_barriers_are_not_reset(driver):
+    driver.lam.invoke = Mock(
+        return_value={"StatusCode": 202, "DurableExecutionArn": "arn"}
+    )
+    calls = []
+    driver.s3.put_object.side_effect = lambda **kw: calls.append(
+        ("hold", kw["Key"], kw["Body"])
+    )
+    driver.lam.invoke.side_effect = lambda **_: (
+        calls.append(("invoke",)) or {"StatusCode": 202, "DurableExecutionArn": "arn"}
+    )
+    item = driver.start("parallel")
+    assert calls == [
+        ("hold", "control/" + item["marker"] + "-loser", b"hold"),
+        ("hold", "control/" + item["marker"] + "-loser-started", b"hold"),
+        ("invoke",),
+    ]
+    calls.clear()
+    driver.start("barrier", gate="shared")
+    driver.start("barrier", gate="shared")
+    assert calls == [("hold", "control/shared", b"hold"), ("invoke",), ("invoke",)]
+    assert "release-all" not in driver.gates
+
+
+def test_polling_reads_only_current_case_and_surfaces_control_errors(driver):
+    driver.invocations = [{"marker": "current"}]
+    event = {
+        "run": "unit",
+        "commit": "commit",
+        "marker": "current",
+        "request": "r",
+        "sequence": 1,
+        "time": 1,
+        "phase": "CONTROL_ERROR",
+        "gate": "g",
+        "error": "403 Forbidden",
+    }
+    key = "events/current/r/000001.json"
+    driver.s3.get_paginator.return_value.paginate.return_value = [
+        {"Contents": [{"Key": key}]}
+    ]
+    driver.s3.get_object.side_effect = lambda **_: {
+        "Body": io.BytesIO(json.dumps(event).encode())
+    }
+    with pytest.raises(CollectionError, match="403"):
+        driver.refresh()
+    driver.s3.get_paginator.return_value.paginate.assert_called_once_with(
+        Bucket="unit-bucket", Prefix="events/current/"
+    )
+    driver.s3.get_object.assert_called_once_with(Bucket="unit-bucket", Key=key)
+    # Full diagnostic collection preserves errors without turning itself into a
+    # second failing test or omitting evidence from earlier cases.
+    assert driver.refresh(markers=[]) == [event]
+    driver.s3.get_paginator.return_value.paginate.assert_called_with(
+        Bucket="unit-bucket", Prefix="events/"
+    )

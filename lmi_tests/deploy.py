@@ -372,6 +372,9 @@ def deploy(args):
     client("s3").put_object(
         Bucket=manifest["bucket"], Key=manifest["codeKey"], Body=data
     )
+    client("s3").put_object(
+        Bucket=manifest["bucket"], Key="control/release-all", Body=b"hold"
+    )
     cfn.update_stack(
         StackName=name, TemplateBody=json.dumps(template(manifest)), Tags=tags
     )
