@@ -4,6 +4,8 @@ version = "0.0.0"
 requires-python = ">=3.11"
 
 [tool.hatch.envs.default]
+# The root coordinates workspace packages; it is not an installable distribution.
+skip-install = true
 workspace.members = ["packages/*"]
 
 [tool.hatch.envs.test]
