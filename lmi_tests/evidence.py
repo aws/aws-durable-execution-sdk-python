@@ -69,6 +69,87 @@ def checkpoint_held(events, gate):
     ], "Wrapper/checkpoint exited before the held response settled"
 
 
+def scope_exit(events, gate, status=None):
+    """A result or failure must not abandon live user work (Java in-flight cases)."""
+    check_controls(events)
+    assert not select(events, "ESCAPE"), "Fixture emergency exit is not SDK cleanup"
+    starts = [e for e in select(events, "BLOCKED") if e.get("gate") == gate]
+    if not starts:
+        raise CollectionError("Missing in-flight work/cleanup precondition")
+    request = starts[0]["request"]
+    local = [e for e in events if e["request"] == request]
+    ends = select(local, "WRAPPER_RETURN") + select(local, "WRAPPER_RAISE")
+    for end in ends:
+        exits = [e for e in select(local, "IO_EXIT") if e.get("gate") == gate]
+        assert exits and exits[0]["sequence"] < end["sequence"], (
+            "Wrapper exited while invocation-owned work was still active"
+        )
+    if status is not None:
+        assert any(e.get("status") == status for e in ends), (
+            f"No {status} return for the original request"
+        )
+        lifecycle(events)
+
+
+def suspension_cleanup(events, history):
+    check_controls(events)
+    pending = [e for e in select(events, "WRAPPER_RETURN") if e["status"] == "PENDING"]
+    assert pending, "No real PENDING invocation observed"
+    assert len({e["request"] for e in select(events, "WRAPPER_ENTER")}) >= 2, (
+        "No real resume"
+    )
+    for end in pending:
+        local = [e for e in events if e["request"] == end["request"]]
+        enters, exits = select(local, "CLEANUP_ENTER"), select(local, "CLEANUP_EXIT")
+        assert (
+            enters
+            and exits
+            and enters[0]["sequence"] < exits[0]["sequence"] < end["sequence"]
+        ), "PENDING preceded root finally cleanup"
+    bodies = [e for e in select(events, "BODY") if e["operation"] == "success"]
+    assert len(bodies) == 1, "Completed body repeated after cleanup/suspension"
+    assert any(e.get("EventType") == "WaitSucceeded" for e in history)
+    lifecycle(events)
+
+
+def progress(events, marker, seconds=15):
+    check_controls(events)
+    entered, exited = select(events, "PROGRESS_BEGIN"), select(events, "PROGRESS")
+    assert entered and exited, (
+        "Nested work did not progress with single-lane branch pools"
+    )
+    assert exited[0]["time"] - entered[0]["time"] <= seconds, (
+        "Nested orchestration exhausted its progress budget"
+    )
+    assert exited[0]["value"] == [[marker + ":0", marker + ":1"], marker], (
+        "Nested results crossed invocation boundaries"
+    )
+    lifecycle(events)
+
+
+def late_operation(events, history):
+    held_loser(events)
+    ready = select(events, "WINNER_READY")[0]
+    assert select(events, "WINNER_SELECTED"), "Parent completion was not observed"
+    attempts, rejected = select(events, "LATE_ATTEMPT"), select(events, "LATE_REJECTED")
+    assert attempts and attempts[0]["sequence"] > ready["sequence"], (
+        "Late operation was not attempted after winner readiness"
+    )
+    assert not [e for e in select(events, "BODY") if e["operation"] == "late-work"], (
+        "#741: abandoned child executed a late user side effect"
+    )
+    assert rejected and rejected[0]["error"] == "OrphanedChildException", (
+        "#741: completed child scope did not reject subsequent work"
+    )
+    assert not select(events, "LATE_ACCEPTED"), (
+        "#741: completed child scope accepted a late operation"
+    )
+    assert not [e for e in history if e.get("Name") == "late-work"], (
+        "#741: late operation reached the service"
+    )
+    lifecycle(events)
+
+
 def overlap(events, markers, count, environment=None):
     blocked = [e for e in select(events, "BLOCKED") if e["marker"] in markers]
     for start in blocked:

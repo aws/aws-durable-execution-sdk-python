@@ -112,7 +112,12 @@ def test_summary_never_claims_unexecuted_or_skipped_cloud_success(tmp_path):
     assert "ProvisioningError" in summarize(tmp_path)
 
 
-def test_controls_exist_before_invocation_and_shared_barriers_are_not_reset(driver):
+@pytest.mark.parametrize(
+    "scenario", ["parallel", "return-inflight", "failure-inflight", "late-operation"]
+)
+def test_controls_exist_before_invocation_and_shared_barriers_are_not_reset(
+    driver, scenario
+):
     driver.lam.invoke = Mock(
         return_value={"StatusCode": 202, "DurableExecutionArn": "arn"}
     )
@@ -123,7 +128,7 @@ def test_controls_exist_before_invocation_and_shared_barriers_are_not_reset(driv
     driver.lam.invoke.side_effect = lambda **_: (
         calls.append(("invoke",)) or {"StatusCode": 202, "DurableExecutionArn": "arn"}
     )
-    item = driver.start("parallel")
+    item = driver.start(scenario)
     assert calls == [
         ("hold", "control/" + item["marker"] + "-loser", b"hold"),
         ("hold", "control/" + item["marker"] + "-loser-started", b"hold"),
@@ -134,6 +139,24 @@ def test_controls_exist_before_invocation_and_shared_barriers_are_not_reset(driv
     driver.start("barrier", gate="shared")
     assert calls == [("hold", "control/shared", b"hold"), ("invoke",), ("invoke",)]
     assert "release-all" not in driver.gates
+
+
+def test_finally_control_is_initialized_before_invocation(driver):
+    calls = []
+    driver.s3.put_object.side_effect = lambda **kw: calls.append(
+        ("hold", kw["Key"], kw["Body"])
+    )
+    driver.lam.invoke = Mock(
+        side_effect=lambda **_: (
+            calls.append(("invoke",))
+            or {"StatusCode": 202, "DurableExecutionArn": "arn"}
+        )
+    )
+    item = driver.start("suspend-cleanup")
+    assert calls == [
+        ("hold", "control/" + item["marker"] + "-cleanup", b"hold"),
+        ("invoke",),
+    ]
 
 
 def test_polling_reads_only_current_case_and_surfaces_control_errors(driver):

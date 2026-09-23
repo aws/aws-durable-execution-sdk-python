@@ -173,3 +173,111 @@ def test_service_timeout_retry_does_not_repeat_completed_step(cloud):
     evidence.deadline(events, first["request"], cloud.manifest["cleanupGrace"])
     # Interrupted blocked-io effects are recorded per request, not incorrectly
     # constrained to exactly-once under at-least-once step semantics.
+
+
+def start_healthy_anchor(cloud):
+    if cloud.manifest["concurrency"] == 1:
+        return None, None
+    gate = "anchor-" + uuid.uuid4().hex
+    item = cloud.start("barrier", gate=gate)
+    cloud.phase(item, "BLOCKED")
+    return item, gate
+
+
+def healthy_during(cloud, anchor, victim, boundary):
+    if anchor is None:
+        return
+    wait_overlap(cloud, [anchor, victim], 2)
+    cloud.poll(
+        lambda: [
+            e
+            for e in cloud.for_item(anchor)
+            if e["phase"] == "ALIVE" and e["time"] >= boundary["time"]
+        ],
+        message="Healthy peer did not progress while victim cleanup was held",
+    )
+
+
+def finish_anchor(cloud, anchor, gate):
+    if anchor is not None:
+        cloud.release(gate)
+        cloud.finish(anchor)
+        evidence.lifecycle(cloud.for_item(anchor))
+
+
+def test_pending_waits_for_root_finally_and_then_replays(cloud):
+    anchor, anchor_gate = start_healthy_anchor(cloud)
+    item = cloud.start("suspend-cleanup")
+    blocked = cloud.phase(item, "BLOCKED")[0]
+    healthy_during(cloud, anchor, item, blocked)
+    gate = item["marker"] + "-cleanup"
+    evidence.scope_exit(cloud.for_item(item), gate)
+    cloud.release(gate)
+    history = cloud.finish(item)
+    evidence.suspension_cleanup(cloud.for_item(item), history)
+    finish_anchor(cloud, anchor, anchor_gate)
+
+
+def test_nested_single_lane_pools_progress_for_all_runtime_workers(cloud):
+    gate = "progress-" + uuid.uuid4().hex
+    items = [
+        cloud.start("nested-progress", gate=gate)
+        for _ in range(cloud.manifest["concurrency"])
+    ]
+    wait_overlap(cloud, items, len(items))
+    cloud.release(gate)
+    for item in items:
+        cloud.phase(
+            item,
+            "PROGRESS",
+            seconds=20,
+            category=AssertionError,
+            message="Nested child/map/parallel work starved behind its own branch pool",
+        )
+        cloud.finish(item)
+        evidence.progress(cloud.for_item(item), item["marker"])
+
+
+@pytest.mark.parametrize(
+    "scenario,status",
+    [("return-inflight", "SUCCEEDED"), ("failure-inflight", "FAILED")],
+)
+def test_root_return_or_failure_settles_inflight_work(cloud, scenario, status):
+    anchor, anchor_gate = start_healthy_anchor(cloud)
+    item = cloud.start(scenario)
+    cloud.phase(item, "WINNER_SELECTED")
+    root_exit = cloud.phase(item, "USER_EXIT")[0]
+    healthy_during(cloud, anchor, item, root_exit)
+    gate = item["marker"] + "-loser"
+    evidence.held_loser(cloud.for_item(item))
+    evidence.scope_exit(cloud.for_item(item), gate)
+    cloud.release(gate)
+    cloud.finish(item, status)
+    if status == "FAILED":
+        failure = cloud.lam.get_durable_execution(DurableExecutionArn=item["arn"])[
+            "Error"
+        ]
+        assert (
+            failure["ErrorType"] == "ValueError"
+            and failure["ErrorMessage"] == "expected:" + item["marker"]
+        )
+    evidence.scope_exit(cloud.for_item(item), gate, status)
+    finish_anchor(cloud, anchor, anchor_gate)
+
+
+def test_abandoned_child_rejects_late_durable_operation(cloud):
+    item = cloud.start("late-operation")
+    cloud.phase(item, "WINNER_SELECTED")
+    evidence.held_loser(cloud.for_item(item))
+    cloud.release(item["marker"] + "-loser")
+    cloud.poll(
+        lambda: [
+            e
+            for e in cloud.for_item(item)
+            if e["phase"] in {"WRAPPER_RETURN", "WRAPPER_RAISE"}
+        ],
+        message="Residual branch did not settle after release",
+    )
+    history = cloud.history(item)
+    evidence.late_operation(cloud.for_item(item), history)
+    cloud.finish(item)

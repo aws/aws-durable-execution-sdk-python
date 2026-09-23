@@ -234,3 +234,73 @@ def test_replay_rejects_repeated_bodies_changed_identity_and_missing_history():
     ]:
         with pytest.raises(AssertionError):
             evidence.replay(bad_events, bad_history, "a")
+
+
+@pytest.mark.parametrize("status", ["SUCCEEDED", "FAILED", "PENDING"])
+def test_scope_exit_rejects_return_before_owned_work_exits(status):
+    events = lifecycle_events() + [event("BLOCKED", 1.1)]
+    events[3]["status"] = status
+    with pytest.raises(AssertionError, match="still active"):
+        evidence.scope_exit(events, "gate", status)
+    evidence.scope_exit(events + [event("IO_EXIT", 3.5)], "gate", status)
+
+
+def test_suspension_requires_finally_before_pending_and_preserves_replay():
+    events = [
+        event("WRAPPER_ENTER", resources=resource_snapshot()),
+        event("BODY", 1.1, operation="success"),
+        event("CLEANUP_ENTER", 1.2),
+        event("CLEANUP_EXIT", 2),
+        event("USER_EXIT", 2.1),
+        event("WRAPPER_RETURN", 2.2, status="PENDING", resources=resource_snapshot()),
+        event("WRAPPER_ENTER", 3, request="r2", resources=resource_snapshot()),
+        event("USER_EXIT", 4, request="r2"),
+        event(
+            "WRAPPER_RETURN",
+            5,
+            request="r2",
+            status="SUCCEEDED",
+            resources=resource_snapshot(),
+        ),
+    ]
+    history = [{"EventType": "WaitSucceeded"}]
+    evidence.suspension_cleanup(events, history)
+    wrong = [
+        {**e, "sequence": 30} if e["phase"] == "CLEANUP_EXIT" else e for e in events
+    ]
+    with pytest.raises(AssertionError, match="finally"):
+        evidence.suspension_cleanup(wrong, history)
+    with pytest.raises(AssertionError, match="repeated"):
+        evidence.suspension_cleanup(
+            events + [event("BODY", 3.1, request="r2", operation="success")], history
+        )
+
+
+def test_progress_requires_correct_nested_results_within_budget():
+    events = lifecycle_events() + [
+        event("PROGRESS_BEGIN", 1.1),
+        event("PROGRESS", 2, value=[["a:0", "a:1"], "a"]),
+    ]
+    evidence.progress(events, "a")
+    with pytest.raises(AssertionError, match="crossed"):
+        evidence.progress(events, "different")
+    with pytest.raises(AssertionError, match="budget"):
+        evidence.progress(events, "a", seconds=0.1)
+
+
+def test_late_rejection_after_a_side_effect_is_not_a_pass():
+    events = race_events() + [
+        event("LATE_ATTEMPT", 2.1),
+        event("LATE_REJECTED", 2.2, error="OrphanedChildException"),
+    ]
+    evidence.late_operation(events, [])
+    with pytest.raises(AssertionError, match="late user side effect"):
+        evidence.late_operation(
+            events + [event("BODY", 2.15, operation="late-work")], []
+        )
+    with pytest.raises(AssertionError, match="accepted"):
+        evidence.late_operation(events + [event("LATE_ACCEPTED", 2.2)], [])
+    with pytest.raises(AssertionError, match="reached the service"):
+        evidence.late_operation(
+            events, [{"Name": "late-work", "EventType": "StepStarted"}]
+        )

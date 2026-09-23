@@ -11,11 +11,11 @@ from lmi_tests.evidence import ProvisioningError
 def manifest():
     return {
         "run": "unit",
-        "stack": "py-lmi-unit-313-c2",
+        "stack": "py-lmi-unit-314-c2",
         "bucket": "test-bucket",
         "role": "role",
         "provider": "provider",
-        "runtime": "python3.13",
+        "runtime": "python3.14",
         "concurrency": 2,
         "commit": "sha",
         "codeKey": "code/sha.zip",
@@ -27,12 +27,12 @@ def manifest():
     }
 
 
-@pytest.mark.parametrize("runtime", ["python3.13", "python3.14"])
 @pytest.mark.parametrize("concurrency", [1, 2])
 def test_template_sets_native_scaling_durability_and_published_target(
-    manifest, runtime, concurrency
+    manifest, concurrency
 ):
-    manifest.update(runtime=runtime, concurrency=concurrency)
+    runtime = "python3.14"
+    manifest.update(concurrency=concurrency)
     template = deploy.template(manifest)
     for key in ("normal", "deadline"):
         config = template["Resources"][key + "Function"]["Properties"]

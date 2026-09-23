@@ -14,7 +14,7 @@ suite remains usable while the fix is designed.
 
 ## Run locally
 
-Use Python 3.13 or 3.14 and Hatch from the repository root:
+Use Python 3.14 and Hatch from the repository root:
 
 ```sh
 hatch run lmi:unit
@@ -22,10 +22,11 @@ hatch run lmi:lint
 hatch run lmi:regressions --junitxml=lmi_tests/artifacts/regressions.xml
 ```
 
-The last command asserts four fixed behaviors against the real decorator/step/map/
+The last command asserts five fixed behaviors against the real decorator/step/map/
 parallel APIs with an in-memory checkpoint service: an expired invocation starts no
 step, and an early result does not pin a parallel, map, or nested-map wrapper past
-its invocation budget. These local tests have final releases and bounded fixture
+its invocation budget. A further regression checks that an abandoned child cannot
+start another step in its `finally` block. These local tests have final releases and bounded fixture
 waits. They establish the SDK defects, not real LMI worker recovery.
 
 The green harness tests exercise negative evidence controls, process-shared marker
@@ -37,7 +38,7 @@ reject an early-completion pass when the losing branch failed before the winner.
 ## Cloud prerequisites and configuration
 
 Use a **test account** and region supporting durable functions on LMI with Python
-3.13/3.14 and arm64. Provision an existing test-owned capacity provider with an
+3.14 and arm64. Provision an existing test-owned capacity provider with an
 explicit 2–128 vCPU maximum. Its `VpcConfig` supplies subnet/security-group
 configuration; change networking on that provider before the run. Workers need
 access to Lambda's checkpoint API, S3, and CloudWatch Logs through NAT or endpoints.
@@ -65,7 +66,7 @@ is substituted. The artifact hash, SDK wheel version, and commit are retained.
 hatch run lmi:build
 hatch run lmi:python -m lmi_tests.deploy reconcile
 hatch run lmi:python -m lmi_tests.deploy deploy \
-  --run-id local-20260923-a --runtime python3.13 --concurrency 2
+  --run-id local-20260923-a --runtime python3.14 --concurrency 2
 hatch run lmi:cloud --junitxml=lmi_tests/artifacts/cloud.xml
 # Run both commands below even when a scenario fails:
 hatch run lmi:python -m lmi_tests.deploy collect
@@ -75,9 +76,10 @@ python -m lmi_tests.summary
 
 For unattended local runs, install a shell `EXIT`/`INT`/`TERM` trap that calls
 `collect` followed by `cleanup`; the workflow already has unconditional steps.
-Use a fresh run ID for each deployment. Run all four combinations of runtime
-`python3.13`/`python3.14` and environment concurrency `1`/`2`, as CI does.
-The independent SDK branch-concurrency settings include 2 and 3.
+Use a fresh run ID for each deployment. Run both environment-concurrency settings,
+`1` and `2`, with Python 3.14, as CI does. The LMI suite and its Hatch environment
+target only Python 3.14. Independent SDK branch-concurrency settings include 1, 2,
+and 3.
 
 Each combination creates a unique stack, private bucket, log groups, and two
 functions (`normal`, `deadline`). Both functions declare native scaling limits of
@@ -105,6 +107,37 @@ waiting for results, with finite boto transport timeouts.
 | Checkpoint settlement | Real synchronous service checkpoint is acknowledged but response delivery to the SDK waiter is externally held; wrapper cannot return before settlement; releasing the response must unblock branch cleanup |
 | Invocation deadline (#741) | A real short function timeout, service invocation-completed error for the exact request, external side effects, full original-environment worker capacity recovery, and healthy concurrent work on another process for c2 |
 | Timeout/retry | A second service invocation of the **same** durable execution, completed step skipped, original attempt effects cease; repeated interrupted at-least-once work is recorded separately and is not called exactly-once |
+
+### Java lifecycle coverage in Python
+
+The analogous cases from Java PR #728 are mapped to Python's public APIs:
+
+| Java case | Python coverage |
+| --- | --- |
+| Root `finally` before PENDING, with a healthy peer | `test_pending_waits_for_root_finally_and_then_replays`: externally hold root cleanup, require cleanup exit before PENDING, verify actual wait/resume and no repeated step body; c2 also observes a healthy worker progressing during cleanup |
+| Two roots on a fixed executor | Local subprocess test invokes the same decorated handler concurrently through the real local runner, with distinct inputs/checkpoints and a bounded rendezvous |
+| Fixed-pool nested child/map/parallel progress | `test_nested_single_lane_pools_progress_for_all_runtime_workers`: saturate runtime lanes, release a shared barrier, and finish nested child/map/parallel work with each SDK branch pool limited to one worker; results and a 15-second progress budget are asserted |
+| Return/failure with an in-flight step | `test_root_return_or_failure_settles_inflight_work`: `first_successful` leaves a controlled losing branch in flight, then the root returns or raises; the wrapper must settle that work before returning SUCCEEDED/FAILED, retaining the original failure; c2 keeps a healthy peer active |
+| Non-cooperative residual child attempts later SDK work | `test_abandoned_child_rejects_late_durable_operation`: after parent completion, explicitly attempt another step in the losing branch's `finally`; rejection must precede any body execution or service checkpoint |
+| Deadline, worker recovery, repeated warm batches | Existing deadline/isolation/retry and warm-resource tests remain enabled |
+
+There is no Python equivalent of Java's public shared-executor injection or
+`stepAsync`. The Python cases use separate invocation scopes, public child/map/
+parallel APIs, and LMI's distinct Python worker processes. They do not inject a
+Java-style executor into Python or manufacture an async step API.
+
+The root-finally gate is test-only lifecycle instrumentation after a durable wait
+has requested suspension; it does not schedule another durable operation or change
+the handler's result/operation sequence. Ordinary orchestration delays still use
+`context.wait`. Local shared-root tests run under a subprocess watchdog, so an
+executor-starvation regression cannot hang the test process. Cloud progress tests
+have bounded driver budgets and the existing run-owned-function retirement path.
+
+The late-operation guard currently exposes an additional #741 scope-lifetime gap:
+a newly created operation can escape the SDK's set of already-known orphaned
+operation IDs. Its local regression is explicitly enabled with `lmi:regressions`;
+its real-cloud assertion always runs. The green harness validates fixture behavior
+and negative evidence controls without treating the SDK defect as a passing result.
 
 The current SDK has no public cooperative cancellation API. The fault fixture
 therefore deliberately remains blocked until interrupted/retired by the eventual
@@ -180,7 +213,7 @@ and on every push to `main`, including merged changes. There are no path filters
 label requirements, or ready-for-review requirements. `workflow_dispatch` remains
 available for manual reruns; there are no scheduled jobs.
 
-Each workflow run has its own resources and runs its four matrix entries
+Each workflow run has its own resources and runs its two matrix entries
 sequentially. Runs do not share a GitHub concurrency group, so a new PR update or
 main push cannot replace another commit's pending cloud job.
 

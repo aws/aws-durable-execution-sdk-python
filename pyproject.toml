@@ -29,6 +29,7 @@ examples-integration = "pytest --runner-mode=cloud -m example packages/aws-durab
 
 [tool.hatch.envs.lmi]
 detached = true
+python = "3.14"
 workspace.members = [
   "packages/aws-durable-execution-sdk-python",
   "packages/aws-durable-execution-sdk-python-testing",

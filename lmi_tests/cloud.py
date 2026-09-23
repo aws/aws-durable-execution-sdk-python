@@ -36,11 +36,20 @@ class Cloud:
         if gate:
             payload["gate"] = gate
             self.hold(gate)
-        if scenario in {"parallel", "map", "nested"}:
+        if scenario in {
+            "parallel",
+            "map",
+            "nested",
+            "return-inflight",
+            "failure-inflight",
+            "late-operation",
+        }:
             self.hold(marker + "-loser")
             self.hold(marker + "-loser-started")
         elif scenario == "checkpoint":
             self.hold(marker + "-checkpoint")
+        elif scenario == "suspend-cleanup":
+            self.hold(marker + "-cleanup")
         runner = DurableFunctionCloudTestRunner(
             self.manifest["functions"][fixture], region=self.manifest["region"]
         )

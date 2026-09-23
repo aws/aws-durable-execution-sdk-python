@@ -530,9 +530,7 @@ def main():
         "command", choices=["build", "deploy", "collect", "cleanup", "reconcile"]
     )
     parser.add_argument("--run-id")
-    parser.add_argument(
-        "--runtime", choices=["python3.13", "python3.14"], default="python3.13"
-    )
+    parser.add_argument("--runtime", choices=["python3.14"], default="python3.14")
     parser.add_argument("--concurrency", type=int, choices=[1, 2], default=2)
     args = parser.parse_args()
     try:

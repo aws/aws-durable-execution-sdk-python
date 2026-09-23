@@ -28,6 +28,7 @@ from aws_durable_execution_sdk_python.execution import (
 )
 from aws_durable_execution_sdk_python.lambda_service import LambdaClient
 from aws_durable_execution_sdk_python.retries import RetryDecision
+from aws_durable_execution_sdk_python.exceptions import OrphanedChildException
 
 
 PROCESS_ID = uuid.uuid4().hex
@@ -200,13 +201,51 @@ class ObservedClient:
             self.trace.emit("CHECKPOINT_EXIT")
 
 
+def nested_progress(context, trace, marker):
+    """Nested public operations must progress even when each branch pool has one lane."""
+    trace.emit("PROGRESS_BEGIN")
+
+    def children(child):
+        def mapped(branch):
+            return branch.map(
+                [0, 1],
+                lambda inner, item, _index, _all: inner.run_in_child_context(
+                    lambda leaf: leaf.step(
+                        lambda step: trace.body("leaf", f"{marker}:{item}", step),
+                        name="leaf",
+                    ),
+                    name="grandchild",
+                ),
+                name="inner-map",
+                config=MapConfig(max_concurrency=1),
+            ).get_results()
+
+        return child.parallel(
+            [
+                mapped,
+                lambda branch: branch.run_in_child_context(
+                    lambda leaf: leaf.step(
+                        lambda step: trace.body("sibling", marker, step), name="sibling"
+                    ),
+                    name="sibling-child",
+                ),
+            ],
+            name="outer-parallel",
+            config=ParallelConfig(max_concurrency=1),
+        ).get_results()
+
+    result = context.run_in_child_context(children, name="progress-child")
+    assert result == [[marker + ":0", marker + ":1"], marker]
+    trace.emit("PROGRESS", value=result)
+
+
 def workflow(event, context, trace):
     marker, scenario = event["marker"], event["scenario"]
     try:
         value = context.step(lambda s: trace.body("success", marker, s), name="success")
         if scenario == "failure":
             raise ValueError("expected:" + marker)
-        if scenario in {"barrier", "deadline"}:
+        if scenario in {"barrier", "deadline", "nested-progress"}:
             context.step(
                 lambda step: trace.gate(
                     event["gate"], effects=scenario == "deadline", attempt=step.attempt
@@ -215,7 +254,18 @@ def workflow(event, context, trace):
                 config=NO_RETRY,
             )
             context.step(lambda s: trace.body("after-io", marker, s), name="after-io")
-        elif scenario in {"parallel", "map", "nested"}:
+            if scenario == "nested-progress":
+                nested_progress(context, trace, marker)
+        elif scenario == "suspend-cleanup":
+            context.wait(Duration.from_seconds(5), name="pause")
+        elif scenario in {
+            "parallel",
+            "map",
+            "nested",
+            "return-inflight",
+            "failure-inflight",
+            "late-operation",
+        }:
 
             def losing(child):
                 def io(step):
@@ -227,7 +277,24 @@ def workflow(event, context, trace):
                     )
                     return marker
 
-                return child.step(io, name="losing-io", config=NO_RETRY)
+                try:
+                    return child.step(io, name="losing-io", config=NO_RETRY)
+                finally:
+                    if scenario == "late-operation":
+                        # The preceding step's final checkpoint can itself be
+                        # rejected after the parent finishes. Still test the next
+                        # SDK boundary, without swallowing unrelated failures.
+                        trace.emit("LATE_ATTEMPT")
+                        try:
+                            child.step(
+                                lambda step: trace.body("late-work", marker, step),
+                                name="late-work",
+                                config=NO_RETRY,
+                            )
+                        except OrphanedChildException as error:
+                            trace.emit("LATE_REJECTED", error=type(error).__name__)
+                        else:
+                            trace.emit("LATE_ACCEPTED")
 
             def winning(child):
                 def io(_):
@@ -271,6 +338,9 @@ def workflow(event, context, trace):
             else:
                 race(context)
             trace.emit("WINNER_SELECTED")
+            if scenario == "failure-inflight":
+                trace.emit("ROOT_FAILURE_READY")
+                raise ValueError("expected:" + marker)
         elif scenario == "checkpoint":
             context.parallel(
                 [
@@ -334,6 +404,14 @@ def workflow(event, context, trace):
         trace.emit("USER_RESULT", value=value)
         return value
     finally:
+        if scenario == "suspend-cleanup":
+            # Test-only root-finally diagnostics. This gate changes only exit
+            # timing; it introduces no durable operations during suspension.
+            trace.emit("CLEANUP_ENTER")
+            try:
+                trace.gate(marker + "-cleanup")
+            finally:
+                trace.emit("CLEANUP_EXIT")
         trace.emit("USER_EXIT")
 
 
