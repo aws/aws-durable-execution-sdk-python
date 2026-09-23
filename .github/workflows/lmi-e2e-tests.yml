@@ -56,6 +56,12 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    # All runs and matrix entries use the same provider. Hold this slot through
+    # cleanup; do not include a PR/ref/run ID or matrix value in the group.
+    concurrency:
+      group: lmi-e2e-shared-capacity-provider
+      cancel-in-progress: false
+      queue: max
     strategy:
       fail-fast: false
       max-parallel: 1

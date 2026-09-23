@@ -224,9 +224,18 @@ and on every push to `main`, including merged changes. There are no path filters
 label requirements, or ready-for-review requirements. `workflow_dispatch` remains
 available for manual reruns; there are no scheduled jobs.
 
-Each workflow run has its own resources and runs its two matrix entries
-sequentially. Runs do not share a GitHub concurrency group, so a new PR update or
-main push cannot replace another commit's pending cloud job.
+Each workflow run has its own resources. All cloud jobs share the repository-wide
+`lmi-e2e-shared-capacity-provider` concurrency group, across PRs, main pushes,
+manual runs, and both matrix entries. Only one cloud job can deploy, test, or clean
+up at a time; the slot is held until the entire job finishes. Harness jobs can run
+in parallel. The capacity provider's configuration is not changed.
+
+`cancel-in-progress: false` preserves running jobs, and
+[`queue: max`](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency#example-queueing-multiple-pending-runs)
+retains up to 100 pending jobs instead of replacing an older pending job on each update. GitHub
+cancels additional arrivals when that queue is full. This repository-wide group
+does not coordinate manual local deployments or jobs in other repositories using
+the same provider; those consumers must also leave sufficient capacity available.
 
 Privileged cloud jobs retain the repository's existing restrictions for forked PRs
 and Dependabot; the harness still runs for those PRs. Cloud jobs reuse
