@@ -175,13 +175,33 @@ def test_service_timeout_retry_does_not_repeat_completed_step(cloud):
     # constrained to exactly-once under at-least-once step semantics.
 
 
-def start_healthy_anchor(cloud):
+def place_with_healthy_anchor(cloud, scenario):
     if cloud.manifest["concurrency"] == 1:
-        return None, None
-    gate = "anchor-" + uuid.uuid4().hex
-    item = cloud.start("barrier", gate=gate)
-    cloud.phase(item, "BLOCKED")
-    return item, gate
+        return None, None, cloud.start(scenario)
+    for _attempt in range(3):
+        gate = "anchor-" + uuid.uuid4().hex
+        anchor = cloud.start("barrier", gate=gate)
+        environment = cloud.phase(anchor, "BLOCKED")[0]["environment"]
+        victim = cloud.start(scenario, target_environment=environment)
+        admission = cloud.poll(
+            lambda: [
+                e
+                for e in cloud.for_item(victim)
+                if e["phase"] in {"PLACEMENT_ACCEPTED", "PLACEMENT_MISS"}
+            ],
+            seconds=15,
+            category=evidence.PlacementError,
+            message="Victim placement was not established before fault admission",
+        )[0]
+        if admission["phase"] == "PLACEMENT_ACCEPTED":
+            return anchor, gate, victim
+        # Only a rejected precondition is retried. The victim has checkpointed
+        # admission=False and returns without executing the scenario.
+        cloud.finish(victim)
+        finish_anchor(cloud, anchor, gate)
+    raise evidence.PlacementError(
+        "No same-environment pair after three placement attempts"
+    )
 
 
 def healthy_during(cloud, anchor, victim, boundary):
@@ -206,8 +226,7 @@ def finish_anchor(cloud, anchor, gate):
 
 
 def test_pending_waits_for_root_finally_and_then_replays(cloud):
-    anchor, anchor_gate = start_healthy_anchor(cloud)
-    item = cloud.start("suspend-cleanup")
+    anchor, anchor_gate, item = place_with_healthy_anchor(cloud, "suspend-cleanup")
     blocked = cloud.phase(item, "BLOCKED")[0]
     healthy_during(cloud, anchor, item, blocked)
     gate = item["marker"] + "-cleanup"
@@ -243,8 +262,7 @@ def test_nested_single_lane_pools_progress_for_all_runtime_workers(cloud):
     [("return-inflight", "SUCCEEDED"), ("failure-inflight", "FAILED")],
 )
 def test_root_return_or_failure_settles_inflight_work(cloud, scenario, status):
-    anchor, anchor_gate = start_healthy_anchor(cloud)
-    item = cloud.start(scenario)
+    anchor, anchor_gate, item = place_with_healthy_anchor(cloud, scenario)
     cloud.phase(item, "WINNER_SELECTED")
     root_exit = cloud.phase(item, "USER_EXIT")[0]
     healthy_during(cloud, anchor, item, root_exit)

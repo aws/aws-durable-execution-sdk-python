@@ -90,6 +90,56 @@ def test_pending_waits_for_finally_then_replays_without_repeating_body():
     evidence.suspension_cleanup(controls.snapshot(), history)
 
 
+@pytest.mark.parametrize(
+    "scenario", ["suspend-cleanup", "return-inflight", "failure-inflight"]
+)
+def test_placement_miss_runs_no_fault_or_finally_gate(scenario):
+    controls = Controls()
+    trace = controls.trace("local", scenario)
+    handler = durable_execution(lambda event, context: workflow(event, context, trace))
+    with DurableFunctionTestRunner(handler, poll_interval=0.01) as runner:
+        result = runner.run(
+            input={
+                "marker": "local",
+                "scenario": scenario,
+                "target_environment": "another-environment",
+            },
+            execution_timeout=10,
+        )
+    assert result.status.value == "SUCCEEDED"
+    phases = {e["phase"] for e in controls.snapshot()}
+    assert "PLACEMENT_MISS" in phases
+    assert not phases & {"BODY", "BLOCKED", "WINNER_READY", "CLEANUP_ENTER"}
+
+
+def test_only_missed_admission_retries_environment_pair(monkeypatch):
+    from unittest.mock import Mock
+    from lmi_tests.tests.e2e import test_lifecycle
+
+    cloud = Mock()
+    cloud.manifest = {"concurrency": 2}
+    first, missed, second, admitted = [
+        dict(marker=name) for name in ("first", "missed", "second", "admitted")
+    ]
+    cloud.start.side_effect = [first, missed, second, admitted]
+    cloud.phase.side_effect = [[{"environment": "old"}], [{"environment": "new"}]]
+    cloud.for_item.side_effect = [
+        [{"phase": "PLACEMENT_MISS"}],
+        [{"phase": "PLACEMENT_ACCEPTED"}],
+    ]
+    cloud.poll.side_effect = lambda predicate, **_: predicate()
+    finish = Mock()
+    monkeypatch.setattr(test_lifecycle, "finish_anchor", finish)
+    anchor, _gate, victim = test_lifecycle.place_with_healthy_anchor(
+        cloud, "return-inflight"
+    )
+    assert anchor is second and victim is admitted
+    cloud.finish.assert_called_once_with(missed)
+    assert finish.call_count == 1
+    assert cloud.start.call_args_list[1].kwargs["target_environment"] == "old"
+    assert cloud.start.call_args_list[3].kwargs["target_environment"] == "new"
+
+
 def run_inflight_case(scenario, status):
     controls = Controls()
     for suffix in ("loser", "loser-started"):

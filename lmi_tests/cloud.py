@@ -44,9 +44,11 @@ class Cloud:
             )
             verify(config, scaling, self.manifest, key)
 
-    def start(self, scenario, fixture="normal", gate=None):
+    def start(self, scenario, fixture="normal", gate=None, target_environment=None):
         marker = scenario + "-" + uuid.uuid4().hex[:12]
         payload = {"scenario": scenario, "marker": marker, "run": self.manifest["run"]}
+        if target_environment is not None:
+            payload["target_environment"] = target_environment
         if gate:
             payload["gate"] = gate
             self.hold(gate)

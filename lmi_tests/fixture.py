@@ -241,7 +241,22 @@ def nested_progress(context, trace, marker):
 
 def workflow(event, context, trace):
     marker, scenario = event["marker"], event["scenario"]
+    admitted = False
     try:
+        if target := event.get("target_environment"):
+            # Record placement before any fault work. Replays consume the same
+            # decision even if Lambda later resumes in another environment.
+            accepted = context.step(
+                lambda _: trace.identity["environment"] == target,
+                name="placement-admission",
+                config=NO_RETRY,
+            )
+            trace.emit(
+                "PLACEMENT_ACCEPTED" if accepted else "PLACEMENT_MISS", target=target
+            )
+            if not accepted:
+                return marker
+        admitted = True
         value = context.step(lambda s: trace.body("success", marker, s), name="success")
         if scenario == "failure":
             raise ValueError("expected:" + marker)
@@ -404,7 +419,7 @@ def workflow(event, context, trace):
         trace.emit("USER_RESULT", value=value)
         return value
     finally:
-        if scenario == "suspend-cleanup":
+        if scenario == "suspend-cleanup" and admitted:
             # Test-only root-finally diagnostics. This gate changes only exit
             # timing; it introduces no durable operations during suspension.
             trace.emit("CLEANUP_ENTER")

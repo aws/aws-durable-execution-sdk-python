@@ -133,6 +133,11 @@ the handler's result/operation sequence. Ordinary orchestration delays still use
 executor-starvation regression cannot hang the test process. Cloud progress tests
 have bounded driver budgets and the existing run-owned-function retirement path.
 
+Healthy-peer cases checkpoint an admission decision before running fault work.
+If an environment rotation places the victim elsewhere, it returns without
+entering the scenario and the driver replaces the pair, up to three attempts.
+Once admitted, lifecycle assertions are final and are never retried to get a pass.
+
 The late-operation guard currently exposes an additional #741 scope-lifetime gap:
 a newly created operation can escape the SDK's set of already-known orphaned
 operation IDs. Its local regression is explicitly enabled with `lmi:regressions`;
