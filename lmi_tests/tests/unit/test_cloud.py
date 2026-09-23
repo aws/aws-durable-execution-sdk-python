@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 import boto3
 from botocore.stub import ANY, Stubber
+from botocore.exceptions import ClientError
 import pytest
 
 from lmi_tests import cloud as module
@@ -191,3 +192,92 @@ def test_polling_reads_only_current_case_and_surfaces_control_errors(driver):
     driver.s3.get_paginator.return_value.paginate.assert_called_with(
         Bucket="unit-bucket", Prefix="events/"
     )
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def time(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def throttle_error():
+    return ClientError(
+        {"Error": {"Code": "TooManyRequestsException", "Message": "Rate exceeded"}},
+        "GetDurableExecutionHistory",
+    )
+
+
+def test_history_retries_preserve_pages_and_pace_requests(driver, monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(module, "time", clock)
+    driver.lam.get_durable_execution_history = Mock(
+        side_effect=[
+            throttle_error(),
+            {"Events": [{"EventId": 1}], "NextMarker": "page2"},
+            {"Events": [{"EventId": 2}]},
+        ]
+    )
+    assert driver.history({"arn": "execution", "marker": "case"}) == [
+        {"EventId": 1},
+        {"EventId": 2},
+    ]
+    calls = driver.lam.get_durable_execution_history.call_args_list
+    assert calls[0] == calls[1]
+    assert calls[2].kwargs["Marker"] == "page2"
+    assert clock.now >= 2
+
+
+def test_history_throttling_has_a_finite_budget(driver, monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(module, "time", clock)
+    driver.lam.get_durable_execution_history = Mock(side_effect=throttle_error())
+    with pytest.raises(CollectionError, match="throttle budget"):
+        driver.history_page(DurableExecutionArn="execution")
+    assert driver.lam.get_durable_execution_history.call_count == 5
+    assert clock.now < 20
+
+
+def test_history_does_not_retry_permission_errors_or_invocations(driver, monkeypatch):
+    monkeypatch.setattr(module, "time", Clock())
+    driver.lam.invoke = Mock(
+        return_value={"StatusCode": 202, "DurableExecutionArn": "execution"}
+    )
+    item = driver.start("success")
+    error = ClientError(
+        {"Error": {"Code": "AccessDeniedException"}}, "GetDurableExecutionHistory"
+    )
+    driver.lam.get_durable_execution_history = Mock(side_effect=error)
+    with pytest.raises(ClientError):
+        item["runner"].lambda_client.get_durable_execution_history(
+            DurableExecutionArn="execution"
+        )
+    driver.lam.invoke.assert_called_once()
+    driver.lam.get_durable_execution_history.assert_called_once()
+
+
+def test_case_collection_is_scoped_but_final_collection_is_complete(driver):
+    driver.invocations = [{"arn": "execution", "marker": "case"}]
+    driver.refresh = Mock(return_value=[{"execution": "execution", "marker": "case"}])
+    driver.history = Mock(return_value=[])
+    driver.lam.get_durable_execution = Mock(return_value={"Status": "SUCCEEDED"})
+    driver.logs = Mock()
+    driver.collect(full_run=False)
+    driver.refresh.assert_called_once_with(markers=["case"], validate_controls=False)
+    driver.history.assert_called_once()
+    driver.logs.get_paginator.assert_not_called()
+    driver.manifest["created"] = 0
+    driver.lam.get_function_configuration = Mock(
+        return_value={"LoggingConfig": {"LogGroup": "group"}}
+    )
+    driver.logs.get_paginator.return_value.paginate.return_value = []
+    driver.collect()
+    driver.refresh.assert_called_with(markers=[], validate_controls=False)
+    driver.logs.get_paginator.assert_called_once_with("filter_log_events")

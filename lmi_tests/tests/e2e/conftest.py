@@ -50,4 +50,4 @@ def cloud(deployment):
         try:
             driver.release_all()
         finally:
-            driver.collect()
+            driver.collect(full_run=False)

@@ -185,6 +185,12 @@ later case's short observation budget. Checkpoint holds and returns are correlat
 to the same request, and stale-attempt effects are checked before waiting for a
 retry that might itself be unable to start on a pinned worker.
 
+Per-case teardown collects only that case's executions. Complete-run histories
+and CloudWatch logs are collected once by the final workflow step. Both runner
+and artifact history reads are paced at one request per second, with at most five
+throttling attempts within a 20-second retry budget (in addition to the finite
+transport timeout). Invocation and callback writes are not retried by this layer.
+
 ## Independent budgets and results
 
 | Budget | Default |

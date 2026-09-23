@@ -14,6 +14,19 @@ from lmi_tests.deploy import ARTIFACTS, QUALIFIER, client, save, verify
 from lmi_tests.evidence import CollectionError, check_controls, select
 
 
+class RunnerClient:
+    """Share paced history reads with the public runner; other APIs are unchanged."""
+
+    def __init__(self, cloud):
+        self.cloud = cloud
+
+    def __getattr__(self, name):
+        return getattr(self.cloud.lam, name)
+
+    def get_durable_execution_history(self, **kwargs):
+        return self.cloud.history_page(**kwargs)
+
+
 class Cloud:
     def __init__(self, manifest):
         self.manifest = manifest
@@ -21,6 +34,7 @@ class Cloud:
         self.events = {}
         self.invocations = []
         self.gates = set()
+        self._next_history_read = 0.0
 
     def verify(self):
         for key, arn in self.manifest["functions"].items():
@@ -53,7 +67,7 @@ class Cloud:
         runner = DurableFunctionCloudTestRunner(
             self.manifest["functions"][fixture], region=self.manifest["region"]
         )
-        runner.lambda_client = self.lam  # bounded transport, including async start
+        runner.lambda_client = RunnerClient(self)
         try:
             arn = runner.run_async(input=payload)
             if not arn:
@@ -106,7 +120,7 @@ class Cloud:
             Bucket=self.manifest["bucket"], Key="control/" + gate, Body=b"release"
         )
 
-    def refresh(self, markers=None):
+    def refresh(self, markers=None, *, validate_controls=True):
         # A new pytest fixture must not scan every earlier case before it can
         # observe its first event. Explicit [] requests the complete run for collection.
         if markers is None:
@@ -149,7 +163,7 @@ class Cloud:
         )
         save(ARTIFACTS / "events.json", events)
         selected = [e for e in events if not markers or e["marker"] in markers]
-        if markers:
+        if markers and validate_controls:
             check_controls(selected)
         return selected
 
@@ -196,13 +210,39 @@ class Cloud:
         self.phase(item, "WRAPPER_RETURN")
         return self.history(item)
 
+    def history_page(self, **request):
+        """Bound read-only throttling retries without replaying invocation writes."""
+        deadline = time.monotonic() + 20
+        last_error = None
+        for attempt in range(5):
+            delay = max(0, self._next_history_read - time.monotonic())
+            if time.monotonic() + delay >= deadline:
+                break
+            if delay:
+                time.sleep(delay)
+            try:
+                return self.lam.get_durable_execution_history(**request)
+            except ClientError as error:
+                if error.response["Error"]["Code"] not in {
+                    "TooManyRequestsException",
+                    "ThrottlingException",
+                }:
+                    raise
+                last_error = error
+            finally:
+                self._next_history_read = time.monotonic() + 1
+            self._next_history_read = time.monotonic() + min(2**attempt, 4)
+        raise CollectionError(
+            "Execution-history API throttle budget exhausted"
+        ) from last_error
+
     def history(self, item):
         events, marker = [], None
         while True:
             request = {"DurableExecutionArn": item["arn"], "IncludeExecutionData": True}
             if marker:
                 request["Marker"] = marker
-            result = self.lam.get_durable_execution_history(**request)
+            result = self.history_page(**request)
             events.extend(result.get("Events", []))
             marker = result.get("NextMarker")
             if not marker:
@@ -229,25 +269,36 @@ class Cloud:
             message="No service invocation timeout evidence for " + request,
         )
 
-    def collect(self):
+    def collect(self, *, full_run=True):
         errors = []
+        if not full_run and not self.invocations:
+            return
         try:
-            events = self.refresh(markers=[])
+            events = self.refresh(
+                markers=[] if full_run else [i["marker"] for i in self.invocations],
+                validate_controls=False,
+            )
             # Independent collect steps can recover execution ARNs without the
             # pytest process or successful invoke response.
             items = {
                 e["execution"]: {"arn": e["execution"], "marker": e["marker"]}
                 for e in events
             }
-            for item in items.values():
+        except Exception as error:
+            errors.append(str(error))
+            items = {}
+        if not full_run:
+            items.update({i["arn"]: i for i in self.invocations})
+        for item in items.values():
+            try:
                 self.history(item)
                 save(
                     ARTIFACTS / f"executions/{item['marker']}.json",
                     self.lam.get_durable_execution(DurableExecutionArn=item["arn"]),
                 )
-        except Exception as error:
-            errors.append(str(error))
-        for key, arn in self.manifest["functions"].items():
+            except Exception as error:
+                errors.append(str(error))
+        for key, arn in self.manifest["functions"].items() if full_run else []:
             try:
                 config = self.lam.get_function_configuration(FunctionName=arn)
                 logs = []
