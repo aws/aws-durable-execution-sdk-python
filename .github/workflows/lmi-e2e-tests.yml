@@ -1,0 +1,121 @@
+name: LMI e2e tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      region:
+        description: Region containing the test LMI capacity provider
+        default: us-west-2
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - run: pip install hatch==1.16.5
+      - run: hatch run lmi:lint
+      - run: hatch run lmi:unit --junitxml=lmi_tests/artifacts/unit.xml
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lmi-harness-tests
+          path: lmi_tests/artifacts/
+
+  cloud:
+    needs: harness
+    # Start with manual runs and explicit trusted PR opt-in; no scheduled cloud job.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.actor != 'dependabot[bot]' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(github.event.pull_request.labels.*.name, 'run-lmi-e2e'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        python: ['3.13', '3.14']
+        concurrency: [1, 2]
+    concurrency:
+      group: python-lmi-e2e-${{ matrix.python }}-${{ matrix.concurrency }}
+      cancel-in-progress: false
+    env:
+      AWS_REGION: ${{ inputs.region || 'us-west-2' }}
+      CAPACITY_PROVIDER_ARN: ${{ secrets.CAPACITY_PROVIDER_ARN }}
+      TEST_ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
+      TEST_LAMBDA_EXECUTION_ROLE_ARN: ${{ secrets.TEST_LAMBDA_EXECUTION_ROLE_ARN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.TEST_ROLE_ARN }}
+          role-session-name: python-lmi-e2e
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ secrets.TEST_ACCOUNT_ID }}
+      - name: Verify test account and prerequisites
+        run: |
+          test -n "$CAPACITY_PROVIDER_ARN"
+          test -n "$TEST_LAMBDA_EXECUTION_ROLE_ARN"
+          test "$(aws sts get-caller-identity --query Account --output text)" = "$TEST_ACCOUNT_ID"
+      - run: pip install hatch==1.16.5
+      - name: Build SDK checkout and reconcile expired test stacks
+        timeout-minutes: 5
+        run: |
+          hatch run lmi:build
+          hatch run lmi:python -m lmi_tests.deploy reconcile
+      - name: Deploy verified LMI functions
+        timeout-minutes: 28
+        env:
+          LMI_RUNTIME: python${{ matrix.python }}
+          LMI_CONCURRENCY: ${{ matrix.concurrency }}
+        run: |
+          hatch run lmi:python -m lmi_tests.deploy deploy \
+            --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --runtime "$LMI_RUNTIME" --concurrency "$LMI_CONCURRENCY"
+      - name: Run cloud regressions (red until issue 741 is fixed)
+        timeout-minutes: 12
+        run: hatch run lmi:cloud --junitxml=lmi_tests/artifacts/cloud.xml
+      - name: Collect service history and runtime evidence
+        if: always()
+        timeout-minutes: 3
+        run: |
+          if test -f lmi_tests/artifacts/manifest.json; then
+            hatch run lmi:python -m lmi_tests.deploy collect
+          fi
+      - name: Release blocked work and retire run-owned resources
+        if: always()
+        timeout-minutes: 5
+        run: |
+          if test -f lmi_tests/artifacts/manifest.json; then
+            hatch run lmi:python -m lmi_tests.deploy cleanup
+          fi
+      - name: Retain diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lmi-${{ matrix.python }}-c${{ matrix.concurrency }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          path: lmi_tests/artifacts/
+      - name: Summarize outcomes
+        if: always()
+        run: python -m lmi_tests.summary >> "$GITHUB_STEP_SUMMARY"
