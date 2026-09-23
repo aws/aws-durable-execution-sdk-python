@@ -10,8 +10,13 @@ import uuid
 from botocore.exceptions import ClientError
 
 from aws_durable_execution_sdk_python_testing import DurableFunctionCloudTestRunner
-from lmi_tests.deploy import ARTIFACTS, QUALIFIER, client, save, verify
-from lmi_tests.evidence import CollectionError, check_controls, select
+from lmi_tests.deploy import ARTIFACTS, CONCURRENCIES, QUALIFIER, client, save, verify
+from lmi_tests.evidence import (
+    CollectionError,
+    ProvisioningError,
+    check_controls,
+    select,
+)
 
 
 class RunnerClient:
@@ -28,8 +33,9 @@ class RunnerClient:
 
 
 class Cloud:
-    def __init__(self, manifest):
+    def __init__(self, manifest, configuration=None):
         self.manifest = manifest
+        self.configuration = configuration
         self.lam, self.s3, self.logs = client("lambda"), client("s3"), client("logs")
         self.events = {}
         self.invocations = []
@@ -37,6 +43,12 @@ class Cloud:
         self._next_history_read = 0.0
 
     def verify(self):
+        if self.manifest.get("concurrencies") != CONCURRENCIES or set(
+            self.manifest["functions"]
+        ) != set(CONCURRENCIES):
+            raise ProvisioningError(
+                "One deployment must contain both c1 and c2 functions"
+            )
         for key, arn in self.manifest["functions"].items():
             config = self.lam.get_function_configuration(FunctionName=arn)
             scaling = self.lam.get_function_scaling_config(
@@ -44,7 +56,15 @@ class Cloud:
             )
             verify(config, scaling, self.manifest, key)
 
-    def start(self, scenario, fixture="normal", gate=None, target_environment=None):
+    @property
+    def concurrency(self):
+        return self.manifest["concurrencies"][self.configuration]
+
+    def start(self, scenario, gate=None, target_environment=None):
+        if self.configuration not in self.manifest["functions"]:
+            raise ProvisioningError(
+                "Select a deployed concurrency configuration before Invoke"
+            )
         marker = scenario + "-" + uuid.uuid4().hex[:12]
         payload = {"scenario": scenario, "marker": marker, "run": self.manifest["run"]}
         if target_environment is not None:
@@ -67,7 +87,8 @@ class Cloud:
         elif scenario == "suspend-cleanup":
             self.hold(marker + "-cleanup")
         runner = DurableFunctionCloudTestRunner(
-            self.manifest["functions"][fixture], region=self.manifest["region"]
+            self.manifest["functions"][self.configuration],
+            region=self.manifest["region"],
         )
         runner.lambda_client = RunnerClient(self)
         try:
@@ -83,7 +104,7 @@ class Cloud:
         item = {
             "marker": marker,
             "arn": arn,
-            "fixture": fixture,
+            "configuration": self.configuration,
             "runner": runner,
             "started": time.time(),
         }
@@ -267,7 +288,7 @@ class Cloud:
 
         return self.poll(
             observed,
-            seconds=40,
+            seconds=self.manifest["invocationTimeout"] + 40,
             message="No service invocation timeout evidence for " + request,
         )
 
@@ -320,3 +341,56 @@ class Cloud:
         for gate in self.gates:
             self.release(gate)
         self.gates.clear()
+
+    def settle_case(self):
+        """Release fault work and drain this case before reusing its function."""
+        self.release_all()
+        pending = []
+        for item in self.invocations:
+            result = self.lam.get_durable_execution(DurableExecutionArn=item["arn"])
+            if result["Status"] == "RUNNING":
+                try:
+                    self.lam.stop_durable_execution(DurableExecutionArn=item["arn"])
+                    pending.append(item)
+                except ClientError as error:
+                    if (
+                        error.response["Error"]["Code"]
+                        != "InvalidParameterValueException"
+                    ):
+                        raise
+                    # Completion can race the stop request. A still-running
+                    # execution must not be ignored or leak into the next case.
+                    if (
+                        self.lam.get_durable_execution(DurableExecutionArn=item["arn"])[
+                            "Status"
+                        ]
+                        == "RUNNING"
+                    ):
+                        raise
+
+        def settled():
+            pending[:] = [
+                item
+                for item in pending
+                if self.lam.get_durable_execution(DurableExecutionArn=item["arn"])[
+                    "Status"
+                ]
+                == "RUNNING"
+            ]
+            if pending:
+                return False
+            events = self.refresh(validate_controls=False)
+            entered = {e["request"] for e in select(events, "WRAPPER_ENTER")}
+            exited = {
+                e["request"]
+                for e in events
+                if e["phase"] in {"WRAPPER_RETURN", "WRAPPER_RAISE"}
+            }
+            return entered <= exited
+
+        if self.invocations:
+            self.poll(
+                settled,
+                seconds=30,
+                message="Released case still owns runtime workers; shared function is not ready for reuse",
+            )

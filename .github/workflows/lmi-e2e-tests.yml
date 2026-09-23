@@ -43,7 +43,7 @@ jobs:
           path: lmi_tests/artifacts/
 
   cloud:
-    name: cloud (Python 3.14, concurrency ${{ matrix.concurrency }})
+    name: cloud (Python 3.14, concurrency 1 and 2)
     needs: harness
     # Run on every main push and trusted PR update, including drafts.
     # Match the repository's cloud credential restrictions for forks/Dependabot.
@@ -52,21 +52,16 @@ jobs:
       (github.actor != 'dependabot[bot]' &&
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 70
     permissions:
       contents: read
       id-token: write
-    # All runs and matrix entries use the same provider. Hold this slot through
-    # cleanup; do not include a PR/ref/run ID or matrix value in the group.
+    # All runs use the same provider. Hold this slot through cleanup; do not
+    # include a PR/ref/run ID in the group.
     concurrency:
       group: lmi-e2e-shared-capacity-provider
       cancel-in-progress: false
       queue: max
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        concurrency: [1, 2]
     env:
       AWS_REGION: ${{ inputs.region || 'us-west-2' }}
       CAPACITY_PROVIDER_ARN: ${{ secrets.CAPACITY_PROVIDER_ARN }}
@@ -94,21 +89,20 @@ jobs:
         run: |
           hatch run lmi:build
           hatch run lmi:python -m lmi_tests.deploy reconcile
-      - name: Deploy verified LMI functions
+      - name: Deploy both shared LMI functions once
         timeout-minutes: 28
         env:
           LMI_RUNTIME: python3.14
-          LMI_CONCURRENCY: ${{ matrix.concurrency }}
         run: |
           hatch run lmi:python -m lmi_tests.deploy deploy \
             --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --runtime "$LMI_RUNTIME" --concurrency "$LMI_CONCURRENCY"
+            --runtime "$LMI_RUNTIME"
       - name: Run cloud regressions (red until issue 741 is fixed)
-        timeout-minutes: 12
+        timeout-minutes: 20
         run: hatch run lmi:cloud --junitxml=lmi_tests/artifacts/cloud.xml
       - name: Collect service history and runtime evidence
         if: always()
-        timeout-minutes: 3
+        timeout-minutes: 5
         run: |
           if test -f lmi_tests/artifacts/manifest.json; then
             hatch run lmi:python -m lmi_tests.deploy collect
@@ -124,7 +118,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: lmi-3.14-c${{ matrix.concurrency }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: lmi-3.14-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7
           path: lmi_tests/artifacts/
       - name: Summarize outcomes

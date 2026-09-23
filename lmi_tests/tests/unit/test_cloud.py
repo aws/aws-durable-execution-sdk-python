@@ -31,33 +31,122 @@ def driver(monkeypatch, tmp_path):
     driver = module.Cloud(
         {
             "functions": {
-                "normal": "arn:aws:lambda:us-west-2:123456789012:function:lmi:$LATEST.PUBLISHED"
+                "c1": "arn:aws:lambda:us-west-2:123456789012:function:lmi:$LATEST.PUBLISHED"
             },
             "region": "us-west-2",
             "run": "unit",
             "bucket": "unit-bucket",
             "commit": "commit",
-        }
+            "invocationTimeout": 60,
+            "concurrencies": {"c1": 1},
+        },
+        "c1",
     )
     driver.s3 = Mock()
     return driver
 
 
-def test_async_cloud_runner_sends_json_to_qualified_lmi_target(driver):
+@pytest.mark.parametrize("configuration", ["c1", "c2"])
+@pytest.mark.parametrize("scenario", ["success", "deadline"])
+def test_scenarios_reuse_the_qualified_function_for_their_concurrency(
+    driver, configuration, scenario
+):
+    driver.configuration = configuration
+    driver.manifest["concurrencies"] = module.CONCURRENCIES
+    driver.manifest["functions"]["c2"] = (
+        "arn:aws:lambda:us-west-2:123456789012:function:lmi-c2:$LATEST.PUBLISHED"
+    )
+    assert driver.concurrency == module.CONCURRENCIES[configuration]
     arn = "arn:aws:lambda:us-west-2:123456789012:function:lmi:$LATEST.PUBLISHED/durable-execution/name/id"
     with Stubber(driver.lam) as stub:
         stub.add_response(
             "invoke",
             {"StatusCode": 202, "DurableExecutionArn": arn},
             {
-                "FunctionName": driver.manifest["functions"]["normal"],
+                "FunctionName": driver.manifest["functions"][configuration],
                 "InvocationType": "Event",
                 "Payload": ANY,
             },
         )
-        item = driver.start("success")
+        item = driver.start(scenario, gate="fault" if scenario == "deadline" else None)
         assert item["arn"] == arn
         stub.assert_no_pending_responses()
+
+
+def test_verify_rejects_a_deployment_missing_a_concurrency_configuration(driver):
+    driver.manifest["concurrencies"] = module.CONCURRENCIES
+    with pytest.raises(module.ProvisioningError, match="both c1 and c2"):
+        driver.verify()
+
+
+def test_settlement_releases_controls_stops_retries_and_waits_for_every_wrapper(driver):
+    driver.invocations = [{"arn": "fault"}, {"arn": "completed"}]
+    calls = []
+    driver.release_all = Mock(side_effect=lambda: calls.append("release"))
+    statuses = {"fault": "RUNNING", "completed": "SUCCEEDED"}
+    driver.lam.get_durable_execution = Mock(
+        side_effect=lambda **kw: {"Status": statuses[kw["DurableExecutionArn"]]}
+    )
+
+    def stop(**kw):
+        calls.append("stop")
+        statuses[kw["DurableExecutionArn"]] = "STOPPED"
+
+    driver.lam.stop_durable_execution = Mock(side_effect=stop)
+    events = [
+        {"phase": "WRAPPER_ENTER", "request": "first"},
+        {"phase": "WRAPPER_ENTER", "request": "retry"},
+        {"phase": "WRAPPER_RETURN", "request": "first"},
+    ]
+    driver.refresh = Mock(return_value=events)
+
+    def poll(predicate, **_):
+        # A terminal durable execution does not prove a stopped LMI worker.
+        assert not predicate()
+        events.append({"phase": "WRAPPER_RAISE", "request": "retry"})
+        assert predicate()
+        calls.append("settled")
+
+    driver.poll = poll
+    driver.settle_case()
+    assert calls == ["release", "stop", "settled"]
+    driver.lam.stop_durable_execution.assert_called_once_with(
+        DurableExecutionArn="fault"
+    )
+
+
+def test_settlement_reports_a_worker_still_running_after_release(driver):
+    driver.invocations = [{"arn": "execution"}]
+    driver.lam.get_durable_execution = Mock(return_value={"Status": "STOPPED"})
+    driver.refresh = Mock(return_value=[{"phase": "WRAPPER_ENTER", "request": "stuck"}])
+
+    def poll(predicate, **kwargs):
+        assert not predicate()
+        raise CollectionError(kwargs["message"])
+
+    driver.poll = poll
+    with pytest.raises(CollectionError, match="not ready for reuse"):
+        driver.settle_case()
+
+
+@pytest.mark.parametrize("status", ["SUCCEEDED", "RUNNING"])
+def test_stop_race_is_ignored_only_after_confirmed_completion(driver, status):
+    driver.invocations = [{"arn": "execution"}]
+    driver.lam.get_durable_execution = Mock(
+        side_effect=[{"Status": "RUNNING"}, {"Status": status}]
+    )
+    driver.lam.stop_durable_execution = Mock(
+        side_effect=ClientError(
+            {"Error": {"Code": "InvalidParameterValueException"}},
+            "StopDurableExecution",
+        )
+    )
+    driver.refresh = Mock(return_value=[])
+    if status == "RUNNING":
+        with pytest.raises(ClientError):
+            driver.settle_case()
+    else:
+        driver.settle_case()
 
 
 def test_missing_execution_arn_is_collection_error_not_pass(driver):

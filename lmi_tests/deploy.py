@@ -27,6 +27,7 @@ ARTIFACTS = ROOT / "lmi_tests/artifacts"
 OWNER = "python-sdk-lmi-e2e"
 SCALING = {"MinExecutionEnvironments": 1, "MaxExecutionEnvironments": 1}
 QUALIFIER = "$LATEST.PUBLISHED"
+CONCURRENCIES = {"c1": 1, "c2": 2}
 
 
 def client(service, region=None):
@@ -171,10 +172,7 @@ def template(manifest, functions=True):
     }
     outputs = {}
     if functions:
-        for key, timeout in (
-            ("normal", manifest["invocationTimeout"]),
-            ("deadline", manifest["deadlineTimeout"]),
-        ):
+        for key, concurrency in manifest["concurrencies"].items():
             name = manifest["stack"] + "-" + key
             resources[key + "Logs"] = {
                 "Type": "AWS::Logs::LogGroup",
@@ -193,7 +191,7 @@ def template(manifest, functions=True):
                     "Handler": "lmi_tests.fixture.handler",
                     "Role": manifest["role"],
                     "MemorySize": 2048,
-                    "Timeout": timeout,
+                    "Timeout": manifest["invocationTimeout"],
                     "Code": {"S3Bucket": bucket, "S3Key": manifest["codeKey"]},
                     "FunctionScalingConfig": SCALING,
                     "DurableConfig": {
@@ -203,9 +201,7 @@ def template(manifest, functions=True):
                     "CapacityProviderConfig": {
                         "LambdaManagedInstancesCapacityProviderConfig": {
                             "CapacityProviderArn": manifest["provider"],
-                            "PerExecutionEnvironmentMaxConcurrency": manifest[
-                                "concurrency"
-                            ],
+                            "PerExecutionEnvironmentMaxConcurrency": concurrency,
                             "ExecutionEnvironmentMemoryGiBPerVCpu": 2,
                         }
                     },
@@ -270,7 +266,8 @@ def verify(config, scaling, manifest, key):
     )
     checks = [
         actual.get("CapacityProviderArn") == manifest["provider"],
-        actual.get("PerExecutionEnvironmentMaxConcurrency") == manifest["concurrency"],
+        actual.get("PerExecutionEnvironmentMaxConcurrency")
+        == manifest["concurrencies"][key],
         config.get("Runtime") == manifest["runtime"],
         config.get("Architectures") == ["arm64"],
         config.get("Version") == QUALIFIER,
@@ -279,8 +276,7 @@ def verify(config, scaling, manifest, key):
         config.get("State") == "Active",
         config.get("DurableConfig", {}).get("ExecutionTimeout")
         == manifest["executionTimeout"],
-        config.get("Timeout")
-        == manifest["deadlineTimeout" if key == "deadline" else "invocationTimeout"],
+        config.get("Timeout") == manifest["invocationTimeout"],
         scaling.get("AppliedFunctionScalingConfig") == SCALING,
         config.get("Environment", {}).get("Variables", {}).get("LMI_COMMIT")
         == manifest["commit"],
@@ -327,9 +323,7 @@ def deploy(args):
     built = json.loads((ARTIFACTS / "build.json").read_text())
     if built["sha256"] != digest.hex():
         raise ProvisioningError("Artifact changed since build")
-    suffix = (
-        args.runtime.replace("python", "").replace(".", "") + f"-c{args.concurrency}"
-    )
+    suffix = args.runtime.replace("python", "").replace(".", "")
     name = f"py-lmi-{args.run_id}-{suffix}"
     manifest = {
         "run": args.run_id,
@@ -340,12 +334,11 @@ def deploy(args):
         "provider": provider,
         "role": os.environ["TEST_LAMBDA_EXECUTION_ROLE_ARN"],
         "runtime": args.runtime,
-        "concurrency": args.concurrency,
+        "concurrencies": CONCURRENCIES,
         "commit": built["commit"],
         "codeKey": "code/" + digest.hex() + ".zip",
         "codeSha256": base64.b64encode(digest).decode(),
         "invocationTimeout": 60,
-        "deadlineTimeout": 10,
         "executionTimeout": 240,
         "driverTimeout": 120,
         "cleanupGrace": 5,
@@ -394,7 +387,10 @@ def deploy(args):
         verify(config, scaling, manifest, key)
     save(
         ARTIFACTS / "function-name-map.json",
-        {"lmi_tests.fixture.handler": manifest["functions"]["normal"]},
+        {
+            key: {"lmi_tests.fixture.handler": arn}
+            for key, arn in manifest["functions"].items()
+        },
     )
 
 
@@ -531,7 +527,6 @@ def main():
     )
     parser.add_argument("--run-id")
     parser.add_argument("--runtime", choices=["python3.14"], default="python3.14")
-    parser.add_argument("--concurrency", type=int, choices=[1, 2], default=2)
     args = parser.parse_args()
     try:
         if args.command == "build":

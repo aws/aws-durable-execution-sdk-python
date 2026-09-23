@@ -11,30 +11,35 @@ from lmi_tests.evidence import ProvisioningError
 def manifest():
     return {
         "run": "unit",
-        "stack": "py-lmi-unit-314-c2",
+        "stack": "py-lmi-unit-314",
         "bucket": "test-bucket",
         "role": "role",
         "provider": "provider",
         "runtime": "python3.14",
-        "concurrency": 2,
+        "concurrencies": deploy.CONCURRENCIES,
         "commit": "sha",
         "codeKey": "code/sha.zip",
         "codeSha256": "hash",
         "owned": True,
         "invocationTimeout": 60,
-        "deadlineTimeout": 10,
         "executionTimeout": 240,
     }
 
 
-@pytest.mark.parametrize("concurrency", [1, 2])
-def test_template_sets_native_scaling_durability_and_published_target(
-    manifest, concurrency
-):
+def test_one_deployment_shares_two_functions_across_all_scenarios(manifest):
     runtime = "python3.14"
-    manifest.update(concurrency=concurrency)
     template = deploy.template(manifest)
-    for key in ("normal", "deadline"):
+    functions = {
+        key: resource
+        for key, resource in template["Resources"].items()
+        if resource["Type"] == "AWS::Lambda::Function"
+    }
+    assert set(functions) == {"c1Function", "c2Function"}
+    assert (
+        functions["c1Function"]["Properties"]["Code"]
+        == functions["c2Function"]["Properties"]["Code"]
+    )
+    for key, concurrency in deploy.CONCURRENCIES.items():
         config = template["Resources"][key + "Function"]["Properties"]
         assert config["FunctionScalingConfig"] == deploy.SCALING
         assert config["Runtime"] == runtime
@@ -45,7 +50,8 @@ def test_template_sets_native_scaling_durability_and_published_target(
             == concurrency
         )
         assert config["DurableConfig"]["ExecutionTimeout"] == 240
-        assert config["Timeout"] == (10 if key == "deadline" else 60)
+        assert config["Timeout"] == 60
+        assert config["Handler"] == "lmi_tests.fixture.handler"
         assert (
             template["Outputs"][key]["Value"]["Fn::Join"][1][-1] == ":$LATEST.PUBLISHED"
         )
@@ -59,11 +65,13 @@ def test_verify_rejects_standard_lambda_wrong_artifact_and_unbounded_placement(
     manifest,
 ):
     config = copy.deepcopy(
-        deploy.template(manifest)["Resources"]["normalFunction"]["Properties"]
+        deploy.template(manifest)["Resources"]["c1Function"]["Properties"]
     )
     config.update(State="Active", Version=deploy.QUALIFIER, CodeSha256="hash")
     scaling = {"AppliedFunctionScalingConfig": deploy.SCALING}
-    deploy.verify(config, scaling, manifest, "normal")
+    deploy.verify(config, scaling, manifest, "c1")
+    with pytest.raises(ProvisioningError):
+        deploy.verify(config, scaling, manifest, "c2")
     for field in (
         "CapacityProviderConfig",
         "CodeSha256",
@@ -75,13 +83,13 @@ def test_verify_rejects_standard_lambda_wrong_artifact_and_unbounded_placement(
         bad = copy.deepcopy(config)
         del bad[field]
         with pytest.raises(ProvisioningError):
-            deploy.verify(bad, scaling, manifest, "normal")
+            deploy.verify(bad, scaling, manifest, "c1")
     with pytest.raises(ProvisioningError):
         deploy.verify(
             config,
             {"AppliedFunctionScalingConfig": {"MaxExecutionEnvironments": 2}},
             manifest,
-            "normal",
+            "c1",
         )
 
 

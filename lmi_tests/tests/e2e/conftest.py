@@ -5,7 +5,7 @@ import json
 import pytest
 
 from lmi_tests.cloud import Cloud
-from lmi_tests.deploy import ARTIFACTS
+from lmi_tests.deploy import ARTIFACTS, CONCURRENCIES
 from lmi_tests.evidence import CollectionError, PlacementError, ProvisioningError
 
 
@@ -41,13 +41,24 @@ def deployment(request):
     return manifest
 
 
+@pytest.fixture(scope="session", params=CONCURRENCIES)
+def configuration(request, deployment):
+    return {"key": request.param, "pending": None}
+
+
 @pytest.fixture
-def cloud(deployment):
-    driver = Cloud(deployment)
+def cloud(deployment, configuration):
+    # A failed teardown cannot silently hand a still-busy function to another
+    # case. Retry only retirement; never retry the regression assertions.
+    if configuration["pending"] is not None:
+        configuration["pending"].settle_case()
+    driver = Cloud(deployment, configuration["key"])
+    configuration["pending"] = driver
     try:
         yield driver
     finally:
         try:
-            driver.release_all()
+            driver.settle_case()
+            configuration["pending"] = None
         finally:
             driver.collect(full_run=False)

@@ -66,7 +66,7 @@ is substituted. The artifact hash, SDK wheel version, and commit are retained.
 hatch run lmi:build
 hatch run lmi:python -m lmi_tests.deploy reconcile
 hatch run lmi:python -m lmi_tests.deploy deploy \
-  --run-id local-20260923-a --runtime python3.14 --concurrency 2
+  --run-id local-20260923-a --runtime python3.14
 hatch run lmi:cloud --junitxml=lmi_tests/artifacts/cloud.xml
 # Run both commands below even when a scenario fails:
 hatch run lmi:python -m lmi_tests.deploy collect
@@ -76,14 +76,22 @@ python -m lmi_tests.summary
 
 For unattended local runs, install a shell `EXIT`/`INT`/`TERM` trap that calls
 `collect` followed by `cleanup`; the workflow already has unconditional steps.
-Use a fresh run ID for each deployment. Run both environment-concurrency settings,
-`1` and `2`, with Python 3.14, as CI does. The LMI suite and its Hatch environment
-target only Python 3.14. Independent SDK branch-concurrency settings include 1, 2,
-and 3.
+Use a fresh run ID for each deployment. This one deployment supplies both native
+environment-concurrency settings, `1` and `2`, on Python 3.14. The single cloud
+command runs all 14 scenarios for each setting (28 cases), sequentially, without
+redeploying or changing function configuration between cases. Independent SDK
+branch-concurrency settings include 1, 2, and 3.
 
-Each combination creates a unique stack, private bucket, log groups, and two
-functions (`normal`, `deadline`). Both functions declare native scaling limits of
-exactly one environment and use 2 GiB / 1 vCPU. LMI automatically publishes
+Each run creates one unique stack, one private bucket, and two functions/log
+groups (`c1`, `c2`). All scenarios, including deadlines and healthy-peer probes,
+reuse the function for their concurrency setting and the same handler artifact.
+Both functions use a 60-second invocation timeout. Deadline tests wait for the
+real platform timeout, leaving ordinary scenarios their existing invocation
+budget. A single fixed function configuration cannot exercise both native
+concurrency limits; merely sending one request to `c2` would not establish `c1`.
+
+Both functions declare native scaling limits of exactly one environment and use
+2 GiB / 1 vCPU. LMI automatically publishes
 `$LATEST.PUBLISHED`; every invocation uses that qualified target. Creating an extra
 numbered version would allocate another set of environments. Before assertions,
 the suite checks Active state, runtime/architecture, durability, timeout, provider,
@@ -91,8 +99,9 @@ process concurrency, applied scaling limits, commit/run identity, and code hash.
 Unsupported configurations, insufficient permissions, and unavailable capacity fail
 provisioning. There is no fallback to standard Lambda and no passing cloud skip.
 
-The normal handler mapping is saved in `artifacts/function-name-map.json`, using
-the existing `PYTEST_FUNCTION_NAME_MAP` convention. The test driver reuses
+The handler mappings are saved under `c1` and `c2` in
+`artifacts/function-name-map.json`; each entry has the existing
+`PYTEST_FUNCTION_NAME_MAP` shape. The test driver reuses
 `DurableFunctionCloudTestRunner` for async invocation, callback completion, and
 waiting for results, with finite boto transport timeouts.
 
@@ -200,13 +209,14 @@ transport timeout). Invocation and callback writes are not retried by this layer
 
 | Budget | Default |
 | --- | --- |
-| Lambda invocation | Normal 60 s; deadline fixture 10 s |
+| Lambda invocation | 60 s for all scenarios, including deadlines |
 | Durable logical execution | 240 s |
 | Driver result polling | 120 s |
 | Cleanup acceptance grace | 5 s |
-| Fault-fixture emergency I/O release | 75 s |
-| Workflow cloud assertions | 12 min |
-| Matrix job including provisioning/retirement | 55 min |
+| Fault-fixture emergency I/O release | 150 s |
+| Per-case retirement after assertions | 30 s |
+| Workflow cloud assertions (all 28 cases) | 20 min |
+| Single cloud job including provisioning/retirement | 70 min |
 
 Artifacts contain JUnit, configuration/provider readbacks, qualified targets,
 commit/wheel/code hash, invocation inputs/ARNs, all lifecycle and side-effect records,
@@ -218,16 +228,17 @@ An unexecuted scenario is never summarized as passing.
 
 ## CI and resource ownership
 
-The dedicated workflow runs the harness and full LMI cloud matrix automatically
+The dedicated workflow runs the harness and full LMI suite automatically
 when a same-repository PR is opened, updated, or reopened (including Draft PRs),
 and on every push to `main`, including merged changes. There are no path filters,
 label requirements, or ready-for-review requirements. `workflow_dispatch` remains
 available for manual reruns; there are no scheduled jobs.
 
-Each workflow run has its own resources. All cloud jobs share the repository-wide
-`lmi-e2e-shared-capacity-provider` concurrency group, across PRs, main pushes,
-manual runs, and both matrix entries. Only one cloud job can deploy, test, or clean
-up at a time; the slot is held until the entire job finishes. Harness jobs can run
+Each workflow run has one harness job and one cloud job with its own resources.
+All cloud jobs share the repository-wide `lmi-e2e-shared-capacity-provider`
+concurrency group, across PRs, main pushes, and manual runs. Only one cloud job can
+deploy, test, or clean up at a time; the slot is held until the entire job finishes.
+Harness jobs can run
 in parallel. The capacity provider's configuration is not changed.
 
 `cancel-in-progress: false` preserves running jobs, and
@@ -242,6 +253,14 @@ and Dependabot; the harness still runs for those PRs. Cloud jobs reuse
 `TEST_ROLE_ARN`, `TEST_ACCOUNT_ID`, and `TEST_LAMBDA_EXECUTION_ROLE_ARN` with OIDC.
 The #741 regression assertions remain visibly failing until its fix lands; they
 are not skipped or converted into expected-success results to keep CI green.
+
+After each case's assertions, teardown releases that case's controls, stops any
+remaining logical executions to prevent retries, and waits for every observed
+wrapper to return or raise. A terminal service status alone does not prove worker
+retirement. If retirement fails, the next case must first retire that pending work
+before invoking the shared function. Collection remains scoped to the case, and
+the final collector gathers the entire run. These post-assertion releases and
+stops cannot satisfy a deadline, cleanup-grace, or capacity-recovery assertion.
 
 The workflow collects evidence before teardown, even after test failure or ordinary
 cancellation. Cleanup sends external releases, stops running durable executions,

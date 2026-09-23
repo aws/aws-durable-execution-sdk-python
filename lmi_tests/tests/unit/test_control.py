@@ -5,6 +5,7 @@ import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import boto3
@@ -13,7 +14,7 @@ from botocore.stub import Stubber
 import pytest
 
 from lmi_tests.fixture import Trace, workflow
-from lmi_tests import evidence
+from lmi_tests import evidence, fixture
 from lmi_tests.tests.regressions.test_issue741 import invocation, lambda_context
 from aws_durable_execution_sdk_python import durable_execution
 
@@ -65,6 +66,28 @@ def test_invalid_control_content_cannot_release_work(trace):
         with pytest.raises(ValueError, match="Invalid control state"):
             trace.released("gate")
     assert trace.emit.call_args.args[0] == "CONTROL_ERROR"
+
+
+@pytest.mark.parametrize("elapsed,escaped", [(90, False), (180, True)])
+def test_fault_gate_outlives_invocation_deadline_but_remains_bounded(
+    trace, monkeypatch, elapsed, escaped
+):
+    trace.deadline = 60
+    times = iter([0, elapsed])
+    trace.released = Mock(side_effect=[False, False, True])
+    monkeypatch.setattr(
+        fixture,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(times), sleep=lambda _: None),
+    )
+    if escaped:
+        with pytest.raises(TimeoutError, match="emergency release"):
+            trace.gate("fault", effects=True)
+    else:
+        trace.gate("fault", effects=True)
+    phases = [call.args[0] for call in trace.emit.call_args_list]
+    assert ("ESCAPE" in phases) is escaped
+    assert ("EFFECT" in phases) is not escaped
 
 
 def test_winner_is_signalled_only_after_loser_actually_enters_held_io(trace):

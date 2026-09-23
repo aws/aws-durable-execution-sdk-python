@@ -20,10 +20,10 @@ def test_checkpoint_replay_callback_and_retry(cloud):
     evidence.replay(cloud.for_item(item), history, item["marker"])
 
 
-def capacity_barrier(cloud, fixture="normal", environment=None, seconds=30):
-    count = cloud.manifest["concurrency"]
+def capacity_barrier(cloud, environment=None, seconds=30):
+    count = cloud.concurrency
     gate = "capacity-" + uuid.uuid4().hex
-    items = [cloud.start("barrier", fixture, gate) for _ in range(count)]
+    items = [cloud.start("barrier", gate=gate) for _ in range(count)]
     env, events = wait_overlap(cloud, items, count, environment, seconds)
     cloud.release(gate)
     for item in items:
@@ -104,11 +104,11 @@ def test_real_synchronous_checkpoint_settles_before_branch_join(cloud):
 
 
 def test_invocation_deadline_isolation_and_capacity_recovery(cloud):
-    fault = cloud.start("deadline", "deadline", "fault-" + uuid.uuid4().hex)
+    fault = cloud.start("deadline", gate="fault-" + uuid.uuid4().hex)
     blocked = cloud.phase(fault, "BLOCKED")[0]
-    if cloud.manifest["concurrency"] > 1:
+    if cloud.concurrency > 1:
         healthy_gate = "healthy-" + uuid.uuid4().hex
-        healthy = cloud.start("barrier", "deadline", healthy_gate)
+        healthy = cloud.start("barrier", gate=healthy_gate)
         cloud.phase(healthy, "BLOCKED")
         wait_overlap(cloud, [fault, healthy], 2, blocked["environment"])
         cloud.release(healthy_gate)
@@ -117,14 +117,15 @@ def test_invocation_deadline_isolation_and_capacity_recovery(cloud):
     # Queue recovery demand at the runtime deadline, before waiting for the
     # eventually consistent service history. History delivery latency must not
     # consume the worker recovery budget.
-    cloud.poll(lambda: time.time() >= blocked["deadline"] - 1, seconds=15)
+    cloud.poll(
+        lambda: time.time() >= blocked["deadline"] - 1,
+        seconds=cloud.manifest["invocationTimeout"] + 5,
+    )
     # Put every worker slot under demand without releasing the fault. A different
     # environment cannot satisfy recovery, even if the service replaces capacity.
     recovery_started = time.time()
     try:
-        _env, probes = capacity_barrier(
-            cloud, "deadline", blocked["environment"], seconds=15
-        )
+        _env, probes = capacity_barrier(cloud, blocked["environment"], seconds=15)
     finally:
         cloud.platform_timeout(fault, blocked["request"])
     bound = blocked["deadline"] + cloud.manifest["cleanupGrace"]
@@ -142,7 +143,7 @@ def test_invocation_deadline_isolation_and_capacity_recovery(cloud):
 
 
 def test_service_timeout_retry_does_not_repeat_completed_step(cloud):
-    fault = cloud.start("deadline", "deadline", "retry-" + uuid.uuid4().hex)
+    fault = cloud.start("deadline", gate="retry-" + uuid.uuid4().hex)
     first = cloud.phase(fault, "BLOCKED")[0]
     cloud.platform_timeout(fault, first["request"])
     # Diagnose stale side effects before waiting for a retry that may itself be
@@ -176,7 +177,7 @@ def test_service_timeout_retry_does_not_repeat_completed_step(cloud):
 
 
 def place_with_healthy_anchor(cloud, scenario):
-    if cloud.manifest["concurrency"] == 1:
+    if cloud.concurrency == 1:
         return None, None, cloud.start(scenario)
     for _attempt in range(3):
         gate = "anchor-" + uuid.uuid4().hex
@@ -240,8 +241,7 @@ def test_pending_waits_for_root_finally_and_then_replays(cloud):
 def test_nested_single_lane_pools_progress_for_all_runtime_workers(cloud):
     gate = "progress-" + uuid.uuid4().hex
     items = [
-        cloud.start("nested-progress", gate=gate)
-        for _ in range(cloud.manifest["concurrency"])
+        cloud.start("nested-progress", gate=gate) for _ in range(cloud.concurrency)
     ]
     wait_overlap(cloud, items, len(items))
     cloud.release(gate)

@@ -12,10 +12,10 @@ def summarize(directory):
     if manifest.exists():
         config = json.loads(manifest.read_text())
         lines.append(
-            f"Commit `{config['commit']}`; {config['runtime']}; environment concurrency {config['concurrency']}."
+            f"Commit `{config['commit']}`; {config['runtime']}; one deployment, environment concurrency {list(config['concurrencies'].values())}."
         )
         lines.append(
-            f"Timeouts: invocation {config['deadlineTimeout']}s (fault) / {config['invocationTimeout']}s (normal), durable execution {config['executionTimeout']}s, driver {config['driverTimeout']}s; cleanup grace {config['cleanupGrace']}s."
+            f"Timeouts: invocation {config['invocationTimeout']}s (all scenarios), durable execution {config['executionTimeout']}s, driver {config['driverTimeout']}s; cleanup grace {config['cleanupGrace']}s."
         )
     report = directory / "cloud.xml"
     if report.exists():

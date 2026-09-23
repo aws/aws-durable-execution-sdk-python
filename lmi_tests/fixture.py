@@ -121,7 +121,9 @@ class Trace:
             raise
 
     def gate(self, name, *, effects=False, attempt=1, ready=None):
-        end = time.monotonic() + 75
+        # Leave time to observe the real 60-second invocation timeout and
+        # recovery. This safety escape must never masquerade as SDK cancellation.
+        end = time.monotonic() + 150
         entered = False
         try:
             while not self.released(name) and not self.released("release-all"):

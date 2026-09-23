@@ -117,7 +117,7 @@ def test_only_missed_admission_retries_environment_pair(monkeypatch):
     from lmi_tests.tests.e2e import test_lifecycle
 
     cloud = Mock()
-    cloud.manifest = {"concurrency": 2}
+    cloud.concurrency = 2
     first, missed, second, admitted = [
         dict(marker=name) for name in ("first", "missed", "second", "admitted")
     ]
