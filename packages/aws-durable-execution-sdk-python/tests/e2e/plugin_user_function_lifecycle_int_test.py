@@ -28,6 +28,7 @@ from aws_durable_execution_sdk_python.plugin import (
     UserFunctionOutcome,
     UserFunctionStartInfo,
 )
+from tests.test_helpers import plugin_factory
 
 
 @dataclass(frozen=True)
@@ -156,7 +157,7 @@ def test_child_user_function_lifecycle_across_suspend_and_replay() -> None:
     def user_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
         return context.run_in_child_context(child_function, name="charge")
 
-    handler = durable_execution(user_handler, plugins=[plugin])
+    handler = durable_execution(user_handler, plugins=[plugin_factory(plugin)])
 
     first_checkpoint, first_operations = _tracking_checkpoint()
     with patch(

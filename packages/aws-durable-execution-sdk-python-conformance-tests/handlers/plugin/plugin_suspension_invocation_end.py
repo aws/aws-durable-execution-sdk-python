@@ -57,7 +57,22 @@ class SuspensionPlugin(DurableInstrumentationPlugin):
         )
 
 
-@durable_execution(plugins=[SuspensionPlugin()])
+class SuspensionPluginFactory:
+    """Builds one :class:`SuspensionPlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> SuspensionPlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return SuspensionPlugin()
+
+
+@durable_execution(plugins=[SuspensionPluginFactory()])
 def handler(_event: Any, context: DurableContext) -> str:
     context.wait(Duration.from_seconds(2))
     return "Wait completed"

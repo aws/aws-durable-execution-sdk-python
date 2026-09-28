@@ -9,7 +9,7 @@ from typing import Any
 
 from aws_durable_execution_sdk_python import DurableContext, durable_execution
 from aws_durable_execution_sdk_python.types import WaitForCallbackContext
-from common import otel_plugin, require_scenario
+from common import otel_plugin_factory, require_scenario
 
 
 def submit_callback(
@@ -19,7 +19,7 @@ def submit_callback(
     return None
 
 
-@durable_execution(plugins=[otel_plugin()])
+@durable_execution(plugins=[otel_plugin_factory()])
 def handler(event: dict[str, Any], context: DurableContext) -> str:
     require_scenario(event, "wait-for-callback")
     return context.wait_for_callback(

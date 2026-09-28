@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -32,6 +33,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import (
     NonRecordingSpan,
+    Span,
     SpanContext,
     SpanKind,
     TraceFlags,
@@ -48,6 +50,7 @@ from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtel
 from aws_durable_execution_sdk_python_otel.durable_parent_span import (
     DurableParentSpan,
 )
+from aws_durable_execution_sdk_python_otel.log_filter import OtelContextLogFilter
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 
 
@@ -73,9 +76,16 @@ def _assert_otel_context_balanced():
 
 def _create_plugin(
     context_extractor=lambda _: None,
+    exporter: InMemorySpanExporter | None = None,
 ) -> tuple[ExecutionOtelPlugin, InMemorySpanExporter]:
-    """Create an ExecutionOtelPlugin wired to an in-memory exporter."""
-    exporter = InMemorySpanExporter()
+    """Create an ExecutionOtelPlugin wired to an in-memory exporter.
+
+    One plugin instance serves exactly one invocation, so a test that spans
+    invocations creates a plugin per invocation and passes the same ``exporter``
+    to each -- the way the SDK's factory hands successive invocations distinct
+    instances that publish to one provider.
+    """
+    exporter = exporter if exporter is not None else InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     plugin = ExecutionOtelPlugin(
@@ -721,7 +731,13 @@ def test_suspended_operation_held_as_non_recording_placeholder():
 
 
 def test_suspend_then_resume_operation_exports_one_deterministic_span():
-    """An operation spanning invocations exports one deterministic span."""
+    """An operation spanning invocations exports one deterministic span.
+
+    Each invocation gets its own plugin instance, so nothing about the operation
+    is carried in memory from one invocation to the next: the single exported
+    span and its ID come from the deterministic derivation off the execution ARN,
+    and the replay guard is the hook's own ``is_replayed`` flag.
+    """
     plugin, exporter = _create_plugin()
     operation_id = "wait-across-invocations"
 
@@ -745,6 +761,7 @@ def test_suspend_then_resume_operation_exports_one_deterministic_span():
     assert not [s for s in exporter.get_finished_spans() if s.name == "long-wait"]
 
     # Invocation N+1: the still-open operation is replayed, then completes.
+    plugin, _ = _create_plugin(exporter=exporter)
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_operation_start(
         OperationStartInfo(
@@ -785,6 +802,7 @@ def test_suspend_then_resume_operation_exports_one_deterministic_span():
 
     # ReplayChildren/virtual child completion callbacks are replay-only and
     # must not re-export the terminal deterministic span in a later invocation.
+    plugin, _ = _create_plugin(exporter=exporter)
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_operation_end(
         OperationEndInfo(
@@ -836,7 +854,8 @@ def test_suspended_child_context_exports_one_span_on_replay():
     # Nothing exported for the suspended context.
     assert not [s for s in exporter.get_finished_spans() if s.name == context_id]
 
-    # Invocation 2: the context replays and completes.
+    # Invocation 2: the context replays and completes, in a fresh plugin instance.
+    plugin, _ = _create_plugin(exporter=exporter)
     plugin.on_invocation_start(_invocation_start_info())
     plugin.on_operation_start(
         OperationStartInfo(
@@ -903,10 +922,12 @@ def test_checkpointless_context_end_uses_a_non_negative_duration():
 
 
 def test_virtual_context_replay_uses_unique_linked_segments():
-    plugin, exporter = _create_plugin()
+    exporter = InMemorySpanExporter()
     context_id = "flat-branch"
 
     for _ in range(2):
+        # Each invocation is served by its own plugin instance.
+        plugin, _ = _create_plugin(exporter=exporter)
         plugin.on_invocation_start(_invocation_start_info())
         # Virtual contexts have no durable START hook.
         plugin.on_user_function_start(_context_start_info(context_id))
@@ -1401,15 +1422,21 @@ def test_invocation_end_releases_scope_of_suspended_user_function():
     assert plugin._context_tokens == {}
 
 
-def test_warm_invocation_reuse_restores_ambient_span_each_time():
-    """Verify repeated invocations leave the ambient Lambda span current."""
-    plugin, _ = _create_plugin()
+def test_successive_invocations_restore_ambient_span_each_time():
+    """Verify each invocation's own plugin leaves the ambient Lambda span current.
+
+    The SDK builds a plugin per invocation, so this drives three invocations
+    through three instances against one warm environment. What is asserted is
+    that no instance leaves a context attached behind it -- state carried in the
+    instance is irrelevant, because the instance is gone.
+    """
     ambient_provider = TracerProvider()
     ambient = ambient_provider.get_tracer("ambient").start_span("AmbientLambda")
     token = otel_context.attach(trace.set_span_in_context(ambient))
     try:
         warm_context = otel_context.get_current()
         for index in range(3):
+            plugin, _ = _create_plugin()
             plugin.on_invocation_start(_invocation_start_info())
             operation_id = f"step-{index}"
             plugin.on_user_function_start(_step_start_info(operation_id))
@@ -1620,3 +1647,73 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
 
     plugin.on_invocation_end(_invocation_end_info())
     assert plugin._context_tokens == {}
+
+
+# ---------------------------------------------------------------------------
+# Log correlation
+# ---------------------------------------------------------------------------
+def _stamped_span_id() -> str:
+    """Return the span ID the log filter stamps on a record emitted right here."""
+    record = logging.LogRecord(
+        name="test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="message",
+        args=(),
+        exc_info=None,
+    )
+    OtelContextLogFilter().filter(record)
+    return str(getattr(record, "spanId", None))
+
+
+def _span_id_hex(span: Span) -> str:
+    """Return a span's ID in the hex form the log filter stamps."""
+    return format(span.get_span_context().span_id, "016x")
+
+
+def test_top_level_log_names_invocation_span_not_the_attached_workflow_span():
+    """A top-level handler record names the Invocation span, not the Workflow span.
+
+    This plugin makes the Workflow span current at invocation start so
+    auto-instrumented spans join the execution trace, and the SDK carries the
+    invocation thread's context into the thread that runs the handler body. The
+    Workflow span spans the whole execution, so it is less specific than the
+    Invocation span for a record emitted by one invocation's top-level code.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    try:
+        assert plugin._invocation_span is not None
+        assert plugin._workflow_span is not None
+        # Confirm the shape under test: the Workflow span is the current span.
+        assert trace.get_current_span() is plugin._workflow_span
+
+        stamped = _stamped_span_id()
+
+        assert stamped == _span_id_hex(plugin._invocation_span)
+        assert stamped != _span_id_hex(plugin._workflow_span)
+    finally:
+        plugin.on_invocation_end(_invocation_end_info())
+
+
+def test_step_attempt_log_names_the_attempt_span():
+    """A record inside a step names the attempt span, not the Invocation span.
+
+    Excluding the Workflow span from log correlation must not also exclude spans
+    that become current inside the invocation.
+    """
+    plugin, _ = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    try:
+        plugin.on_user_function_start(_step_start_info("step-1"))
+        attempt_span = plugin._get_span("step-1:attempt:1")
+        assert attempt_span is not None
+        assert plugin._invocation_span is not None
+
+        stamped = _stamped_span_id()
+
+        assert stamped == _span_id_hex(attempt_span)
+        assert stamped != _span_id_hex(plugin._invocation_span)
+    finally:
+        plugin.on_invocation_end(_invocation_end_info())

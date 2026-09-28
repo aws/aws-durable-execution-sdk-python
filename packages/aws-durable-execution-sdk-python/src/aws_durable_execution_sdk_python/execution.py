@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import functools
 import json
 import logging
@@ -27,8 +28,9 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationUpdate,
 )
 from aws_durable_execution_sdk_python.plugin import (
-    DurableInstrumentationPlugin,
+    DurableInstrumentationPluginFactory,
     PluginExecutor,
+    PluginHost,
 )
 from aws_durable_execution_sdk_python.plugin_discovery import (
     load_configured_plugins,
@@ -169,7 +171,7 @@ def durable_execution(
     func: Callable[[Any, DurableContext], Any] | None = None,
     *,
     boto3_client: Boto3LambdaClient | None = None,
-    plugins: list[DurableInstrumentationPlugin] | None = None,
+    plugins: list[DurableInstrumentationPluginFactory] | None = None,
 ) -> Callable[[Any, LambdaContext], Any]:
     """
     Decorator to create a durable execution handler.
@@ -177,7 +179,10 @@ def durable_execution(
     Args:
         func: The user function to decorate
         boto3_client: Optional boto3 Lambda client to use
-        plugins: Optional list of instrumentation plugins to use
+        plugins: Optional list of instrumentation plugin factories. Each
+            factory's ``create_plugin`` is called once per invocation with that
+            invocation's ``InvocationStartInfo``, and the instance it returns
+            serves only that invocation.
     """
     # Decorator called with parameters
     if func is None:
@@ -188,10 +193,26 @@ def durable_execution(
 
     logger.debug("Starting durable execution handler...")
 
-    plugin_executor = PluginExecutor(load_configured_plugins(plugins))
+    # Only the resolved factory list is handler-lifetime. The plugin instances,
+    # and the invocation metadata the hooks read, are built per invocation by
+    # PluginHost.invocation() and live in that invocation's frame -- see the
+    # plugin_executor parameter below.
+    plugin_host = PluginHost(load_configured_plugins(plugins))
 
-    @plugin_executor.handle_durable_output
-    def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
+    @plugin_host.handle_durable_output
+    # The metadata of whatever function the host wrapper wraps becomes the
+    # decorated handler's own, because the host wrapper applies
+    # functools.wraps() to it. This function takes a third argument the returned
+    # handler does not accept, so without this line inspect.signature() on the
+    # handler advertises a required `plugin_executor` parameter, and a
+    # signature-aware runtime or test harness rejects or misinvokes a handler
+    # that in fact takes (event, context). Copying the user function's metadata
+    # here puts it at the head of the chain the host wrapper then extends, so
+    # the handler reports the user function's signature, name and docstring.
+    @functools.wraps(func)
+    def wrapper(
+        event: Any, context: LambdaContext, plugin_executor: PluginExecutor
+    ) -> MutableMapping[str, Any]:
         invocation_input: DurableExecutionInvocationInput
         service_client: DurableServiceClient
 
@@ -306,14 +327,41 @@ def durable_execution(
                 operations_provider=lambda: execution_state.operations,
                 updated_operation_ids=invocation_input.updated_operation_ids,
             )
-            # Thread 1: Run background checkpoint processing
+            # Thread 1: Run background checkpoint processing.
+            #
+            # Submitted without the invocation's context, deliberately. This
+            # thread runs SDK checkpointing, never user code, and nothing it
+            # does needs a contextvar the invocation thread set. Copying the
+            # context here would also make the invocation thread's ambient OTel
+            # context current on a background thread that starts and ends
+            # plugin spans, which widens the change with no caller-visible
+            # benefit.
             executor.submit(execution_state.checkpoint_batches_forever)
 
             # Thread 2: Execute user function
             logger.debug(
                 "%s entering user-space...", invocation_input.durable_execution_arn
             )
-            user_future = executor.submit(func, input_event, durable_context)
+            # Carry this thread's context into the worker that runs the handler
+            # body. A callable submitted to a ThreadPoolExecutor runs on a worker
+            # thread, whose context is not the submitting thread's, so without
+            # this the handler body starts from a context in which no contextvar
+            # set before the handler is visible -- neither those set by the
+            # plugins that ran in on_invocation_start just above, nor those set
+            # by customer code around the decorator. Log correlation depends on
+            # it, since a plugin that claims the invocation for the calling
+            # thread at invocation start has no other way to reach the thread the
+            # handler body runs on.
+            #
+            # The copy is taken here, per submission: a Context cannot be entered
+            # twice concurrently, so the checkpoint thread above could not share
+            # one with this. Copying does not couple the two threads -- the
+            # worker mutates its own copy, and the invocation thread's context is
+            # unchanged either way, exactly as it was when the worker started
+            # from an unrelated context.
+            user_future = executor.submit(
+                contextvars.copy_context().run, func, input_event, durable_context
+            )
 
             logger.debug(
                 "%s waiting for user code completion...",

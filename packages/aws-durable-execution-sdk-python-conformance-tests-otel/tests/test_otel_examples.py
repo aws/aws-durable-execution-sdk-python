@@ -519,5 +519,5 @@ def test_common_selects_the_plugin_from_the_deployed_view() -> None:
     common: str = (SRC_DIR / "common.py").read_text(encoding="utf-8")
 
     assert 'os.environ.get("OTEL_PLUGIN_MODE") == "execution"' in common
-    assert "ExecutionOtelPlugin(OtelPluginConfig())" in common
-    assert "InvocationOtelPlugin(OtelPluginConfig())" in common
+    assert "ExecutionOtelPluginFactory(OtelPluginConfig())" in common
+    assert "InvocationOtelPluginFactory(OtelPluginConfig())" in common

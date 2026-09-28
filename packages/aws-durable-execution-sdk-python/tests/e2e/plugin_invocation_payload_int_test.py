@@ -27,7 +27,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
 )
 from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
-from tests.test_helpers import operation_id_sequence
+from tests.test_helpers import operation_id_sequence, plugin_factory
 
 
 class _PayloadRecordingPlugin(DurableInstrumentationPlugin):
@@ -116,7 +116,7 @@ def test_plugin_sees_execution_input_and_result_end_to_end():
     """A completing invocation surfaces the input on both hooks and the result."""
     plugin = _PayloadRecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def my_handler(event: Any, context: DurableContext) -> dict:  # noqa: ARG001
         return {"greeting": f"Hello, {event['name']}!"}
 
@@ -146,7 +146,7 @@ def test_plugin_payload_surfaces_on_suspending_invocation():
     """A suspending invocation carries the input but no execution result."""
     plugin = _PayloadRecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def my_handler(event: Any, context: DurableContext) -> str:
         context.wait(Duration.from_seconds(60))
         return f"done-{event['name']}"
@@ -175,7 +175,7 @@ def test_plugin_payload_surfaces_on_replay_invocation():
     """A replay past a completed wait carries the input and the terminal result."""
     plugin = _PayloadRecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def my_handler(event: Any, context: DurableContext) -> str:
         context.wait(Duration.from_seconds(60))
         return f"done-{event['name']}"
@@ -232,7 +232,7 @@ def test_plugin_execution_input_is_isolated_from_handler_end_to_end():
     plugin = _MutatingPlugin()
     handler_saw: dict[str, Any] = {}
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def my_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
         handler_saw.update(
             {"top": dict(event), "nested_items": list(event["nested"]["items"])}

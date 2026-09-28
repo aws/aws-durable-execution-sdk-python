@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -21,6 +22,17 @@ if TYPE_CHECKING:
 class _IdOverride:
     trace_id: int | None
     span_id: int | None
+
+
+# Serializes installation so two invocations binding to one tracer at the same
+# time cannot both wrap its original generator. A TracerProvider caches tracers
+# by instrumentation scope, so two plugins that ask for the same instrument name
+# get the same tracer object. Without this lock both can read the original
+# generator, both wrap it, and the second assignment replaces the first: the
+# plugin that assigned first then holds a wrapper the tracer no longer uses, its
+# deterministic overrides are never consulted, and its workflow and operation
+# span IDs are random, which breaks cross-invocation stitching.
+_install_lock = threading.Lock()
 
 
 def _to_otel_trace_id(execution_arn: str, start_timestamp: datetime) -> int:
@@ -123,16 +135,25 @@ class DeterministicIdGenerator(RandomIdGenerator):
         """Return the tracer's deterministic generator, installing one if needed.
 
         Installing on the plugin's tracer keeps unrelated instrumentation scopes
-        on the provider's original generator. Reusing an installed generator also
-        supports SDK versions that cache tracers by instrumentation scope.
-        """
-        current_generator = tracer.id_generator
-        if isinstance(current_generator, cls):
-            return current_generator
+        on the provider's original generator.
 
-        generator = cls(fallback_id_generator=current_generator)
-        tracer.id_generator = generator
-        return generator
+        The returned generator is always the one the tracer holds. The check and
+        the install are one critical section, so a caller that arrives while
+        another is installing waits and then finds the installed generator
+        instead of wrapping the original a second time. A caller that acted on a
+        generator the tracer does not hold would set its deterministic overrides
+        somewhere the tracer never reads. Returning the installed generator also
+        supports SDK versions that cache tracers by instrumentation scope, which
+        is what makes two invocations share one tracer in the first place.
+        """
+        with _install_lock:
+            current_generator = tracer.id_generator
+            if isinstance(current_generator, cls):
+                return current_generator
+
+            generator = cls(fallback_id_generator=current_generator)
+            tracer.id_generator = generator
+            return generator
 
     @contextmanager
     def use_ids(self, *, trace_id: int | None, span_id: int | None) -> Iterator[None]:

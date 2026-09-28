@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,16 @@ _DURABLE_SAMPLING_INTENT_KEY = otel_context.create_key(
 )
 
 
+# Serializes installation so two invocations binding to one tracer at the same
+# time cannot both wrap its original sampler. A TracerProvider caches tracers by
+# instrumentation scope, so two plugins that ask for the same instrument name get
+# the same tracer object. Without this lock both can read the original sampler,
+# both wrap it, and the second assignment replaces the first: the plugin that
+# assigned first then holds a wrapper the tracer no longer uses, and the delegate
+# it took from that wrapper is not the delegate the tracer consults.
+_install_lock = threading.Lock()
+
+
 @dataclass(frozen=True)
 class DurableSamplingIntent:
     """Sampling result to apply to each durable span in one invocation."""
@@ -39,12 +50,22 @@ class DurableSampler(Sampler):
 
     @classmethod
     def install_on_tracer(cls, tracer: SdkTracer) -> "DurableSampler":
-        current_sampler = tracer.sampler
-        if isinstance(current_sampler, cls):
-            return current_sampler
-        sampler = cls(current_sampler)
-        tracer.sampler = sampler
-        return sampler
+        """Return the tracer's durable sampler, installing one if needed.
+
+        The returned sampler is always the one the tracer holds. The check and the
+        install are one critical section, so a caller that arrives while another
+        is installing waits and then finds the installed sampler instead of
+        wrapping the original a second time. A caller that kept a sampler the
+        tracer does not hold would also keep a delegate the tracer never
+        consults.
+        """
+        with _install_lock:
+            current_sampler = tracer.sampler
+            if isinstance(current_sampler, cls):
+                return current_sampler
+            sampler = cls(current_sampler)
+            tracer.sampler = sampler
+            return sampler
 
     def should_sample(
         self,

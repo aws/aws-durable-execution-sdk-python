@@ -40,15 +40,60 @@ DURABLE_EXECUTION_PLUGINS=otel-invocation,example_audit
 The SDK resolves those names from the `aws_durable_execution.plugins` Python
 entry-point group when the decorated handler is initialized. An unset or blank
 variable preserves the existing behavior. The decorator's `plugins` argument
-remains supported; explicit plugins run first and take precedence when a
-dynamic provider creates the same concrete plugin type.
+remains supported; explicit factories run first, and a factory passed to the
+decorator is not registered a second time through the environment.
 
-Provider packages expose a versioned factory:
+A plugin is registered as a *factory*, not as an instance. A factory is an object
+with a `create_plugin(info)` method taking the invocation's `InvocationStartInfo`
+and returning a `DurableInstrumentationPlugin`; the SDK calls that method once per
+invocation, so the instance it returns serves that one invocation only and can
+hold **per-invocation** state in ordinary attributes.
+
+Per-invocation is narrower than per-execution, and the difference matters. A
+durable execution spans as many invocations as it waits, retries or resumes, and
+the instance is dropped when each of those returns — so anything a plugin keeps in
+its attributes is gone by the next invocation of the same execution. State that
+has to survive that has two honest homes: rebuild it from the operation map the
+invocation hooks carry (`InvocationStartInfo.operations` is a full snapshot,
+which is how the bundled Insight plugin reports operations that completed in an
+earlier invocation), or put it on the factory, which outlives every invocation —
+keyed by execution ARN, and pruned by the owner, because the SDK will not tell the
+factory when an execution ends for good.
+
+A factory is an object with a method rather than a plain callable so the
+registration type can grow a second, optional member later -- a process-level
+flush on execution-environment shutdown, for example -- without a second breaking
+change to this surface.
+
+Write a small factory class and construct the plugin in its `create_plugin`. The
+factory holds what outlives an invocation, such as an exporter or a resolved
+configuration, and setup work that can fail belongs in the factory's own
+constructor rather than the plugin's:
+
+```python
+class AuditPluginFactory:
+    def __init__(self, sink):
+        self._sink = sink
+
+    def create_plugin(self, info):
+        return AuditPlugin(self._sink)
+
+
+plugins=[AuditPluginFactory(sink)]
+```
+
+A plugin class is not a factory, and neither is a bare callable. `plugins=[MyPlugin]`
+and `plugins=[lambda info: MyPlugin(sink)]` raise `PluginLoadError` during handler
+initialization, because neither carries `create_plugin`. A class that declares
+`create_plugin` as a `@classmethod` is accepted, since the requirement is the
+member and not the kind of object.
+
+Provider packages expose such a factory:
 
 ```python
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
-    DurableInstrumentationPluginProvider,
+    InvocationStartInfo,
 )
 
 
@@ -56,26 +101,24 @@ class AuditPlugin(DurableInstrumentationPlugin):
     pass
 
 
-AUDIT_PLUGIN_PROVIDER = DurableInstrumentationPluginProvider(
-    plugin_type=AuditPlugin,
-    factory=AuditPlugin,
-    plugin_api_version=1,
-)
+class AuditPluginFactory:
+    def create_plugin(self, info: InvocationStartInfo) -> AuditPlugin:
+        return AuditPlugin()
+
+
+AUDIT_PLUGIN_FACTORY = AuditPluginFactory()
 ```
 
-Register the provider in the package's `pyproject.toml`:
+Register the factory instance in the package's `pyproject.toml`:
 
 ```toml
 [project.entry-points."aws_durable_execution.plugins"]
-example_audit = "example_audit:AUDIT_PLUGIN_PROVIDER"
+example_audit = "example_audit:AUDIT_PLUGIN_FACTORY"
 ```
 
-Set `plugin_api_version` to the literal API version the provider implements.
-Update it only after verifying the provider against that API version.
-
 Provider names must be unique across installed distributions. Missing,
-ambiguous, incompatible, or invalid providers raise `PluginLoadError` during
-handler initialization with the provider and distribution details.
+ambiguous, or wrongly shaped providers raise `PluginLoadError` during handler
+initialization with the provider and distribution details.
 
 ## 🚀 Quick Start
 

@@ -1,10 +1,15 @@
+import re
 import tomllib
 from pathlib import Path
+
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
-CORE_DEPENDENCY = "aws-durable-execution-sdk-python>=2.0.0"
+CORE_DISTRIBUTION = "aws-durable-execution-sdk-python"
+CORE_DEPENDENCY = "aws-durable-execution-sdk-python>=3.0.0,<4"
 TEST_OTEL_DEPENDENCIES = {
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-propagator-aws-xray",
@@ -80,3 +85,121 @@ def test_pypi_compatibility_environment_uses_compatible_core_sdk() -> None:
     ]["test-pypi-otel"]["dependencies"]
 
     assert CORE_DEPENDENCY in dependencies
+
+
+def _core_version() -> str:
+    """The core SDK version this repository builds, read from its source.
+
+    Read from the file rather than imported. The ``test-pypi-otel`` environment
+    installs a *published* core alongside this package's source, so an import
+    would report that release's version and the checks below would stop saying
+    anything about this repository's version story.
+    """
+    about = (
+        REPOSITORY_ROOT
+        / "packages"
+        / "aws-durable-execution-sdk-python"
+        / "src"
+        / "aws_durable_execution_sdk_python"
+        / "__about__.py"
+    ).read_text()
+    match = re.search(r'^__version__ = "([^"]+)"', about, re.MULTILINE)
+    assert match is not None, "core __about__.py has no __version__ assignment"
+    return match.group(1)
+
+
+def _core_dependency_lower_bound() -> str:
+    dependencies = _load_pyproject(PACKAGE_ROOT / "pyproject.toml")["project"][
+        "dependencies"
+    ]
+    bounds = [
+        dependency.removeprefix(CORE_DISTRIBUTION + ">=").split(",", 1)[0]
+        for dependency in dependencies
+        if dependency.startswith(CORE_DISTRIBUTION + ">=")
+    ]
+    assert len(bounds) == 1, f"expected one {CORE_DISTRIBUTION} bound, got {bounds}"
+    return bounds[0]
+
+
+def _major(version: str) -> int:
+    return int(version.split(".", 1)[0])
+
+
+def test_core_dependency_bound_matches_the_core_major_in_this_repository() -> None:
+    """The declared bound must not admit a core major that predates this plugin's contract.
+
+    This package's entry points resolve to plugin factories, and the ``plugins``
+    argument only accepts factories from the core major that introduced them. A
+    lower bound naming an earlier major is a resolution pip accepts and that then
+    fails at handler initialization, so the bound has to track the core major this
+    repository builds. The bound may lag within that major -- a later core minor
+    still satisfies the contract -- which is why only the major is compared and
+    the bound is required not to exceed the core version.
+    """
+    core_version = _core_version()
+    lower_bound = _core_dependency_lower_bound()
+
+    assert _major(lower_bound) == _major(core_version)
+    assert Version(lower_bound) <= Version(core_version)
+
+
+def test_layer_sdk_pin_matches_the_core_version_in_this_repository() -> None:
+    """The OTel layer pin selects the core wheel bundled into the published layer.
+
+    A combined SDK and OTel release fails outright when the pin disagrees with the
+    released SDK version, and an OTel-only release downloads exactly the pinned
+    version from PyPI. A stale pin therefore either blocks the release or ships a
+    layer whose core cannot run this plugin, so the pin tracks the core version
+    this repository builds.
+    """
+    metadata_path = REPOSITORY_ROOT / ".github" / "lambda-layer-publish.toml"
+
+    with metadata_path.open("rb") as metadata_file:
+        pinned_version = tomllib.load(metadata_file)["layer"]["sdk-version"]
+
+    assert pinned_version == _core_version()
+
+
+def test_core_dependency_excludes_the_next_core_major() -> None:
+    """A lower bound alone is the same defect one major later.
+
+    The lower bound exists because this package's entry points resolve to plugin
+    factories, which the core major below cannot call: pip accepts the resolution
+    and the handler fails at initialization. Without a ceiling the next core major
+    that changes the plugin contract reproduces exactly that, so the specifier has
+    to reject it rather than only reject what came before.
+    """
+    dependencies = _load_pyproject(PACKAGE_ROOT / "pyproject.toml")["project"][
+        "dependencies"
+    ]
+    specifiers = [
+        SpecifierSet(dependency.removeprefix(CORE_DISTRIBUTION))
+        for dependency in dependencies
+        if dependency.startswith(CORE_DISTRIBUTION)
+    ]
+    assert len(specifiers) == 1
+
+    core_major = _major(_core_version())
+    assert specifiers[0].contains(_core_version(), prereleases=True)
+    assert not specifiers[0].contains(f"{core_major + 1}.0.0", prereleases=True)
+
+
+def test_core_dependency_admits_a_later_core_patch() -> None:
+    """The ceiling belongs on the major, not on the version built here.
+
+    A ``<=`` ceiling looks equivalent and is not: it excludes the next core patch,
+    so the first core patch release puts this claim out of date for a change that
+    cannot have touched the plugin contract.
+    """
+    dependencies = _load_pyproject(PACKAGE_ROOT / "pyproject.toml")["project"][
+        "dependencies"
+    ]
+    specifier = next(
+        SpecifierSet(dependency.removeprefix(CORE_DISTRIBUTION))
+        for dependency in dependencies
+        if dependency.startswith(CORE_DISTRIBUTION)
+    )
+
+    core = Version(_core_version())
+    next_patch = f"{core.major}.{core.minor}.{core.micro + 1}"
+    assert specifier.contains(next_patch, prereleases=True)

@@ -10,7 +10,7 @@ from typing import Any
 
 from aws_durable_execution_sdk_python import DurableContext, durable_execution
 from aws_durable_execution_sdk_python.config import MapConfig
-from common import otel_plugin, require_scenario
+from common import otel_plugin_factory, require_scenario
 
 
 def fail_map_item(
@@ -22,7 +22,7 @@ def fail_map_item(
     raise RuntimeError("Intentional map iteration failure")
 
 
-@durable_execution(plugins=[otel_plugin()])
+@durable_execution(plugins=[otel_plugin_factory()])
 def handler(event: dict[str, Any], context: DurableContext) -> None:
     require_scenario(event, "map-failure")
     result = context.map(

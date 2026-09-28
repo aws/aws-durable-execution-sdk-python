@@ -5,11 +5,10 @@ import copy
 import datetime
 import functools
 import logging
-from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, MutableMapping, cast
+from typing import Any, Callable, MutableMapping, Protocol, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -27,8 +26,6 @@ from aws_durable_execution_sdk_python.types import LambdaContext
 
 
 logger = logging.getLogger(__name__)
-
-DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION = 1
 
 
 class InvocationStatus(Enum):
@@ -451,41 +448,299 @@ class DurableInstrumentationPlugin:
         pass
 
 
-@dataclass(frozen=True)
-class DurableInstrumentationPluginProvider:
-    """Versioned factory exposed through the plugin entry-point group."""
+class DurableInstrumentationPluginFactory(Protocol):
+    """Builds one plugin instance for one invocation.
 
-    plugin_type: type[DurableInstrumentationPlugin]
-    factory: Callable[[], DurableInstrumentationPlugin]
-    plugin_api_version: int
+    An object with a method rather than a bare callable, because the SDK will
+    grow process-level plugin hooks -- a flush when the execution environment
+    shuts down, for example. A callable type has no member to add such a hook to,
+    so growing one would have to change the registration type from callable to
+    object, which is a second breaking change on the same public surface. One
+    method on an object leaves room for an optional second member, which is
+    additive.
+
+    Not ``@runtime_checkable``. Three facts decide it. An ``isinstance`` check
+    against a runtime-checkable protocol tests only that the member name is
+    present, not that it is callable, so it would accept an object whose
+    ``create_plugin`` is a string; the SDK needs the stronger test. The SDK also
+    has to name what an invalid entry actually was, which a boolean
+    ``isinstance`` result cannot supply. And ``isinstance`` against a
+    runtime-checkable protocol requires *every* declared member, so publishing
+    one would make the optional second member above non-additive for any caller
+    who wrote such a check. :func:`plugin_discovery._is_plugin_factory` performs
+    the check instead.
+
+    Register the factory, not a plugin::
+
+        class MyPluginFactory:
+            def __init__(self, exporter: Exporter) -> None:
+                self._exporter = exporter
+
+            def create_plugin(self, info: InvocationStartInfo) -> MyPlugin:
+                return MyPlugin(self._exporter)
+
+
+        plugins = [MyPluginFactory(exporter)]
+
+    A plugin class is not a factory. ``plugins=[MyPlugin]`` used to work because
+    calling a class constructs an instance, and it now fails at handler
+    initialization because a class carries no ``create_plugin``. A class that
+    declares ``create_plugin`` itself -- as a ``@classmethod`` -- does satisfy the
+    shape, because the requirement is the member and not the kind of object.
+
+    The factory holds what outlives an invocation: an exporter, a resolved
+    configuration, a shared worker. The plugin instance holds what does not.
+    Setup work that can fail or that reads the environment belongs in the
+    factory's own constructor rather than in the plugin's, because a plugin
+    constructor should only assign fields (see ``CONTRIBUTING.md``,
+    "Initialization and conversion").
+    """
+
+    def create_plugin(
+        self, info: InvocationStartInfo, /
+    ) -> DurableInstrumentationPlugin:
+        """Return the plugin instance that serves the described invocation.
+
+        Called once per invocation, with that invocation's
+        :class:`InvocationStartInfo` -- the same object the returned instance's
+        ``on_invocation_start`` then receives -- and before any hook fires. The
+        instance serves only that invocation and is dropped when it returns, so a
+        plugin can hold that invocation's state in ordinary instance attributes
+        without keying it by execution ARN.
+
+        Per invocation is narrower than per execution. A durable execution spans
+        as many invocations as it waits, retries or resumes, so state a plugin
+        leaves in its attributes is gone by the next invocation of the same
+        execution. Anything that has to survive that is rebuilt from the operation
+        map the invocation hooks carry -- ``InvocationStartInfo.operations`` is a
+        full snapshot, including operations that completed in an earlier
+        invocation -- or kept on the factory, which outlives every invocation and
+        is therefore the caller's to key and to prune.
+
+        ``info`` is positional-only, so an implementation may name the parameter
+        whatever reads best; a named protocol parameter would pin that name for
+        every implementation.
+
+        A call that raises, or that returns ``None``, is logged and skipped for
+        that invocation and never disrupts the execution.
+
+        Args:
+            info: The invocation the returned plugin instance will observe.
+
+        Returns:
+            The plugin instance for this invocation.
+        """
+        ...
+
+
+def _type_name(value: object) -> str:
+    """Best available name for a value's type, for log messages.
+
+    Reads the type rather than the value, so no instance ``__getattr__`` or
+    ``__getattribute__`` runs, and wraps the lookup, because these names are built
+    while a plugin failure is being contained: a name that raises would turn a
+    contained failure into a failed execution.
+    """
+    try:
+        return type(value).__qualname__
+    except BaseException:  # noqa: BLE001 - a name is never worth failing a hook for
+        return "<unnamed>"
+
+
+def _factory_name(factory: object) -> str:
+    """Best available name for a factory, for log messages.
+
+    Read from the factory's *type*, not from the factory. This runs while a
+    factory failure is being contained, and a ``getattr`` on the instance would
+    call a custom ``__getattr__`` or ``__getattribute__`` -- so a factory whose
+    attribute hook raises would make the containment itself raise, turning a
+    contained plugin failure into a failed execution. A class registered directly
+    as a factory is read through the class object, which carries its own
+    ``__qualname__``.
+
+    Wrapped as well, because diagnostics must not be the thing that fails: a name
+    that cannot be produced is reported as unavailable rather than raised.
+    """
+    try:
+        if isinstance(factory, type):
+            return factory.__qualname__
+    except BaseException:  # noqa: BLE001 - a name is never worth failing a hook for
+        return "<unnamed factory>"
+    return _type_name(factory)
+
+
+# Raised out of plugin code, these three are not reports of a plugin defect but
+# instructions to the thread that is running: stop. Containing one would drop the
+# instruction and return a thread that was told to unwind to the work after the
+# plugin. They are re-raised; every other BaseException is contained.
+#
+# asyncio.CancelledError is deliberately NOT here. It derives from BaseException
+# and it does mean "stop" for the task that was cancelled, but the task here is
+# the SDK's, not the plugin's: nothing cancels the invocation thread or the
+# single-worker plugin pool. A CancelledError arriving from plugin code therefore
+# came from the plugin's own asyncio use -- an awaited task it let be cancelled --
+# which is a plugin defect and belongs on the contained side, or the plugin's
+# failure would fail an execution it was only observing.
+_PLUGIN_THREAD_CONTROL_EXCEPTIONS = (KeyboardInterrupt, SystemExit, GeneratorExit)
+
+
+def _contain_plugin_failure(
+    error: BaseException, message: str, *message_args: object
+) -> BaseException | None:
+    """Log what plugin code raised, and return the part that must not be contained.
+
+    Returns ``None`` when the whole failure was contained, or the part that
+    instructs the calling thread to stop, which the caller re-raises.
+
+    A :class:`BaseExceptionGroup` is split rather than tested, because it is
+    neither of the two cases a plain ``isinstance`` chain covers: a group carrying
+    a :class:`KeyboardInterrupt` is not an instance of one, so a tuple handler
+    naming the three does not match it and a broad handler would contain the
+    interrupt inside it. Plugin code produces such a group without asking for it
+    -- an ``asyncio.TaskGroup`` whose task is interrupted raises one -- so the
+    group is partitioned: the control leaves are returned to be re-raised, and
+    what remains is logged like any other contained plugin failure.
+    """
+    control: BaseException | None
+    contained: BaseException | None
+    if isinstance(error, BaseExceptionGroup):
+        control, contained = error.split(_PLUGIN_THREAD_CONTROL_EXCEPTIONS)
+    elif isinstance(error, _PLUGIN_THREAD_CONTROL_EXCEPTIONS):
+        control, contained = error, None
+    else:
+        control, contained = None, error
+    if contained is not None:
+        logger.error(message, *message_args, exc_info=contained)
+    return control
 
 
 class PluginExecutor:
-    def __init__(self, plugins: list[DurableInstrumentationPlugin] | None):
-        self._plugins = plugins or []
-        self._executor: ThreadPoolExecutor | None = None
+    """One invocation's plugin instances, metadata and dispatch.
+
+    Scoped to a single invocation, not to the handler. Everything mutable here --
+    the instances built for this invocation, the start info the end hook derives
+    from, the operations provider, the dispatch pool -- describes one invocation,
+    so a single instance shared by two of them would let each overwrite the
+    other's state. Concurrent executions in one environment (Lambda Managed
+    Instances) are exactly that case: they run in separate threads of one
+    process, against one decorated handler. :class:`PluginHost` therefore builds
+    a fresh executor per invocation and holds it only in that invocation's frame.
+
+    Single-use by construction: :meth:`run` refuses a second entry, so the
+    lifetime is an invariant of the class rather than a convention its callers
+    have to keep. Only the factory list is handler-lifetime, and it is copied in
+    rather than shared mutably.
+    """
+
+    def __init__(self, plugins: list[DurableInstrumentationPluginFactory] | None):
+        # Factories outlive this executor -- the list is copied, never aliased.
+        # The instances they build do not: _plugins is populated in
+        # on_invocation_start and emptied when the invocation scope exits.
+        self._plugin_factories = list(plugins or [])
+        self._plugins: list[DurableInstrumentationPlugin] = []
+        # The subset of _plugins whose invocation-start hook has been dispatched.
+        # Every later hook is dispatched to this list, so a plugin that never
+        # received its start hook never receives its end hook.
+        self._started: list[DurableInstrumentationPlugin] = []
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
+        self._run_entered = False
 
     @contextlib.contextmanager
     def run(self):
-        if self._plugins:
-            self._executor = ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="plugin-executor",
+        """Open this executor's one invocation scope.
+
+        Raises:
+            RuntimeError: if entered more than once. A second entry would mean an
+                executor is serving two invocations, which is the shape this
+                class exists to prevent; failing loudly here keeps the bug from
+                reappearing as silent crosstalk.
+        """
+        if self._run_entered:
+            msg = (
+                "PluginExecutor.run() is single-use: this executor has already "
+                "served an invocation. Build one executor per invocation."
             )
+            raise RuntimeError(msg)
+        self._run_entered = True
         try:
             yield
         finally:
             self._invocation_status = None
             self._operations_provider = None
-            # Shut down the thread pool, waiting for pending tasks to complete.
-            if self._executor:
-                self._executor.shutdown(wait=True)
+            # Drop this invocation's plugin instances: nothing outlives the
+            # invocation. Every dispatch is synchronous, so there is no queued
+            # work still holding one.
+            self._plugins = []
+            self._started = []
+
+    def _create_plugins(self, info: InvocationStartInfo) -> None:
+        """Build this invocation's plugin instances from its start info.
+
+        Called once per invocation, before the first hook is dispatched. A
+        factory whose ``create_plugin`` raises or returns ``None`` is contained
+        exactly as a failing hook is -- logged and skipped -- so a broken plugin
+        cannot disrupt the execution. The remaining factories still produce their
+        instances.
+
+        An entry without a usable ``create_plugin`` raises ``AttributeError``
+        here, which this containment then swallows once per invocation.
+        :func:`plugin_discovery.load_configured_plugins` rejects such an entry
+        while the handler is being initialized, so the silent case is not
+        reachable through ``durable_execution()``.
+
+        Containment covers every ``BaseException`` except the parts that instruct
+        the calling thread to stop; see
+        :data:`_PLUGIN_THREAD_CONTROL_EXCEPTIONS` and
+        :func:`_contain_plugin_failure`. Narrowing it to ``Exception`` left the
+        contract conditional on a factory never raising outside that hierarchy,
+        and a factory that awaits a cancelled task raises
+        ``asyncio.CancelledError``, which is outside it.
+        """
+        plugins: list[DurableInstrumentationPlugin] = []
+        for factory in self._plugin_factories:
+            try:
+                plugin = factory.create_plugin(info)
+            except BaseException as error:  # noqa: BLE001 - a factory must not fail the execution
+                control = _contain_plugin_failure(
+                    error, "Plugin factory %s exception ignored", _factory_name(factory)
+                )
+                if control is not None:
+                    raise control from None
+                continue
+            if plugin is None:
+                logger.error(
+                    "Plugin factory %s returned None; plugin ignored",
+                    _factory_name(factory),
+                )
+                continue
+            # The load-time shape check can only establish that the factory has
+            # a callable create_plugin; what that call returns is knowable only
+            # here. A value that is not a plugin fails every hook inside
+            # _dispatch_plugin, so registering it would produce one logged error
+            # per hook per invocation for the life of the function while
+            # providing no telemetry. Reject it once instead.
+            if not isinstance(plugin, DurableInstrumentationPlugin):
+                logger.error(
+                    "Plugin factory %s returned %s, which is not a "
+                    "DurableInstrumentationPlugin; plugin ignored",
+                    _factory_name(factory),
+                    _type_name(plugin),
+                )
+                continue
+            plugins.append(plugin)
+        self._plugins = plugins
 
     @staticmethod
     def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> None:
-        """Invoke the appropriate plugin callback. Runs inside the thread pool."""
+        """Invoke the appropriate plugin callback. Runs inside the thread pool.
+
+        Contains every ``BaseException`` except the parts that instruct the calling
+        thread to stop, the same rule the factory boundary uses. The thread here
+        is the executor's own single worker, which nothing outside this class
+        cancels or interrupts, so an exception outside the ``Exception`` hierarchy
+        arriving here was raised by the plugin.
+        """
         try:
             match info:
                 case InvocationStartInfo():
@@ -504,20 +759,73 @@ class PluginExecutor:
                     plugin.on_user_function_end(info)
                 case _:
                     raise RuntimeError(f"Unknown info type: {type(info)}")
-        except Exception:
-            # log and ignore the exception
-            logger.exception("Plugin %s exception ignored", plugin.__class__.__name__)
+        except BaseException as error:  # noqa: BLE001 - a hook must not fail the execution
+            control = _contain_plugin_failure(
+                error, "Plugin %s exception ignored", plugin.__class__.__name__
+            )
+            if control is not None:
+                raise control from None
 
-    def execute_plugins(self, info, sync):
-        if not self._executor:
+    def execute_plugins(self, info):
+        """Dispatch one hook to this invocation's plugins.
+
+        A plugin receives a hook only once it has received the invocation-start
+        hook, which makes the pairing an invariant rather than a coincidence.
+        Without it one dispatch order breaks the pairing: a start hook that raises
+        one of the three exceptions :data:`_PLUGIN_THREAD_CONTROL_EXCEPTIONS`
+        names propagates out of this loop, so plugins later in the list never
+        receive their start hook -- and the invocation-end hook that the
+        propagating exception then triggers used to reach them anyway, leaving a
+        plugin to tear down state it had never been told to build.
+
+        A plugin is counted as started before its start hook is dispatched rather
+        than after, because a hook that begins and then fails may already have
+        allocated what its end hook releases.
+
+        The invocation-end hook is the one hook that finishes dispatching even
+        when a plugin raises one of those. Every plugin it reaches has already
+        started, so cutting the loop short costs a plugin its only chance to
+        finish: Insight would not drain, and OTel would leave spans unended. The
+        first such exception is held and re-raised once every plugin has been
+        called, so the thread still stops and nothing is swallowed. No other hook
+        defers: stopping a start-hook loop early leaves later plugins with nothing
+        to clean up, because the pairing rule above then withholds their end hook
+        too.
+
+        Anything :meth:`_dispatch_plugin` raises is already a thread-control
+        failure -- it contains everything else -- so the end path catches
+        ``BaseException`` rather than naming the three again. Naming them would
+        miss a :class:`BaseExceptionGroup` carrying one, which is what
+        :func:`_contain_plugin_failure` hands back.
+
+        Every hook is dispatched on the calling thread. That is what lets a
+        plugin set a ``ThreadLocal`` or an MDC key the SDK's own logging then
+        reads, and it is what makes the pairing and re-raise rules above
+        enforceable: a hook dispatched to a pool would land in a
+        :class:`~concurrent.futures.Future` nobody reads, so a control exception
+        raised there would be swallowed and the end-hook fan-out could not hold
+        it. An earlier ``sync`` parameter offered the pool path; no caller ever
+        passed it, and it is removed rather than left as a way to opt out of
+        those rules.
+        """
+        if not self._plugin_factories:
             return
-        for plugin in self._plugins:
-            if sync:
-                # this is called synchronously, so plugins will be able to manipulate thread local objects
+        starting = isinstance(info, InvocationStartInfo)
+        ending = isinstance(info, InvocationEndInfo)
+        deferred_control: BaseException | None = None
+        for plugin in self._plugins if starting else self._started:
+            if starting:
+                self._started.append(plugin)
+            if not ending:
                 self._dispatch_plugin(plugin, info)
-            else:
-                # this is called asynchronously, so plugins cannot manipulate thread local objects
-                self._executor.submit(self._dispatch_plugin, plugin, info)
+                continue
+            try:
+                self._dispatch_plugin(plugin, info)
+            except BaseException as control:  # noqa: BLE001 - held and re-raised below
+                if deferred_control is None:
+                    deferred_control = control
+        if deferred_control is not None:
+            raise deferred_control
 
     def _snapshot_operation_infos(
         self,
@@ -535,11 +843,13 @@ class PluginExecutor:
         plugin that stashes the info and reads it later still sees the state as
         of its own hook.
 
-        Skipped entirely when no plugins are registered -- ``durable_execution()``
+        Skipped entirely when no plugins are configured -- ``durable_execution()``
         passes a provider unconditionally, so without this gate a plugin-free
-        execution would pay for a view nothing can read.
+        execution would pay for a view nothing can read. The gate reads the
+        factory list, not the instances: this runs while the start info is being
+        built, before any instance exists.
         """
-        if not self._plugins or operations_provider is None:
+        if not self._plugin_factories or operations_provider is None:
             return {}
         try:
             return _to_operation_info_map(operations_provider())
@@ -572,7 +882,9 @@ class PluginExecutor:
                 ``UpdatedOperationIds`` -- those updated while suspended.
         """
         aws_request_id = lambda_context.aws_request_id if lambda_context else None
-        self._operations_provider = operations_provider if self._plugins else None
+        self._operations_provider = (
+            operations_provider if self._plugin_factories else None
+        )
         operations = self._snapshot_operation_infos(operations_provider)
         self._invocation_status = InvocationStartInfo(
             execution_arn=execution_arn,
@@ -587,7 +899,10 @@ class PluginExecutor:
                 if operation_id in operations
             },
         )
-        self.execute_plugins(self._invocation_status, sync=True)
+        # Build this invocation's plugin instances from the very info their first
+        # hook receives, and before that hook is dispatched.
+        self._create_plugins(self._invocation_status)
+        self.execute_plugins(self._invocation_status)
 
     def _snapshot_execution_input(self, execution_input: Any) -> Any:
         """Deep-copy the execution input so the plugin view is isolated.
@@ -602,12 +917,12 @@ class PluginExecutor:
         The copy is eager rather than deferred: the handler starts running
         immediately after this hook, so a lazily-taken snapshot could already
         have observed the handler's mutations. It is skipped when no plugins are
-        registered, so non-plugin executions pay nothing.
+        configured, so non-plugin executions pay nothing.
 
         The snapshot is shared by all plugins for this invocation; plugins should
         still treat it as read-only with respect to each other.
         """
-        if not self._plugins or execution_input is None:
+        if not self._plugin_factories or execution_input is None:
             return execution_input
         try:
             return copy.deepcopy(execution_input)
@@ -635,7 +950,7 @@ class PluginExecutor:
                 operations=self._snapshot_operation_infos(self._operations_provider),
             )
         )
-        self.execute_plugins(invocation_end_info, sync=True)
+        self.execute_plugins(invocation_end_info)
 
     def on_user_function_start(
         self,
@@ -656,7 +971,7 @@ class PluginExecutor:
             is_replay_children=is_replay_children,
             attempt=attempt,
         )
-        self.execute_plugins(start_info, sync=True)
+        self.execute_plugins(start_info)
         return start_info
 
     def on_user_function_end(
@@ -669,7 +984,6 @@ class PluginExecutor:
         """Execute plugins when a user function returns, fails, or is incomplete."""
         self.execute_plugins(
             UserFunctionEndInfo.from_start_info(start_info, error, outcome=outcome),
-            sync=True,
         )
 
     def on_operation_action(
@@ -699,7 +1013,6 @@ class PluginExecutor:
                     is_replayed=previous_operation is not None,
                     status=OperationStatus.STARTED,
                 ),
-                sync=True,
             )
 
     def on_operation_replay(self, operation: Operation) -> None:
@@ -717,7 +1030,7 @@ class PluginExecutor:
             is_replayed=True,
             status=operation.status,
         )
-        self.execute_plugins(start_info, sync=True)
+        self.execute_plugins(start_info)
 
     def on_child_context_end(
         self,
@@ -742,7 +1055,6 @@ class PluginExecutor:
                 error=error,
                 is_replayed=is_replayed,
             ),
-            sync=True,
         )
 
     def on_operation_update(
@@ -792,7 +1104,6 @@ class PluginExecutor:
                         ),
                         is_replayed=False,
                     ),
-                    sync=True,
                 )
 
         if (
@@ -820,7 +1131,6 @@ class PluginExecutor:
                 },
                 operations=_to_operation_info_map(operations),
             ),
-            sync=True,
         )
 
     @staticmethod
@@ -837,26 +1147,117 @@ class PluginExecutor:
             OperationStatus.STOPPED,
         ]
 
+
+class PluginHost:
+    """Handler-lifetime owner of the configured plugin factories.
+
+    The factory list is the only plugin state that may span invocations: a
+    factory is resolved once when the handler is initialized and is, by
+    definition, environment-lifetime. Everything a factory produces is
+    invocation-lifetime, so this class never holds an instance, a start info or a
+    dispatch pool -- :meth:`invocation` hands out a fresh
+    :class:`PluginExecutor` and the caller keeps it in the invocation's own
+    frame.
+
+    The handler holds factories and the invocation holds instances. The other
+    SDKs are moving to the same split, in aws/aws-durable-execution-sdk-js#924
+    (``createInvocationPluginRunner``) and aws/aws-durable-execution-sdk-java#721
+    (``PluginRunner`` constructed from factories). Both are open pull requests, so
+    neither shape is on those repositories' default branches: ``createPluginRunner``
+    on JS and ``PluginRunner`` on Java both still hold plugin instances directly.
+    """
+
+    def __init__(self, plugins: list[DurableInstrumentationPluginFactory] | None):
+        self._plugin_factories = list(plugins or [])
+
+    @contextlib.contextmanager
+    def invocation(self) -> Iterator[PluginExecutor]:
+        """Open one invocation's plugin scope and yield its executor.
+
+        The executor is created here rather than at handler-initialization time
+        so that two invocations sharing this process -- concurrent executions on
+        a Lambda Managed Instance, or successive executions on a warm
+        environment -- never write to the same slot. Teardown on scope exit
+        touches only the executor yielded here.
+        """
+        executor = PluginExecutor(self._plugin_factories)
+        with executor.run():
+            yield executor
+
     @property
     def handle_durable_output(self):
-        def decorator(func: Callable[[Any, LambdaContext], MutableMapping[str, Any]]):
+        """Wrap an invocation body so plugins see its outcome.
+
+        The wrapped function receives this invocation's :class:`PluginExecutor`
+        as a third argument. Passing it in, rather than closing over one, is what
+        keeps the instances out of handler-lifetime state: the executor is
+        reachable only from the frames of the invocation it belongs to.
+        """
+
+        def decorator(
+            func: Callable[
+                [Any, LambdaContext, PluginExecutor], MutableMapping[str, Any]
+            ],
+        ):
             @functools.wraps(func)
             def wrapper(event: Any, context: LambdaContext):
-                with self.run():
+                with self.invocation() as plugin_executor:
+                    # The end hook is dispatched exactly once per invocation, so
+                    # the success dispatch sits outside the try. Inside it, an
+                    # end hook that raised would be caught as though the handler
+                    # had failed, and the hook would run a second time with a
+                    # RETRY outcome -- telling later plugins the wrong thing about
+                    # an invocation that succeeded, and letting an exporter export
+                    # twice. A hook can raise: _dispatch_plugin re-raises the three
+                    # exceptions that instruct the calling thread to stop, and
+                    # from_dict below can reject an output the handler built.
                     try:
-                        output = func(event, context)
-
-                        self.on_invocation_end(
-                            output=DurableExecutionInvocationOutput.from_dict(output),
-                        )
-                        return output
-                    except Exception as e:
-                        self.on_invocation_end(
-                            output=DurableExecutionInvocationOutput.create_retry(
-                                ErrorObject.from_exception(e)
-                            ),
-                        )
+                        output = func(event, context, plugin_executor)
+                        completed = DurableExecutionInvocationOutput.from_dict(output)
+                    except BaseException as e:
+                        # Every exit fires the end hook, not only the ones that
+                        # derive from Exception. A handler that surfaces an
+                        # asyncio.CancelledError -- user code that awaited a
+                        # cancelled task, most simply -- leaves the invocation by
+                        # a BaseException, and an invocation that ends without
+                        # its end hook costs the plugins the only point at which
+                        # they can finish: Insight never drains, so the records it
+                        # holds for this execution are dropped, and OTel never
+                        # ends the spans it opened, so they are never exported.
+                        # The teardown below still runs either way, which is why
+                        # the gap was silent rather than a leak.
+                        #
+                        # KeyboardInterrupt and SystemExit reach here too, and
+                        # they also fire the hook. The hook is what a plugin needs
+                        # to flush, and a process being torn down is when flushing
+                        # matters; the cost is the same bounded work any
+                        # invocation end does.
+                        #
+                        # The handler's exception is what the caller sees,
+                        # whatever the hook does. The end-hook dispatch can raise
+                        # -- it re-raises the control exceptions it holds through
+                        # the fan-out -- and letting that replace the handler's
+                        # failure would report an instrumentation problem as the
+                        # execution's outcome and leave the real failure reachable
+                        # only as __context__. Instrumentation does not decide
+                        # what an execution failed with, so the hook's exception
+                        # is contained here and the original is re-raised
+                        # unchanged.
+                        try:
+                            plugin_executor.on_invocation_end(
+                                output=DurableExecutionInvocationOutput.create_retry(
+                                    ErrorObject.from_exception(e)
+                                ),
+                            )
+                        except BaseException:  # noqa: BLE001 - the handler's failure wins
+                            logger.exception(
+                                "Plugin invocation-end hook failed while the "
+                                "invocation was already failing; the original "
+                                "failure is raised"
+                            )
                         raise
+                    plugin_executor.on_invocation_end(output=completed)
+                    return output
 
             return wrapper
 

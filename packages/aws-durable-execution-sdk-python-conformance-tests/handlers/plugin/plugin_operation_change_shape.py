@@ -78,12 +78,27 @@ class OperationChangeShapePlugin(DurableInstrumentationPlugin):
             _emit(record, self._execution_arn)
 
 
+class OperationChangeShapePluginFactory:
+    """Builds one :class:`OperationChangeShapePlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> OperationChangeShapePlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return OperationChangeShapePlugin()
+
+
 @durable_step
 def greet(_step_context: StepContext) -> str:
     return "task-a"
 
 
-@durable_execution(plugins=[OperationChangeShapePlugin()])
+@durable_execution(plugins=[OperationChangeShapePluginFactory()])
 def handler(_event: Any, context: DurableContext) -> str:
     result: str = context.step(greet(), name="greet")
     return result

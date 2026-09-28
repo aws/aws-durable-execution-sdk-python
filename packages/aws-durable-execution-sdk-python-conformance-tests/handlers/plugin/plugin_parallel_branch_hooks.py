@@ -75,6 +75,21 @@ class ParallelBranchPlugin(DurableInstrumentationPlugin):
         )
 
 
+class ParallelBranchPluginFactory:
+    """Builds one :class:`ParallelBranchPlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> ParallelBranchPlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return ParallelBranchPlugin()
+
+
 def branch0(_ctx: DurableContext) -> str:
     return "task-1"
 
@@ -83,7 +98,7 @@ def branch1(_ctx: DurableContext) -> str:
     return "task-2"
 
 
-@durable_execution(plugins=[ParallelBranchPlugin()])
+@durable_execution(plugins=[ParallelBranchPluginFactory()])
 def handler(_event: Any, context: DurableContext) -> list:
     result = context.parallel(
         [branch0, branch1],
