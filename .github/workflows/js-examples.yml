@@ -1,0 +1,100 @@
+name: JS Examples
+
+# Runs the JS SDK's example tests against the Python local runner in
+# packages/aws-durable-execution-sdk-python-testing. Everything runs on the
+# job's loopback: no AWS account or credentials are involved.
+#
+# The harness is scripts/js-examples/run.sh, the same script developers run
+# locally. See scripts/js-examples/README.md.
+#
+# Pull requests and pushes test against the JS SDK commit pinned in
+# scripts/js-examples/js-sdk.ref, so a failure points at the Python change.
+# The weekly run tests against the JS SDK's main branch, to find JS changes
+# the runner does not handle yet before the pin is moved.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "packages/aws-durable-execution-sdk-python-testing/**"
+      - "scripts/js-examples/**"
+      - ".github/workflows/js-examples.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "packages/aws-durable-execution-sdk-python-testing/**"
+      - "scripts/js-examples/**"
+      - ".github/workflows/js-examples.yml"
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      js_ref:
+        description: "JS SDK branch, tag or commit. Empty: the commit in scripts/js-examples/js-sdk.ref"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: js-examples-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  js-examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Choose JS SDK ref
+      id: ref
+      env:
+        INPUT_REF: ${{ github.event.inputs.js_ref }}
+        EVENT: ${{ github.event_name }}
+      run: |
+        if [ -n "$INPUT_REF" ]; then
+          ref="$INPUT_REF"
+        elif [ "$EVENT" = "schedule" ]; then
+          ref=main
+        else
+          ref="$(cut -d' ' -f1 scripts/js-examples/js-sdk.ref)"
+        fi
+        echo "JS SDK ref: $ref"
+        echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        repository: aws/aws-durable-execution-sdk-js
+        ref: ${{ steps.ref.outputs.ref }}
+        path: js-sdk
+        persist-credentials: false
+
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: "3.14"
+
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        # The JS SDK's CI runs on Node.js 22.
+        node-version: "22.x"
+        cache: npm
+        cache-dependency-path: js-sdk/package-lock.json
+
+    - name: Unit tests for the harness
+      run: |
+        scripts/js-examples/run.sh --help > /dev/null
+        scripts/js-examples/.venv/bin/python -m pytest scripts/js-examples
+
+    - name: Run the JS examples
+      run: scripts/js-examples/run.sh --js-dir js-sdk --out "$RUNNER_TEMP/js-examples"
+
+    - name: Upload logs and report
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: js-examples-logs
+        path: ${{ runner.temp }}/js-examples
+        if-no-files-found: ignore
