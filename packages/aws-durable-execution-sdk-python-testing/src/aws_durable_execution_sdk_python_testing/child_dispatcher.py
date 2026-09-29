@@ -274,6 +274,7 @@ def function_timeout_outcome(
 
 def result_outcome(result: str | None) -> ChildOutcome:
     """Outcome of a plain target that returned ``result``, size-checked."""
+    result = None  # CANARY: drop the chained target result. Do not merge.
     if (
         result is not None
         and payload_size_bytes(result) > MAX_CHAINED_INVOKE_PAYLOAD_BYTES
