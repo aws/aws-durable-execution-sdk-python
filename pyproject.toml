@@ -103,12 +103,15 @@ dependencies = [
   "pytest-cov",
   "coverage[toml]",
   "mypy>=1.0.0",
+  # .github/scripts/js_examples/run.py reads the JS examples' SAM template.
+  "PyYAML==6.0.2",
 ]
 
 [tool.hatch.envs.dev-testing.scripts]
 test = "pytest packages/aws-durable-execution-sdk-python-testing/tests {args}"
 cov = "pytest --cov-report=term-missing --cov-config=packages/aws-durable-execution-sdk-python-testing/pyproject.toml --cov=packages/aws-durable-execution-sdk-python-testing/src/aws_durable_execution_sdk_python_testing --cov-fail-under=95 packages/aws-durable-execution-sdk-python-testing/tests {args}"
 typecheck = "mypy --install-types --non-interactive packages/aws-durable-execution-sdk-python-testing/src/aws_durable_execution_sdk_python_testing packages/aws-durable-execution-sdk-python-testing/tests"
+js-examples = "python .github/scripts/js_examples/run.py {args}"
 
 [tool.hatch.envs.dev-examples]
 workspace.members = [
