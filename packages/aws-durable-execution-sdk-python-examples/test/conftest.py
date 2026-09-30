@@ -285,9 +285,10 @@ def _get_deployed_function_name(
 
 
 # X-Ray ingestion is eventually consistent; give the backend time to receive and
-# index spans before querying, then retry a few times.
-_XRAY_QUERY_RETRIES = 3
-_XRAY_RETRY_DELAY_SECONDS = 10
+# index spans before querying, then retry a few times. The ingestion lag is
+# variable and can exceed a minute under load, so the retry budget is generous.
+_XRAY_QUERY_RETRIES = 6
+_XRAY_RETRY_DELAY_SECONDS = 15
 
 
 class XRaySpanFetcher:
