@@ -42,7 +42,12 @@ jobs:
     # 1. Run for non-PR events, such as scheduled runs and manual invocations
     # 2. For PRs, run only same-repo branches from non-Dependabot actors; forked PRs or Dependabot should not access secrets.
     if: github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    # CodeBuild-hosted runner in the Python testing account (Lambda compute,
+    # Amazon Linux python3.13 image). Fork PRs are already excluded by the `if:`
+    # above, so the plain label is safe here. The label must match the CodeBuild
+    # project name exactly.
+    runs-on:
+      - codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
     outputs:
       suites: ${{ steps.discover.outputs.suites }}
     steps:
@@ -56,10 +61,20 @@ jobs:
   conformance:
     name: conformance (${{ matrix.suite }})
     needs: discover_suites
-    runs-on: ubuntu-latest
+    # CodeBuild-hosted runner in the Python testing account (Lambda compute,
+    # Amazon Linux python3.13 image). Each matrix entry gets its own runner; the
+    # discover_suites gate already excludes fork PRs, so the plain label is safe.
+    runs-on:
+      - codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: read
       id-token: write # Required for AWS OIDC credentials
+    env:
+      # The runner image ships /etc/pip.conf with `[global] target =
+      # /tmp/opt/python/site-packages` on PYTHONPATH; ignore both so the uv venv
+      # and the conformance runner install stay isolated.
+      PIP_CONFIG_FILE: /dev/null
+      PYTHONPATH: ""
     strategy:
       fail-fast: false
       matrix:
@@ -71,9 +86,12 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Setup Python
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      # The runner image is Amazon Linux; actions/setup-python only ships Ubuntu
+      # builds, so uv provides the Python 3.14 interpreter and activates a venv.
+      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       with:
         python-version: "3.14"
+        activate-environment: true
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -100,7 +118,7 @@ jobs:
       run: python3 scripts/build_examples.py
 
     - name: Install conformance runner
-      run: pip install "git+https://github.com/aws/aws-durable-execution-conformance-tests.git@main#subdirectory=packages/aws-durable-execution-conformance-tests"
+      run: uv pip install "git+https://github.com/aws/aws-durable-execution-conformance-tests.git@main#subdirectory=packages/aws-durable-execution-conformance-tests"
 
     - name: Inject Lambda execution role into template
       env:

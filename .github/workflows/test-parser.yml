@@ -26,12 +26,29 @@ permissions:
 
 jobs:
   test-scripts:
-    runs-on: ubuntu-latest
+    # Fork PRs stay on GitHub-hosted runners so fork code never executes inside
+    # the testing account; same-repo PRs, pushes and manual runs go to the
+    # CodeBuild-hosted runner (Lambda compute, Amazon Linux python3.13 image).
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || format('codebuild-github-actions-runner-{0}-{1}', github.run_id, github.run_attempt) }}
+    env:
+      # The runner image ships /etc/pip.conf with `[global] target =
+      # /tmp/opt/python/site-packages` on PYTHONPATH; ignore both so the
+      # dependency install stays isolated.
+      PIP_CONFIG_FILE: /dev/null
+      PYTHONPATH: ""
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+    - name: Set up Python
+      # The runner image is Amazon Linux; actions/setup-python only ships Ubuntu
+      # builds, so uv provides the interpreter and activates a venv.
+      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      with:
+        python-version: "3.13"
+        activate-environment: true
+
     - name: Install test dependencies
-      run: python -m pip install packaging pytest
+      run: uv pip install packaging pytest
 
     - name: Run script tests
       run: |
