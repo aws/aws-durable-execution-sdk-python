@@ -1,0 +1,81 @@
+name: JS Examples
+
+# Runs the JS SDK's example tests against the Python local runner in
+# packages/aws-durable-execution-sdk-python-testing. Everything runs on the
+# job's loopback: no AWS account or credentials are involved.
+#
+# The harness is .github/scripts/js_examples/run.py, which developers run
+# locally the same way. See .github/scripts/js_examples/README.md.
+#
+# It tests against the JS SDK's main branch. A manual run can name another
+# branch, tag or commit with js_ref. When a run fails, compare against an
+# older JS commit to tell a Python regression from a JS change.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "packages/aws-durable-execution-sdk-python-testing/**"
+      - ".github/scripts/js_examples/**"
+      - ".github/workflows/js-examples.yml"
+      - "pyproject.toml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "packages/aws-durable-execution-sdk-python-testing/**"
+      - ".github/scripts/js_examples/**"
+      - ".github/workflows/js-examples.yml"
+      - "pyproject.toml"
+  workflow_dispatch:
+    inputs:
+      js_ref:
+        description: "JS SDK branch, tag or commit"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: js-examples-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  js-examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        repository: aws/aws-durable-execution-sdk-js
+        ref: ${{ github.event.inputs.js_ref || 'main' }}
+        path: js-sdk
+        persist-credentials: false
+
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: "3.14"
+
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        # The JS SDK's CI runs on Node.js 22.
+        node-version: "22.x"
+        cache: npm
+        cache-dependency-path: js-sdk/package-lock.json
+
+    - name: Install Hatch
+      run: python -m pip install hatch==1.16.5
+
+    - name: Run the JS examples
+      run: hatch run dev-testing:js-examples --js-dir js-sdk --out "$RUNNER_TEMP/js-examples"
+
+    - name: Upload logs and report
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: js-examples-logs
+        path: ${{ runner.temp }}/js-examples
+        if-no-files-found: ignore
