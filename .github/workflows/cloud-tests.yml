@@ -115,8 +115,11 @@ jobs:
         sam build --template-file packages/aws-durable-execution-sdk-python-examples/template.generated.json
 
         ADOT_LAYER_ARN=$(
-          gh api repos/aws-observability/aws-otel-python-instrumentation/releases/latest \
-            --jq .body |
+          curl -sSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/aws-observability/aws-otel-python-instrumentation/releases/latest |
+            python3 -c "import sys, json; print(json.load(sys.stdin)['body'])" |
             awk -F '|' -v region="$AWS_REGION" '
               $2 ~ "^[[:space:]]*" region "[[:space:]]*$" {
                 gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3)
