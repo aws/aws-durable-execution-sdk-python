@@ -538,6 +538,19 @@ class TimedSuspendExecution(SuspendExecution):
         return cls(message, scheduled_timestamp=datetime_timestamp.timestamp())
 
 
+class ExecutionSuspendedByService(SuspendExecution):
+    """Raise when a checkpoint response does not include a checkpoint token.
+
+    A checkpoint response that omits the token means this invocation must
+    stop checkpointing and report PENDING; retrying would only spend a
+    token the service already will not accept from this invocation.
+
+    Deriving from SuspendExecution, not Exception, keeps this invisible to
+    customer handler code: it is never caught by a broad "except Exception",
+    and it reaches the same PENDING exit as every other suspension.
+    """
+
+
 class OrderedLockError(DurableExecutionsError):
     """An error from OrderedLock.
 

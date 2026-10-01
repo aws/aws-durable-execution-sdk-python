@@ -18,9 +18,9 @@ from typing import TYPE_CHECKING, Callable, NoReturn
 
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
-    CheckpointError,
     DurableExecutionsError,
     DurableOperationError,
+    ExecutionSuspendedByService,
     GetExecutionStateError,
     OrphanedChildException,
 )
@@ -396,6 +396,12 @@ class ExecutionState:
         # Set once the service confirms the execution has completed (a checkpoint
         # response with no token). No further checkpoint can succeed afterward.
         self._execution_completed: threading.Event = threading.Event()
+        # Set once a checkpoint response omits the token without carrying the
+        # execution's own terminal update: this invocation must stop
+        # checkpointing and report PENDING. Kept strictly separate from
+        # _execution_completed: that flag gates OrphanedChildException, which
+        # would reach customer handler code, and this condition must not.
+        self._checkpoint_token_revoked: threading.Event = threading.Event()
         # Serializes the execution-completed check with enqueueing so a checkpoint
         # is never enqueued after _settle_after_execution_completed drains the queue.
         self._completion_lock: Lock = Lock()
@@ -659,6 +665,29 @@ class ExecutionState:
             operation_id=operation_update.operation_id,
         )
 
+    @property
+    def is_checkpoint_token_revoked(self) -> bool:
+        """Return whether the service has withdrawn this invocation's checkpoint token.
+
+        The invocation wrapper consults this before reporting SUCCEEDED or
+        FAILED from any exit that did not itself go through create_checkpoint,
+        because those exits have no other way to learn that the token is gone.
+        """
+        return self._checkpoint_token_revoked.is_set()
+
+    def _reject_if_checkpoint_token_revoked(self) -> None:
+        """Raise ExecutionSuspendedByService once the checkpoint token is gone.
+
+        Guards create_checkpoint and schedule_refresh against sending with a
+        token the service already rejects: a retry would only spend a token
+        that cannot succeed, instead of this invocation answering PENDING now.
+        """
+        if not self._checkpoint_token_revoked.is_set():
+            return
+        raise ExecutionSuspendedByService(
+            "Checkpoint token revoked by the service; ending invocation with PENDING."
+        )
+
     def create_checkpoint(
         self,
         operation_update: OperationUpdate | None = None,
@@ -714,6 +743,8 @@ class ExecutionState:
                 the stored failure is re-raised to the caller. For a synchronous
                 checkpoint, a later background failure also surfaces here through
                 the completion event.
+            ExecutionSuspendedByService: If a checkpoint response did not include a
+                checkpoint token and this invocation must stop and answer PENDING.
 
         Examples:
             # Synchronous checkpoint (default, safe)
@@ -767,7 +798,10 @@ class ExecutionState:
         # Reject a late checkpoint before dispatching the START hook, so an
         # orphaned operation does not emit a START with no matching completion
         # (mirrors the parent-done check above). The _completion_lock block below
-        # re-checks to close the race with a concurrent completion.
+        # re-checks to close the race with a concurrent completion. Checked
+        # before execution-completed: a revoked token takes priority over
+        # every other exit classification.
+        self._reject_if_checkpoint_token_revoked()
         self._reject_if_execution_completed(operation_update)
 
         # Conditionally create completion event based on is_sync parameter
@@ -797,6 +831,7 @@ class ExecutionState:
             if self._checkpointing_failed.is_set():
                 # Raises the stored BackgroundThreadError.
                 self._checkpointing_failed.wait()
+            self._reject_if_checkpoint_token_revoked()
             self._reject_if_execution_completed(operation_update)
             if operation_update is None:
                 self._checkpoint_queue.put(queued_op)
@@ -826,11 +861,16 @@ class ExecutionState:
         were requested. One requested after its time joins the next batch. The
         caller waits on the handle when it needs the refreshed operations, and
         cancels it if it stops needing them.
+
+        Raises:
+            ExecutionSuspendedByService: If a checkpoint response did not include a
+                checkpoint token and this invocation must stop and answer PENDING.
         """
         refresh = ScheduledRefresh(earliest_check_time, CompletionEvent())
         with self._completion_lock:
             if self._checkpointing_failed.is_set():
                 self._checkpointing_failed.wait()
+            self._reject_if_checkpoint_token_revoked()
             self._reject_if_execution_completed(None)
             if self._checkpointing_stopped.is_set():
                 raise OrphanedChildException(
@@ -1019,22 +1059,26 @@ class ExecutionState:
 
                     logger.debug("Checkpoint batch processed successfully")
 
-                    # The service omits the token only when there is no next
-                    # checkpoint, i.e. the execution has reached a terminal state
-                    # - completed, or failed (for example on a quota limit). A
-                    # batch that sent updates and gets no token back is therefore
-                    # terminal: stop and settle. An empty checkpoint always gets a
-                    # fresh token, so a missing token with no updates is malformed.
+                    # A checkpoint response can omit the token for two different
+                    # reasons, and they must not be conflated. If the accepted batch
+                    # carries the execution's own terminal update (operation type
+                    # EXECUTION), the execution is already finished - that is genuine
+                    # completion. Otherwise the missing token means this invocation
+                    # must stop checkpointing and report PENDING instead - that is
+                    # not completion, and must not be reported as one. This applies
+                    # whether the batch carries other, non-terminal updates or none
+                    # at all (e.g. an all-refresh batch).
                     execution_completed: bool = False
                     if output.checkpoint_token:
                         current_checkpoint_token = output.checkpoint_token
-                    elif updates:
+                    elif any(
+                        update.operation_type is OperationType.EXECUTION
+                        for update in updates
+                    ):
                         execution_completed = True
                     else:
-                        raise CheckpointError(
-                            "Checkpoint response omitted the token for an empty "
-                            "checkpoint."
-                        )
+                        self._handle_revoked_checkpoint_token(batch)
+                        break
 
                     previous_operations = self.operations
 
@@ -1175,6 +1219,59 @@ class ExecutionState:
                             operation_id=operation_id,
                         )
                     )
+
+    def _handle_revoked_checkpoint_token(self, batch: list[QueuedOperation]) -> None:
+        """Stop checkpointing after a checkpoint response omits the token.
+
+        Called when a checkpoint response omits the token on a batch that does
+        not carry the execution's own terminal update: this invocation must
+        stop checkpointing and report PENDING rather than treat the missing
+        token as completion. The token is no longer usable for any further
+        call, checkpoint or GetDurableExecutionState pagination alike, so
+        this invocation must send neither again.
+
+        The response's new execution state is not applied, and the accepted
+        batch's waiters are not resolved as succeeded: either would let the
+        handler act on state, or keep running past a checkpoint it thinks
+        succeeded, when the service can no longer be told anything about it.
+        Both the accepted batch and everything still queued are instead woken
+        with ExecutionSuspendedByService. JS can leave such a waiter's promise
+        unresolved and let a separate termination signal decide; Python's
+        threading.Event would then block the invocation until the Lambda
+        timeout, so it is woken with this exception instead. That is still
+        not an error to customer code, because the exception derives from
+        SuspendExecution, and it is the same adaptation the Java port makes
+        with its own SuspendExecutionException - keep this shape rather than
+        reworking it back toward JS's.
+        """
+        logger.warning(
+            "Checkpoint token revoked by the service mid-invocation. Ending "
+            "this invocation with PENDING; %d accepted update(s) in this batch "
+            "remain durable, unsent work is abandoned.",
+            len(batch),
+        )
+        with self._completion_lock:
+            self._checkpoint_token_revoked.set()
+            self._checkpointing_stopped.set()
+
+            revoked = ExecutionSuspendedByService(
+                "Checkpoint token revoked by the service; ending invocation "
+                "with PENDING."
+            )
+            for refresh in self._drain_pending_refreshes():
+                refresh.completion_event.set(revoked)
+            unsent: list[QueuedOperation] = list(batch)
+            for pending_queue in (self._overflow_queue, self._checkpoint_queue):
+                while not pending_queue.empty():
+                    try:
+                        item = pending_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if isinstance(item, QueuedOperation):
+                        unsent.append(item)
+            for queued_op in unsent:
+                if queued_op.completion_event is not None:
+                    queued_op.completion_event.set(revoked)
 
     def stop_checkpointing(self) -> None:
         """Signal background thread to stop checkpointing.
