@@ -1,0 +1,292 @@
+# Python LMI end-to-end tests
+
+This suite implements [#742](https://github.com/aws/aws-durable-execution-sdk-python/issues/742)
+and asserts the invocation-lifetime behavior requested by
+[#741](https://github.com/aws/aws-durable-execution-sdk-python/issues/741).
+It follows the separate cloud-suite approach in
+[Java PR #728](https://github.com/aws/aws-durable-execution-sdk-java/pull/728).
+It changes no production SDK code. The deadline and early-completion regressions
+are **expected to fail on the current SDK**. They are ordinary failing assertions,
+with no `xfail`, swallowed failure, or expected-failure success status. CI runs the
+cloud suite automatically on every trusted PR update and main push. Local cloud
+runs and local red regressions require explicit commands; the ordinary local test
+suite remains usable while the fix is designed.
+
+## Run locally
+
+Use Python 3.14 and Hatch from the repository root:
+
+```sh
+hatch run lmi:unit
+hatch run lmi:lint
+hatch run lmi:regressions --junitxml=lmi_tests/artifacts/regressions.xml
+```
+
+The last command asserts five fixed behaviors against the real decorator/step/map/
+parallel APIs with an in-memory checkpoint service: an expired invocation starts no
+step, and an early result does not pin a parallel, map, or nested-map wrapper past
+its invocation budget. A further regression checks that an abandoned child cannot
+start another step in its `finally` block. These local tests have final releases and bounded fixture
+waits. They establish the SDK defects, not real LMI worker recovery.
+
+The green harness tests exercise negative evidence controls, process-shared marker
+initialization, real public-API replay/callback/retry with the local runner,
+checkpoint response/error forwarding, persistent create/update, ownership checks,
+and run-scoped cleanup.
+They also exercise the real parallel/map/nested fixtures with controlled I/O and
+reject an early-completion pass when the losing branch failed before the winner.
+
+## Cloud prerequisites and configuration
+
+Use a **test account** and region supporting durable functions on LMI with Python
+3.14 and arm64. Provision an existing test-owned capacity provider with an
+explicit 2–128 vCPU maximum. Its `VpcConfig` supplies subnet/security-group
+configuration; change networking on that provider before the run. Workers need
+access to Lambda's checkpoint API, S3, and CloudWatch Logs through NAT or endpoints.
+The suite saves the provider configuration, but never creates, updates, or deletes
+the provider. Its owner remains responsible for its capacity costs and lifecycle.
+
+Set:
+
+| Variable | Purpose |
+| --- | --- |
+| `AWS_REGION` | Region matching the provider |
+| `TEST_ACCOUNT_ID` | Required authenticated account check |
+| `CAPACITY_PROVIDER_ARN` | Existing test provider with bounded capacity |
+| `TEST_LAMBDA_EXECUTION_ROLE_ARN` | Lambda role with LMI/durable execution and logging permissions |
+
+The deployment identity needs CloudFormation stack operations, S3 bucket/policy/
+object operations, Lambda deployment/configuration/invoke/history/list/stop,
+`iam:PassRole` for the supplied role, CloudWatch Logs read/create/delete, and
+read access to the provider. The stack's private bucket policy grants that function
+role access **only** to the suite's `runs/` event and control objects. The SDK and dependencies
+come from a wheel built from the checked-out core package; no published SDK wheel
+is substituted. The artifact hash, SDK wheel version, and commit are retained.
+
+```sh
+hatch run lmi:build
+hatch run lmi:python -m lmi_tests.deploy deploy \
+  --stack-name python-lmi-e2e --run-id local-20260923-a --runtime python3.14
+hatch run lmi:cloud --junitxml=lmi_tests/artifacts/cloud.xml
+# Run both commands below even when a scenario fails:
+hatch run lmi:python -m lmi_tests.deploy collect
+hatch run lmi:python -m lmi_tests.deploy cleanup
+python -m lmi_tests.summary
+```
+
+For unattended local runs, install a shell `EXIT`/`INT`/`TERM` trap that calls
+`collect` followed by `cleanup`; the workflow already has unconditional steps.
+Use a fresh run ID for each run and reuse the same stack name. This deployment supplies both native
+environment-concurrency settings, `1` and `2`, on Python 3.14. The single cloud
+command runs all 14 scenarios for each setting (28 cases), sequentially, without
+redeploying or changing function configuration between cases. Independent SDK
+branch-concurrency settings include 1, 2, and 3.
+
+The first run creates the persistent `python-lmi-e2e` stack, one private bucket,
+and two functions/log groups (`python-lmi-e2e-c1`, `python-lmi-e2e-c2`). Later runs
+update these same resources and preserve their names/ARNs. Select another dedicated
+stack with `--stack-name`; its bucket name is stable for the account/region/stack.
+All scenarios, including deadlines and healthy-peer probes,
+reuse the function for their concurrency setting and the same handler artifact.
+Both functions use a 60-second invocation timeout. Deadline tests wait for the
+real platform timeout, leaving ordinary scenarios their existing invocation
+budget. A single fixed function configuration cannot exercise both native
+concurrency limits; merely sending one request to `c2` would not establish `c1`.
+
+Both functions declare native scaling limits of exactly one environment and use
+2 GiB / 1 vCPU. LMI automatically publishes
+`$LATEST.PUBLISHED`; every invocation uses that qualified target. Creating an extra
+numbered version would allocate another set of environments. Before assertions,
+the suite checks Active state, runtime/architecture, durability, timeout, provider,
+process concurrency, applied scaling limits, commit/run identity, and code hash.
+Unsupported configurations, insufficient permissions, and unavailable capacity fail
+provisioning. There is no fallback to standard Lambda and no passing cloud skip.
+
+The handler mappings are saved under `c1` and `c2` in
+`artifacts/function-name-map.json`; each entry has the existing
+`PYTEST_FUNCTION_NAME_MAP` shape. The test driver reuses
+`DurableFunctionCloudTestRunner` for async invocation, callback completion, and
+waiting for results, with finite boto transport timeouts.
+
+## Evidence and regression contracts
+
+| Scenario | Evidence required |
+| --- | --- |
+| Replay/callback/retry | Real service histories; one body execution for checkpointed success and failure; stable failure type/message; retry attempts 1 and 2; nested child/map, parallel, wait, callback completion; PENDING and resumed requests |
+| Environment concurrency | Held external barriers overlap in one shared `/tmp` environment marker, with distinct request IDs, execution ARNs, process UUIDs, and PIDs; c1 is the baseline, c2 must prove two processes |
+| Warm cleanup | Repeated success, failure, and suspension/resume; explicit reuse of the same environment/process; no residual SDK threads after wrapper return; bounded current RSS and FD growth after warming |
+| Early completion (#741) | `first_successful` parallel, `min_successful=1` map, and nested pools; loser blocked inside a step; separate winner selection, user result, user exit, wrapper exit; no late effects after grace |
+| Checkpoint settlement | Real synchronous service checkpoint is acknowledged but response delivery to the SDK waiter is externally held; wrapper cannot return before settlement; releasing the response must unblock branch cleanup |
+| Invocation deadline (#741) | A real short function timeout, service invocation-completed error for the exact request, external side effects, full original-environment worker capacity recovery, and healthy concurrent work on another process for c2 |
+| Timeout/retry | A second service invocation of the **same** durable execution, completed step skipped, original attempt effects cease; repeated interrupted at-least-once work is recorded separately and is not called exactly-once |
+
+### Java lifecycle coverage in Python
+
+The analogous cases from Java PR #728 are mapped to Python's public APIs:
+
+| Java case | Python coverage |
+| --- | --- |
+| Root `finally` before PENDING, with a healthy peer | `test_pending_waits_for_root_finally_and_then_replays`: externally hold root cleanup, require cleanup exit before PENDING, verify actual wait/resume and no repeated step body; c2 also observes a healthy worker progressing during cleanup |
+| Two roots on a fixed executor | Local subprocess test invokes the same decorated handler concurrently through the real local runner, with distinct inputs/checkpoints and a bounded rendezvous |
+| Fixed-pool nested child/map/parallel progress | `test_nested_single_lane_pools_progress_for_all_runtime_workers`: saturate runtime lanes, release a shared barrier, and finish nested child/map/parallel work with each SDK branch pool limited to one worker; results and a 15-second progress budget are asserted |
+| Return/failure with an in-flight step | `test_root_return_or_failure_settles_inflight_work`: `first_successful` leaves a controlled losing branch in flight, then the root returns or raises; the wrapper must settle that work before returning SUCCEEDED/FAILED, retaining the original failure; c2 keeps a healthy peer active |
+| Non-cooperative residual child attempts later SDK work | `test_abandoned_child_rejects_late_durable_operation`: after parent completion, explicitly attempt another step in the losing branch's `finally`; rejection must precede any body execution or service checkpoint |
+| Deadline, worker recovery, repeated warm batches | Existing deadline/isolation/retry and warm-resource tests remain enabled |
+
+There is no Python equivalent of Java's public shared-executor injection or
+`stepAsync`. The Python cases use separate invocation scopes, public child/map/
+parallel APIs, and LMI's distinct Python worker processes. They do not inject a
+Java-style executor into Python or manufacture an async step API.
+
+The root-finally gate is test-only lifecycle instrumentation after a durable wait
+has requested suspension; it does not schedule another durable operation or change
+the handler's result/operation sequence. Ordinary orchestration delays still use
+`context.wait`. Local shared-root tests run under a subprocess watchdog, so an
+executor-starvation regression cannot hang the test process. Cloud progress tests
+have bounded driver budgets and post-assertion release/settlement of run-owned work.
+
+Healthy-peer cases checkpoint an admission decision before running fault work.
+If an environment rotation places the victim elsewhere, it returns without
+entering the scenario and the driver replaces the pair, up to three attempts.
+Once admitted, lifecycle assertions are final and are never retried to get a pass.
+
+The late-operation guard currently exposes an additional #741 scope-lifetime gap:
+a newly created operation can escape the SDK's set of already-known orphaned
+operation IDs. Its local regression is explicitly enabled with `lmi:regressions`;
+its real-cloud assertion always runs. The green harness validates fixture behavior
+and negative evidence controls without treating the SDK defect as a passing result.
+
+The current SDK has no public cooperative cancellation API. The fault fixture
+therefore deliberately remains blocked until interrupted/retired by the eventual
+SDK/runtime policy or released externally. Its 75-second emergency limit always
+invalidates a regression pass. It does not implement deadline cancellation in test
+code, use `shutdown(wait=False)` as a fix, kill the process itself, or manufacture
+successful checkpoints. Selecting a bounded retirement strategy belongs to #741.
+
+The initial **test acceptance budget** is five seconds after invocation deadline
+or early winner selection. This is not a published SDK cancellation contract;
+review/update it together with the #741 fix. A platform-supported replacement of
+an affected Python worker in the same environment is allowed. Whole-environment
+replacement is reported as a placement failure until a supported policy and
+corresponding evidence are agreed; scaling elsewhere cannot hide a pinned worker.
+The local regressions use a one-second invocation budget and two-second observation.
+
+All trace records include run, commit, marker, execution ARN, request, environment,
+process initialization UUID, PID, sequence, timestamp, and phase. Body/effect records
+include operation/attempt where relevant. A file lock safely initializes the shared
+environment UUID across Python processes. Test-only wrapper/client diagnostics do
+not control durable branches. All barrier and side-effect I/O in user code lives
+inside steps; operation names stay static. Infrastructure diagnostics can repeat on
+replay and are explicitly separate from the body/effect ledger.
+
+S3 records remain readable when a wrapper is stuck. CloudWatch logs and real history
+provide independent runtime/service evidence. Recovery probes are queued at the
+deadline, before waiting for eventually consistent history. A client timeout or a
+logical execution's `TIMED_OUT` status alone cannot satisfy invocation-timeout
+assertions. Missing service retry evidence is a collection/precondition failure,
+never a passing retry test. No explicit second logical execution is mislabeled as
+a service retry.
+
+Control objects are created with `hold` before invocation and updated to `release`
+explicitly. Fixtures read their content with `GetObject`; missing objects, 403s,
+and invalid states emit `CONTROL_ERROR` and fail as test infrastructure errors.
+This avoids relying on `HeadObject` returning 404 for missing keys when the
+function role has no `s3:ListBucket` permission. The winner is released only after
+the losing step has validated its controls and emitted an actual side-effect
+record. A loser that exits before `WINNER_READY` cannot satisfy the regression.
+
+Lifecycle objects are partitioned by case marker and request ID. Live polling
+reads only the current case's prefixes with a bounded pool of readers; final
+collection retrieves the complete run. Earlier cases therefore do not consume a
+later case's short observation budget. Checkpoint holds and returns are correlated
+to the same request, and stale-attempt effects are checked before waiting for a
+retry that might itself be unable to start on a pinned worker.
+
+Per-case teardown collects only that case's executions. Complete-run histories
+and CloudWatch logs are collected once by the final workflow step. Both runner
+and artifact history reads are paced at one request per second, with at most five
+throttling attempts within a 20-second retry budget (in addition to the finite
+transport timeout). Invocation and callback writes are not retried by this layer.
+
+## Independent budgets and results
+
+| Budget | Default |
+| --- | --- |
+| Lambda invocation | 60 s for all scenarios, including deadlines |
+| Durable logical execution | 240 s |
+| Driver result polling | 120 s |
+| Cleanup acceptance grace | 5 s |
+| Fault-fixture emergency I/O release | 150 s |
+| Per-case retirement after assertions | 30 s |
+| Workflow cloud assertions (all 28 cases) | 20 min |
+| Waiting for prior executions before updating | 270 s |
+| Single cloud job including deployment/run cleanup | 80 min |
+
+Artifacts contain JUnit, configuration/provider readbacks, qualified targets,
+commit/wheel/code hash, invocation inputs/ARNs, all lifecycle and side-effect records,
+execution histories/results, logs, setup/collection errors, and cleanup confirmation.
+Tokens are omitted from client tracing and redacted from structured histories.
+JUnit `lmi_outcome` properties and the Actions summary distinguish
+`ProvisioningError`, `PlacementError`, `CollectionError`, and `RegressionAssertion`.
+An unexecuted scenario is never summarized as passing.
+
+## CI and resource ownership
+
+The dedicated workflow runs the harness and full LMI suite automatically
+when a same-repository PR is opened, updated, or reopened (including Draft PRs),
+and on every push to `main`, including merged changes. There are no path filters,
+label requirements, or ready-for-review requirements. `workflow_dispatch` remains
+available for manual reruns; there are no scheduled jobs.
+
+Each workflow run has one harness job and one cloud job using the persistent resources.
+All cloud jobs share the repository-wide `lmi-e2e-shared-capacity-provider`
+concurrency group, across PRs, main pushes, and manual runs. Only one cloud job can
+deploy, test, or clean up at a time; the slot is held until the entire job finishes.
+Harness jobs can run
+in parallel. The capacity provider's configuration is not changed.
+
+`cancel-in-progress: false` preserves running jobs, and
+[`queue: max`](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency#example-queueing-multiple-pending-runs)
+retains up to 100 pending jobs instead of replacing an older pending job on each update. GitHub
+cancels additional arrivals when that queue is full. This repository-wide group
+does not coordinate manual local deployments or jobs in other repositories using
+the same provider; those consumers must also leave sufficient capacity available.
+
+Privileged cloud jobs retain the repository's existing restrictions for forked PRs
+and Dependabot; the harness still runs for those PRs. Cloud jobs reuse
+`TEST_ROLE_ARN`, `TEST_ACCOUNT_ID`, and `TEST_LAMBDA_EXECUTION_ROLE_ARN` with OIDC.
+The #741 regression assertions remain visibly failing until its fix lands; they
+are not skipped or converted into expected-success results to keep CI green.
+
+After each case's assertions, teardown releases that case's controls, stops any
+remaining logical executions to prevent retries, and waits for every observed
+wrapper to return or raise. A terminal service status alone does not prove worker
+retirement. If retirement fails, the next case must first retire that pending work
+before invoking the shared function. Collection remains scoped to the case, and
+the final collector gathers the entire run. These post-assertion releases and
+stops cannot satisfy a deadline, cleanup-grace, or capacity-recovery assertion.
+
+Before updating, the driver checks persistent ownership tags and waits for earlier
+durable executions on both functions to finish. Incomplete execution listings,
+active executions past the wait budget, and failed/busy stacks block updates.
+The driver never deletes and recreates a failed stack; CloudFormation's normal
+deployment rollback behavior still applies. Every run updates `LMI_RUN_ID` and
+`LMI_COMMIT` in the function configuration, refreshing runtime state while keeping
+function names and ARNs stable, as in Java PR #728. Readback and trace identity must
+match the tested run and commit. No code/configuration changes occur during tests.
+
+The workflow collects evidence before final run cleanup, even after test failure or
+ordinary cancellation. `cleanup` releases `runs/RUN_ID/control/release-all`, discovers
+only the current run's invocations from its ledger/artifacts, stops unfinished
+executions, and waits for observed wrappers to exit. It never deletes functions,
+the stack, bucket, or code artifacts. A terminal service status alone does not prove
+that LMI worker code stopped. Other runs' controls and executions are not released
+or stopped by this cleanup.
+
+Events and controls use `runs/RUN_ID/events/` and `runs/RUN_ID/control/`; only `runs/`
+objects expire after one day. Content-addressed `code/` artifacts are retained for
+updates and CloudFormation rollback. Logs and durable histories retain one day,
+and GitHub artifacts retain seven days. There is no automatic infrastructure deletion
+or janitor. The test-account owner manages final retirement of the persistent stack,
+functions, bucket, and provider. A forced runner termination can interrupt run
+cleanup; inspect artifacts and let prior executions settle before the next update.
