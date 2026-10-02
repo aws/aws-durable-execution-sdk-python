@@ -236,7 +236,7 @@ def test_invocation_start_and_end_emit_invocation_span():
     spans = exporter.get_finished_spans()
     spans_by_name = {span.name: span for span in spans}
     # Terminal invocation also exports the Workflow span.
-    assert set(spans_by_name) == {"Invocation", "Workflow"}
+    assert set(spans_by_name) == {"DurableExecutionRoot", "Invocation", "Workflow"}
     invocation = spans_by_name["Invocation"]
     assert invocation.kind is SpanKind.INTERNAL
     assert invocation.attributes["durable.execution.arn"] == EXECUTION_ARN
@@ -709,7 +709,9 @@ def test_operation_end_without_start_links_previous_logical_operation():
         )
     )
 
-    span = exporter.get_finished_spans()[0]
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name != "DurableExecutionRoot"
+    )
     assert span.name == "existing-wait"
     assert span.context.span_id == random_span_id
     linked_span_ids = {link.context.span_id for link in span.links}
@@ -746,7 +748,9 @@ def test_continuation_span_uses_current_start_and_end_times():
     )
     after_callback = time.time_ns()
 
-    span = exporter.get_finished_spans()[0]
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name != "DurableExecutionRoot"
+    )
     assert invocation_span.start_time <= span.start_time
     assert before_callback <= span.start_time <= span.end_time <= after_callback
 
@@ -866,7 +870,9 @@ def test_retried_operation_uses_fresh_id_and_links_previous_logical_operation():
         )
     )
 
-    span = exporter.get_finished_spans()[0]
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name != "DurableExecutionRoot"
+    )
     assert span.name == "retried-step"
     assert span.context.span_id == random_span_id
     linked_span_ids = {link.context.span_id for link in span.links}
@@ -1012,7 +1018,9 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
         )
     )
 
-    span = exporter.get_finished_spans()[0]
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name != "DurableExecutionRoot"
+    )
     assert span.name == "fetch-user attempt 1"
     assert span.attributes["durable.execution.arn"] == EXECUTION_ARN
     assert span.attributes["durable.operation.id"] == operation_id
@@ -1064,7 +1072,9 @@ def test_step_attempt_span_name_includes_attempt_number():
         )
     )
 
-    span = exporter.get_finished_spans()[0]
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name != "DurableExecutionRoot"
+    )
     assert span.name == "fetch-user attempt 2"
 
 
@@ -1106,7 +1116,9 @@ def test_step_attempt_span_name_defaults_to_first_attempt():
         )
     )
 
-    span = exporter.get_finished_spans()[0]
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name != "DurableExecutionRoot"
+    )
     assert span.name == "fetch-user attempt 1"
 
 
@@ -1186,7 +1198,7 @@ def test_context_span_waits_for_terminal_status_and_omits_attempt_attributes(
         active_span.attributes["durable.operation.status"]
         == OperationStatus.STARTED.value
     )
-    assert not exporter.get_finished_spans()
+    assert {s.name for s in exporter.get_finished_spans()} == {"DurableExecutionRoot"}
 
     plugin.on_operation_end(
         OperationEndInfo(
@@ -1203,7 +1215,9 @@ def test_context_span_waits_for_terminal_status_and_omits_attempt_attributes(
         )
     )
 
-    span = exporter.get_finished_spans()[0]
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name != "DurableExecutionRoot"
+    )
     assert span.attributes["durable.operation.type"] == OperationType.CONTEXT.value
     assert span.attributes["durable.operation.status"] == terminal_status.value
     assert "durable.attempt.number" not in span.attributes
@@ -1698,7 +1712,9 @@ def test_replayed_context_span_links_previous_logical_operation():
         )
     )
 
-    span = exporter.get_finished_spans()[0]
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name != "DurableExecutionRoot"
+    )
     assert span.context.span_id == random_span_id
     linked_span_ids = {link.context.span_id for link in span.links}
     assert linked_span_ids == {
@@ -2106,7 +2122,9 @@ def test_suspension_releases_the_scope_on_the_originating_worker():
         assert span_still_current is False
         assert span_key not in plugin._context_tokens
         assert suspended_span is not None
-        assert not exporter.get_finished_spans()
+        assert {s.name for s in exporter.get_finished_spans()} == {
+            "DurableExecutionRoot"
+        }
 
         # The timed resume lands on this thread, with nothing stale to unwind.
         plugin.on_user_function_start(_user_function_start_info(operation_id))
@@ -2164,7 +2182,7 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
     assert otel_context.get_current() == before_context
     assert plugin._context_tokens == {}
     # Neither span is ended: both operations are still in flight.
-    assert not exporter.get_finished_spans()
+    assert {s.name for s in exporter.get_finished_spans()} == {"DurableExecutionRoot"}
 
     # The timed in-process resume replays both contexts, outer first.
     plugin.on_user_function_start(

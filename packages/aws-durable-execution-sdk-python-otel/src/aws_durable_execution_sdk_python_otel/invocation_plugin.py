@@ -54,6 +54,7 @@ from aws_durable_execution_sdk_python_otel.durable_sampling import (
 from aws_durable_execution_sdk_python_otel.durable_parent_span import (
     DurableParentSpan,
 )
+from aws_durable_execution_sdk_python_otel.execution_root import ExecutionRoot
 from aws_durable_execution_sdk_python_otel.execution_trace_context import (
     ExecutionTraceContext,
     canonical_trace_id,
@@ -570,6 +571,15 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             execution_arn=self._execution_arn,
             root_sampled=lambda: is_sampled(sampling_result),
         )
+
+        # Materialize the fallback anchor before user code can suspend or fail.
+        # Repeated invocations retain the same SDK-owned identity and timing.
+        if isinstance(self._tracer, SdkTracer):
+            ExecutionRoot(
+                execution_arn=self._execution_arn,
+                ancestor=self._execution_trace_context.execution_ancestor,
+                start_time=info.execution_start_time,
+            ).export(self._tracer, self._id_generator, self._sampling_intent)
 
         self._start_workflow_span(info)
 

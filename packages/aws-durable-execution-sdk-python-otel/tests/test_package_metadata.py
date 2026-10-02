@@ -80,3 +80,19 @@ def test_pypi_compatibility_environment_uses_compatible_core_sdk() -> None:
     ]["test-pypi-otel"]["dependencies"]
 
     assert CORE_DEPENDENCY in dependencies
+
+
+def test_pypi_otel_environment_installs_lifecycle_test_runner() -> None:
+    dependencies = _load_pyproject(REPOSITORY_ROOT / "pyproject.toml")["tool"]["hatch"][
+        "envs"
+    ]["test-pypi-otel"]["dependencies"]
+    assert "aws-durable-execution-sdk-python-testing>=1.2.1" in dependencies
+
+
+def test_pypi_otel_environment_does_not_shadow_installed_core() -> None:
+    environment = _load_pyproject(REPOSITORY_ROOT / "pyproject.toml")["tool"]["hatch"][
+        "envs"
+    ]["test-pypi-otel"]
+    assert environment["workspace"]["members"] == [
+        "packages/aws-durable-execution-sdk-python-otel"
+    ]
