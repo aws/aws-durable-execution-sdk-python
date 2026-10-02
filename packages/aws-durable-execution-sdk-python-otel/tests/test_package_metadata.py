@@ -113,3 +113,20 @@ def test_pypi_otel_environment_does_not_shadow_installed_core() -> None:
     assert environment["workspace"]["members"] == [
         "packages/aws-durable-execution-sdk-python-otel"
     ]
+
+
+def test_legacy_lane_retains_supported_core_20_range() -> None:
+    environment = _load_pyproject(REPOSITORY_ROOT / "pyproject.toml")["tool"]["hatch"][
+        "envs"
+    ]["test-pypi-otel-legacy"]
+    requirement = next(
+        Requirement(value)
+        for value in environment["dependencies"]
+        if Requirement(value).name == "aws-durable-execution-sdk-python"
+    )
+    assert requirement.specifier.contains("2.0.0")
+    assert requirement.specifier.contains("2.0.1")
+    assert not requirement.specifier.contains("2.1.0")
+    assert environment["workspace"]["members"] == [
+        "packages/aws-durable-execution-sdk-python-otel"
+    ]

@@ -121,6 +121,9 @@ def _create_plugin(
         ) from error
 
     if type(plugin) is not provider.plugin_type:
+        # A wrong-type result may already own constructor resources, but it is
+        # never appended to the accepted list cleaned up by the outer boundary.
+        _notify_registration_result([plugin], registered=False)
         raise PluginLoadError(
             f"Durable instrumentation plugin provider '{plugin_name}' returned "
             f"{_qualified_type_name(plugin)}; expected "

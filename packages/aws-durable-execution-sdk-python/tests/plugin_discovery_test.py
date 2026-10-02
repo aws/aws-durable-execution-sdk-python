@@ -634,3 +634,21 @@ def test_registration_diagnostic_failure_is_isolated() -> None:
             is observer
         )
     assert observer.results == [True]
+
+
+def test_wrong_type_factory_result_receives_rejection_cleanup() -> None:
+    actual = _RegistrationObserver()
+    entry = _FakeEntryPoint("wrong", _provider(lambda: actual, plugin_type=_PluginB))
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry],
+        ),
+        pytest.raises(
+            PluginLoadError, match="returned.*_RegistrationObserver.*expected.*_PluginB"
+        ),
+    ):
+        load_configured_plugins(
+            None, environment={PLUGIN_ENVIRONMENT_VARIABLE: "wrong"}
+        )
+    assert actual.results == [False]

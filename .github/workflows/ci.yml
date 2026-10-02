@@ -60,6 +60,8 @@ jobs:
       run: hatch run types:check
     - name: Run tests + coverage
       run: hatch run test:cov
+    - name: Verify supported legacy core compatibility
+      run: hatch run test-pypi-otel-legacy:test
     - name: Build distribution
       run: |
         for pkg in packages/*/; do

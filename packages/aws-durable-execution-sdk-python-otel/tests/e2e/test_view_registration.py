@@ -1,6 +1,7 @@
 """Registration and decorator lifecycle tests for mutually exclusive OTel views."""
 
 import logging
+from types import SimpleNamespace
 from collections.abc import Iterator
 from typing import Any
 
@@ -11,6 +12,8 @@ from aws_durable_execution_sdk_python.exceptions import PluginLoadError
 from aws_durable_execution_sdk_python.execution import durable_execution
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
+    DurableInstrumentationPluginProvider,
+    DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION,
     InvocationEndInfo,
     InvocationStatus,
 )
@@ -266,3 +269,33 @@ def test_execution_constructor_retains_ambient_log_correlation(
             getattr(record, "spanId", None)
             == f"{ambient.get_span_context().span_id:016x}"
         )
+
+
+def test_wrong_type_discovered_factory_releases_constructor_filter(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, exporter = telemetry
+    handler = _RecordingHandler()
+    monkeypatch.setattr(logging.getLogger(), "handlers", [handler])
+    config = OtelPluginConfig(tracer_provider=provider, enrich_logger=True)
+    selected = DurableInstrumentationPluginProvider(
+        plugin_type=ExecutionOtelPlugin,
+        factory=lambda: InvocationOtelPlugin(config),
+        plugin_api_version=DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION,
+    )
+    entry = SimpleNamespace(
+        name="wrong-view", value="test:wrong", dist=None, load=lambda: selected
+    )
+    monkeypatch.setattr(
+        "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+        lambda **_: [entry],
+    )
+    monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", "wrong-view")
+    with pytest.raises(
+        PluginLoadError,
+        match="returned.*InvocationOtelPlugin.*expected.*ExecutionOtelPlugin",
+    ):
+        durable_execution(_handler)
+    assert handler.filters == []
+    assert not exporter.get_finished_spans()
