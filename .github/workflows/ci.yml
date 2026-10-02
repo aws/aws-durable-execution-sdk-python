@@ -15,11 +15,10 @@ on:
 jobs:
   lint-commits:
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
-    # CodeBuild-hosted runner in the Python testing account (Lambda compute,
-    # Amazon Linux python3.13 image). The label must match the CodeBuild
-    # project name exactly.
-    runs-on:
-      - codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    # Fork PRs stay on GitHub-hosted runners so fork code never executes inside
+    # the testing account; same-repo PRs go to the CodeBuild-hosted runner
+    # (label must match the CodeBuild project name exactly).
+    runs-on: ${{ github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || format('codebuild-github-actions-runner-{0}-{1}', github.run_id, github.run_attempt) }}
     env:
       # The runner image ships /etc/pip.conf with `[global] target =
       # /tmp/opt/python/site-packages` and puts that directory on PYTHONPATH, so
@@ -45,11 +44,11 @@ jobs:
       run: python .github/scripts/lintcommit.py --range "${PR_BASE_SHA}..${PR_HEAD_SHA}"
 
   build:
-    # CodeBuild-hosted runner in the Python testing account (Lambda compute,
-    # Amazon Linux python3.13 image). The label must match the CodeBuild
-    # project name exactly.
-    runs-on:
-      - codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    # Fork and Dependabot PRs stay on GitHub-hosted runners so untrusted code
+    # never executes inside the testing account; same-repo PRs and pushes go to
+    # the CodeBuild-hosted runner (label must match the CodeBuild project name
+    # exactly).
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]') && 'ubuntu-latest' || format('codebuild-github-actions-runner-{0}-{1}', github.run_id, github.run_attempt) }}
     env:
       # The runner image ships /etc/pip.conf with `[global] target =
       # /tmp/opt/python/site-packages` and puts that directory on PYTHONPATH, so

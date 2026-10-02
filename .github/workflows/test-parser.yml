@@ -9,6 +9,7 @@ on:
       - '.github/scripts/tests/**'
       - '.github/workflows/ai-pr-review.yml'
       - '.github/workflows/opentelemetry-conformance-tests.yml'
+      - '.github/workflows/test-parser.yml'
       - 'packages/aws-durable-execution-sdk-python-otel/pyproject.toml'
   push:
     branches: [ main ]
@@ -19,6 +20,7 @@ on:
       - '.github/scripts/tests/**'
       - '.github/workflows/ai-pr-review.yml'
       - '.github/workflows/opentelemetry-conformance-tests.yml'
+      - '.github/workflows/test-parser.yml'
       - 'packages/aws-durable-execution-sdk-python-otel/pyproject.toml'
 
 permissions:
