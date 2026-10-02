@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 class _IdOverride:
     trace_id: int | None
     span_id: int | None
+    trace_id_consumed: bool = False
 
 
 def _to_otel_trace_id(execution_arn: str, start_timestamp: datetime) -> int:
@@ -148,24 +149,32 @@ class DeterministicIdGenerator(RandomIdGenerator):
         """Generate a 128-bit trace ID."""
         override = self._id_override.get()
         if override is not None and override.trace_id is not None:
+            # Consume the identity once, but keep its non-random classification
+            # until the SDK asks for the span ID below.
+            self._id_override.set(_IdOverride(None, override.span_id, True))
             return override.trace_id
+        if override is not None and override.trace_id_consumed:
+            self._id_override.set(_IdOverride(None, override.span_id))
         return self._fallback_id_generator.generate_trace_id()
 
     def generate_span_id(self) -> int:
         """Generate a 64-bit span ID."""
         override = self._id_override.get()
-        if override is not None and override.span_id is not None:
-            span_id = override.span_id
-            # Consume before returning so a re-entrant call in the same span
-            # creation falls back instead of reusing the deterministic ID.
+        if override is not None:
+            # Span ID generation completes the ID phase of SDK start_span, before
+            # processors run. Release the consumed trace classification too, so
+            # a processor creating another root sees only its own generator.
             self._id_override.set(_IdOverride(override.trace_id, None))
-            return span_id
+            if override.span_id is not None:
+                return override.span_id
         return self._fallback_id_generator.generate_span_id()
 
     def is_trace_id_random(self) -> bool:
         """Report whether the current trace ID is randomly generated."""
         override = self._id_override.get()
-        if override is not None and override.trace_id is not None:
+        if override is not None and (
+            override.trace_id is not None or override.trace_id_consumed
+        ):
             return False
         fallback_method = getattr(
             self._fallback_id_generator, "is_trace_id_random", None
