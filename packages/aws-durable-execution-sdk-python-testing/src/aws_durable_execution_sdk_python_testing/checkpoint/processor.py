@@ -125,13 +125,20 @@ class CheckpointProcessor:
             now,
         )
 
+        # This checkpoint's updates are registered below either way. Only
+        # the token is withheld: a response without one tells the SDK this
+        # invocation may checkpoint no further, so it reports PENDING at
+        # its next checkpoint rather than continuing. The invocation that
+        # gets cut short this way owes a re-invoke once resumed.
+        if execution.paused:
+            execution.deferred_invocation = True
         self._store.update(execution)
 
         for observer in self._observers:
             apply_effects(result.effects, observer)
 
         return CheckpointOutput(
-            checkpoint_token=result.checkpoint_token,
+            checkpoint_token=None if execution.paused else result.checkpoint_token,
             new_execution_state=CheckpointUpdatedExecutionState(
                 operations=result.operations,
                 next_marker=None,

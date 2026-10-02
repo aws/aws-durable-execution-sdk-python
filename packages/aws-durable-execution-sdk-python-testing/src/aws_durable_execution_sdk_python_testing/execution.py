@@ -163,6 +163,17 @@ class Execution:
         self.result: DurableExecutionInvocationOutput | None = None
         self.consecutive_failed_invocation_attempts: int = 0
         self.close_status: ExecutionStatus | None = None
+        # Set by pause_execution(). While True, the checkpoint response omits
+        # the token (Executor._checkpoint_execution,
+        # CheckpointProcessor.process_checkpoint) and no new invocation
+        # starts (Executor._invoke_execution). Latched: every checkpoint
+        # from pause_execution() until resume_execution() is answered
+        # without a token.
+        self.paused: bool = False
+        # Set when an invocation was held back, or a checkpoint response
+        # withheld its token, while paused. resume_execution() consults
+        # this to decide whether to start the invocation it deferred.
+        self.deferred_invocation: bool = False
 
     def touch_operation(self, operation_id: str) -> None:
         """Record a state-affecting event on an operation.
@@ -248,6 +259,8 @@ class Execution:
             "ConsecutiveFailedInvocationAttempts": self.consecutive_failed_invocation_attempts,
             "CloseStatus": self.close_status.value if self.close_status else None,
             "CurrentInvocationId": self.current_invocation_id,
+            "Paused": self.paused,
+            "DeferredInvocation": self.deferred_invocation,
         }
 
     @classmethod
@@ -316,6 +329,8 @@ class Execution:
         execution.close_status = (
             ExecutionStatus(close_status_str) if close_status_str else None
         )
+        execution.paused = data.get("Paused", False)
+        execution.deferred_invocation = data.get("DeferredInvocation", False)
 
         return execution
 

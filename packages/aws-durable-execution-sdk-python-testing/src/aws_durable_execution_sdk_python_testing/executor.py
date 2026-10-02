@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, assert_never
@@ -1024,10 +1025,17 @@ class Executor(ExecutionObserver):
             now,
         )
 
+        # This checkpoint's updates are registered below either way. Only
+        # the token is withheld: a response without one tells the SDK this
+        # invocation may checkpoint no further, so it reports PENDING at
+        # its next checkpoint rather than continuing. The invocation that
+        # gets cut short this way owes a re-invoke once resumed.
+        if execution.paused:
+            execution.deferred_invocation = True
         self._store.update(execution)
 
         response = CheckpointDurableExecutionResponse(
-            checkpoint_token=result.checkpoint_token,
+            checkpoint_token=None if execution.paused else result.checkpoint_token,
             new_execution_state=CheckpointUpdatedExecutionState(
                 operations=result.operations,
                 next_marker=None,
@@ -1458,11 +1466,18 @@ class Executor(ExecutionObserver):
                 # the handler's return and this check. A change the
                 # handler has not seen, after the invocation's input was
                 # built, earns a re-invoke, so PENDING is valid; only a
-                # handler that waited on nothing is in error.
-                if not execution.has_pending_operations(execution) and not (
-                    invocation_seq is not None
-                    and execution.has_changes_after(
-                        max(invocation_seq, execution.handler_seen_seq)
+                # handler that waited on nothing is in error. A checkpoint
+                # answered without a token while paused also earns PENDING
+                # with nothing else pending - that is how pausing suspends
+                # a handler mid-step.
+                if (
+                    not execution.paused
+                    and not execution.has_pending_operations(execution)
+                    and not (
+                        invocation_seq is not None
+                        and execution.has_changes_after(
+                            max(invocation_seq, execution.handler_seen_seq)
+                        )
                     )
                 ):
                     msg_pending_ops: str = (
@@ -1768,13 +1783,92 @@ class Executor(ExecutionObserver):
         return invoke
 
     def _invoke_execution(self, execution_arn: str, delay: float = 0) -> None:
-        """Invoke execution after delay in seconds."""
+        """Invoke execution after delay in seconds.
+
+        While paused, holds the invocation back instead of scheduling it
+        and remembers that one is owed; resume_execution() starts it. A
+        wait elapsing or a callback arriving while paused routes through
+        here, so both are deferred the same way.
+        """
+        execution = self._store.load(execution_arn)
+        if execution.paused:
+            execution.deferred_invocation = True
+            self._store.save(execution)
+            logger.debug("[%s] Holding back invocation while paused", execution_arn)
+            return
+
         completion_event = self._completion_events.get(execution_arn)
         self._scheduler.call_later(
             self._invoke_handler(execution_arn),
             delay=delay,
             completion_event=completion_event,
         )
+
+    def pause_execution(self, execution_arn: str) -> None:
+        """Make the local checkpoint server answer this execution's
+        checkpoints without a token, starting now.
+
+        Experimental; may change or be removed in a future release.
+
+        The invocation running now, if any, is answered without a token
+        on its next checkpoint. That checkpoint is accepted - its updates
+        stay durable - but the invocation reports PENDING, and no further
+        checkpoint of its is accepted. No new invocation starts until
+        resume_execution(). Idempotent; a no-op once the execution has
+        finished. Resolves once no invocation of this execution is
+        running.
+        """
+        self._validate_execution_arn(execution_arn)
+        self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._set_paused(execution_arn)),
+        ).result()
+        self._wait_until_idle(execution_arn)
+
+    def resume_execution(self, execution_arn: str) -> None:
+        """Make the local checkpoint server answer this execution's
+        checkpoints with a token again.
+
+        Experimental; may change or be removed in a future release.
+
+        Starts the invocation that pause_execution() held back, if any.
+        Idempotent; a no-op once the execution has finished or if it was
+        not paused.
+        """
+        self._validate_execution_arn(execution_arn)
+        self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._resume_execution(execution_arn)),
+        ).result()
+
+    def _set_paused(self, execution_arn: str) -> None:
+        execution = self._store.load(execution_arn)
+        if execution.is_complete or execution.paused:
+            return
+        execution.paused = True
+        self._store.save(execution)
+
+    def _resume_execution(self, execution_arn: str) -> None:
+        execution = self._store.load(execution_arn)
+        if execution.is_complete or not execution.paused:
+            return
+        execution.paused = False
+        deferred = execution.deferred_invocation
+        execution.deferred_invocation = False
+        self._store.save(execution)
+        if deferred:
+            self._invoke_execution(execution_arn)
+
+    def _wait_until_idle(self, execution_arn: str) -> None:
+        """Block until no invocation of ``execution_arn`` is running.
+
+        Polls rather than blocking on an event: the invocation gate flips
+        off the execution's lane (from the invocation pool thread), so no
+        lane-serialized signal can carry the transition without risking
+        the same reentrancy this project's lane design avoids elsewhere.
+        """
+        while self._invocation_gate(execution_arn) is InvocationState.INVOKING:
+            time.sleep(0.005)
 
     def _complete_workflow(
         self, execution_arn: str, result: str | None, error: ErrorObject | None
