@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
-from typing import Any
+from typing import Any, ClassVar
 
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -105,6 +105,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     """
 
     DEFAULT_INSTRUMENT_NAME = "aws-durable-execution-sdk-python"
+
+    exclusive_group: ClassVar[str | None] = "aws-durable-execution-otel-view"
 
     def __init__(self, config: OtelPluginConfig | None = None) -> None:
         """Initialize the plugin from a shared OtelPluginConfig.

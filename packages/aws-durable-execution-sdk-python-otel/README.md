@@ -55,6 +55,14 @@ DURABLE_EXECUTION_PLUGINS=otel-execution
 cold start, so the handler does not need to import or explicitly register the
 plugin.
 
+Enable at most one bundled OTel view for a handler. `InvocationOtelPlugin`
+shows work within each Lambda invocation; `ExecutionOtelPlugin` shows logical
+operations across the whole execution. They emit overlapping telemetry and
+manage competing active contexts, so enabling both is rejected at cold start
+with `PluginLoadError` naming both views. Keep only one across the combined
+`plugins=[...]` and `DURABLE_EXECUTION_PLUGINS` configuration. Unrelated plugins
+may run alongside the selected view; using no OTel plugin is also supported.
+
 ### 1. ADOT Lambda Layer
 
 This plugin requires the [AWS Distro for OpenTelemetry (ADOT) Lambda layer](https://aws-otel.github.io/docs/getting-started/lambda) to export traces from your Lambda function.

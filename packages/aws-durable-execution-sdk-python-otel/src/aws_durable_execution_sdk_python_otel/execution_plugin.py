@@ -34,7 +34,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
-from typing import Any
+from typing import Any, ClassVar
 
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -122,6 +122,8 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             (globally configured provider, X-Ray extractor, "Workflow" root
             span).
     """
+
+    exclusive_group: ClassVar[str | None] = "aws-durable-execution-otel-view"
 
     def __init__(self, config: OtelPluginConfig | None = None) -> None:
         self._config = config or OtelPluginConfig()

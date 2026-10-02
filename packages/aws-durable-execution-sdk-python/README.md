@@ -77,6 +77,20 @@ Provider names must be unique across installed distributions. Missing,
 ambiguous, incompatible, or invalid providers raise `PluginLoadError` during
 handler initialization with the provider and distribution details.
 
+### Selecting an OpenTelemetry view
+
+Enable at most one of `InvocationOtelPlugin` and `ExecutionOtelPlugin`. This
+constraint applies to the combined `plugins=[...]` argument and
+`DURABLE_EXECUTION_PLUGINS=otel-invocation` or `otel-execution` selection.
+Enabling both is rejected at cold start with `PluginLoadError` naming the
+conflicting views; keep only one. Choose Invocation for work within each Lambda
+invocation or Execution for logical operations across the durable execution.
+Unrelated instrumentation plugins can run alongside either view.
+
+Plugin authors can declare `exclusive_group` on a `DurableInstrumentationPlugin`
+subclass to prevent competing plugins from being registered together. The
+default `None` imposes no exclusivity constraint.
+
 ## 🚀 Quick Start
 
 Install the execution SDK:

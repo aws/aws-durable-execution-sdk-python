@@ -78,6 +78,7 @@ typecheck = "mypy --install-types --non-interactive packages/aws-durable-executi
 workspace.members = [
   "packages/aws-durable-execution-sdk-python",
   "packages/aws-durable-execution-sdk-python-otel",
+  "packages/aws-durable-execution-sdk-python-testing",
 ]
 dependencies = [
   "pytest",

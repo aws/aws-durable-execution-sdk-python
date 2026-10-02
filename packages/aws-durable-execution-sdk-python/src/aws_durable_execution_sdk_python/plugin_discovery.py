@@ -130,6 +130,23 @@ def _create_plugin(
     return plugin
 
 
+def _validate_exclusive_groups(plugins: Sequence[DurableInstrumentationPlugin]) -> None:
+    """Reject competing instrumentation before any lifecycle hooks run."""
+    groups: dict[str, DurableInstrumentationPlugin] = {}
+    for plugin in plugins:
+        group = plugin.exclusive_group
+        if not group:
+            continue
+        if (previous := groups.get(group)) is not None:
+            raise PluginLoadError(
+                f"Durable instrumentation plugins {_qualified_type_name(previous)} "
+                f"and {_qualified_type_name(plugin)} are mutually exclusive "
+                f"(group '{group}'). Keep only one plugin from this group in "
+                "plugins and DURABLE_EXECUTION_PLUGINS."
+            )
+        groups[group] = plugin
+
+
 def load_configured_plugins(
     explicit_plugins: Sequence[DurableInstrumentationPlugin] | None,
     *,
@@ -147,6 +164,7 @@ def load_configured_plugins(
     resolved_environment = os.environ if environment is None else environment
     plugin_names = _parse_configured_plugin_names(resolved_environment)
     if not plugin_names:
+        _validate_exclusive_groups(resolved_plugins)
         return resolved_plugins
 
     try:
@@ -206,4 +224,5 @@ def load_configured_plugins(
         resolved_plugins.append(plugin)
         registered_types[provider.plugin_type] = f"dynamic provider '{plugin_name}'"
 
+    _validate_exclusive_groups(resolved_plugins)
     return resolved_plugins

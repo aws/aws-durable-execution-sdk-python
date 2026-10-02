@@ -477,3 +477,28 @@ def test_first_dynamic_registration_wins_for_duplicate_plugin_type(
     first_factory.assert_called_once_with()
     second_factory.assert_not_called()
     assert "already registered by dynamic provider 'first'" in caplog.text
+
+
+class _ExclusivePluginA(DurableInstrumentationPlugin):
+    exclusive_group = "test-telemetry"
+
+
+class _ExclusivePluginB(DurableInstrumentationPlugin):
+    exclusive_group = "test-telemetry"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_explicit_plugins_in_same_group_are_rejected(reverse: bool) -> None:
+    plugins = [_ExclusivePluginA(), _ExclusivePluginB()]
+    if reverse:
+        plugins.reverse()
+    with pytest.raises(PluginLoadError) as error:
+        load_configured_plugins(plugins, environment={})
+    assert "_ExclusivePluginA" in str(error.value)
+    assert "_ExclusivePluginB" in str(error.value)
+    assert "Keep only one" in str(error.value)
+
+
+def test_unrelated_plugins_can_accompany_exclusive_plugin() -> None:
+    plugins = [_PluginA(), _ExclusivePluginA(), _PluginB()]
+    assert load_configured_plugins(plugins, environment={}) == plugins
