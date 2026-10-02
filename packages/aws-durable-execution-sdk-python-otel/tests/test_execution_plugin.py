@@ -1123,7 +1123,9 @@ def test_invocation_span_status_kind_and_attributes(status, expected_code):
     invocation = {s.name: s for s in exporter.get_finished_spans()}["Invocation"]
     assert invocation.kind is trace.SpanKind.INTERNAL
     assert invocation.attributes is not None
-    assert invocation.attributes["durable.invocation.status"] == status.value
+    assert invocation.attributes["durable.invocation.status"] == (
+        "RETRYING" if status is InvocationStatus.RETRY else status.value
+    )
     assert invocation.attributes["durable.invocation.first"] is True
     assert invocation.status.status_code is expected_code
 
