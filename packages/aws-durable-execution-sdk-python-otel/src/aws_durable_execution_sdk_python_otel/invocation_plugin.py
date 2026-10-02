@@ -120,8 +120,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         so durable spans share stable identifiers without changing unrelated
         instrumentation scopes on the same provider.
 
-        When ``enrich_logger`` is enabled (default), the plugin installs a
-        logging filter that stamps the active OTel trace context onto every
+        When ``enrich_logger`` is enabled (default), invocation start installs
+        a logging filter that stamps the active OTel trace context onto every
         emitted log record.
         """
         self._config = config or OtelPluginConfig()
@@ -163,13 +163,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._context_tokens: dict[str, tuple[int, object]] = {}
         self._operation_spans_lock = threading.RLock()
         self._tracing_enabled = False
-
-        if self._enrich_logger:
-            # Install the root-logger filter so every log record is stamped with
-            # the active span context. The Lambda runtime attaches its root
-            # handler before the handler module is imported (and thus before the
-            # plugin is constructed), so the handlers are available here.
-            install_log_filter(self)
 
     def _bind_sdk_tracer(self) -> bool:
         """Bind to an SDK tracer, retrying a deferred global provider."""
@@ -580,6 +573,11 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             name="Invocation",
             attributes=self._extract_attributes(info),
         )
+
+        # Construction can precede rejected registration. Install only once
+        # this accepted plugin has an active invocation to correlate logs with.
+        if self._enrich_logger:
+            install_log_filter(self)
 
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
         """Install a non-recording placeholder for the execution-scoped Workflow span.

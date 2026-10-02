@@ -166,9 +166,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._lock = threading.RLock()
         self._tracing_enabled = False
 
-        if self._config.enrich_logger:
-            install_log_filter(self)
-
     def _bind_sdk_tracer(self) -> bool:
         """Bind to an SDK tracer, retrying a deferred global provider."""
         self._sampling_delegate = None
@@ -488,6 +485,11 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                     self._workflow_span, otel_context.get_current()
                 ),
             )
+
+        # Only accepted plugins that actually start an invocation own logging
+        # instrumentation. Rejected explicit registrations leave no stale filter.
+        if self._config.enrich_logger:
+            install_log_filter(self)
 
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
         """Install a non-recording placeholder for the execution-scoped Workflow span.

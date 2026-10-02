@@ -534,3 +534,29 @@ def test_exclusive_groups_validated_before_any_factory(
         )
     factory_a.assert_not_called()
     factory_b.assert_not_called()
+
+
+@pytest.mark.parametrize("group", [[], {}, 123, True, "", "   "])
+@pytest.mark.parametrize("discovered", [False, True])
+def test_invalid_exclusive_group_is_a_clear_load_error(
+    monkeypatch: pytest.MonkeyPatch,
+    group: object,
+    discovered: bool,
+) -> None:
+    monkeypatch.setattr(_PluginA, "exclusive_group", group)
+    factory = Mock(side_effect=_PluginA)
+    entry = _FakeEntryPoint("a", _provider(factory))
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry],
+        ),
+        pytest.raises(
+            PluginLoadError, match="_PluginA.*exclusive_group.*non-empty string"
+        ),
+    ):
+        load_configured_plugins(
+            None if discovered else [_PluginA()],
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"} if discovered else {},
+        )
+    factory.assert_not_called()

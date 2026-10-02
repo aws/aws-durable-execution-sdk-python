@@ -158,23 +158,61 @@ def test_no_otel_plugin_remains_valid(
     assert not exporter.get_finished_spans()
 
 
-@pytest.mark.parametrize(
-    "configured", ["otel-execution,otel-invocation", "otel-invocation,otel-execution"]
-)
-def test_environment_conflict_leaves_logging_untouched(
+class _RecordingHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@pytest.mark.parametrize("registration", ["explicit", "environment", "mixed"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_rejected_configuration_leaves_no_stale_log_filter(
     telemetry: tuple[TracerProvider, InMemorySpanExporter],
     monkeypatch: pytest.MonkeyPatch,
-    configured: str,
+    registration: str,
+    reverse: bool,
 ) -> None:
-    handler = logging.StreamHandler()
+    provider, exporter = telemetry
+    handler = _RecordingHandler()
     monkeypatch.setattr(logging.getLogger(), "handlers", [handler])
-    monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", configured)
+    classes = [ExecutionOtelPlugin, InvocationOtelPlugin]
+    names = ["otel-execution", "otel-invocation"]
+    if reverse:
+        classes.reverse()
+        names.reverse()
+    config = OtelPluginConfig(tracer_provider=provider, enrich_logger=True)
+    explicit: list[DurableInstrumentationPlugin] = []
+    if registration == "explicit":
+        explicit = [cls(config) for cls in classes]
+    elif registration == "environment":
+        monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", ",".join(names))
+    else:
+        explicit = [classes[0](config)]
+        monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", names[1])
     with pytest.raises(PluginLoadError, match="mutually exclusive"):
-        durable_execution(_handler)
+        durable_execution(_handler, plugins=explicit)
     assert handler.filters == []
-    # A valid registration after the caught configuration error owns its filter.
-    monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", "otel-execution")
-    wrapped = durable_execution(_handler)
+    assert not exporter.get_finished_spans()
+
+    def log_step(_step_context: Any) -> str:
+        logging.getLogger("recovery").warning("correlated recovery record")
+        return "ok"
+
+    def recovered(_event: Any, durable: DurableContext) -> str:
+        return durable.step(log_step, name="logged-step")
+
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    wrapped = durable_execution(recovered, plugins=[classes[0](config)])
     with DurableFunctionTestRunner(handler=wrapped) as runner:
         assert runner.run(input="{}", timeout=15).status.value == "SUCCEEDED"
+    record = next(r for r in handler.records if r.name == "recovery")
+    attempt = next(
+        s for s in exporter.get_finished_spans() if s.name == "logged-step attempt 1"
+    )
+    assert attempt.context is not None
+    assert getattr(record, "traceId", None) == f"{attempt.context.trace_id:032x}"
+    assert getattr(record, "spanId", None) == f"{attempt.context.span_id:016x}"
     assert len(handler.filters) == 1

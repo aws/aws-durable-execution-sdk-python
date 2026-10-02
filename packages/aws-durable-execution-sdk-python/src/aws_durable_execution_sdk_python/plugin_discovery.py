@@ -136,9 +136,19 @@ def _validate_exclusive_groups(
     """Reject competing instrumentation before any lifecycle hooks run."""
     groups: dict[str, type[DurableInstrumentationPlugin]] = {}
     for plugin_type in plugin_types:
-        group = plugin_type.exclusive_group
-        if not group:
+        try:
+            group = plugin_type.exclusive_group
+        except Exception as error:
+            raise PluginLoadError(
+                f"Cannot read exclusive_group for {_qualified_class_name(plugin_type)}."
+            ) from error
+        if group is None:
             continue
+        if type(group) is not str or not group.strip():
+            raise PluginLoadError(
+                f"Durable instrumentation plugin {_qualified_class_name(plugin_type)} "
+                "must declare exclusive_group as None or a non-empty string."
+            )
         if (previous := groups.get(group)) is not None:
             raise PluginLoadError(
                 f"Durable instrumentation plugins {_qualified_class_name(previous)} "

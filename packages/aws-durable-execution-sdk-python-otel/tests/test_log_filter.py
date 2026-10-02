@@ -10,6 +10,8 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.plugin import (
     InvocationStartInfo,
+    InvocationEndInfo,
+    InvocationStatus,
     OperationType,
     UserFunctionStartInfo,
 )
@@ -208,13 +210,24 @@ def test_install_log_filter_returns_none_without_handlers():
     assert install_log_filter(plugin, target_logger=target) is None
 
 
-def test_plugin_installs_filter_on_root_logger_at_construction():
-    """The plugin installs the filter on the root logger when constructed."""
+def test_plugin_installs_filter_on_root_logger_at_invocation_start():
+    """Construction is side-effect free; accepted invocation installs the filter."""
     root = logging.getLogger()
     handler = logging.NullHandler()
     root.addHandler(handler)
     try:
-        _create_plugin(enrich_logger=True)
+        plugin, _ = _create_plugin(enrich_logger=True)
+        assert not any(isinstance(f, OtelContextLogFilter) for f in handler.filters)
+        plugin.on_invocation_start(_invocation_start_info())
+        plugin.on_invocation_end(
+            InvocationEndInfo(
+                request_id="request-1",
+                execution_arn=EXECUTION_ARN,
+                execution_start_time=START_TIME,
+                is_first_invocation=True,
+                status=InvocationStatus.SUCCEEDED,
+            )
+        )
 
         assert any(isinstance(f, OtelContextLogFilter) for f in handler.filters)
     finally:
