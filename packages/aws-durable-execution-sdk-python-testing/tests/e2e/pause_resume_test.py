@@ -106,6 +106,7 @@ def test_pause_mid_step_holds_back_the_next_step() -> None:
 
 def test_callback_answered_while_paused_defers_invocation_until_resumed() -> None:
     """A callback success delivered while paused does not reinvoke until resumed."""
+
     def _callback_submitter(
         _callback_id: str, _context: WaitForCallbackContext
     ) -> None:
@@ -149,7 +150,9 @@ def test_wait_elapsing_while_paused_defers_invocation_until_resumed() -> None:
         handler=durable_execution(_wait_handler), execution_timeout=15, skip_time=False
     ) as runner:
         arn = runner.run_async(input="{}")
-        _wait_until(lambda: _has_history_event(runner, arn, "WaitStarted", "pause-wait"))
+        _wait_until(
+            lambda: _has_history_event(runner, arn, "WaitStarted", "pause-wait")
+        )
 
         runner.pause_execution(arn)
         # Observe longer than the durable wait so it can elapse while paused.
