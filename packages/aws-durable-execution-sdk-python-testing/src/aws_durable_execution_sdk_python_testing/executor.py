@@ -1462,14 +1462,15 @@ class Executor(ExecutionObserver):
                 )
 
             case InvocationStatus.PENDING:
-                # An operation the handler waited on may complete between
-                # the handler's return and this check. A change the
-                # handler has not seen, after the invocation's input was
-                # built, earns a re-invoke, so PENDING is valid; only a
-                # handler that waited on nothing is in error. A checkpoint
-                # answered without a token while paused also earns PENDING
-                # with nothing else pending - that is how pausing suspends
-                # a handler mid-step.
+                # PENDING is valid while paused because pause can make a
+                # checkpoint response omit the next checkpoint token, forcing
+                # the current handler invocation to stop as PENDING.
+                #
+                # Otherwise, PENDING requires either pending durable operations
+                # or a change the handler has not seen yet. The unseen-change
+                # case can happen when an operation completes after this
+                # invocation's input was built but before this response is
+                # validated, so a follow-up invocation is needed.
                 if (
                     not execution.paused
                     and not execution.has_pending_operations(execution)
@@ -1481,7 +1482,9 @@ class Executor(ExecutionObserver):
                     )
                 ):
                     msg_pending_ops: str = (
-                        "Cannot return PENDING status with no pending operations."
+                        "Cannot return PENDING status unless execution is paused, "
+                        "has pending durable operations, or has unseen changes "
+                        "after invocation input was built."
                     )
                     raise InvalidParameterValueException(msg_pending_ops)
                 logger.info("[%s] Execution pending async work", execution_arn)
@@ -1532,6 +1535,15 @@ class Executor(ExecutionObserver):
             self._store.save(execution)
             logger.info(
                 "[%s] Handler already INVOKING; deferring re-invoke",
+                execution_arn,
+            )
+            return None
+
+        if execution.paused:
+            execution.deferred_invocation = True
+            self._store.save(execution)
+            logger.debug(
+                "[%s] Holding back scheduled invocation while paused",
                 execution_arn,
             )
             return None
@@ -1814,9 +1826,10 @@ class Executor(ExecutionObserver):
         on its next checkpoint. That checkpoint is accepted - its updates
         stay durable - but the invocation reports PENDING, and no further
         checkpoint of its is accepted. No new invocation starts until
-        resume_execution(). Idempotent; a no-op once the execution has
-        finished. Resolves once no invocation of this execution is
-        running.
+        resume_execution() is called.
+
+        Idempotent; a no-op once the execution has finished.
+        Resolves once no invocation of this execution is running.
         """
         self._validate_execution_arn(execution_arn)
         self._registry.submit(
@@ -1832,6 +1845,7 @@ class Executor(ExecutionObserver):
         Experimental; may change or be removed in a future release.
 
         Starts the invocation that pause_execution() held back, if any.
+
         Idempotent; a no-op once the execution has finished or if it was
         not paused.
         """
@@ -1860,13 +1874,7 @@ class Executor(ExecutionObserver):
             self._invoke_execution(execution_arn)
 
     def _wait_until_idle(self, execution_arn: str) -> None:
-        """Block until no invocation of ``execution_arn`` is running.
-
-        Polls rather than blocking on an event: the invocation gate flips
-        off the execution's lane (from the invocation pool thread), so no
-        lane-serialized signal can carry the transition without risking
-        the same reentrancy this project's lane design avoids elsewhere.
-        """
+        """Block until no invocation of ``execution_arn`` is running."""
         while self._invocation_gate(execution_arn) is InvocationState.INVOKING:
             time.sleep(0.005)
 

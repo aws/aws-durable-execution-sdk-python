@@ -784,7 +784,10 @@ def test_pending_response_with_only_input_time_state_is_still_an_error(
     assert execution.has_unseen_changes()
     baseline = execution.seq_counter
 
-    with pytest.raises(InvalidParameterValueException, match="no pending operations"):
+    with pytest.raises(
+        InvalidParameterValueException,
+        match="unless execution is paused, has pending durable operations",
+    ):
         executor._validate_invocation_response_and_store(  # noqa: SLF001
             execution.durable_execution_arn,
             DurableExecutionInvocationOutput(status=InvocationStatus.PENDING),
@@ -810,7 +813,10 @@ def test_pending_response_is_an_error_when_the_handler_saw_the_completion(
     execution.complete_chained_invoke("invoke-1", OperationStatus.SUCCEEDED, result="1")
     execution.handler_seen_seq = execution.seq_counter
 
-    with pytest.raises(InvalidParameterValueException, match="no pending operations"):
+    with pytest.raises(
+        InvalidParameterValueException,
+        match="unless execution is paused, has pending durable operations",
+    ):
         executor._validate_invocation_response_and_store(  # noqa: SLF001
             execution.durable_execution_arn,
             DurableExecutionInvocationOutput(status=InvocationStatus.PENDING),

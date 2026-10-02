@@ -3224,9 +3224,7 @@ class CheckpointDurableExecutionRequest:
 class CheckpointDurableExecutionResponse:
     """Response from checkpointing a durable execution.
 
-    ``checkpoint_token`` is None when this invocation may checkpoint no
-    further: the response is otherwise ordinary, but the field is
-    omitted from the wire format rather than sent empty.
+    ``checkpoint_token`` is None when this invocation may checkpoint no further
     """
 
     checkpoint_token: str | None

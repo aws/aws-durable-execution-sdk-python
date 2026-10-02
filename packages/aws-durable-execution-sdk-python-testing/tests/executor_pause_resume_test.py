@@ -70,9 +70,6 @@ def _step_start_update(op_id: str, name: str | None = None) -> OperationUpdate:
     )
 
 
-# region: the paused flag round-trips through the store
-
-
 def test_execution_paused_flag_defaults_false_and_round_trips():
     execution = Execution.new(_make_start_input())
     assert execution.paused is False
@@ -80,10 +77,6 @@ def test_execution_paused_flag_defaults_false_and_round_trips():
     execution.paused = True
     restored = Execution.from_json_dict(execution.to_json_dict())
     assert restored.paused is True
-
-
-# endregion
-# region: a checkpoint while paused omits the token but keeps the update
 
 
 def test_checkpoint_while_paused_omits_token_but_registers_update():
@@ -110,7 +103,7 @@ def test_checkpoint_while_paused_omits_token_but_registers_update():
 
 
 def test_checkpoint_while_not_paused_still_returns_token():
-    executor, _store, execution, token_0 = _make_executor_with_started_execution()
+    executor, _, execution, token_0 = _make_executor_with_started_execution()
 
     response = executor.checkpoint_execution(
         execution_arn=execution.durable_execution_arn,
@@ -121,12 +114,27 @@ def test_checkpoint_while_not_paused_still_returns_token():
     assert response.checkpoint_token is not None
 
 
-# endregion
-# region: pause_execution / resume_execution are idempotent and a no-op once complete
+def test_begin_invocation_while_paused_defers_without_claiming_gate():
+    executor, store, execution, _ = _make_executor_with_started_execution()
+    executor._set_invocation_gate(  # noqa: SLF001
+        execution.durable_execution_arn, InvocationState.PRE_INVOKE
+    )
+    execution.paused = True
+    store.save(execution)
+
+    result = executor._begin_invocation(execution.durable_execution_arn)  # noqa: SLF001
+
+    assert result is None
+    assert (
+        executor._invocation_gate(execution.durable_execution_arn)  # noqa: SLF001
+        is InvocationState.PRE_INVOKE
+    )
+    assert store.load(execution.durable_execution_arn).deferred_invocation is True
+    executor._invoker.create_invocation_input.assert_not_called()  # noqa: SLF001
 
 
 def test_pause_and_resume_are_idempotent():
-    executor, store, execution, _token_0 = _make_executor_with_started_execution()
+    executor, store, execution, _ = _make_executor_with_started_execution()
     # pause_execution() waits for the invocation gate to clear; the shared
     # helper leaves it INVOKING to let the checkpoint tests run, so release
     # it here to model no invocation in flight.
@@ -144,7 +152,7 @@ def test_pause_and_resume_are_idempotent():
 
 
 def test_pause_is_a_no_op_once_the_execution_has_finished():
-    executor, store, execution, _token_0 = _make_executor_with_started_execution()
+    executor, store, execution, _ = _make_executor_with_started_execution()
     executor.complete_execution(execution.durable_execution_arn, result='"done"')
 
     executor.pause_execution(execution.durable_execution_arn)
@@ -153,13 +161,10 @@ def test_pause_is_a_no_op_once_the_execution_has_finished():
 
 
 def test_resume_is_a_no_op_when_not_paused():
-    executor, store, execution, _token_0 = _make_executor_with_started_execution()
+    executor, store, execution, _ = _make_executor_with_started_execution()
 
     executor.resume_execution(execution.durable_execution_arn)
 
     reloaded = store.load(execution.durable_execution_arn)
     assert reloaded.paused is False
     assert reloaded.deferred_invocation is False
-
-
-# endregion

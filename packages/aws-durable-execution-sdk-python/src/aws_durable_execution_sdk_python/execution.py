@@ -332,14 +332,19 @@ def durable_execution(
                     invocation_input.durable_execution_arn,
                 )
 
-                # The handler can return while an async checkpoint it never
-                # awaited is still in flight (e.g. an early-completing map or
-                # parallel branch). If that checkpoint's response is the one
-                # that revoked the token, the execution is not finished from
-                # the service's point of view: answer PENDING, not SUCCEEDED.
-                # This fast path handles revocation already observed before
-                # terminal result creation; the post-with check below handles
-                # revocation discovered while closing in-flight checkpoint work.
+                # The handler may finish while background checkpoint work is
+                # still running for async operations it did not await, such as
+                # early-completing map or parallel branches. If one of those
+                # checkpoint responses omitted the next checkpoint token, this
+                # invocation can no longer record anything else with the
+                # service, including the handler's final result.
+                #
+                # In that case, return PENDING instead of SUCCEEDED. The next
+                # invocation will replay from the last durable checkpoint and
+                # produce the result again. This check catches revocation
+                # already observed before we build the terminal response; the
+                # post-with check below catches revocation discovered during
+                # cleanup of in-flight checkpoint work.
                 if execution_state.is_checkpoint_token_revoked:
                     logger.debug(
                         "Checkpoint token revoked; ending invocation with "
@@ -418,8 +423,6 @@ def durable_execution(
 
             except CheckpointError as e:
                 # Checkpoint system is broken - stop background thread and exit immediately.
-                # Consult the latch before classifying for the same reason as the
-                # other exits below: a revoked token takes priority.
                 if execution_state.is_checkpoint_token_revoked:
                     output = DurableExecutionInvocationOutput.create_pending_for_revoked_checkpoint_token(
                         e
@@ -431,12 +434,6 @@ def durable_execution(
                     )
                     output = handle_checkpoint_error(e).to_dict()
             except InvocationError as e:
-                # A retryable error rethrown here would have Lambda retry with
-                # a token the service already rejected. Consult the latch
-                # first: a revoked token takes priority over this error's
-                # own retryable/non-retryable classification. The error does
-                # not reach plugins on this path - see
-                # create_pending_for_revoked_checkpoint_token's docstring for why.
                 if execution_state.is_checkpoint_token_revoked:
                     output = DurableExecutionInvocationOutput.create_pending_for_revoked_checkpoint_token(
                         e
@@ -458,7 +455,6 @@ def durable_execution(
                         # Throw the error to trigger Lambda retry
                         raise
             except ExecutionError as e:
-                # Consult the latch before FAILED for the same reason as above.
                 if execution_state.is_checkpoint_token_revoked:
                     output = DurableExecutionInvocationOutput.create_pending_for_revoked_checkpoint_token(
                         e
@@ -473,12 +469,6 @@ def durable_execution(
                     ).to_dict()
             except Exception as e:
                 # all user-space errors go here
-
-                # Consult the latch before FAILED for the same reason as above.
-                # This also covers the oversized-error-result checkpoint below:
-                # skip it entirely rather than let it discover the revoked
-                # token itself, so this exit returns promptly instead of
-                # attempting a send the service has already rejected.
                 if execution_state.is_checkpoint_token_revoked:
                     output = DurableExecutionInvocationOutput.create_pending_for_revoked_checkpoint_token(
                         e
@@ -513,15 +503,12 @@ def durable_execution(
                         try:
                             execution_state.create_checkpoint_sync(failed_operation)
                         except SuspendExecution:
-                            # The checkpoint token became unusable between the latch
-                            # check above and this send. Answer PENDING here: this
-                            # send is not inside the try that handles
-                            # SuspendExecution, so the exception would otherwise
-                            # escape the wrapper and have Lambda retry with a token
-                            # that cannot succeed.
-                            output = DurableExecutionInvocationOutput.create_pending_for_revoked_checkpoint_token(
-                                e
-                            ).to_dict()
+                            if execution_state.is_checkpoint_token_revoked:
+                                output = DurableExecutionInvocationOutput.create_pending_for_revoked_checkpoint_token(
+                                    e
+                                ).to_dict()
+                            else:
+                                raise
                         except CheckpointError as checkpoint_error:
                             output = handle_checkpoint_error(checkpoint_error).to_dict()
                         else:
@@ -531,7 +518,7 @@ def durable_execution(
                     else:
                         output = result
 
-        if output is None:  # pragma: no cover
+        if output is None:
             msg = "Durable execution wrapper exited without an invocation output."
             raise RuntimeError(msg)
 

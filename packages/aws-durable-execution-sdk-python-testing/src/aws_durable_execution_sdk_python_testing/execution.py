@@ -163,16 +163,16 @@ class Execution:
         self.result: DurableExecutionInvocationOutput | None = None
         self.consecutive_failed_invocation_attempts: int = 0
         self.close_status: ExecutionStatus | None = None
-        # Set by pause_execution(). While True, the checkpoint response omits
-        # the token (Executor._checkpoint_execution,
-        # CheckpointProcessor.process_checkpoint) and no new invocation
-        # starts (Executor._invoke_execution). Latched: every checkpoint
-        # from pause_execution() until resume_execution() is answered
-        # without a token.
+        # While True, every checkpoint from pause_execution() until resume_execution()
+        # is answered without a checkpoint token.
+        # If responses have no token then no new invocation will start.
         self.paused: bool = False
-        # Set when an invocation was held back, or a checkpoint response
-        # withheld its token, while paused. resume_execution() consults
-        # this to decide whether to start the invocation it deferred.
+        # Set while paused when progress was stopped and must be resumed later.
+        # This means either a new handler invocation was not started because the
+        # execution is paused, or the current handler was given no next checkpoint
+        # token and therefore must stop as PENDING.
+        #
+        # resume_execution() clears this flag and starts one new invocation.
         self.deferred_invocation: bool = False
 
     def touch_operation(self, operation_id: str) -> None:

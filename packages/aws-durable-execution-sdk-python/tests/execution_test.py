@@ -26,7 +26,6 @@ from aws_durable_execution_sdk_python.exceptions import (
     CheckpointErrorCategory,
     DurableApiErrorCategory,
     ExecutionError,
-    ExecutionSuspendedByService,
     GetExecutionStateError,
     InvocationError,
     SuspendExecution,
@@ -1276,7 +1275,7 @@ def test_durable_execution_oversized_result_revoked_during_checkpoint_returns_pe
     """The token-revoked latch can flip strictly between the pre-checkpoint
     check and the oversized-result checkpoint call itself.
 
-    create_checkpoint raising ExecutionSuspendedByService there is only
+    create_checkpoint raising SuspendExecution there is only
     caught by the wrapper's outer SuspendExecution handler (there is no
     dedicated except around this call, unlike the symmetric FAILED/oversized-
     error path). This proves that path still answers PENDING, not an
@@ -1292,7 +1291,7 @@ def test_durable_execution_oversized_result_revoked_during_checkpoint_returns_pe
     lambda_context = _make_lambda_context()
 
     def _raise_suspended(self: ExecutionState, *args, **kwargs) -> None:
-        raise ExecutionSuspendedByService(
+        raise SuspendExecution(
             "Checkpoint token revoked by the service; ending invocation with PENDING."
         )
 

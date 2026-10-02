@@ -20,7 +20,6 @@ import pytest
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     DurableApiErrorCategory,
-    ExecutionSuspendedByService,
     GetExecutionStateError,
     NonDeterministicExecutionError,
     OrphanedChildException,
@@ -2200,7 +2199,7 @@ def test_checkpoint_missing_token_without_terminal_update_is_revoked(caplog):
     try:
         with caplog.at_level(logging.WARNING):
             thread.start()
-            with pytest.raises(ExecutionSuspendedByService):
+            with pytest.raises(SuspendExecution):
                 completion_event.wait(timeout=2.0)
     finally:
         state.stop_checkpointing()
@@ -2244,7 +2243,7 @@ def test_checkpoint_missing_token_on_empty_refresh_batch_is_revoked(caplog):
     try:
         with caplog.at_level(logging.WARNING):
             thread.start()
-            with pytest.raises(ExecutionSuspendedByService):
+            with pytest.raises(SuspendExecution):
                 refresh.completion_event.wait(timeout=2.0)
     finally:
         state.stop_checkpointing()
@@ -2258,7 +2257,7 @@ def test_checkpoint_missing_token_on_empty_refresh_batch_is_revoked(caplog):
 def test_checkpoint_token_revoked_abandons_still_queued_work():
     """Work still queued when the token is revoked is abandoned, not resolved.
 
-    Its waiter is woken with ExecutionSuspendedByService - not left blocking
+    Its waiter is woken with SuspendExecution - not left blocking
     (a threading.Event would then hang the invocation until the Lambda
     timeout) and not resolved as if it had been sent and accepted, since it
     was never sent at all.
@@ -2297,9 +2296,9 @@ def test_checkpoint_token_revoked_abandons_still_queued_work():
     thread = threading.Thread(daemon=True, target=state.checkpoint_batches_forever)
     try:
         thread.start()
-        with pytest.raises(ExecutionSuspendedByService):
+        with pytest.raises(SuspendExecution):
             sent_event.wait(timeout=2.0)
-        with pytest.raises(ExecutionSuspendedByService):
+        with pytest.raises(SuspendExecution):
             queued_event.wait(timeout=2.0)
     finally:
         state.stop_checkpointing()
@@ -2334,7 +2333,7 @@ def test_create_checkpoint_rejects_once_token_revoked():
     )
     state._checkpoint_token_revoked.set()
 
-    with pytest.raises(ExecutionSuspendedByService):
+    with pytest.raises(SuspendExecution):
         state.create_checkpoint(_step_start("op1"), is_sync=True)
 
     assert state._checkpoint_queue.empty()
@@ -2356,7 +2355,7 @@ def test_schedule_refresh_rejects_once_token_revoked():
     )
     state._checkpoint_token_revoked.set()
 
-    with pytest.raises(ExecutionSuspendedByService):
+    with pytest.raises(SuspendExecution):
         state.schedule_refresh(earliest_check_time=0.0)
 
     assert state._pending_refreshes == []
@@ -2383,10 +2382,10 @@ def test_revoked_token_guard_runs_before_execution_completed_guard():
     state._execution_completed.set()
     state._checkpoint_token_revoked.set()
 
-    with pytest.raises(ExecutionSuspendedByService):
+    with pytest.raises(SuspendExecution):
         state.create_checkpoint(_step_start("op1"), is_sync=True)
 
-    with pytest.raises(ExecutionSuspendedByService):
+    with pytest.raises(SuspendExecution):
         state.schedule_refresh(earliest_check_time=0.0)
 
 
@@ -2640,7 +2639,7 @@ def test_checkpoint_missing_token_on_empty_only_batch_is_revoked():
     thread.join(timeout=2.0)
 
     assert empty_event.is_set()
-    with pytest.raises(ExecutionSuspendedByService):
+    with pytest.raises(SuspendExecution):
         empty_event.wait()
     assert state._checkpoint_token_revoked.is_set()
 
@@ -5781,7 +5780,7 @@ def test_execution_completion_settles_pending_refresh():
 
 def test_checkpoint_token_revocation_settles_pending_refresh():
     """When the service revokes the token, a deferred refresh can never be
-    sent. Its waiter is woken with ExecutionSuspendedByService.
+    sent. Its waiter is woken with SuspendExecution.
 
     The completion twin above settles the same refresh as orphaned instead.
     The two exits stay distinguishable: a refresh abandoned by a revoked token
@@ -5801,7 +5800,7 @@ def test_checkpoint_token_revocation_settles_pending_refresh():
         # Async so the revocation reaches the refreshes, not this caller.
         state.create_checkpoint(_step_update(OperationAction.SUCCEED), is_sync=False)
         for refresh in refreshes:
-            with pytest.raises(ExecutionSuspendedByService):
+            with pytest.raises(SuspendExecution):
                 refresh.wait(timeout=5)
     finally:
         state.stop_checkpointing()
