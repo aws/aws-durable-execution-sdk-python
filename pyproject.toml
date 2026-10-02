@@ -129,6 +129,8 @@ dependencies = [
 test = "pytest packages/aws-durable-execution-sdk-python-examples/test {args}"
 
 [tool.hatch.envs.test-pypi-otel]
+# Override inherited workspace membership: core must come from an installed distribution.
+workspace.members = ["packages/aws-durable-execution-sdk-python-otel"]
 dependencies = [
   "aws-durable-execution-sdk-python-testing>=1.2.1",
   "aws-durable-execution-sdk-python>=2.0.0",

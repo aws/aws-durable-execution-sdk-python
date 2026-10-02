@@ -1,5 +1,6 @@
 """Fallback anchor coverage through the decorator and local durable runner."""
 
+import inspect
 from typing import Any
 
 import pytest
@@ -70,11 +71,14 @@ def test_fallback_anchor_survives_suspension(
 
     wrapped = durable_execution(handler, plugins=[plugin, observer])
     try:
-        with DurableFunctionTestRunner(
-            handler=wrapped, skip_time=outcome != "timeout"
-        ) as runner:
+        # Published runners use real time; newer workspace runners default to
+        # skipping durable waits. Exercise timeout without advancing that wait.
+        runner_options: dict[str, Any] = {"handler": wrapped}
+        if "skip_time" in inspect.signature(DurableFunctionTestRunner).parameters:
+            runner_options["skip_time"] = outcome != "timeout"
+        with DurableFunctionTestRunner(**runner_options) as runner:
             arn = runner.run_async(
-                input="{}", execution_timeout=3 if outcome == "timeout" else 15
+                input="{}", timeout=3 if outcome == "timeout" else 15
             )
             result = runner.wait_for_result(arn, timeout=10)
         assert completed_steps == ["step"]
@@ -88,7 +92,9 @@ def test_fallback_anchor_survives_suspension(
         ]
         assert all(s.to_json() == first_roots[0].to_json() for s in roots)
         if outcome == "timeout":
-            assert result.execution_status.value == "TIMED_OUT"
+            assert result.status.value == "FAILED"
+            assert result.error is not None
+            assert "timed out" in (result.error.message or "")
             assert len(observer.snapshots) == 1
             assert len(roots) == 1
             assert not any(s.name == "Workflow" for s in exporter.get_finished_spans())
