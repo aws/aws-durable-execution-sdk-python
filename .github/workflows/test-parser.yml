@@ -50,7 +50,9 @@ jobs:
         activate-environment: true
 
     - name: Install test dependencies
-      run: uv pip install packaging pytest
+      # build_lambda_layer.py shells out to `python -m pip`; a uv-created venv
+      # has no pip, so install it alongside the test dependencies.
+      run: uv pip install packaging pytest pip
 
     - name: Run script tests
       run: |
