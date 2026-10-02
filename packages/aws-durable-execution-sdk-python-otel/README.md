@@ -55,6 +55,7 @@ DURABLE_EXECUTION_PLUGINS=otel-execution
 cold start, so the handler does not need to import or explicitly register the
 plugin.
 
+Core SDK 2.1.0 or later enforces this registration contract.
 Enable at most one bundled OTel view for a handler. `InvocationOtelPlugin`
 shows work within each Lambda invocation; `ExecutionOtelPlugin` shows logical
 operations across the whole execution. They emit overlapping telemetry and
@@ -405,7 +406,7 @@ setups.
 ## Requirements
 
 - Python >= 3.11
-- `aws-durable-execution-sdk-python` >= 2.0.0
+- `aws-durable-execution-sdk-python` >= 2.1.0
 - An ADOT/community OpenTelemetry Lambda layer, or the `standalone` extra
 
 ## License

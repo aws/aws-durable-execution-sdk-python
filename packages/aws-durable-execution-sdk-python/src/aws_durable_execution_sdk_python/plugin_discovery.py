@@ -130,21 +130,23 @@ def _create_plugin(
     return plugin
 
 
-def _validate_exclusive_groups(plugins: Sequence[DurableInstrumentationPlugin]) -> None:
+def _validate_exclusive_groups(
+    plugin_types: Sequence[type[DurableInstrumentationPlugin]],
+) -> None:
     """Reject competing instrumentation before any lifecycle hooks run."""
-    groups: dict[str, DurableInstrumentationPlugin] = {}
-    for plugin in plugins:
-        group = plugin.exclusive_group
+    groups: dict[str, type[DurableInstrumentationPlugin]] = {}
+    for plugin_type in plugin_types:
+        group = plugin_type.exclusive_group
         if not group:
             continue
         if (previous := groups.get(group)) is not None:
             raise PluginLoadError(
-                f"Durable instrumentation plugins {_qualified_type_name(previous)} "
-                f"and {_qualified_type_name(plugin)} are mutually exclusive "
+                f"Durable instrumentation plugins {_qualified_class_name(previous)} "
+                f"and {_qualified_class_name(plugin_type)} are mutually exclusive "
                 f"(group '{group}'). Keep only one plugin from this group in "
                 "plugins and DURABLE_EXECUTION_PLUGINS."
             )
-        groups[group] = plugin
+        groups[group] = plugin_type
 
 
 def load_configured_plugins(
@@ -164,7 +166,7 @@ def load_configured_plugins(
     resolved_environment = os.environ if environment is None else environment
     plugin_names = _parse_configured_plugin_names(resolved_environment)
     if not plugin_names:
-        _validate_exclusive_groups(resolved_plugins)
+        _validate_exclusive_groups([type(plugin) for plugin in resolved_plugins])
         return resolved_plugins
 
     try:
@@ -185,6 +187,9 @@ def load_configured_plugins(
         type(plugin): "the decorator's plugins argument" for plugin in resolved_plugins
     }
 
+    selected_providers: list[
+        tuple[str, metadata.EntryPoint, DurableInstrumentationPluginProvider]
+    ] = []
     for plugin_name in plugin_names:
         matching_entry_points = entry_points_by_name.get(plugin_name, [])
         if not matching_entry_points:
@@ -220,9 +225,15 @@ def load_configured_plugins(
             )
             continue
 
-        plugin = _create_plugin(plugin_name, entry_point, provider)
-        resolved_plugins.append(plugin)
+        selected_providers.append((plugin_name, entry_point, provider))
         registered_types[provider.plugin_type] = f"dynamic provider '{plugin_name}'"
 
-    _validate_exclusive_groups(resolved_plugins)
+    # Factories can install instrumentation globally. Validate every selected
+    # type first so a rejected configuration leaves no discarded plugin behind.
+    _validate_exclusive_groups(
+        [type(plugin) for plugin in resolved_plugins]
+        + [provider.plugin_type for _, _, provider in selected_providers]
+    )
+    for plugin_name, entry_point, provider in selected_providers:
+        resolved_plugins.append(_create_plugin(plugin_name, entry_point, provider))
     return resolved_plugins

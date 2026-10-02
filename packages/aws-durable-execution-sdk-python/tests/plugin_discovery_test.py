@@ -502,3 +502,35 @@ def test_explicit_plugins_in_same_group_are_rejected(reverse: bool) -> None:
 def test_unrelated_plugins_can_accompany_exclusive_plugin() -> None:
     plugins = [_PluginA(), _ExclusivePluginA(), _PluginB()]
     assert load_configured_plugins(plugins, environment={}) == plugins
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_exclusive_groups_validated_before_any_factory(
+    reverse: bool, mixed: bool
+) -> None:
+    factory_a = Mock(side_effect=_ExclusivePluginA)
+    factory_b = Mock(side_effect=_ExclusivePluginB)
+    providers = [
+        _FakeEntryPoint("a", _provider(factory_a, plugin_type=_ExclusivePluginA)),
+        _FakeEntryPoint("b", _provider(factory_b, plugin_type=_ExclusivePluginB)),
+    ]
+    names = ["a", "b"]
+    types = [_ExclusivePluginA, _ExclusivePluginB]
+    if reverse:
+        names.reverse()
+        types.reverse()
+    explicit = [types[0]()] if mixed else []
+    configured = names[1:] if mixed else names
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=providers,
+        ),
+        pytest.raises(PluginLoadError, match="mutually exclusive"),
+    ):
+        load_configured_plugins(
+            explicit, environment={PLUGIN_ENVIRONMENT_VARIABLE: ",".join(configured)}
+        )
+    factory_a.assert_not_called()
+    factory_b.assert_not_called()

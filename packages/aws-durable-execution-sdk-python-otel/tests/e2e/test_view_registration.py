@@ -1,5 +1,6 @@
 """Registration and decorator lifecycle tests for mutually exclusive OTel views."""
 
+import logging
 from collections.abc import Iterator
 from typing import Any
 
@@ -127,7 +128,7 @@ def test_one_view_and_unrelated_plugin_suspend_resume(
 
     wrapped = durable_execution(handler, plugins=plugins)
     with DurableFunctionTestRunner(handler=wrapped) as runner:
-        result = runner.run(input="{}", execution_timeout=15)
+        result = runner.run(input="{}", timeout=15)
     assert result.status.value == ("FAILED" if fail else "SUCCEEDED")
     assert calls == ["step"]
     assert InvocationStatus.PENDING in observer.statuses
@@ -153,5 +154,27 @@ def test_no_otel_plugin_remains_valid(
     _, exporter = telemetry
     handler = durable_execution(_handler, plugins=[_Observer()])
     with DurableFunctionTestRunner(handler=handler) as runner:
-        assert runner.run(input="{}", execution_timeout=15).status.value == "SUCCEEDED"
+        assert runner.run(input="{}", timeout=15).status.value == "SUCCEEDED"
     assert not exporter.get_finished_spans()
+
+
+@pytest.mark.parametrize(
+    "configured", ["otel-execution,otel-invocation", "otel-invocation,otel-execution"]
+)
+def test_environment_conflict_leaves_logging_untouched(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str,
+) -> None:
+    handler = logging.StreamHandler()
+    monkeypatch.setattr(logging.getLogger(), "handlers", [handler])
+    monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", configured)
+    with pytest.raises(PluginLoadError, match="mutually exclusive"):
+        durable_execution(_handler)
+    assert handler.filters == []
+    # A valid registration after the caught configuration error owns its filter.
+    monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", "otel-execution")
+    wrapped = durable_execution(_handler)
+    with DurableFunctionTestRunner(handler=wrapped) as runner:
+        assert runner.run(input="{}", timeout=15).status.value == "SUCCEEDED"
+    assert len(handler.filters) == 1
