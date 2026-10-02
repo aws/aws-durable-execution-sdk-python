@@ -310,6 +310,26 @@ context onto every emitted log record using these attributes:
 These attributes are only set when a valid span context is active, so any log
 formatter or schema must treat the fields as optional.
 
+## Draft outbound propagation producer
+
+Both views implement the proposed synchronous `provide_propagation_metadata`
+hook with SDK-owned types from the matching core branch. It encodes X-Ray
+`Root`, operation `Parent`, and resolved `Sampled=1` or `Sampled=0` without
+creating a span. An existing operation's actual span ID is used (including an
+invocation-view continuation); before span creation the logical deterministic
+ID is derived from the execution ARN and operation ID. Unrelated ambient spans
+cannot change execution ownership, and inactive/mismatched executions return
+no contribution. Tracer, provider and resource ownership are unchanged.
+
+This is groundwork for [#751](https://github.com/aws/aws-durable-execution-sdk-python/issues/751),
+not an enabled outbound propagation feature. Invoke START integration, supported
+Lambda model fields/serialization, backend rollout, replay and failed-checkpoint
+coverage, and cloud topology validation remain pending. On older supported cores that lack the propagation contract, plugin loading
+and existing tracing continue; the new hook contributes no metadata. The new
+propagation capability requires a coordinated core that exposes its contract
+and collector. Rebase onto the coordinated minor release before publication
+without dropping existing valid core/plugin combinations. Keep this PR draft while public models lack the capability.
+
 ## Verification
 
 After deploying your function with the plugin configured:

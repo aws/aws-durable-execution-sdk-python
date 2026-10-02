@@ -77,6 +77,35 @@ Provider names must be unique across installed distributions. Missing,
 ambiguous, incompatible, or invalid providers raise `PluginLoadError` during
 handler initialization with the provider and distribution details.
 
+### Draft chained-invoke propagation contract
+
+This branch prepares a model-independent plugin contract for [#751](https://github.com/aws/aws-durable-execution-sdk-python/issues/751).
+The production invoke START path does not consume it and no propagation header
+is transmitted yet. Public Lambda models currently lack
+`ChainedInvokeOptions.XAmznTraceId` and `DistributedMapOptions`.
+
+`aws_durable_execution_sdk_python.plugin` defines frozen `PropagationInput`
+(`execution_arn`, `operation_id`, optional `parent_operation_id`, and
+`target_function_name`) and frozen `PropagationMetadata` with optional
+`x_amzn_trace_id`. Neither type depends on OpenTelemetry or generated service
+models. Plugins can override the optional synchronous
+`provide_propagation_metadata(info)` method; its default returns `None`.
+
+`PluginExecutor.provide_propagation_metadata` collects supported members in
+configured order. First non-null wins, equal values do not conflict, and unequal
+later values log both plugin identities and a running conflict count. Ordinary
+hook, result/getter, and diagnostic failures are isolated. Cancellation and
+other `BaseException` control signals retain the existing dispatch policy.
+The input and result are immutable; an asynchronous hook is unsupported.
+
+Before this draft can ship, integrate the coordinated core 2.1 / OTel 1.1 minor
+release from [#753](https://github.com/aws/aws-durable-execution-sdk-python/pull/753)
+and document the matching-core prerequisite for this optional capability.
+Existing supported core/plugin combinations must retain their prior tracing
+behavior; no broad minimum-core rejection is required for this groundwork. Production START consumption, supported generated client
+serialization, backend capability rollout, replay/failed-checkpoint integration
+and deployed topology validation remain pending. The full feature in #751 remains pending.
+
 ## 🚀 Quick Start
 
 Install the execution SDK:
