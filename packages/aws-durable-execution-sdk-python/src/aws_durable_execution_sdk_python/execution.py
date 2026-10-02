@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import functools
 import json
 import logging
@@ -313,7 +314,11 @@ def durable_execution(
             logger.debug(
                 "%s entering user-space...", invocation_input.durable_execution_arn
             )
-            user_future = executor.submit(func, input_event, durable_context)
+            # Invocation-start hooks can establish tracing and other contextvars.
+            # Context.run restores worker bindings on both return and failure.
+            user_future = executor.submit(
+                contextvars.copy_context().run, func, input_event, durable_context
+            )
 
             logger.debug(
                 "%s waiting for user code completion...",

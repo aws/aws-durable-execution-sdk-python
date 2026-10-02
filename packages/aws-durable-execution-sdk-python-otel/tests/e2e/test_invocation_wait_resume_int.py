@@ -31,6 +31,9 @@ from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
 from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
 from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
+from opentelemetry import context as otel_context
+from opentelemetry import trace
+from opentelemetry.propagators.aws.aws_xray_propagator import AwsXRayPropagator
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -253,3 +256,131 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
     assert completed_wait_span.end_time is not None
     assert after_resume.start_time is not None
     assert completed_wait_span.end_time <= after_resume.start_time
+
+
+@pytest.mark.parametrize("plugin_type", [InvocationOtelPlugin, ExecutionOtelPlugin])
+@pytest.mark.parametrize("fail_after_resume", [False, True])
+def test_handler_user_spans_inherit_context_across_resume_and_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_type: type[InvocationOtelPlugin] | type[ExecutionOtelPlugin],
+    fail_after_resume: bool,
+) -> None:
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    monkeypatch.setenv("_X_AMZN_TRACE_ID", XRAY_TRACE_HEADER)
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    plugin = plugin_type(
+        OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
+    )
+    tracer = provider.get_tracer("customer")
+    before_context = otel_context.get_current()
+    calls: list[str] = []
+
+    def user_span(name: str) -> None:
+        # Ordinary instrumentation: the SDK/caller supplies the active parent.
+        span = tracer.start_span(name)
+        span.end()
+
+    def step_body(_step_context: Any) -> str:
+        calls.append("step")
+        user_span("step-user")
+        return "saved"
+
+    def handler_body(_event: Any, context: DurableContext) -> str:
+        user_span("handler-entry")
+        saved = context.step(step_body, name="before-wait")
+        user_span("handler-after-step")
+        context.wait(Duration.from_seconds(1), name="context-wait")
+        user_span("handler-after-resume")
+        if fail_after_resume:
+            raise ValueError("handler failed after resume")
+        return saved
+
+    handler = durable_execution(handler_body, plugins=[plugin])
+    remote = AwsXRayPropagator().extract({"X-Amzn-Trace-Id": XRAY_TRACE_HEADER})
+    assert trace.get_current_span(remote).get_span_context().trace_id == XRAY_TRACE_ID
+    initial_operations = [_execution_operation()]
+    checkpoint, operations = _checkpoint_store(initial_operations)
+    ambient_ids: list[int] = []
+    try:
+        with patch(
+            "aws_durable_execution_sdk_python.execution.LambdaClient"
+        ) as client_class:
+            client = Mock()
+            client.checkpoint = checkpoint
+            client_class.initialize_client.return_value = client
+            # Standard host instrumentation supplies a same-trace Lambda span.
+            with tracer.start_as_current_span("lambda-first", context=remote) as host:
+                ambient_ids.append(host.get_span_context().span_id)
+                first = handler(_event(initial_operations), _lambda_context())
+                assert trace.get_current_span() is host
+        assert first["Status"] == InvocationStatus.PENDING.value
+        assert otel_context.get_current() == before_context
+        resumed_operations = [
+            replace(
+                operation,
+                status=OperationStatus.SUCCEEDED,
+                end_timestamp=datetime.now(UTC),
+            )
+            if operation.name == "context-wait"
+            else operation
+            for operation in operations.values()
+        ]
+        wait_id = next(
+            operation.operation_id
+            for operation in resumed_operations
+            if operation.name == "context-wait"
+        )
+        checkpoint, _ = _checkpoint_store(resumed_operations)
+        with patch(
+            "aws_durable_execution_sdk_python.execution.LambdaClient"
+        ) as client_class:
+            client = Mock()
+            client.checkpoint = checkpoint
+            client_class.initialize_client.return_value = client
+            with tracer.start_as_current_span("lambda-resume", context=remote) as host:
+                ambient_ids.append(host.get_span_context().span_id)
+                resumed = handler(
+                    _event(resumed_operations, updated_operation_ids=[wait_id]),
+                    _lambda_context(),
+                )
+                assert trace.get_current_span() is host
+        assert resumed["Status"] == (
+            InvocationStatus.FAILED.value
+            if fail_after_resume
+            else InvocationStatus.SUCCEEDED.value
+        )
+        assert calls == ["step"]
+        assert otel_context.get_current() == before_context
+        spans = exporter.get_finished_spans()
+        expected_parents = (
+            [derive_workflow_span_id(EXECUTION_ARN)] * 2
+            if plugin_type is ExecutionOtelPlugin
+            else ambient_ids
+        )
+        for name in ("handler-entry", "handler-after-step"):
+            users = [span for span in spans if span.name == name]
+            assert len(users) == 2
+            assert [span.parent.span_id if span.parent else None for span in users] == (
+                expected_parents
+            )
+            assert all(
+                span.context is not None and span.context.trace_id == XRAY_TRACE_ID
+                for span in users
+            )
+        after_resume = next(
+            span for span in spans if span.name == "handler-after-resume"
+        )
+        assert after_resume.parent is not None
+        assert after_resume.parent.span_id == expected_parents[1]
+        step_user = next(span for span in spans if span.name == "step-user")
+        assert step_user.parent is not None
+        assert any(
+            span.name == "before-wait attempt 1"
+            and span.context is not None
+            and span.context.span_id == step_user.parent.span_id
+            for span in spans
+        )
+    finally:
+        provider.shutdown()
