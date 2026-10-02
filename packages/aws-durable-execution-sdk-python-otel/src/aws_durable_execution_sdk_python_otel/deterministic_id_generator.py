@@ -22,6 +22,7 @@ class _IdOverride:
     trace_id: int | None
     span_id: int | None
     trace_id_consumed: bool = False
+    consume_trace_id: bool = False
 
 
 def _to_otel_trace_id(execution_arn: str, start_timestamp: datetime) -> int:
@@ -145,16 +146,37 @@ class DeterministicIdGenerator(RandomIdGenerator):
         finally:
             self._id_override.reset(token)
 
+    @contextmanager
+    def _use_ids_for_span(
+        self,
+        *,
+        trace_id: int,
+        span_id: int,
+    ) -> Iterator[None]:
+        """Reserve IDs for one SDK-created span without changing public scope semantics."""
+        token = self._id_override.set(
+            _IdOverride(trace_id, span_id, consume_trace_id=True)
+        )
+        try:
+            yield
+        finally:
+            self._id_override.reset(token)
+
     def generate_trace_id(self) -> int:
         """Generate a 128-bit trace ID."""
         override = self._id_override.get()
         if override is not None and override.trace_id is not None:
             # Consume the identity once, but keep its non-random classification
             # until the SDK asks for the span ID below.
-            self._id_override.set(_IdOverride(None, override.span_id, True))
+            if override.consume_trace_id:
+                self._id_override.set(_IdOverride(None, override.span_id, True, True))
             return override.trace_id
         if override is not None and override.trace_id_consumed:
-            self._id_override.set(_IdOverride(None, override.span_id))
+            self._id_override.set(
+                _IdOverride(
+                    None, override.span_id, consume_trace_id=override.consume_trace_id
+                )
+            )
         return self._fallback_id_generator.generate_trace_id()
 
     def generate_span_id(self) -> int:
@@ -164,7 +186,11 @@ class DeterministicIdGenerator(RandomIdGenerator):
             # Span ID generation completes the ID phase of SDK start_span, before
             # processors run. Release the consumed trace classification too, so
             # a processor creating another root sees only its own generator.
-            self._id_override.set(_IdOverride(override.trace_id, None))
+            self._id_override.set(
+                _IdOverride(
+                    override.trace_id, None, consume_trace_id=override.consume_trace_id
+                )
+            )
             if override.span_id is not None:
                 return override.span_id
         return self._fallback_id_generator.generate_span_id()

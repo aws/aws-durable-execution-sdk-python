@@ -350,7 +350,7 @@ def test_trace_override_is_consumed_once_and_randomness_is_released() -> None:
             trace_id_is_random=True,
         )
     )
-    with generator.use_ids(trace_id=123, span_id=456):
+    with generator._use_ids_for_span(trace_id=123, span_id=456):
         assert generator.generate_trace_id() == 123
         assert generator.is_trace_id_random() is False
         assert generator.generate_span_id() == 456
@@ -360,7 +360,7 @@ def test_trace_override_is_consumed_once_and_randomness_is_released() -> None:
         assert generator.generate_span_id() == int("b" * 16, 16)
 
 
-def test_trace_only_override_releases_randomness_with_fallback_span() -> None:
+def test_public_trace_only_scope_preserves_existing_override() -> None:
     generator = DeterministicIdGenerator(
         _StubIdGenerator(
             trace_id=123,
@@ -372,5 +372,24 @@ def test_trace_only_override_releases_randomness_with_fallback_span() -> None:
         assert generator.generate_trace_id() == 789
         assert generator.is_trace_id_random() is False
         assert generator.generate_span_id() == 456
-        assert generator.is_trace_id_random() is True
-        assert generator.generate_trace_id() == 123
+        assert generator.is_trace_id_random() is False
+        assert generator.generate_trace_id() == 789
+
+
+def test_default_use_ids_preserves_scope_wide_trace_override() -> None:
+    """Existing advanced callers can intentionally create multiple roots on one trace."""
+    generator = DeterministicIdGenerator(
+        _StubIdGenerator(
+            trace_id=123,
+            span_id=456,
+            trace_id_is_random=True,
+        )
+    )
+    with generator.use_ids(trace_id=789, span_id=999):
+        assert generator.generate_trace_id() == 789
+        assert generator.generate_span_id() == 999
+        assert generator.generate_trace_id() == 789
+        assert generator.generate_span_id() == 456
+        assert generator.is_trace_id_random() is False
+    assert generator.generate_trace_id() == 123
+    assert generator.is_trace_id_random() is True

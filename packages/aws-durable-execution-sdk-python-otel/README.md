@@ -394,6 +394,11 @@ them to Invocation.
 
 A custom OpenTelemetry `IdGenerator` that produces reproducible trace and span IDs from execution metadata. Exported for advanced use cases.
 
+`use_ids` retains its existing scope-wide trace override by default. The
+synthetic-root implementation uses a separate internal one-span override,
+preventing processor-created roots from inheriting that internal ID. Existing
+`use_ids` signatures and default behavior remain unchanged.
+
 ### `xray_context_extractor`
 
 Default context extractor. Reads the `_X_AMZN_TRACE_ID` environment variable and

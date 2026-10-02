@@ -45,8 +45,9 @@ class ExecutionRoot:
         # the regular tracer preserves configured resources and processors.
         root_context = store_sampling_intent(Context(), sampling_intent)
         timestamp = int(self.start_time.timestamp() * 1_000_000_000)
-        with id_generator.use_ids(
-            trace_id=self.ancestor.trace_id, span_id=self.ancestor.span_id
+        with id_generator._use_ids_for_span(
+            trace_id=self.ancestor.trace_id,
+            span_id=self.ancestor.span_id,
         ):
             span = tracer.start_span(
                 "DurableExecutionRoot",
