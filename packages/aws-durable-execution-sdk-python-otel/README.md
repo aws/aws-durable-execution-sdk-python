@@ -254,8 +254,8 @@ Both bundled plugins use the same execution ancestor:
 
 - a propagated backend parent when `_X_AMZN_TRACE_ID` contains a valid `Root`
   and `Parent`
-- otherwise a deterministic, non-recording synthetic root derived from the
-  durable execution ARN
+- otherwise a deterministic `DurableExecutionRoot` span derived from the
+  durable execution ARN, with `durable.execution.synthetic_root=true`
 
 `InvocationOtelPlugin` keeps durable operation spans under the Invocation span
 and links operations to Workflow:
@@ -283,6 +283,32 @@ If an ambient Lambda span is active and already has the execution trace ID, the
 Invocation span uses that ambient span as its parent. Ambient spans on a
 different trace are ignored for durable parenting so Invocation remains on the
 execution trace.
+
+### Synthetic fallback anchor
+
+Each sampled fallback invocation exports `DurableExecutionRoot` at invocation
+start and flushes through the normal invocation-end lifecycle, including when
+it returns `PENDING` or `RETRY`. A suspended execution therefore already has an
+exported ancestor if it is later stopped or times out without resuming.
+
+The anchor uses the existing execution-scoped span ID and the stable execution
+start timestamp for both its start and end. It carries no terminal outcome;
+`Workflow` remains the span for execution duration and success/failure. Retries
+of the first invocation and later invocations may re-export the same anchor to
+recover lost telemetry; export is not exactly once. Two executions sharing a
+propagated trace ID retain distinct ARN-scoped anchor IDs.
+
+The anchor uses the same configured tracer, provider resource, processors and
+resolved sampling result as other durable spans. SDK-added IDs, timestamps and
+attributes are stable across recovery exports; provider resources, sampler
+metadata and custom processor enrichment can vary between execution environments.
+The SDK does not replace configured service identity or freeze detector fields.
+
+Complete remote parents are externally owned and are never materialized by the
+SDK. Unsampled invocations emit no anchor. Sampling remains resolved per
+invocation: a later sampled fallback invocation also emits the anchor even if
+an earlier invocation was unsampled. Missing execution start time continues to
+disable telemetry; no wall-clock timestamp is invented for the anchor.
 
 ### Sampling
 

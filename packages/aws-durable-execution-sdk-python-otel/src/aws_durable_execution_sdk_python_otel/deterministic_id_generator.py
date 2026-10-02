@@ -83,9 +83,10 @@ def derive_workflow_span_id(durable_execution_arn: str) -> int:
 def derive_execution_root_span_id(durable_execution_arn: str) -> int:
     """Derive the deterministic synthetic execution-root span ID.
 
-    The synthetic root is a non-recording parent context used when the backend
-    does not provide a complete remote parent. Its ID is stable across
-    reinvocations and uses a namespace distinct from Workflow and operation
+    The synthetic root anchors the trace when the backend does not provide a
+    complete remote parent. Its zero-duration span is exported on each sampled
+    fallback invocation. Its ID is stable across reinvocations and uses a
+    namespace distinct from Workflow and operation
     span IDs.
     """
     if not durable_execution_arn:
