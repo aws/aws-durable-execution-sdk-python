@@ -121,6 +121,9 @@ def _create_plugin(
         ) from error
 
     if type(plugin) is not provider.plugin_type:
+        # A wrong-type result may already own constructor resources, but it is
+        # never appended to the accepted list cleaned up by the outer boundary.
+        _notify_registration_result([plugin], registered=False)
         raise PluginLoadError(
             f"Durable instrumentation plugin provider '{plugin_name}' returned "
             f"{_qualified_type_name(plugin)}; expected "
@@ -128,6 +131,35 @@ def _create_plugin(
         )
 
     return plugin
+
+
+def _validate_exclusive_groups(
+    plugin_types: Sequence[type[DurableInstrumentationPlugin]],
+) -> None:
+    """Reject competing instrumentation before any lifecycle hooks run."""
+    groups: dict[str, type[DurableInstrumentationPlugin]] = {}
+    for plugin_type in plugin_types:
+        try:
+            group = getattr(plugin_type, "exclusive_group", None)
+        except Exception as error:
+            raise PluginLoadError(
+                f"Cannot read exclusive_group for {_qualified_class_name(plugin_type)}."
+            ) from error
+        if group is None:
+            continue
+        if type(group) is not str or not group.strip():
+            raise PluginLoadError(
+                f"Durable instrumentation plugin {_qualified_class_name(plugin_type)} "
+                "must declare exclusive_group as None or a non-empty string."
+            )
+        if (previous := groups.get(group)) is not None:
+            raise PluginLoadError(
+                f"Durable instrumentation plugins {_qualified_class_name(previous)} "
+                f"and {_qualified_class_name(plugin_type)} are mutually exclusive "
+                f"(group '{group}'). Keep only one plugin from this group in "
+                "plugins and DURABLE_EXECUTION_PLUGINS."
+            )
+        groups[group] = plugin_type
 
 
 def load_configured_plugins(
@@ -144,9 +176,42 @@ def load_configured_plugins(
     """
 
     resolved_plugins = list(explicit_plugins or [])
+    try:
+        result = _resolve_configured_plugins(resolved_plugins, environment=environment)
+    except PluginLoadError:
+        _notify_registration_result(resolved_plugins, registered=False)
+        raise
+    _notify_registration_result(result, registered=True)
+    return result
+
+
+def _notify_registration_result(
+    plugins: Sequence[DurableInstrumentationPlugin],
+    *,
+    registered: bool,
+) -> None:
+    """Let a plugin release rejected constructor resources without failing loading."""
+    for plugin in plugins:
+        try:
+            callback = getattr(plugin, "on_registration_result", None)
+            if callable(callback):
+                callback(registered)
+        except Exception:
+            try:
+                logger.exception("Plugin registration-result callback failed")
+            except Exception:
+                pass
+
+
+def _resolve_configured_plugins(
+    resolved_plugins: list[DurableInstrumentationPlugin],
+    *,
+    environment: Mapping[str, str] | None,
+) -> list[DurableInstrumentationPlugin]:
     resolved_environment = os.environ if environment is None else environment
     plugin_names = _parse_configured_plugin_names(resolved_environment)
     if not plugin_names:
+        _validate_exclusive_groups([type(plugin) for plugin in resolved_plugins])
         return resolved_plugins
 
     try:
@@ -167,6 +232,9 @@ def load_configured_plugins(
         type(plugin): "the decorator's plugins argument" for plugin in resolved_plugins
     }
 
+    selected_providers: list[
+        tuple[str, metadata.EntryPoint, DurableInstrumentationPluginProvider]
+    ] = []
     for plugin_name in plugin_names:
         matching_entry_points = entry_points_by_name.get(plugin_name, [])
         if not matching_entry_points:
@@ -202,8 +270,15 @@ def load_configured_plugins(
             )
             continue
 
-        plugin = _create_plugin(plugin_name, entry_point, provider)
-        resolved_plugins.append(plugin)
+        selected_providers.append((plugin_name, entry_point, provider))
         registered_types[provider.plugin_type] = f"dynamic provider '{plugin_name}'"
 
+    # Factories can install instrumentation globally. Validate every selected
+    # type first so a rejected configuration leaves no discarded plugin behind.
+    _validate_exclusive_groups(
+        [type(plugin) for plugin in resolved_plugins]
+        + [provider.plugin_type for _, _, provider in selected_providers]
+    )
+    for plugin_name, entry_point, provider in selected_providers:
+        resolved_plugins.append(_create_plugin(plugin_name, entry_point, provider))
     return resolved_plugins

@@ -477,3 +477,178 @@ def test_first_dynamic_registration_wins_for_duplicate_plugin_type(
     first_factory.assert_called_once_with()
     second_factory.assert_not_called()
     assert "already registered by dynamic provider 'first'" in caplog.text
+
+
+class _ExclusivePluginA(DurableInstrumentationPlugin):
+    exclusive_group = "test-telemetry"
+
+
+class _ExclusivePluginB(DurableInstrumentationPlugin):
+    exclusive_group = "test-telemetry"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_explicit_plugins_in_same_group_are_rejected(reverse: bool) -> None:
+    plugins = [_ExclusivePluginA(), _ExclusivePluginB()]
+    if reverse:
+        plugins.reverse()
+    with pytest.raises(PluginLoadError) as error:
+        load_configured_plugins(plugins, environment={})
+    assert "_ExclusivePluginA" in str(error.value)
+    assert "_ExclusivePluginB" in str(error.value)
+    assert "Keep only one" in str(error.value)
+
+
+def test_unrelated_plugins_can_accompany_exclusive_plugin() -> None:
+    plugins = [_PluginA(), _ExclusivePluginA(), _PluginB()]
+    assert load_configured_plugins(plugins, environment={}) == plugins
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_exclusive_groups_validated_before_any_factory(
+    reverse: bool, mixed: bool
+) -> None:
+    factory_a = Mock(side_effect=_ExclusivePluginA)
+    factory_b = Mock(side_effect=_ExclusivePluginB)
+    providers = [
+        _FakeEntryPoint("a", _provider(factory_a, plugin_type=_ExclusivePluginA)),
+        _FakeEntryPoint("b", _provider(factory_b, plugin_type=_ExclusivePluginB)),
+    ]
+    names = ["a", "b"]
+    types = [_ExclusivePluginA, _ExclusivePluginB]
+    if reverse:
+        names.reverse()
+        types.reverse()
+    explicit = [types[0]()] if mixed else []
+    configured = names[1:] if mixed else names
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=providers,
+        ),
+        pytest.raises(PluginLoadError, match="mutually exclusive"),
+    ):
+        load_configured_plugins(
+            explicit, environment={PLUGIN_ENVIRONMENT_VARIABLE: ",".join(configured)}
+        )
+    factory_a.assert_not_called()
+    factory_b.assert_not_called()
+
+
+@pytest.mark.parametrize("group", [[], {}, 123, True, "", "   "])
+@pytest.mark.parametrize("discovered", [False, True])
+def test_invalid_exclusive_group_is_a_clear_load_error(
+    monkeypatch: pytest.MonkeyPatch,
+    group: object,
+    discovered: bool,
+) -> None:
+    monkeypatch.setattr(_PluginA, "exclusive_group", group)
+    factory = Mock(side_effect=_PluginA)
+    entry = _FakeEntryPoint("a", _provider(factory))
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry],
+        ),
+        pytest.raises(
+            PluginLoadError, match="_PluginA.*exclusive_group.*non-empty string"
+        ),
+    ):
+        load_configured_plugins(
+            None if discovered else [_PluginA()],
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"} if discovered else {},
+        )
+    factory.assert_not_called()
+
+
+class _RegistrationObserver(_PluginA):
+    def __init__(self) -> None:
+        self.results: list[bool] = []
+
+    def on_registration_result(self, registered: bool) -> None:
+        self.results.append(registered)
+
+
+def test_registration_result_notifies_acceptance_and_later_rejection() -> None:
+    observer = _RegistrationObserver()
+    assert load_configured_plugins([observer], environment={}) == [observer]
+    with pytest.raises(PluginLoadError, match="non-empty"):
+        load_configured_plugins(
+            [observer], environment={PLUGIN_ENVIRONMENT_VARIABLE: ","}
+        )
+    assert observer.results == [True, False]
+
+
+def test_factory_failure_rejects_already_constructed_plugins() -> None:
+    observer = _RegistrationObserver()
+    failing = Mock(side_effect=ValueError("factory failed"))
+    entries = [
+        _FakeEntryPoint(
+            "a", _provider(lambda: observer, plugin_type=_RegistrationObserver)
+        ),
+        _FakeEntryPoint("b", _provider(failing, plugin_type=_PluginB)),
+    ]
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=entries,
+        ),
+        pytest.raises(PluginLoadError, match="factory failed"),
+    ):
+        load_configured_plugins(None, environment={PLUGIN_ENVIRONMENT_VARIABLE: "a,b"})
+    assert observer.results == [False]
+
+
+def test_registration_callback_failure_does_not_break_valid_plugins() -> None:
+    class Broken(_PluginA):
+        def on_registration_result(self, registered: bool) -> None:
+            raise ValueError("cleanup notification failed")
+
+    observer = _RegistrationObserver()
+    result = load_configured_plugins([Broken(), observer], environment={})
+    assert result[-1] is observer
+    assert observer.results == [True]
+
+
+def test_optional_registration_metadata_preserves_legacy_explicit_objects() -> None:
+    class LegacyPlugin:
+        pass
+
+    legacy = cast(DurableInstrumentationPlugin, LegacyPlugin())
+    assert load_configured_plugins([legacy], environment={}) == [legacy]
+
+
+def test_registration_diagnostic_failure_is_isolated() -> None:
+    class Broken(_PluginA):
+        def on_registration_result(self, registered: bool) -> None:
+            raise ValueError("callback failed")
+
+    observer = _RegistrationObserver()
+    with patch(
+        "aws_durable_execution_sdk_python.plugin_discovery.logger.exception",
+        side_effect=ValueError("diagnostic failed"),
+    ):
+        assert (
+            load_configured_plugins([Broken(), observer], environment={})[-1]
+            is observer
+        )
+    assert observer.results == [True]
+
+
+def test_wrong_type_factory_result_receives_rejection_cleanup() -> None:
+    actual = _RegistrationObserver()
+    entry = _FakeEntryPoint("wrong", _provider(lambda: actual, plugin_type=_PluginB))
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry],
+        ),
+        pytest.raises(
+            PluginLoadError, match="returned.*_RegistrationObserver.*expected.*_PluginB"
+        ),
+    ):
+        load_configured_plugins(
+            None, environment={PLUGIN_ENVIRONMENT_VARIABLE: "wrong"}
+        )
+    assert actual.results == [False]
