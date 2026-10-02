@@ -100,8 +100,9 @@ The input and result are immutable; an asynchronous hook is unsupported.
 
 Before this draft can ship, integrate the coordinated core 2.1 / OTel 1.1 minor
 release from [#753](https://github.com/aws/aws-durable-execution-sdk-python/pull/753)
-and assign later package versions/dependency floors that include this new
-contract. Production START consumption, supported generated client
+and document the matching-core prerequisite for this optional capability.
+Existing supported core/plugin combinations must retain their prior tracing
+behavior; no broad minimum-core rejection is required for this groundwork. Production START consumption, supported generated client
 serialization, backend capability rollout, replay/failed-checkpoint integration
 and deployed topology validation remain pending. The full feature in #751 remains pending.
 

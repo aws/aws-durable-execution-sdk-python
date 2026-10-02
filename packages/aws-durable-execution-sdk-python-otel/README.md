@@ -324,9 +324,11 @@ no contribution. Tracer, provider and resource ownership are unchanged.
 This is groundwork for [#751](https://github.com/aws/aws-durable-execution-sdk-python/issues/751),
 not an enabled outbound propagation feature. Invoke START integration, supported
 Lambda model fields/serialization, backend rollout, replay and failed-checkpoint
-coverage, and cloud topology validation remain pending. Rebase this draft onto
-the coordinated minor release and assign compatible core/OTel version floors
-before publication. Keep this PR draft while public models lack the capability.
+coverage, and cloud topology validation remain pending. On older supported cores that lack the propagation contract, plugin loading
+and existing tracing continue; the new hook contributes no metadata. The new
+propagation capability requires a coordinated core that exposes its contract
+and collector. Rebase onto the coordinated minor release before publication
+without dropping existing valid core/plugin combinations. Keep this PR draft while public models lack the capability.
 
 ## Verification
 

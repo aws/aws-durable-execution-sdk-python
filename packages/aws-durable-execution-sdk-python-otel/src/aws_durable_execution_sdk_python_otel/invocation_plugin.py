@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -15,8 +15,6 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationEndInfo,
     OperationStartInfo,
     OperationType,
-    PropagationInput,
-    PropagationMetadata,
     UserFunctionEndInfo,
     UserFunctionOutcome,
     UserFunctionStartInfo,
@@ -64,6 +62,18 @@ from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
 from aws_durable_execution_sdk_python_otel.propagation import propagation_metadata
+
+
+if TYPE_CHECKING:
+    from aws_durable_execution_sdk_python.plugin import (
+        PropagationInput,
+        PropagationMetadata,
+    )
+else:
+    from aws_durable_execution_sdk_python import plugin as _core_plugin
+
+    PropagationInput = getattr(_core_plugin, "PropagationInput", Any)
+    PropagationMetadata = getattr(_core_plugin, "PropagationMetadata", Any)
 
 
 logger = logging.getLogger(__name__)

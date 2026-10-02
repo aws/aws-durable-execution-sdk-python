@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from aws_durable_execution_sdk_python import plugin as core_plugin
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationStartInfo,
@@ -316,5 +317,33 @@ def test_failed_invocation_setup_cannot_supply_stale_metadata(
             plugin.on_invocation_start(start_info(first=False))
         assert plugin.provide_propagation_metadata(INPUT) is None
         plugin.on_invocation_end(end_info())
+    finally:
+        provider.shutdown()
+
+
+def test_legacy_core_keeps_tracing_without_propagation_contract(
+    plugin_type: PluginType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(core_plugin, "PropagationMetadata")
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    plugin = plugin_type(
+        OtelPluginConfig(
+            tracer_provider=provider,
+            context_extractor=lambda _: None,
+            enrich_logger=False,
+        )
+    )
+    try:
+        plugin.on_invocation_start(start_info())
+        assert plugin.provide_propagation_metadata(INPUT) is None
+        start_operation(plugin)
+        end_operation(plugin)
+        plugin.on_invocation_end(end_info())
+        assert {"invoke-target", "Invocation", "Workflow"} <= {
+            s.name for s in exporter.get_finished_spans()
+        }
     finally:
         provider.shutdown()
