@@ -6,7 +6,8 @@ from packaging.requirements import Requirement
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
-CORE_DEPENDENCY = "aws-durable-execution-sdk-python>=2.1.0"
+CORE_DEPENDENCY = "aws-durable-execution-sdk-python>=2.0.0"
+EXCLUSIVITY_TEST_CORE = "aws-durable-execution-sdk-python>=2.1.0"
 TEST_OTEL_DEPENDENCIES = {
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-propagator-aws-xray",
@@ -81,7 +82,7 @@ def test_pypi_compatibility_environment_uses_compatible_core_sdk() -> None:
         "envs"
     ]["test-pypi-otel"]["dependencies"]
 
-    assert CORE_DEPENDENCY in dependencies
+    assert EXCLUSIVITY_TEST_CORE in dependencies
 
 
 def test_pypi_otel_environment_installs_lifecycle_test_runner() -> None:
@@ -91,7 +92,7 @@ def test_pypi_otel_environment_installs_lifecycle_test_runner() -> None:
     assert "aws-durable-execution-sdk-python-testing>=1.2.1" in dependencies
 
 
-def test_core_dependency_rejects_releases_without_exclusivity() -> None:
+def test_core_dependency_preserves_previously_supported_releases() -> None:
     dependencies = _load_pyproject(PACKAGE_ROOT / "pyproject.toml")["project"][
         "dependencies"
     ]
@@ -100,8 +101,8 @@ def test_core_dependency_rejects_releases_without_exclusivity() -> None:
         for value in dependencies
         if Requirement(value).name == "aws-durable-execution-sdk-python"
     )
-    assert not requirement.specifier.contains("2.0.0")
-    assert not requirement.specifier.contains("2.0.1")
+    assert requirement.specifier.contains("2.0.0")
+    assert requirement.specifier.contains("2.0.1")
     assert requirement.specifier.contains("2.1.0")
 
 

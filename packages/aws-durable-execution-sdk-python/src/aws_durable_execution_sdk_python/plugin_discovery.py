@@ -137,7 +137,7 @@ def _validate_exclusive_groups(
     groups: dict[str, type[DurableInstrumentationPlugin]] = {}
     for plugin_type in plugin_types:
         try:
-            group = plugin_type.exclusive_group
+            group = getattr(plugin_type, "exclusive_group", None)
         except Exception as error:
             raise PluginLoadError(
                 f"Cannot read exclusive_group for {_qualified_class_name(plugin_type)}."
@@ -173,6 +173,38 @@ def load_configured_plugins(
     """
 
     resolved_plugins = list(explicit_plugins or [])
+    try:
+        result = _resolve_configured_plugins(resolved_plugins, environment=environment)
+    except PluginLoadError:
+        _notify_registration_result(resolved_plugins, registered=False)
+        raise
+    _notify_registration_result(result, registered=True)
+    return result
+
+
+def _notify_registration_result(
+    plugins: Sequence[DurableInstrumentationPlugin],
+    *,
+    registered: bool,
+) -> None:
+    """Let a plugin release rejected constructor resources without failing loading."""
+    for plugin in plugins:
+        try:
+            callback = getattr(plugin, "on_registration_result", None)
+            if callable(callback):
+                callback(registered)
+        except Exception:
+            try:
+                logger.exception("Plugin registration-result callback failed")
+            except Exception:
+                pass
+
+
+def _resolve_configured_plugins(
+    resolved_plugins: list[DurableInstrumentationPlugin],
+    *,
+    environment: Mapping[str, str] | None,
+) -> list[DurableInstrumentationPlugin]:
     resolved_environment = os.environ if environment is None else environment
     plugin_names = _parse_configured_plugin_names(resolved_environment)
     if not plugin_names:

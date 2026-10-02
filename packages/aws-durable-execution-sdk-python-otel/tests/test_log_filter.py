@@ -210,14 +210,14 @@ def test_install_log_filter_returns_none_without_handlers():
     assert install_log_filter(plugin, target_logger=target) is None
 
 
-def test_plugin_installs_filter_on_root_logger_at_invocation_start():
-    """Construction is side-effect free; accepted invocation installs the filter."""
+def test_plugin_preserves_constructor_filter_and_invocation_reuse():
+    """Constructor behavior is preserved; invocation start does not duplicate it."""
     root = logging.getLogger()
     handler = logging.NullHandler()
     root.addHandler(handler)
     try:
         plugin, _ = _create_plugin(enrich_logger=True)
-        assert not any(isinstance(f, OtelContextLogFilter) for f in handler.filters)
+        assert any(isinstance(f, OtelContextLogFilter) for f in handler.filters)
         plugin.on_invocation_start(_invocation_start_info())
         plugin.on_invocation_end(
             InvocationEndInfo(

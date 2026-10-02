@@ -82,14 +82,19 @@ handler initialization with the provider and distribution details.
 Enable at most one of `InvocationOtelPlugin` and `ExecutionOtelPlugin`. This
 constraint applies to the combined `plugins=[...]` argument and
 `DURABLE_EXECUTION_PLUGINS=otel-invocation` or `otel-execution` selection.
-Enabling both is rejected at cold start with `PluginLoadError` naming the
+Core 2.1+ with OTel 1.1+ rejects both at cold start with `PluginLoadError` naming the
 conflicting views; keep only one. Choose Invocation for work within each Lambda
 invocation or Execution for logical operations across the durable execution.
-Unrelated instrumentation plugins can run alongside either view.
+Unrelated instrumentation plugins can run alongside either view. Existing valid
+registrations remain supported with OTel 1.1 on older core 2.0.x; those cores do
+not implement the new exclusivity validation.
 
 Plugin authors can declare `exclusive_group` on a `DurableInstrumentationPlugin`
 subclass to prevent competing plugins from being registered together. The
-default `None` imposes no exclusivity constraint.
+default `None` imposes no exclusivity constraint. An optional
+`on_registration_result(registered)` callback can release constructor-owned
+resources after rejected loading. It must preserve resources from any earlier
+accepted registration; the base implementation does nothing.
 
 ## 🚀 Quick Start
 

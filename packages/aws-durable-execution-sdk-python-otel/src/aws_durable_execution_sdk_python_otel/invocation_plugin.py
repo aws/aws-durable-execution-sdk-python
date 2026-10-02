@@ -58,7 +58,10 @@ from aws_durable_execution_sdk_python_otel.execution_trace_context import (
     ExecutionTraceContext,
     canonical_trace_id,
 )
-from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
+from aws_durable_execution_sdk_python_otel.log_filter import (
+    install_log_filter,
+    uninstall_log_filter,
+)
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
 
@@ -120,7 +123,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         so durable spans share stable identifiers without changing unrelated
         instrumentation scopes on the same provider.
 
-        When ``enrich_logger`` is enabled (default), invocation start installs
+        When ``enrich_logger`` is enabled (default), construction installs
         a logging filter that stamps the active OTel trace context onto every
         emitted log record.
         """
@@ -163,6 +166,17 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._context_tokens: dict[str, tuple[int, object]] = {}
         self._operation_spans_lock = threading.RLock()
         self._tracing_enabled = False
+
+        self._registration_accepted = False
+        if self._enrich_logger:
+            install_log_filter(self)
+
+    def on_registration_result(self, registered: bool) -> None:
+        """Preserve accepted resources, releasing only a discarded constructor."""
+        if registered:
+            self._registration_accepted = True
+        elif not self._registration_accepted:
+            uninstall_log_filter(self)
 
     def _bind_sdk_tracer(self) -> bool:
         """Bind to an SDK tracer, retrying a deferred global provider."""
@@ -508,6 +522,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         """Called at the start of each invocation. Creates the invocation span."""
         logger.debug("Durable invocation started: %s", info)
+        self._registration_accepted = True
         self._reset_state()
         if info.execution_start_time is None:
             logger.warning(
@@ -574,8 +589,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             attributes=self._extract_attributes(info),
         )
 
-        # Construction can precede rejected registration. Install only once
-        # this accepted plugin has an active invocation to correlate logs with.
+        # Cover handlers installed after construction as well.
         if self._enrich_logger:
             install_log_filter(self)
 

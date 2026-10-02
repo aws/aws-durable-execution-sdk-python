@@ -129,6 +129,8 @@ dependencies = [
 test = "pytest packages/aws-durable-execution-sdk-python-examples/test {args}"
 
 [tool.hatch.envs.test-pypi-otel]
+# Test new exclusivity capability against an installed capable core.
+# Legacy valid-registration combinations are verified separately against 2.0.x.
 # Override inherited workspace membership: core must come from an installed distribution.
 workspace.members = ["packages/aws-durable-execution-sdk-python-otel"]
 dependencies = [

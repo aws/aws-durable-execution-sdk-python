@@ -389,6 +389,14 @@ class DurableInstrumentationPlugin:
     # without coupling the core SDK to individual instrumentation packages.
     exclusive_group: ClassVar[str | None] = None
 
+    def on_registration_result(self, registered: bool) -> None:
+        """Observe cold-start registration acceptance or rejection.
+
+        Optional cleanup for constructor-owned resources. Existing plugins may
+        inherit the no-op default. Rejection must not undo earlier accepted use.
+        """
+        pass
+
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         """Called when an invocation starts. This is called within the thread that runs user function handler.
 

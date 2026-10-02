@@ -89,26 +89,26 @@ class _Observer(DurableInstrumentationPlugin):
 
 
 @pytest.mark.parametrize("plugin_type", [ExecutionOtelPlugin, InvocationOtelPlugin])
-@pytest.mark.parametrize("from_environment", [False, True])
+@pytest.mark.parametrize("registration", ["explicit", "environment", "mixed"])
 @pytest.mark.parametrize("fail", [False, True])
 def test_one_view_and_unrelated_plugin_suspend_resume(
     telemetry: tuple[TracerProvider, InMemorySpanExporter],
     monkeypatch: pytest.MonkeyPatch,
     plugin_type: type[ExecutionOtelPlugin] | type[InvocationOtelPlugin],
-    from_environment: bool,
+    registration: str,
     fail: bool,
 ) -> None:
     provider, exporter = telemetry
     observer = _Observer()
     plugins: list[DurableInstrumentationPlugin] = [observer]
-    if from_environment:
+    if registration != "explicit":
         name = (
             "otel-execution"
             if plugin_type is ExecutionOtelPlugin
             else "otel-invocation"
         )
         monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", name)
-    else:
+    if registration != "environment":
         plugins.append(
             plugin_type(OtelPluginConfig(tracer_provider=provider, enrich_logger=False))
         )
@@ -216,3 +216,53 @@ def test_rejected_configuration_leaves_no_stale_log_filter(
     assert getattr(record, "traceId", None) == f"{attempt.context.trace_id:032x}"
     assert getattr(record, "spanId", None) == f"{attempt.context.span_id:016x}"
     assert len(handler.filters) == 1
+
+
+@pytest.mark.parametrize("plugin_type", [ExecutionOtelPlugin, InvocationOtelPlugin])
+def test_rejection_preserves_previously_accepted_plugin_filter(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_type: type[ExecutionOtelPlugin] | type[InvocationOtelPlugin],
+) -> None:
+    provider, exporter = telemetry
+    handler = _RecordingHandler()
+    monkeypatch.setattr(logging.getLogger(), "handlers", [handler])
+    config = OtelPluginConfig(tracer_provider=provider, enrich_logger=True)
+    accepted = plugin_type(config)
+    assert len(handler.filters) == 1
+    installed_filter = handler.filters[0]
+    other_type = (
+        InvocationOtelPlugin
+        if plugin_type is ExecutionOtelPlugin
+        else ExecutionOtelPlugin
+    )
+    valid = durable_execution(_handler, plugins=[accepted])
+    with pytest.raises(PluginLoadError, match="mutually exclusive"):
+        durable_execution(_handler, plugins=[accepted, other_type(config)])
+    assert handler.filters == [installed_filter]
+    with DurableFunctionTestRunner(handler=valid) as runner:
+        assert runner.run(input="{}", timeout=15).status.value == "SUCCEEDED"
+    assert any(s.name == "Invocation" for s in exporter.get_finished_spans())
+
+
+def test_execution_constructor_retains_ambient_log_correlation(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, _ = telemetry
+    handler = _RecordingHandler()
+    monkeypatch.setattr(logging.getLogger(), "handlers", [handler])
+    with provider.get_tracer("startup").start_as_current_span("startup") as ambient:
+        ExecutionOtelPlugin(
+            OtelPluginConfig(tracer_provider=provider, enrich_logger=True)
+        )
+        logging.getLogger("startup").warning("constructor correlation")
+        record = handler.records[-1]
+        assert (
+            getattr(record, "traceId", None)
+            == f"{ambient.get_span_context().trace_id:032x}"
+        )
+        assert (
+            getattr(record, "spanId", None)
+            == f"{ambient.get_span_context().span_id:016x}"
+        )

@@ -55,12 +55,14 @@ DURABLE_EXECUTION_PLUGINS=otel-execution
 cold start, so the handler does not need to import or explicitly register the
 plugin.
 
-Core SDK 2.1.0 or later enforces this registration contract.
-Enable at most one bundled OTel view for a handler. `InvocationOtelPlugin`
+Automatic mutual-exclusion validation requires core SDK 2.1.0 or later together
+with OTel 1.1.0 or later. OTel 1.1 remains compatible with core 2.0.x for existing
+valid registrations; those older cores do not enforce the new group metadata.
+Configure only one OTel view on every core version. `InvocationOtelPlugin`
 shows work within each Lambda invocation; `ExecutionOtelPlugin` shows logical
 operations across the whole execution. They emit overlapping telemetry and
-manage competing active contexts, so enabling both is rejected at cold start
-with `PluginLoadError` naming both views. Keep only one across the combined
+manage competing active contexts, so the coordinated core 2.1+/OTel 1.1+ pair
+rejects both at cold start with `PluginLoadError` naming both views. Keep only one across the combined
 `plugins=[...]` and `DURABLE_EXECUTION_PLUGINS` configuration. Unrelated plugins
 may run alongside the selected view; using no OTel plugin is also supported.
 
@@ -406,7 +408,7 @@ setups.
 ## Requirements
 
 - Python >= 3.11
-- `aws-durable-execution-sdk-python` >= 2.1.0
+- `aws-durable-execution-sdk-python` >= 2.0.0 (core >= 2.1.0 with OTel >= 1.1.0 for automatic view-exclusivity validation)
 - An ADOT/community OpenTelemetry Lambda layer, or the `standalone` extra
 
 ## License
