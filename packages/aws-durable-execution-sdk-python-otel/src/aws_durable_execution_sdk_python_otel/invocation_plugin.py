@@ -15,6 +15,8 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationEndInfo,
     OperationStartInfo,
     OperationType,
+    PropagationInput,
+    PropagationMetadata,
     UserFunctionEndInfo,
     UserFunctionOutcome,
     UserFunctionStartInfo,
@@ -61,6 +63,7 @@ from aws_durable_execution_sdk_python_otel.execution_trace_context import (
 from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
+from aws_durable_execution_sdk_python_otel.propagation import propagation_metadata
 
 
 logger = logging.getLogger(__name__)
@@ -510,6 +513,33 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     # ------------------------------------------------------------------
     # Plugin lifecycle callbacks
     # ------------------------------------------------------------------
+    def provide_propagation_metadata(
+        self,
+        info: PropagationInput,
+    ) -> PropagationMetadata | None:
+        """Describe this operation as the downstream parent without starting a span."""
+        execution_context = self._execution_trace_context
+        if (
+            not self._tracing_enabled
+            or execution_context is None
+            or info.execution_arn != self._execution_arn
+            or not info.operation_id
+        ):
+            return None
+        operation_span = self._get_span(info.operation_id)
+        span_context = (
+            operation_span.get_span_context()
+            if operation_span is not None
+            else self._operation_link_context(info.operation_id)
+        )
+        if (
+            span_context is None
+            or not span_context.is_valid
+            or span_context.trace_id != execution_context.trace_id
+        ):
+            return None
+        return propagation_metadata(span_context)
+
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         """Called at the start of each invocation. Creates the invocation span."""
         logger.debug("Durable invocation started: %s", info)
