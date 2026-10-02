@@ -1,4 +1,4 @@
-"""Public handler dispatch carries context without leaking worker mutations."""
+"""Focused handler-dispatch tests with a mock service and real worker thread."""
 
 from __future__ import annotations
 
