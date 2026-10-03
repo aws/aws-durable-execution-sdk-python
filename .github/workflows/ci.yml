@@ -60,6 +60,18 @@ jobs:
       run: hatch run types:check
     - name: Run tests + coverage
       run: hatch run test:cov
+    - name: Test OTel with the minimum supported core
+      run: |
+        hatch run test-pypi-otel:python - <<'PYTHON'
+        from importlib.metadata import version
+        from pathlib import Path
+        import aws_durable_execution_sdk_python.plugin as plugin
+
+        assert version("aws-durable-execution-sdk-python") == "2.0.0"
+        assert "site-packages" in Path(plugin.__file__).parts
+        assert not hasattr(plugin.DurableInstrumentationPlugin, "handler_context")
+        PYTHON
+        hatch run test-pypi-otel:test
     - name: Build distribution
       run: |
         for pkg in packages/*/; do
