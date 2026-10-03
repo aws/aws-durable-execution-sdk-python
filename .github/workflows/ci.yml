@@ -10,8 +10,7 @@ on:
     branches: [ main ]
 
   pull_request:
-    # Run checks while the conformance PR is stacked on the focused context fix.
-    branches: ["main", "fix/otel-handler-context-428"]
+    branches: ["main"]
 
 jobs:
   lint-commits:
