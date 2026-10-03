@@ -26,6 +26,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     StepDetails,
 )
+from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     derive_workflow_span_id,
 )
@@ -278,6 +279,10 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
 ) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
     monkeypatch.setenv("_X_AMZN_TRACE_ID", XRAY_TRACE_HEADER)
+    # The documented PyPI compatibility environment deliberately uses an older
+    # core. Keep exercising its supported operation tracing and lifecycle while
+    # asserting the new handler contract only when that core exposes the scope.
+    supports_handler_context = hasattr(DurableInstrumentationPlugin, "handler_context")
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
@@ -300,7 +305,9 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
 
     def handler_body(_event: Any, context: DurableContext) -> str:
         if extra_context_plugin:
-            assert baggage.get_baggage("customer") == "present"
+            assert baggage.get_baggage("customer") == (
+                "present" if supports_handler_context else None
+            )
         user_span("handler-entry")
         saved = context.step(step_body, name="before-wait")
         user_span("handler-after-step")
@@ -312,7 +319,6 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
 
     # An unrelated plugin may own a caller-thread OTel baggage scope. The
     # invocation-view fallback must never become part of its saved token.
-    from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
     from opentelemetry import baggage
 
     class BaggagePlugin(DurableInstrumentationPlugin):
@@ -405,7 +411,9 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
         assert otel_context.get_current() == before_context
         spans = exporter.get_finished_spans()
         expected_parents = (
-            [derive_workflow_span_id(EXECUTION_ARN)] * 2
+            [None, None]
+            if not supports_handler_context
+            else [derive_workflow_span_id(EXECUTION_ARN)] * 2
             if plugin_type is ExecutionOtelPlugin
             else ambient_ids
             if ambient_kind == "same"
@@ -422,14 +430,18 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
                 expected_parents
             )
             assert all(
-                span.context is not None and span.context.trace_id == XRAY_TRACE_ID
+                span.context is not None
+                and (
+                    (span.context.trace_id == XRAY_TRACE_ID) == supports_handler_context
+                )
                 for span in users
             )
         after_resume = next(
             span for span in spans if span.name == "handler-after-resume"
         )
-        assert after_resume.parent is not None
-        assert after_resume.parent.span_id == expected_parents[1]
+        assert (
+            after_resume.parent.span_id if after_resume.parent else None
+        ) == expected_parents[1]
         step_user = next(span for span in spans if span.name == "step-user")
         assert step_user.parent is not None
         assert any(
