@@ -131,7 +131,7 @@ test = "pytest packages/aws-durable-execution-sdk-python-examples/test {args}"
 # Do not inherit the default workspace core when validating a published release.
 workspace.members = ["packages/aws-durable-execution-sdk-python-otel"]
 dependencies = [
-  "aws-durable-execution-sdk-python>=2.0.0",
+  "aws-durable-execution-sdk-python==2.0.0",
   "opentelemetry-sdk>=1.20.0",
   "opentelemetry-propagator-aws-xray",
   "pytest",
