@@ -161,8 +161,11 @@ lambda_.Function(
 A core SDK with handler-worker context propagation carries the context established
 by invocation-start hooks into the handler. Invocation view preserves an active
 ambient span on the canonical execution trace; when that context is absent or
-belongs to a different trace, it makes the Invocation span current until invocation
-finalization. The caller context is restored before Workflow export and flushing.
+belongs to a different trace, its optional `handler_context` scope makes the Invocation
+span current only while the handler runs. The scope closes on the same worker in
+reverse plugin order, including on failure and suspension, without changing the
+invocation-hook caller. Older cores ignore this optional scope and retain their
+existing behavior; install the updated core as well to get handler context propagation.
 Existing plugin registration, factory lifetime, and checkpoint formats are unchanged.
 
 ### 3. In your Lambda handler (index.py)

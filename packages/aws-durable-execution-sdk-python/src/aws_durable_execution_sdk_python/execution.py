@@ -317,7 +317,11 @@ def durable_execution(
             # Invocation-start hooks can establish tracing and other contextvars.
             # Context.run restores worker bindings on both return and failure.
             user_future = executor.submit(
-                contextvars.copy_context().run, func, input_event, durable_context
+                contextvars.copy_context().run,
+                plugin_executor.run_handler,
+                func,
+                input_event,
+                durable_context,
             )
 
             logger.debug(

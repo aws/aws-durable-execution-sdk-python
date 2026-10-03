@@ -259,7 +259,14 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
     assert completed_wait_span.end_time <= after_resume.start_time
 
 
-@pytest.mark.parametrize("plugin_type", [InvocationOtelPlugin, ExecutionOtelPlugin])
+@pytest.mark.parametrize(
+    ("plugin_type", "extra_context_plugin"),
+    [
+        (InvocationOtelPlugin, False),
+        (InvocationOtelPlugin, True),
+        (ExecutionOtelPlugin, False),
+    ],
+)
 @pytest.mark.parametrize("fail_after_resume", [False, True])
 @pytest.mark.parametrize("ambient_kind", ["same", "unrelated", "absent"])
 def test_handler_user_spans_inherit_context_across_resume_and_failure(
@@ -267,6 +274,7 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
     plugin_type: type[InvocationOtelPlugin] | type[ExecutionOtelPlugin],
     fail_after_resume: bool,
     ambient_kind: str,
+    extra_context_plugin: bool,
 ) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
     monkeypatch.setenv("_X_AMZN_TRACE_ID", XRAY_TRACE_HEADER)
@@ -291,6 +299,8 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
         return "saved"
 
     def handler_body(_event: Any, context: DurableContext) -> str:
+        if extra_context_plugin:
+            assert baggage.get_baggage("customer") == "present"
         user_span("handler-entry")
         saved = context.step(step_body, name="before-wait")
         user_span("handler-after-step")
@@ -300,7 +310,25 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
             raise ValueError("handler failed after resume")
         return saved
 
-    handler = durable_execution(handler_body, plugins=[plugin])
+    # An unrelated plugin may own a caller-thread OTel baggage scope. The
+    # invocation-view fallback must never become part of its saved token.
+    from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
+    from opentelemetry import baggage
+
+    class BaggagePlugin(DurableInstrumentationPlugin):
+        token: Any = None
+
+        def on_invocation_start(self, _info: Any) -> None:
+            self.token = otel_context.attach(baggage.set_baggage("customer", "present"))
+
+        def on_invocation_end(self, _info: Any) -> None:
+            otel_context.detach(self.token)
+            self.token = None
+
+    plugins: list[DurableInstrumentationPlugin] = [plugin]
+    if extra_context_plugin:
+        plugins.append(BaggagePlugin())
+    handler = durable_execution(handler_body, plugins=plugins)
     remote = AwsXRayPropagator().extract({"X-Amzn-Trace-Id": XRAY_TRACE_HEADER})
     assert trace.get_current_span(remote).get_span_context().trace_id == XRAY_TRACE_ID
     initial_operations = [_execution_operation()]
