@@ -55,7 +55,7 @@ def test_handler_worker_preserves_context_and_restores_its_caller(
         def submit(
             self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any
         ) -> Future[Any]:
-            if fn is not body and not (args and args[0] is body):
+            if fn is not body and body not in args:
                 return super().submit(fn, *args, **kwargs)
 
             def observe() -> Any:
@@ -123,3 +123,72 @@ def test_handler_worker_preserves_context_and_restores_its_caller(
         }[outcome]
     ]
     client.checkpoint_durable_execution.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", [None, "body", "enter", "exit"])
+def test_optional_handler_scopes_are_balanced_and_cannot_change_outcome(
+    failure: str | None,
+) -> None:
+    from contextlib import contextmanager
+    from datetime import UTC, datetime
+    from collections.abc import Iterator
+    from aws_durable_execution_sdk_python.plugin import PluginExecutor
+
+    marker = contextvars.ContextVar("handler-scope", default="caller")
+    events: list[str] = []
+
+    class ScopePlugin(DurableInstrumentationPlugin):
+        def __init__(self, name: str):
+            self.name = name
+
+        @contextmanager
+        def handler_context(self, info: InvocationStartInfo) -> Iterator[None]:
+            assert info.execution_arn == "handler-scope"
+            events.append("enter-" + self.name)
+            if self.name == "inner" and failure == "enter":
+                raise ValueError("plugin entry failure")
+            token = marker.set(self.name)
+            try:
+                yield
+            finally:
+                marker.reset(token)
+                events.append("exit-" + self.name)
+                if self.name == "inner" and failure == "exit":
+                    raise ValueError("plugin cleanup failure")
+
+    executor = PluginExecutor([ScopePlugin("outer"), ScopePlugin("inner")])
+
+    def body() -> str:
+        assert marker.get() == ("outer" if failure == "enter" else "inner")
+        events.append("body")
+        if failure in ("body", "exit"):
+            raise RuntimeError("original handler failure")
+        return "ok"
+
+    with executor.run():
+        executor.on_invocation_start("handler-scope", True, datetime.now(UTC), None)
+        if failure in ("body", "exit"):
+            with pytest.raises(RuntimeError, match="original handler failure"):
+                executor.run_handler(body)
+        else:
+            assert executor.run_handler(body) == "ok"
+    assert marker.get() == "caller"
+    assert events == ["enter-outer", "enter-inner", "body"] + (
+        ["exit-outer"] if failure == "enter" else ["exit-inner", "exit-outer"]
+    )
+
+
+def test_handler_accepts_plugin_without_optional_scope() -> None:
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from typing import cast
+    from aws_durable_execution_sdk_python.plugin import PluginExecutor
+
+    legacy = cast(
+        DurableInstrumentationPlugin,
+        SimpleNamespace(on_invocation_start=lambda info: None),
+    )
+    executor = PluginExecutor([legacy])
+    with executor.run():
+        executor.on_invocation_start("legacy", True, datetime.now(UTC), None)
+        assert executor.run_handler(lambda: "unchanged") == "unchanged"

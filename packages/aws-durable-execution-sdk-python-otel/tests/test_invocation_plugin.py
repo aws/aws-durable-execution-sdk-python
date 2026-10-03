@@ -721,8 +721,6 @@ def test_operation_end_without_start_links_previous_logical_operation():
         span.attributes["durable.operation.status"] == OperationStatus.SUCCEEDED.value
     )
 
-    plugin.on_invocation_end(_invocation_end_info())
-
 
 def test_continuation_span_uses_current_start_and_end_times():
     """Continuation spans use current times within the invocation."""
@@ -751,8 +749,6 @@ def test_continuation_span_uses_current_start_and_end_times():
     span = exporter.get_finished_spans()[0]
     assert invocation_span.start_time <= span.start_time
     assert before_callback <= span.start_time <= span.end_time <= after_callback
-
-    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_resume_operation_timestamps_do_not_precede_current_invocation():
@@ -812,8 +808,6 @@ def test_resume_operation_timestamps_do_not_precede_current_invocation():
     assert invocation_span.start_time <= after_resume_span.start_time
     assert after_resume_span.parent is not None
     assert after_resume_span.parent.span_id == invocation_span.context.span_id
-
-    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_ordered_timestamps_are_thread_safe():
@@ -880,8 +874,6 @@ def test_retried_operation_uses_fresh_id_and_links_previous_logical_operation():
         derive_workflow_span_id(EXECUTION_ARN),
         operation_id_to_span_id(EXECUTION_ARN, operation_id),
     }
-
-    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_step_operation_span_parents_attempt_span():
@@ -1033,8 +1025,6 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
     )
     assert "durable.operation.status" not in span.attributes
 
-    plugin.on_invocation_end(_invocation_end_info())
-
 
 def test_step_attempt_span_name_includes_attempt_number():
     """Step attempt spans include the attempt number in the display name."""
@@ -1077,8 +1067,6 @@ def test_step_attempt_span_name_includes_attempt_number():
     span = exporter.get_finished_spans()[0]
     assert span.name == "fetch-user attempt 2"
 
-    plugin.on_invocation_end(_invocation_end_info())
-
 
 def test_step_attempt_span_name_defaults_to_first_attempt():
     """Step attempt spans default to attempt 1 when no attempt is provided."""
@@ -1120,8 +1108,6 @@ def test_step_attempt_span_name_defaults_to_first_attempt():
 
     span = exporter.get_finished_spans()[0]
     assert span.name == "fetch-user attempt 1"
-
-    plugin.on_invocation_end(_invocation_end_info())
 
 
 @pytest.mark.parametrize(
@@ -1224,8 +1210,6 @@ def test_context_span_waits_for_terminal_status_and_omits_attempt_attributes(
     assert "durable.attempt.outcome" not in span.attributes
     assert span.status.status_code is expected_span_status
 
-    plugin.on_invocation_end(_invocation_end_info())
-
 
 def test_span_registry_helpers_can_be_called_from_multiple_threads():
     """Verify active span registry helpers are safe under concurrent access."""
@@ -1272,8 +1256,6 @@ def test_user_function_end_restores_enclosing_context():
     assert plugin._context_tokens == {}
     assert plugin.get_current_span_context().span_id == invocation_span_id
 
-    plugin.on_invocation_end(_invocation_end_info())
-
 
 def test_user_function_start_preserves_baggage_in_current_context():
     plugin, _ = _create_plugin()
@@ -1308,8 +1290,6 @@ def test_user_function_end_restores_enclosing_context_on_failure():
     assert otel_context.get_current() == enclosing_context
     assert plugin._context_tokens == {}
 
-    plugin.on_invocation_end(_invocation_end_info())
-
 
 def test_user_function_end_restores_enclosing_context_across_multiple_steps():
     """Verify sequential steps do not accumulate context scopes."""
@@ -1327,8 +1307,6 @@ def test_user_function_end_restores_enclosing_context_across_multiple_steps():
         assert otel_context.get_current() == enclosing_context
         assert plugin._context_tokens == {}
         assert plugin.get_current_span_context().span_id == invocation_span_id
-
-    plugin.on_invocation_end(_invocation_end_info())
 
 
 # ----------------------------------------------------------------------
@@ -1350,8 +1328,6 @@ def test_get_current_span_context_returns_invocation_span_at_top_level():
     invocation_span = plugin._get_span(None)
     assert span_context is not None
     assert span_context.span_id == invocation_span.get_span_context().span_id
-
-    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_get_current_span_context_returns_operation_span_inside_step():
@@ -1383,8 +1359,6 @@ def test_get_current_span_context_returns_invocation_span_between_steps():
     invocation_span = plugin._get_span(None)
     assert span_context is not None
     assert span_context.span_id == invocation_span.get_span_context().span_id
-
-    plugin.on_invocation_end(_invocation_end_info())
 
 
 # ----------------------------------------------------------------------
@@ -1463,13 +1437,11 @@ def test_top_level_step_end_falls_back_to_invocation_for_correlation():
     plugin.on_user_function_start(_user_function_start_info(operation_id))
     plugin.on_user_function_end(_user_function_end_info(operation_id))
 
-    # With no compatible ambient span, the handler inherits the Invocation
-    # context; completing a step restores that enclosing context.
+    # No durable span is attached at the top level, so the registry fallback
+    # supplies the invocation span for log correlation.
     assert otel_context.get_current() == enclosing_context
-    assert trace.get_current_span().get_span_context().span_id == invocation_span_id
+    assert not trace.get_current_span().get_span_context().is_valid
     assert plugin.get_current_span_context().span_id == invocation_span_id
-
-    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_get_current_span_context_returns_context_span_between_nested_steps():
@@ -1734,8 +1706,6 @@ def test_replayed_context_span_links_previous_logical_operation():
         operation_id_to_span_id(EXECUTION_ARN, operation_id),
     }
 
-    plugin.on_invocation_end(_invocation_end_info())
-
 
 def test_checkpointed_context_first_span_uses_deterministic_id():
     plugin, exporter = _create_plugin()
@@ -1895,8 +1865,6 @@ def test_child_context_end_restores_context_active_before_it():
     assert otel_context.get_current() == enclosing_context
     assert plugin._context_tokens == {}
 
-    plugin.on_invocation_end(_invocation_end_info())
-
 
 def test_nested_scopes_are_released_without_accumulating():
     """Verify a child context and its inner step unwind to their entry contexts."""
@@ -1926,8 +1894,6 @@ def test_nested_scopes_are_released_without_accumulating():
     )
     assert otel_context.get_current() == before_context
     assert plugin._context_tokens == {}
-
-    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_invocation_end_releases_scope_of_suspended_user_function():
