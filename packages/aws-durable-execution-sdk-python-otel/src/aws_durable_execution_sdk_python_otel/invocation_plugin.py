@@ -160,6 +160,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         # owns is released through _detach_context so the plugin never leaves a
         # scope on the context stack.
         self._context_tokens: dict[str, tuple[int, object]] = {}
+        self._handler_context_token: tuple[int, object] | None = None
         self._operation_spans_lock = threading.RLock()
         self._tracing_enabled = False
 
@@ -278,6 +279,12 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         for key in keys:
             self._detach_context(key)
 
+    def _detach_handler_context(self) -> None:
+        entry = self._handler_context_token
+        self._handler_context_token = None
+        if entry is not None and entry[0] == threading.get_ident():
+            context.detach(entry[1])  # type: ignore[arg-type]
+
     def get_current_span_context(self) -> SpanContext | None:
         """Return the span context to use for log correlation.
 
@@ -287,12 +294,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
            context this is the active context span (attached in
            on_user_function_start). Unrelated ambient spans are ignored so logs
            stay correlated to the durable execution trace.
-        2. The invocation span from the plugin registry. This is the path used
-           for top-level handler code: the invocation span is never attached to
-           the worker thread's context, so the registry is the only way to
-           resolve it. It also covers code between top-level operations, where
-           detaching the operation scope restores a context with no durable
-           span.
+        2. The invocation span from the plugin registry, including lifecycle
+           phases before the canonical handler context is attached. A core with
+           context propagation carries that context into the handler worker.
 
         Returns:
             A valid SpanContext, or None if no span is active.
@@ -574,11 +578,19 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
 
         self._start_workflow_span(info)
 
-        self._start_span(
+        invocation_span = self._start_span(
             operation_id=None,
             name="Invocation",
             attributes=self._extract_attributes(info),
         )
+        ambient = trace.get_current_span().get_span_context()
+        if not ambient.is_valid or ambient.trace_id != self._execution_trace_id:
+            # Establish the fallback before the core copies context into its
+            # handler worker. Keep a valid same-trace caller span unchanged.
+            self._handler_context_token = (
+                threading.get_ident(),
+                context.attach(trace.set_span_in_context(invocation_span)),
+            )
 
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
         """Install a non-recording placeholder for the execution-scoped Workflow span.
@@ -656,6 +668,11 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             self._reset_state()
             return
 
+        # User execution has finished. Restore the caller before finalization,
+        # so Workflow parent selection cannot adopt our own Invocation span.
+        self._detach_remaining_contexts()
+        self._detach_handler_context()
+
         # Spans are registered parent-first, so close pending spans in reverse
         # order to keep every child contained within its parent.
         with self._operation_spans_lock:
@@ -713,6 +730,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
     def _reset_state(self) -> None:
         """Clear per-invocation state for warm Lambda environment reuse."""
         self._detach_remaining_contexts()
+        self._detach_handler_context()
         self._execution_arn = ""
         self._execution_trace_id = None
         self._extracted_context = None

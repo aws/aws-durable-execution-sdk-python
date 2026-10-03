@@ -156,6 +156,15 @@ lambda_.Function(
 )
 ```
 
+### Handler context propagation
+
+A core SDK with handler-worker context propagation carries the context established
+by invocation-start hooks into the handler. Invocation view preserves an active
+ambient span on the canonical execution trace; when that context is absent or
+belongs to a different trace, it makes the Invocation span current until invocation
+finalization. The caller context is restored before Workflow export and flushing.
+Existing plugin registration, factory lifetime, and checkpoint formats are unchanged.
+
 ### 3. In your Lambda handler (index.py)
 
 ```python

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -260,10 +261,12 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
 
 @pytest.mark.parametrize("plugin_type", [InvocationOtelPlugin, ExecutionOtelPlugin])
 @pytest.mark.parametrize("fail_after_resume", [False, True])
+@pytest.mark.parametrize("ambient_kind", ["same", "unrelated", "absent"])
 def test_handler_user_spans_inherit_context_across_resume_and_failure(
     monkeypatch: pytest.MonkeyPatch,
     plugin_type: type[InvocationOtelPlugin] | type[ExecutionOtelPlugin],
     fail_after_resume: bool,
+    ambient_kind: str,
 ) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
     monkeypatch.setenv("_X_AMZN_TRACE_ID", XRAY_TRACE_HEADER)
@@ -303,6 +306,7 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
     initial_operations = [_execution_operation()]
     checkpoint, operations = _checkpoint_store(initial_operations)
     ambient_ids: list[int] = []
+    host_context = remote if ambient_kind == "same" else otel_context.Context()
     try:
         with patch(
             "aws_durable_execution_sdk_python.execution.LambdaClient"
@@ -311,10 +315,19 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
             client.checkpoint = checkpoint
             client_class.initialize_client.return_value = client
             # Standard host instrumentation supplies a same-trace Lambda span.
-            with tracer.start_as_current_span("lambda-first", context=remote) as host:
+            host_scope = (
+                tracer.start_as_current_span("lambda-first", context=host_context)
+                if ambient_kind != "absent"
+                else nullcontext()
+            )
+            with host_scope:
+                host = trace.get_current_span()
                 ambient_ids.append(host.get_span_context().span_id)
                 first = handler(_event(initial_operations), _lambda_context())
-                assert trace.get_current_span() is host
+                assert (
+                    trace.get_current_span().get_span_context()
+                    == host.get_span_context()
+                )
         assert first["Status"] == InvocationStatus.PENDING.value
         assert otel_context.get_current() == before_context
         resumed_operations = [
@@ -339,13 +352,22 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
             client = Mock()
             client.checkpoint = checkpoint
             client_class.initialize_client.return_value = client
-            with tracer.start_as_current_span("lambda-resume", context=remote) as host:
+            host_scope = (
+                tracer.start_as_current_span("lambda-resume", context=host_context)
+                if ambient_kind != "absent"
+                else nullcontext()
+            )
+            with host_scope:
+                host = trace.get_current_span()
                 ambient_ids.append(host.get_span_context().span_id)
                 resumed = handler(
                     _event(resumed_operations, updated_operation_ids=[wait_id]),
                     _lambda_context(),
                 )
-                assert trace.get_current_span() is host
+                assert (
+                    trace.get_current_span().get_span_context()
+                    == host.get_span_context()
+                )
         assert resumed["Status"] == (
             InvocationStatus.FAILED.value
             if fail_after_resume
@@ -358,6 +380,12 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
             [derive_workflow_span_id(EXECUTION_ARN)] * 2
             if plugin_type is ExecutionOtelPlugin
             else ambient_ids
+            if ambient_kind == "same"
+            else [
+                span.context.span_id
+                for span in spans
+                if span.name == "Invocation" and span.context is not None
+            ]
         )
         for name in ("handler-entry", "handler-after-step"):
             users = [span for span in spans if span.name == name]
