@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import functools
 import json
 import logging
@@ -188,7 +189,8 @@ def durable_execution(
 
     logger.debug("Starting durable execution handler...")
 
-    plugin_executor = PluginExecutor(load_configured_plugins(plugins))
+    configured_plugins = load_configured_plugins(plugins)
+    plugin_executor = PluginExecutor(configured_plugins)
 
     @plugin_executor.handle_durable_output
     def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
@@ -313,7 +315,20 @@ def durable_execution(
             logger.debug(
                 "%s entering user-space...", invocation_input.durable_execution_arn
             )
-            user_future = executor.submit(func, input_event, durable_context)
+            if configured_plugins:
+                # Invocation-start hooks can establish tracing and other contextvars.
+                # Context.run restores worker bindings on both return and failure.
+                user_future = executor.submit(
+                    contextvars.copy_context().run,
+                    plugin_executor.run_handler,
+                    func,
+                    input_event,
+                    durable_context,
+                )
+            else:
+                # Preserve the original fresh-worker context for uninstrumented
+                # handlers, including the absence of caller ContextVar bindings.
+                user_future = executor.submit(func, input_event, durable_context)
 
             logger.debug(
                 "%s waiting for user code completion...",

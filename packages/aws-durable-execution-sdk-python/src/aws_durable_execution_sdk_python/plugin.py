@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import copy
 import datetime
 import functools
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, MutableMapping, cast
+from typing import Any, Callable, ContextManager, MutableMapping, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -400,6 +401,18 @@ class DurableInstrumentationPlugin:
         """
         pass
 
+    def handler_context(self, info: InvocationStartInfo) -> ContextManager[None]:
+        """Optional scope around the top-level handler on its worker thread.
+
+        The worker already carries a copy of the caller's context after the
+        invocation-start hooks. Scopes enter in plugin order and close in reverse
+        order on success, failure, or suspension. They are for context binding,
+        not exception handling: cleanup receives no handler exception and cannot
+        suppress or replace the handler's outcome. Existing invocation hooks keep
+        their original thread and ordering. Older cores ignore this optional hook.
+        """
+        return contextlib.nullcontext()
+
     def on_operation_start(self, info: OperationStartInfo) -> None:
         """
         Called before an operation's START checkpoint is queued, or when a
@@ -518,6 +531,44 @@ class PluginExecutor:
             else:
                 # this is called asynchronously, so plugins cannot manipulate thread local objects
                 self._executor.submit(self._dispatch_plugin, plugin, info)
+
+    @contextlib.contextmanager
+    def _safe_handler_context(
+        self, plugin: DurableInstrumentationPlugin, info: InvocationStartInfo
+    ) -> Iterator[None]:
+        # Old plugin objects may not inherit this core's new optional method.
+        scope = None
+        try:
+            factory = getattr(plugin, "handler_context", None)
+            if factory is not None:
+                scope = factory(info)
+                scope.__enter__()
+        except Exception:
+            scope = None
+            logger.exception(
+                "Plugin %s handler context failed", plugin.__class__.__name__
+            )
+        try:
+            yield
+        finally:
+            if scope is not None:
+                try:
+                    scope.__exit__(None, None, None)
+                except Exception:
+                    logger.exception(
+                        "Plugin %s handler context cleanup failed",
+                        plugin.__class__.__name__,
+                    )
+
+    def run_handler(self, handler: Callable[..., Any], *args: Any) -> Any:
+        """Run the user handler inside optional, balanced plugin context scopes."""
+        with contextlib.ExitStack() as scopes:
+            if self._invocation_status is not None:
+                for plugin in self._plugins:
+                    scopes.enter_context(
+                        self._safe_handler_context(plugin, self._invocation_status)
+                    )
+            return handler(*args)
 
     def _snapshot_operation_infos(
         self,
@@ -840,8 +891,7 @@ class PluginExecutor:
     @property
     def handle_durable_output(self):
         def decorator(func: Callable[[Any, LambdaContext], MutableMapping[str, Any]]):
-            @functools.wraps(func)
-            def wrapper(event: Any, context: LambdaContext):
+            def invoke(event: Any, context: LambdaContext):
                 with self.run():
                     try:
                         output = func(event, context)
@@ -857,6 +907,16 @@ class PluginExecutor:
                             ),
                         )
                         raise
+
+            @functools.wraps(func)
+            def wrapper(event: Any, context: LambdaContext):
+                if not self._plugins:
+                    return invoke(event, context)
+                # Keep hooks on their existing caller thread and in registration
+                # order, but isolate their context bindings from the host. Two
+                # plugins can otherwise restore a stale predecessor when their
+                # invocation-end hooks close scopes in the original order.
+                return contextvars.copy_context().run(invoke, event, context)
 
             return wrapper
 

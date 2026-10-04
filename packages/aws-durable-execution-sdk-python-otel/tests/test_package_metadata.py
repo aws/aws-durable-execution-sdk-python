@@ -74,9 +74,9 @@ def test_test_environments_install_layer_provided_dependencies() -> None:
     assert TEST_OTEL_DEPENDENCIES <= set(environments["types"]["extra-dependencies"])
 
 
-def test_pypi_compatibility_environment_uses_compatible_core_sdk() -> None:
+def test_pypi_compatibility_environment_pins_minimum_supported_core() -> None:
     dependencies = _load_pyproject(REPOSITORY_ROOT / "pyproject.toml")["tool"]["hatch"][
         "envs"
     ]["test-pypi-otel"]["dependencies"]
 
-    assert CORE_DEPENDENCY in dependencies
+    assert "aws-durable-execution-sdk-python==2.0.0" in dependencies
