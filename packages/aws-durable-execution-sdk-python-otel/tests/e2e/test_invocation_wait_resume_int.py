@@ -266,8 +266,17 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
         (InvocationOtelPlugin, False),
         (InvocationOtelPlugin, True),
         (ExecutionOtelPlugin, False),
-    ],
+    ]
+    # Execution-view caller isolation requires the coordinated newer core.
+    # Released 2.0.x retains the pre-existing same-order teardown limitation;
+    # the legacy lane continues checking its supported combinations above.
+    + (
+        [(ExecutionOtelPlugin, True)]
+        if hasattr(DurableInstrumentationPlugin, "handler_context")
+        else []
+    ),
 )
+@pytest.mark.parametrize("reverse_plugins", [False, True])
 @pytest.mark.parametrize("fail_after_resume", [False, True])
 @pytest.mark.parametrize("ambient_kind", ["same", "unrelated", "absent"])
 def test_handler_user_spans_inherit_context_across_resume_and_failure(
@@ -276,6 +285,7 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
     fail_after_resume: bool,
     ambient_kind: str,
     extra_context_plugin: bool,
+    reverse_plugins: bool,
 ) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
     monkeypatch.setenv("_X_AMZN_TRACE_ID", XRAY_TRACE_HEADER)
@@ -334,6 +344,8 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
     plugins: list[DurableInstrumentationPlugin] = [plugin]
     if extra_context_plugin:
         plugins.append(BaggagePlugin())
+    if reverse_plugins:
+        plugins.reverse()
     handler = durable_execution(handler_body, plugins=plugins)
     remote = AwsXRayPropagator().extract({"X-Amzn-Trace-Id": XRAY_TRACE_HEADER})
     assert trace.get_current_span(remote).get_span_context().trace_id == XRAY_TRACE_ID
