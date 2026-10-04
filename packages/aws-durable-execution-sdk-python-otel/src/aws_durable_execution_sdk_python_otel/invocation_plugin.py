@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import logging
 import threading
+from collections.abc import Iterator
 from typing import Any
 
 from aws_durable_execution_sdk_python.plugin import (
@@ -14,6 +16,7 @@ from aws_durable_execution_sdk_python.plugin import (
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
+    OperationStatus,
     OperationType,
     UserFunctionEndInfo,
     UserFunctionOutcome,
@@ -286,12 +289,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
            context this is the active context span (attached in
            on_user_function_start). Unrelated ambient spans are ignored so logs
            stay correlated to the durable execution trace.
-        2. The invocation span from the plugin registry. This is the path used
-           for top-level handler code: the invocation span is never attached to
-           the worker thread's context, so the registry is the only way to
-           resolve it. It also covers code between top-level operations, where
-           detaching the operation scope restores a context with no durable
-           span.
+        2. The invocation span from the plugin registry, including lifecycle
+           phases outside the optional handler-worker context scope.
 
         Returns:
             A valid SpanContext, or None if no span is active.
@@ -579,6 +578,24 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             attributes=self._extract_attributes(info),
         )
 
+    @contextlib.contextmanager
+    def handler_context(self, info: InvocationStartInfo) -> Iterator[None]:
+        """Bind the fallback only inside the SDK-owned handler worker scope."""
+        ambient = trace.get_current_span().get_span_context()
+        invocation_span = self._get_span(None)
+        token = None
+        if (
+            self._tracing_enabled
+            and invocation_span is not None
+            and (not ambient.is_valid or ambient.trace_id != self._execution_trace_id)
+        ):
+            token = context.attach(trace.set_span_in_context(invocation_span))
+        try:
+            yield
+        finally:
+            if token is not None:
+                context.detach(token)
+
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
         """Install a non-recording placeholder for the execution-scoped Workflow span.
 
@@ -655,6 +672,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             self._reset_state()
             return
 
+        # User execution has finished; the worker has already closed its handler
+        # context scope without modifying the invocation-hook caller.
+        self._detach_remaining_contexts()
+
         # Spans are registered parent-first, so close pending spans in reverse
         # order to keep every child contained within its parent.
         with self._operation_spans_lock:
@@ -676,7 +697,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         invocation_span = self._get_span(None)
         if invocation_span:
             invocation_span.set_attribute(
-                "durable.invocation.status", info.status.value
+                "durable.invocation.status",
+                "RETRYING"
+                if info.status is InvocationStatus.RETRY
+                else info.status.value,
             )
             # Span status mapping: SUCCEEDED/PENDING -> OK, FAILED -> ERROR,
             # RETRY -> UNSET. RETRY is left UNSET because the plugin interface
@@ -780,7 +804,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             span.record_exception(
                 Exception(info.error.message or info.error.type or "Unknown error")
             )
-        else:
+        elif info.status is OperationStatus.SUCCEEDED:
             span.set_status(StatusCode.OK)
 
         self._end_span(info.operation_id, info.end_time)

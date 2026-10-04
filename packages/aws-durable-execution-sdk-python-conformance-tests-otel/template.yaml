@@ -409,6 +409,62 @@ Resources:
       FunctionName: !Sub "${AWS::StackName}-otel-invocation-20"
       Role: !Ref LambdaExecutionRoleArn
 
+  Otel21CompletedStepReplay:
+    Type: AWS::Serverless::Function
+    Condition: DeployInvocationView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-invocation-21
+    Properties:
+      CodeUri: src/
+      Handler: otel_21_completed_step_replay.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-invocation-21"
+      Role: !Ref LambdaExecutionRoleArn
+
+  Otel22UserFunctionContext:
+    Type: AWS::Serverless::Function
+    Condition: DeployInvocationView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-invocation-22
+    Properties:
+      CodeUri: src/
+      Handler: otel_22_user_function_context.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-invocation-22"
+      Role: !Ref LambdaExecutionRoleArn
+
+  Otel23CallbackFunctionContext:
+    Type: AWS::Serverless::Function
+    Condition: DeployInvocationView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-invocation-23
+    Properties:
+      CodeUri: src/
+      Handler: otel_23_callback_function_context.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-invocation-23"
+      Role: !Ref LambdaExecutionRoleArn
+
+  Otel24InvocationRetryStatus:
+    Type: AWS::Serverless::Function
+    Condition: DeployInvocationView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-invocation-24
+    Properties:
+      CodeUri: src/
+      Handler: otel_24_invocation_retry_status.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-invocation-24"
+      Role: !Ref LambdaExecutionRoleArn
+
   OtelExecution1Success:
     Type: AWS::Serverless::Function
     Condition: DeployExecutionView
@@ -777,6 +833,74 @@ Resources:
       CodeUri: src/
       Handler: otel_20_virtual_context.handler
       FunctionName: !Sub "${AWS::StackName}-otel-execution-20"
+      Role: !Ref LambdaExecutionRoleArn
+      Environment:
+        Variables:
+          OTEL_PLUGIN_MODE: execution
+
+  OtelExecution21CompletedStepReplay:
+    Type: AWS::Serverless::Function
+    Condition: DeployExecutionView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-execution-21
+    Properties:
+      CodeUri: src/
+      Handler: otel_21_completed_step_replay.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-execution-21"
+      Role: !Ref LambdaExecutionRoleArn
+      Environment:
+        Variables:
+          OTEL_PLUGIN_MODE: execution
+
+  OtelExecution22UserFunctionContext:
+    Type: AWS::Serverless::Function
+    Condition: DeployExecutionView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-execution-22
+    Properties:
+      CodeUri: src/
+      Handler: otel_22_user_function_context.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-execution-22"
+      Role: !Ref LambdaExecutionRoleArn
+      Environment:
+        Variables:
+          OTEL_PLUGIN_MODE: execution
+
+  OtelExecution23CallbackFunctionContext:
+    Type: AWS::Serverless::Function
+    Condition: DeployExecutionView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-execution-23
+    Properties:
+      CodeUri: src/
+      Handler: otel_23_callback_function_context.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-execution-23"
+      Role: !Ref LambdaExecutionRoleArn
+      Environment:
+        Variables:
+          OTEL_PLUGIN_MODE: execution
+
+  OtelExecution24InvocationRetryStatus:
+    Type: AWS::Serverless::Function
+    Condition: DeployExecutionView
+    Metadata:
+      BuildMethod: makefile
+    TestingMetadata:
+      TestDescription:
+        - otel-execution-24
+    Properties:
+      CodeUri: src/
+      Handler: otel_24_invocation_retry_status.handler
+      FunctionName: !Sub "${AWS::StackName}-otel-execution-24"
       Role: !Ref LambdaExecutionRoleArn
       Environment:
         Variables:

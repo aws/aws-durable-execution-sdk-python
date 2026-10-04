@@ -563,7 +563,11 @@ def test_invocation_span_status_reflects_execution_status(
     invocation = next(s for s in spans if s.name == "Invocation")
     attributes = invocation.attributes
     assert attributes is not None
-    assert attributes["durable.invocation.status"] == invocation_status.value
+    assert attributes["durable.invocation.status"] == (
+        "RETRYING"
+        if invocation_status is InvocationStatus.RETRY
+        else invocation_status.value
+    )
     assert invocation.status.status_code is expected_span_status
 
 
@@ -2198,3 +2202,71 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
     assert plugin._context_tokens == {}
 
     plugin.on_invocation_end(_invocation_end_info())
+
+
+@pytest.mark.parametrize("ambient_kind", ["same", "unrelated", "absent"])
+@pytest.mark.parametrize("raises", [False, True])
+@pytest.mark.parametrize("sampler", [ALWAYS_ON, ALWAYS_OFF])
+def test_handler_context_preserves_or_replaces_parent_and_restores_baggage(
+    ambient_kind: str, raises: bool, sampler: Sampler
+) -> None:
+    plugin, _ = _create_plugin_with_sampler(sampler)
+    info = _invocation_start_info()
+    plugin.on_invocation_start(info)
+    invocation = plugin.get_current_span_context()
+    assert invocation is not None and invocation.is_valid
+    caller = baggage.set_baggage("tenant", "scope-test", Context())
+    expected = invocation
+    if ambient_kind != "absent":
+        ambient = SpanContext(
+            trace_id=(
+                invocation.trace_id
+                if ambient_kind == "same"
+                else (1 if invocation.trace_id != 1 else 2)
+            ),
+            span_id=0x42,
+            is_remote=False,
+            trace_flags=invocation.trace_flags,
+        )
+        caller = trace.set_span_in_context(NonRecordingSpan(ambient), caller)
+        if ambient_kind == "same":
+            expected = ambient
+    token = otel_context.attach(caller)
+    error = ValueError("handler error")
+    try:
+
+        def body() -> None:
+            with plugin.handler_context(info):
+                active = trace.get_current_span().get_span_context()
+                assert active == expected
+                assert active.is_valid
+                assert baggage.get_baggage("tenant") == "scope-test"
+                if raises:
+                    raise error
+
+        if raises:
+            with pytest.raises(ValueError) as caught:
+                body()
+            assert caught.value is error
+        else:
+            body()
+        assert otel_context.get_current() is caller
+        assert baggage.get_baggage("tenant") == "scope-test"
+    finally:
+        otel_context.detach(token)
+        plugin.on_invocation_end(_invocation_end_info())
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_handler_context_without_live_invocation_leaves_context_unchanged(
+    completed: bool,
+) -> None:
+    plugin, _ = _create_plugin()
+    info = _invocation_start_info()
+    if completed:
+        plugin.on_invocation_start(info)
+        plugin.on_invocation_end(_invocation_end_info())
+    caller = otel_context.get_current()
+    with plugin.handler_context(info):
+        assert otel_context.get_current() is caller
+    assert otel_context.get_current() is caller

@@ -75,9 +75,13 @@ hatch run dev-examples:test    # run examples tests only
 To verify packages work against the published PyPI version of the core SDK (rather than the local workspace):
 
 ```bash
-hatch run test-pypi-otel:test       # test otel against PyPI core SDK
+hatch run test-pypi-otel:test       # test otel against the minimum supported core (2.0.0)
 hatch run test-pypi-examples:test   # test examples against PyPI core SDK
 ```
+
+The OTel PyPI environment excludes the local core and pins the minimum supported
+release, so newer PyPI releases cannot remove legacy compatibility coverage. Use
+`hatch run dev-otel:test` for the current workspace core.
 
 ### Package-level commands
 

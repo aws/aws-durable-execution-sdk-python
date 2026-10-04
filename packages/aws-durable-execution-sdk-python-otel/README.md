@@ -156,6 +156,18 @@ lambda_.Function(
 )
 ```
 
+### Handler context propagation
+
+A core SDK with handler-worker context propagation carries the context established
+by invocation-start hooks into the handler. Invocation view preserves an active
+ambient span on the canonical execution trace; when that context is absent or
+belongs to a different trace, its optional `handler_context` scope makes the Invocation
+span current only while the handler runs. The scope closes on the same worker in
+reverse plugin order, including on failure and suspension, without changing the
+invocation-hook caller. Older cores ignore this optional scope and retain their
+existing behavior; install the updated core as well to get handler context propagation.
+Existing plugin registration, factory lifetime, and checkpoint formats are unchanged.
+
 ### 3. In your Lambda handler (index.py)
 
 ```python
@@ -296,6 +308,28 @@ that invocation. Precedence is:
 The resolved decision is applied to Workflow, Invocation, operation, and attempt
 spans. This avoids independently querying stateful or ratio-based samplers for
 each durable span in the same invocation.
+
+### Status attributes
+
+`durable.invocation.status` uses `RETRYING` when the core plugin hook reports
+`InvocationStatus.RETRY`. The core enum remains unchanged. Operation spans use
+OTel `OK` only for `SUCCEEDED`, `ERROR` when error details are delivered, and
+`UNSET` for other outcomes without error details, including `FAILED`,
+`CANCELLED`, `TIMED_OUT`, and `STOPPED`. The original durable operation status
+remains in `durable.operation.status`.
+
+### Invocation context isolation
+
+Invocation hooks retain their caller thread and registration order. With the
+updated core, invocation-local context-variable bindings are isolated from the
+host: hooks see the incoming context and the handler receives their resulting
+context, while invocation exit restores the host's original bindings even if a
+plugin fails during setup or cleanup. Plugins must not use invocation context
+bindings to mutate the host context after the invocation has returned. Older
+supported cores retain their existing lifecycle behavior, including the
+execution-view limitation when later plugins open invocation context scopes.
+The new isolation applies only when plugins are registered.
+
 
 ### Log Correlation
 
