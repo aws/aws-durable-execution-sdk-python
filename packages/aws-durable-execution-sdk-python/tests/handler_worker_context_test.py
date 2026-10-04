@@ -22,8 +22,9 @@ from aws_durable_execution_sdk_python.plugin import (
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "retry"])
+@pytest.mark.parametrize("with_plugin", [False, True])
 def test_handler_worker_preserves_context_and_restores_its_caller(
-    monkeypatch: pytest.MonkeyPatch, outcome: str
+    monkeypatch: pytest.MonkeyPatch, outcome: str, with_plugin: bool
 ) -> None:
     marker = contextvars.ContextVar("handler-worker-context", default="worker-empty")
     seen: list[str] = []
@@ -74,7 +75,9 @@ def test_handler_worker_preserves_context_and_restores_its_caller(
     )
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
     client = Mock()
-    handler = durable_execution(body, boto3_client=client, plugins=[ClaimPlugin()])
+    handler = durable_execution(
+        body, boto3_client=client, plugins=[ClaimPlugin()] if with_plugin else []
+    )
     event = {
         "DurableExecutionArn": "test-arn/handler-context",
         "CheckpointToken": "test-token",
@@ -110,18 +113,26 @@ def test_handler_worker_preserves_context_and_restores_its_caller(
         assert marker.get() == "caller"
     finally:
         marker.reset(token)
-    assert seen == ["invocation-start"]
     assert len(worker_boundaries) == 1
     worker_before, worker_after = worker_boundaries[0]
-    assert worker_after == worker_before
-    assert worker_after != "worker-mutation"
-    assert statuses == [
-        {
-            "success": InvocationStatus.SUCCEEDED,
-            "failure": InvocationStatus.FAILED,
-            "retry": InvocationStatus.RETRY,
-        }[outcome]
-    ]
+    if with_plugin:
+        assert seen == ["invocation-start"]
+        assert worker_after == worker_before
+        assert worker_after != "worker-mutation"
+        assert statuses == [
+            {
+                "success": InvocationStatus.SUCCEEDED,
+                "failure": InvocationStatus.FAILED,
+                "retry": InvocationStatus.RETRY,
+            }[outcome]
+        ]
+    else:
+        # No plugin means the original direct worker call: caller bindings are
+        # absent, and mutations belong to the worker's own context.
+        assert seen == [worker_before]
+        assert seen != ["caller"]
+        assert worker_after == "worker-mutation"
+        assert statuses == []
     client.checkpoint_durable_execution.assert_not_called()
 
 
