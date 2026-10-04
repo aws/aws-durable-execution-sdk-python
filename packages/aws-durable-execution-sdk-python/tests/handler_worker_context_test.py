@@ -192,3 +192,92 @@ def test_handler_accepts_plugin_without_optional_scope() -> None:
     with executor.run():
         executor.on_invocation_start("legacy", True, datetime.now(UTC), None)
         assert executor.run_handler(lambda: "unchanged") == "unchanged"
+
+
+@pytest.mark.parametrize("outcome", ["SUCCEEDED", "PENDING", "FAILED", "retry"])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("hook_failure", [None, "start", "end"])
+def test_invocation_context_scopes_do_not_escape_to_host(
+    outcome: str, reverse: bool, hook_failure: str | None
+) -> None:
+    """Legacy hook order must not leave an already-ended plugin scope current."""
+    from datetime import UTC, datetime
+    import threading
+    from aws_durable_execution_sdk_python.plugin import PluginExecutor
+
+    marker = contextvars.ContextVar("invocation-scope", default="host")
+    events: list[tuple[str, str, str, int]] = []
+    caller_thread = threading.get_ident()
+
+    class ScopePlugin(DurableInstrumentationPlugin):
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.token: contextvars.Token[str] | None = None
+
+        def on_invocation_start(self, _info: InvocationStartInfo) -> None:
+            events.append(("start", self.name, marker.get(), threading.get_ident()))
+            self.token = marker.set(self.name)
+            if self.name == names[0] and hook_failure == "start":
+                raise ValueError("plugin initialization failed")
+
+        def on_invocation_end(self, _info: InvocationEndInfo) -> None:
+            events.append(("end", self.name, marker.get(), threading.get_ident()))
+            if self.name == names[0] and hook_failure == "end":
+                raise ValueError("plugin finalization failed")
+            assert self.token is not None
+            marker.reset(self.token)
+            self.token = None
+
+    names = ["first", "second"]
+    if reverse:
+        names.reverse()
+    executor = PluginExecutor([ScopePlugin(name) for name in names])
+    handler_failure = InvocationError("retry")
+    expected_output = {"Status": outcome}
+
+    @executor.handle_durable_output
+    def invoke(_event: Any, _context: Any) -> dict[str, str]:
+        executor.on_invocation_start("test", True, datetime.now(UTC), None)
+        assert marker.get() == names[-1]
+        if outcome == "retry":
+            raise handler_failure
+        return expected_output
+
+    token = marker.set("incoming")
+    try:
+        for _ in range(2):
+            if outcome == "retry":
+                with pytest.raises(InvocationError, match="retry") as caught:
+                    invoke({}, None)
+                assert caught.value is handler_failure
+            else:
+                assert invoke({}, None) is expected_output
+            assert marker.get() == "incoming"
+    finally:
+        marker.reset(token)
+    assert [(kind, name) for kind, name, _, _ in events] == [
+        (kind, name) for _ in range(2) for kind in ("start", "end") for name in names
+    ]
+    assert all(thread == caller_thread for _, _, _, thread in events)
+    assert [
+        value for kind, name, value, _ in events if kind == "start" and name == names[0]
+    ] == ["incoming", "incoming"]
+
+
+def test_no_plugin_invocation_keeps_original_caller_context_semantics() -> None:
+    from aws_durable_execution_sdk_python.plugin import PluginExecutor
+
+    marker = contextvars.ContextVar("no-plugin-caller", default="host")
+    executor = PluginExecutor([])
+
+    @executor.handle_durable_output
+    def invoke(_event: Any, _context: Any) -> dict[str, str]:
+        marker.set("caller-side-change")
+        return {"Status": "SUCCEEDED"}
+
+    token = marker.set("incoming")
+    try:
+        invoke({}, None)
+        assert marker.get() == "caller-side-change"
+    finally:
+        marker.reset(token)

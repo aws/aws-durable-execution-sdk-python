@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import copy
 import datetime
 import functools
@@ -890,8 +891,7 @@ class PluginExecutor:
     @property
     def handle_durable_output(self):
         def decorator(func: Callable[[Any, LambdaContext], MutableMapping[str, Any]]):
-            @functools.wraps(func)
-            def wrapper(event: Any, context: LambdaContext):
+            def invoke(event: Any, context: LambdaContext):
                 with self.run():
                     try:
                         output = func(event, context)
@@ -907,6 +907,16 @@ class PluginExecutor:
                             ),
                         )
                         raise
+
+            @functools.wraps(func)
+            def wrapper(event: Any, context: LambdaContext):
+                if not self._plugins:
+                    return invoke(event, context)
+                # Keep hooks on their existing caller thread and in registration
+                # order, but isolate their context bindings from the host. Two
+                # plugins can otherwise restore a stale predecessor when their
+                # invocation-end hooks close scopes in the original order.
+                return contextvars.copy_context().run(invoke, event, context)
 
             return wrapper
 

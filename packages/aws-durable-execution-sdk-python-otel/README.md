@@ -318,6 +318,19 @@ OTel `OK` only for `SUCCEEDED`, `ERROR` when error details are delivered, and
 `CANCELLED`, `TIMED_OUT`, and `STOPPED`. The original durable operation status
 remains in `durable.operation.status`.
 
+### Invocation context isolation
+
+Invocation hooks retain their caller thread and registration order. With the
+updated core, invocation-local context-variable bindings are isolated from the
+host: hooks see the incoming context and the handler receives their resulting
+context, while invocation exit restores the host's original bindings even if a
+plugin fails during setup or cleanup. Plugins must not use invocation context
+bindings to mutate the host context after the invocation has returned. Older
+supported cores retain their existing lifecycle behavior, including the
+execution-view limitation when later plugins open invocation context scopes.
+The new isolation applies only when plugins are registered.
+
+
 ### Log Correlation
 
 When `enrich_logger=True` (the default), the plugin installs a logging filter on
