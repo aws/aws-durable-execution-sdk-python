@@ -81,7 +81,7 @@ def test_contract_is_immutable_and_existing_plugins_default_to_no_metadata() -> 
     )
 
 
-def test_first_non_null_wins_and_equal_values_do_not_conflict(
+def test_first_non_blank_wins_and_equal_values_do_not_conflict(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     result = PluginExecutor(
@@ -91,7 +91,7 @@ def test_first_non_null_wins_and_equal_values_do_not_conflict(
     assert "conflict" not in caplog.text
     assert PluginExecutor([_Alpha(""), _Beta("later")]).provide_propagation_metadata(
         INFO
-    ) == PropagationMetadata("")
+    ) == PropagationMetadata("later")
 
 
 def test_conflicts_name_both_plugins_and_count(
@@ -199,3 +199,15 @@ def test_string_subclass_comparison_cannot_break_aggregation() -> None:
     ).provide_propagation_metadata(INFO)
     assert result == PropagationMetadata("first")
     assert type(result.x_amzn_trace_id) is str
+
+
+@pytest.mark.parametrize("empty", ["", " ", "\t\n"])
+def test_blank_contribution_does_not_block_later_opaque_value(empty: str) -> None:
+    value = "  opaque-header  "
+    assert PluginExecutor([_Alpha(empty), _Beta(value)]).provide_propagation_metadata(
+        INFO
+    ) == PropagationMetadata(value)
+    assert (
+        PluginExecutor([_Alpha(empty)]).provide_propagation_metadata(INFO)
+        == PropagationMetadata()
+    )

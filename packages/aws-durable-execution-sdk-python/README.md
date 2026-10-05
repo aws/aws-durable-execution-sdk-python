@@ -77,34 +77,41 @@ Provider names must be unique across installed distributions. Missing,
 ambiguous, incompatible, or invalid providers raise `PluginLoadError` during
 handler initialization with the provider and distribution details.
 
-### Draft chained-invoke propagation contract
+### Draft chained-invoke propagation
 
-This branch prepares a model-independent plugin contract for [#751](https://github.com/aws/aws-durable-execution-sdk-python/issues/751).
-The production invoke START path does not consume it and no propagation header
-is transmitted yet. Public Lambda models currently lack
-`ChainedInvokeOptions.XAmznTraceId` and `DistributedMapOptions`.
+A new invoke START collects synchronous plugin metadata after resolving its
+operation and target identity, before checkpointing. The SDK writes a non-blank
+`x_amzn_trace_id` contribution to the flat
+`ChainedInvokeOptions.XAmznTraceId` member. Function, tenant, payload, operation
+name and identity remain unchanged. The member is omitted without a contribution.
+Each invoke in a batch has its own metadata; this is not a request-wide header.
 
-`aws_durable_execution_sdk_python.plugin` defines frozen `PropagationInput`
-(`execution_arn`, `operation_id`, optional `parent_operation_id`, and
-`target_function_name`) and frozen `PropagationMetadata` with optional
-`x_amzn_trace_id`. Neither type depends on OpenTelemetry or generated service
-models. Plugins can override the optional synchronous
-`provide_propagation_metadata(info)` method; its default returns `None`.
+The SDK-owned frozen `PropagationInput` carries `execution_arn`, `operation_id`,
+optional `parent_operation_id`, and `target_function_name`. Frozen
+`PropagationMetadata` has optional `x_amzn_trace_id`. Neither type depends on
+OpenTelemetry or generated service models. The optional synchronous plugin
+`provide_propagation_metadata(info)` hook defaults to no contribution.
 
-`PluginExecutor.provide_propagation_metadata` collects supported members in
-configured order. First non-null wins, equal values do not conflict, and unequal
-later values log both plugin identities and a running conflict count. Ordinary
-hook, result/getter, and diagnostic failures are isolated. Cancellation and
-other `BaseException` control signals retain the existing dispatch policy.
-The input and result are immutable; an asynchronous hook is unsupported.
+The collector keeps the first non-blank opaque value in configured order without
+trimming it. Equal values do not conflict; different later values log both plugin
+identities and a conflict count. Ordinary hook/getter/result/diagnostic failures
+are isolated; cancellation and other `BaseException` control signals keep their
+existing behavior. Replaying a checkpointed START, pending operation or terminal
+result does not call the hook. If a START was never committed, a later attempt
+can collect again; the callback is not exactly-once.
 
-Before this draft can ship, integrate the coordinated core 2.1 / OTel 1.1 minor
-release from [#753](https://github.com/aws/aws-durable-execution-sdk-python/pull/753)
-and document the matching-core prerequisite for this optional capability.
-Existing supported core/plugin combinations must retain their prior tracing
-behavior; no broad minimum-core rejection is required for this groundwork. Production START consumption, supported generated client
-serialization, backend capability rollout, replay/failed-checkpoint integration
-and deployed topology validation remain pending. The full feature in #751 remains pending.
+This remains draft pending public Lambda model and backend publication. The SDK
+model and START path are implemented; the real botocore serialization tests
+intentionally fail while `ChainedInvokeOptions.XAmznTraceId` is absent from the
+installed model. No field removal, validation bypass or model-capability fallback
+is used to make those checks pass. Python has no `DistributedMapOptions` wrapper
+or distributed-map START API: its existing map/parallel operations use CONTEXT.
+The design's corresponding distributed-map field awaits that future modeled path.
+
+Release coordination still requires the compatible core/OTel minor versions.
+Existing valid core/plugin combinations retain prior tracing behavior; older
+cores without this optional contract contribute no new propagation metadata.
+Backend rollout and deployed downstream trace-topology validation remain pending.
 
 ## 🚀 Quick Start
 

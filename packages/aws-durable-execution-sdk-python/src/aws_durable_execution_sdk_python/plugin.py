@@ -384,10 +384,9 @@ class InvocationEndInfo(InvocationInfo):
 
 @dataclass(frozen=True)
 class PropagationInput:
-    """SDK-owned identity for a future chained-invoke propagation request.
+    """SDK-owned identity for a new chained-invoke START propagation request.
 
     This contract does not contain generated service-model or telemetry types.
-    Production invoke START requests do not consume it yet.
     """
 
     execution_arn: str
@@ -412,8 +411,9 @@ class DurableInstrumentationPlugin:
     ) -> PropagationMetadata | None:
         """Synchronously provide metadata without performing a durable operation.
 
-        Optional groundwork only: the production invoke START path does not yet
-        consume this hook. Existing plugins can inherit the no-op default.
+        Called before checkpointing a new invoke START, never for its replay.
+        Existing plugins can inherit the no-op default. A failed, uncommitted
+        START may collect again on a later attempt.
         """
         return None
 
@@ -505,9 +505,10 @@ class PluginExecutor:
     ) -> PropagationMetadata:
         """Collect opaque metadata synchronously in configured plugin order.
 
-        The first non-null value wins. Ordinary plugin failures are isolated,
+        The first non-blank value wins. Ordinary plugin failures are isolated,
         matching lifecycle dispatch; BaseException cancellation/control signals
-        retain the existing propagation policy. No service request is modified.
+        retain the existing propagation policy. The caller attaches the result
+        to its operation model before checkpoint serialization.
         """
         value: str | None = None
         owner: str | None = None
@@ -547,7 +548,7 @@ class PluginExecutor:
                     exc_info=True,
                 )
                 continue
-            if candidate is None:
+            if candidate is None or not candidate.strip():
                 continue
             if value is None:
                 value, owner = candidate, identity
