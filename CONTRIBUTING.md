@@ -384,6 +384,18 @@ Mimic the package structure in the src/aws_durable_execution_sdk_python director
 Name your module so that src/mypackage/mymodule.py has a dedicated unit test file
 tests/mypackage/mymodule_test.py
 
+### JS SDK examples against the local runner
+
+If you change the testing package, also run the JS SDK's example tests
+against its local runner. You need Node.js 22 or newer:
+
+```
+hatch run dev-testing:js-examples
+```
+
+CI runs the same command on pull requests that change the testing package.
+See [.github/scripts/js_examples/README.md](.github/scripts/js_examples/README.md).
+
 ### Conformance tests
 
 Conformance tests verify cross-SDK behavioral parity. The runner and requirement specifications are maintained in a separate repository: [aws-durable-execution-conformance-tests](https://github.com/aws/aws-durable-execution-conformance-tests). The Python handlers live in-repo under `packages/aws-durable-execution-sdk-python-conformance-tests/`, but new requirement IDs must first be registered upstream. Contributors do not need to add conformance tests. If you believe a change warrants one, mention it in your PR description or [open an issue](https://github.com/aws/aws-durable-execution-conformance-tests/issues/new?template=new_requirement.yml) in that repository.
