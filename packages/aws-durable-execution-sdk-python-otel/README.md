@@ -343,7 +343,6 @@ bindings from before that hook. Successful scopes still clean up in their origin
 context, preserving token ownership. This isolates context-variable bindings;
 it does not undo a plugin's mutations to shared objects or external side effects.
 
-
 ### Log Correlation
 
 When `enrich_logger=True` (the default), the plugin installs a logging filter on
