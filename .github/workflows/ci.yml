@@ -70,6 +70,7 @@ jobs:
         assert version("aws-durable-execution-sdk-python") == "2.0.0"
         assert "site-packages" in Path(plugin.__file__).parts
         assert not hasattr(plugin.DurableInstrumentationPlugin, "handler_context")
+        assert not hasattr(plugin, "DURABLE_INSTRUMENTATION_HANDLER_CONTEXT_API_VERSION")
         PYTHON
         hatch run test-pypi-otel:test
     - name: Build distribution

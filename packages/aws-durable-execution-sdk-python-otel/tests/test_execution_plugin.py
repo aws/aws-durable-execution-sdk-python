@@ -28,6 +28,7 @@ from aws_durable_execution_sdk_python.plugin import (
 from opentelemetry import baggage, trace
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON, ALWAYS_OFF, Sampler
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import (
@@ -1622,3 +1623,73 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
 
     plugin.on_invocation_end(_invocation_end_info())
     assert plugin._context_tokens == {}
+
+
+@pytest.mark.parametrize("ambient_kind", ["same", "unrelated", "absent"])
+@pytest.mark.parametrize("raises", [False, True])
+@pytest.mark.parametrize("sampler", [ALWAYS_ON, ALWAYS_OFF])
+def test_handler_scope_keeps_execution_trace_and_restores_context(
+    ambient_kind: str,
+    raises: bool,
+    sampler: Sampler,
+) -> None:
+    provider = TracerProvider(sampler=sampler)
+    plugin = ExecutionOtelPlugin(
+        OtelPluginConfig(
+            tracer_provider=provider,
+            context_extractor=lambda _: None,
+            enrich_logger=False,
+        )
+    )
+    info = _invocation_start_info()
+    plugin.on_invocation_start(info)
+    workflow = trace.get_current_span().get_span_context()
+    assert workflow.is_valid
+    assert workflow.span_id == derive_workflow_span_id(EXECUTION_ARN)
+    caller = baggage.set_baggage("customer", "preserved", Context())
+    expected = workflow
+    if ambient_kind != "absent":
+        ambient = SpanContext(
+            trace_id=workflow.trace_id if ambient_kind == "same" else 1,
+            span_id=0xCAFE,
+            is_remote=False,
+            trace_flags=workflow.trace_flags,
+        )
+        caller = trace.set_span_in_context(NonRecordingSpan(ambient), caller)
+        if ambient_kind == "same":
+            expected = ambient
+    token = otel_context.attach(caller)
+    error = ValueError("user failure")
+    try:
+
+        def body() -> None:
+            with plugin.handler_context(info):
+                assert trace.get_current_span().get_span_context() == expected
+                assert baggage.get_baggage("customer") == "preserved"
+                if raises:
+                    raise error
+
+        if raises:
+            with pytest.raises(ValueError) as caught:
+                body()
+            assert caught.value is error
+        else:
+            body()
+        assert otel_context.get_current() is caller
+    finally:
+        otel_context.detach(token)
+        plugin.on_invocation_end(_invocation_end_info())
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_handler_scope_without_live_workflow_is_noop(completed: bool) -> None:
+    plugin, _ = _create_plugin()
+    info = _invocation_start_info()
+    if completed:
+        plugin.on_invocation_start(info)
+        plugin.on_invocation_end(_invocation_end_info())
+    caller = otel_context.get_current()
+    with plugin.handler_context(info):
+        assert otel_context.get_current() is caller
+    assert otel_context.get_current() is caller

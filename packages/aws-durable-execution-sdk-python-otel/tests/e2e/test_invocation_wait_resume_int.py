@@ -26,6 +26,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     StepDetails,
 )
+from aws_durable_execution_sdk_python import plugin as core_plugin_api
 from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     derive_workflow_span_id,
@@ -272,7 +273,11 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
     # the legacy lane continues checking its supported combinations above.
     + (
         [(ExecutionOtelPlugin, True)]
-        if hasattr(DurableInstrumentationPlugin, "handler_context")
+        + [(ExecutionOtelPlugin, kind) for kind in ("same", "unrelated", "absent")]
+        if getattr(
+            core_plugin_api, "DURABLE_INSTRUMENTATION_HANDLER_CONTEXT_API_VERSION", None
+        )
+        == 1
         else []
     ),
 )
@@ -284,7 +289,7 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
     plugin_type: type[InvocationOtelPlugin] | type[ExecutionOtelPlugin],
     fail_after_resume: bool,
     ambient_kind: str,
-    extra_context_plugin: bool,
+    extra_context_plugin: bool | str,
     reverse_plugins: bool,
 ) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
@@ -292,7 +297,12 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
     # The documented PyPI compatibility environment deliberately uses an older
     # core. Keep exercising its supported operation tracing and lifecycle while
     # asserting the new handler contract only when that core exposes the scope.
-    supports_handler_context = hasattr(DurableInstrumentationPlugin, "handler_context")
+    supports_handler_context = (
+        getattr(
+            core_plugin_api, "DURABLE_INSTRUMENTATION_HANDLER_CONTEXT_API_VERSION", None
+        )
+        == 1
+    )
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
@@ -335,7 +345,23 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
         token: Any = None
 
         def on_invocation_start(self, _info: Any) -> None:
-            self.token = otel_context.attach(baggage.set_baggage("customer", "present"))
+            current = baggage.set_baggage("customer", "present")
+            if isinstance(extra_context_plugin, str):
+                # A real third-party invocation hook can bind or clear a span.
+                # User functions below still use ordinary implicit parenting.
+                parent = trace.SpanContext(
+                    trace_id=(XRAY_TRACE_ID if extra_context_plugin == "same" else 1),
+                    span_id=0xCAFE,
+                    is_remote=False,
+                    trace_flags=trace.TraceFlags(1),
+                )
+                current = trace.set_span_in_context(
+                    trace.INVALID_SPAN
+                    if extra_context_plugin == "absent"
+                    else trace.NonRecordingSpan(parent),
+                    current,
+                )
+            self.token = otel_context.attach(current)
 
         def on_invocation_end(self, _info: Any) -> None:
             otel_context.detach(self.token)
@@ -425,7 +451,12 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
         expected_parents = (
             [None, None]
             if not supports_handler_context
-            else [derive_workflow_span_id(EXECUTION_ARN)] * 2
+            else [
+                0xCAFE
+                if extra_context_plugin == "same" and not reverse_plugins
+                else derive_workflow_span_id(EXECUTION_ARN)
+            ]
+            * 2
             if plugin_type is ExecutionOtelPlugin
             else ambient_ids
             if ambient_kind == "same"
