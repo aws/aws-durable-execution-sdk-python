@@ -114,7 +114,9 @@ jobs:
           echo "Could not resolve the latest ADOT Python layer for $AWS_REGION"
           exit 1
         fi
-        aws lambda get-layer-version-by-arn \
+        # Parallel jobs can throttle this read; keep retries local to the lookup.
+        AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=8 \
+          aws lambda get-layer-version-by-arn \
           --arn "$ADOT_LAYER_ARN" \
           --region "$AWS_REGION" \
           --query LayerVersionArn \

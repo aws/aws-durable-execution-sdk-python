@@ -171,6 +171,10 @@ Custom subclasses must repeat that literal marker on their own concrete class to
 use the scope; inherited or instance markers are ignored. Unopted legacy helpers
 and properties with the same name are never inspected. Older cores ignore the
 marker without importing any new core API.
+Execution view similarly restores the Workflow span inside the handler scope if
+another invocation-start hook clears the active span or switches to an unrelated
+trace. Both views retain valid same-trace parents and baggage, and restore the
+worker's previous context when the scope ends.
 Existing plugin registration, factory lifetime, and checkpoint formats are unchanged.
 
 ### 3. In your Lambda handler (index.py)
