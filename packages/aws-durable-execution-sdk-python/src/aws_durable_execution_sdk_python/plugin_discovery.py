@@ -133,12 +133,26 @@ def _create_plugin(
     return plugin
 
 
+def _registration_api_enabled(plugin_type: type[object]) -> bool:
+    """Require a concrete class's explicit opt-in; never enable old subclasses.
+
+    Inspect the class namespace directly without running metaclass descriptors.
+    A marker on a base class intentionally does not opt in its subclasses.
+    Legacy attributes named exclusive_group/on_registration_result stay inert.
+    """
+    namespace = type.__dict__["__dict__"].__get__(plugin_type, type(plugin_type))
+    version = namespace.get("__durable_registration_api__")
+    return type(version) is int and version == 1
+
+
 def _validate_exclusive_groups(
     plugin_types: Sequence[type[DurableInstrumentationPlugin]],
 ) -> None:
     """Reject competing instrumentation before any lifecycle hooks run."""
     groups: dict[str, type[DurableInstrumentationPlugin]] = {}
     for plugin_type in plugin_types:
+        if not _registration_api_enabled(plugin_type):
+            continue
         try:
             group = getattr(plugin_type, "exclusive_group", None)
         except Exception as error:
@@ -192,6 +206,8 @@ def _notify_registration_result(
 ) -> None:
     """Let a plugin release rejected constructor resources without failing loading."""
     for plugin in plugins:
+        if not _registration_api_enabled(type(plugin)):
+            continue
         try:
             callback = getattr(plugin, "on_registration_result", None)
             if callable(callback):

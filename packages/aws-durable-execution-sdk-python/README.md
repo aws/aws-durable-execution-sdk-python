@@ -89,12 +89,19 @@ Unrelated instrumentation plugins can run alongside either view. Existing valid
 registrations remain supported with OTel 1.1 on older core 2.0.x; those cores do
 not implement the new exclusivity validation.
 
-Plugin authors can declare `exclusive_group` on a `DurableInstrumentationPlugin`
-subclass to prevent competing plugins from being registered together. The
-default `None` imposes no exclusivity constraint. An optional
-`on_registration_result(registered)` callback can release constructor-owned
-resources after rejected loading. It must preserve resources from any earlier
-accepted registration; the base implementation does nothing.
+Plugin authors explicitly opt in by declaring
+`__durable_registration_api__ = 1` on the concrete plugin class. Only those
+classes have their optional `exclusive_group` metadata validated and their
+optional `on_registration_result(registered)` callback invoked. A missing group
+or `None` imposes no exclusivity constraint. The callback can release rejected
+constructor resources and must preserve resources from earlier accepted use.
+
+The marker must be defined in the concrete class's own namespace; it is never
+inherited. Custom subclasses, including subclasses of the bundled OTel views,
+must repeat the marker if they intentionally adopt this capability. Unopted
+legacy plugins retain their existing attributes/helpers even if they happen to
+use either name. The generic plugin base defines neither attribute nor hook,
+and provider API version 1 and existing plugin lifecycle order are unchanged.
 
 ## 🚀 Quick Start
 

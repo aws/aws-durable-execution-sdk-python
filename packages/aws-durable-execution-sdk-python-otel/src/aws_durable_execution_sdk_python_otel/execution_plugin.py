@@ -126,6 +126,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             span).
     """
 
+    __durable_registration_api__: ClassVar[int] = 1
     exclusive_group: ClassVar[str | None] = "aws-durable-execution-otel-view"
 
     def __init__(self, config: OtelPluginConfig | None = None) -> None:
@@ -177,6 +178,8 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         """Preserve accepted resources, releasing only a discarded constructor."""
         if registered:
             self._registration_accepted = True
+            if self._config.enrich_logger:
+                install_log_filter(self)
         elif not self._registration_accepted:
             uninstall_log_filter(self)
 

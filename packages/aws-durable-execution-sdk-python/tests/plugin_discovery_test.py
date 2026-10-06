@@ -480,10 +480,12 @@ def test_first_dynamic_registration_wins_for_duplicate_plugin_type(
 
 
 class _ExclusivePluginA(DurableInstrumentationPlugin):
+    __durable_registration_api__ = 1
     exclusive_group = "test-telemetry"
 
 
 class _ExclusivePluginB(DurableInstrumentationPlugin):
+    __durable_registration_api__ = 1
     exclusive_group = "test-telemetry"
 
 
@@ -543,7 +545,8 @@ def test_invalid_exclusive_group_is_a_clear_load_error(
     group: object,
     discovered: bool,
 ) -> None:
-    monkeypatch.setattr(_PluginA, "exclusive_group", group)
+    monkeypatch.setattr(_PluginA, "__durable_registration_api__", 1, raising=False)
+    monkeypatch.setattr(_PluginA, "exclusive_group", group, raising=False)
     factory = Mock(side_effect=_PluginA)
     entry = _FakeEntryPoint("a", _provider(factory))
     with (
@@ -563,6 +566,8 @@ def test_invalid_exclusive_group_is_a_clear_load_error(
 
 
 class _RegistrationObserver(_PluginA):
+    __durable_registration_api__ = 1
+
     def __init__(self) -> None:
         self.results: list[bool] = []
 
@@ -602,6 +607,8 @@ def test_factory_failure_rejects_already_constructed_plugins() -> None:
 
 def test_registration_callback_failure_does_not_break_valid_plugins() -> None:
     class Broken(_PluginA):
+        __durable_registration_api__ = 1
+
         def on_registration_result(self, registered: bool) -> None:
             raise ValueError("cleanup notification failed")
 
@@ -621,6 +628,8 @@ def test_optional_registration_metadata_preserves_legacy_explicit_objects() -> N
 
 def test_registration_diagnostic_failure_is_isolated() -> None:
     class Broken(_PluginA):
+        __durable_registration_api__ = 1
+
         def on_registration_result(self, registered: bool) -> None:
             raise ValueError("callback failed")
 
@@ -652,3 +661,119 @@ def test_wrong_type_factory_result_receives_rejection_cleanup() -> None:
             None, environment={PLUGIN_ENVIRONMENT_VARIABLE: "wrong"}
         )
     assert actual.results == [False]
+
+
+@pytest.mark.parametrize("discovered", [False, True])
+@pytest.mark.parametrize(
+    "legacy_value", [42, property(lambda _: "business"), "business-group"]
+)
+def test_unopted_legacy_metadata_and_helpers_are_never_interpreted(
+    discovered: bool,
+    legacy_value: object,
+) -> None:
+    calls: list[bool] = []
+
+    class Legacy(DurableInstrumentationPlugin):
+        exclusive_group = legacy_value
+
+        def on_registration_result(self, registered: bool) -> None:
+            calls.append(registered)
+
+    instance = Legacy()
+    entry = _FakeEntryPoint("legacy", _provider(lambda: instance, plugin_type=Legacy))
+    with patch(
+        "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+        return_value=[entry],
+    ):
+        result = load_configured_plugins(
+            None if discovered else [instance],
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "legacy"} if discovered else {},
+        )
+    assert result == [instance]
+    with pytest.raises(PluginLoadError, match="non-empty"):
+        load_configured_plugins(
+            [instance], environment={PLUGIN_ENVIRONMENT_VARIABLE: ","}
+        )
+    assert calls == []
+
+
+def test_legacy_descriptors_are_not_read_without_class_local_opt_in() -> None:
+    reads: list[str] = []
+
+    class LegacyMeta(type):
+        def __getattribute__(cls, name: str):
+            if name in {"exclusive_group", "__durable_registration_api__"}:
+                reads.append(name)
+                raise RuntimeError("legacy descriptor is not registration metadata")
+            return super().__getattribute__(name)
+
+    class Legacy(DurableInstrumentationPlugin, metaclass=LegacyMeta):
+        @property
+        def on_registration_result(self):
+            reads.append("on_registration_result")
+            raise RuntimeError("legacy helper is not a hook")
+
+    instance = Legacy()
+    assert load_configured_plugins([instance], environment={}) == [instance]
+    assert reads == []
+
+
+def test_registration_opt_in_is_not_inherited_by_existing_subclasses() -> None:
+    class LegacyChild(_RegistrationObserver):
+        exclusive_group = 42
+
+    old = LegacyChild()
+    assert load_configured_plugins([old], environment={}) == [old]
+    assert old.results == []
+
+    class DeliberateChild(_RegistrationObserver):
+        __durable_registration_api__ = 1
+
+    enabled = DeliberateChild()
+    assert load_configured_plugins([enabled], environment={}) == [enabled]
+    assert enabled.results == [True]
+
+
+@pytest.mark.parametrize("marker", [None, True, "1", 1.0, property(lambda _: 1)])
+def test_only_literal_registration_api_version_opts_in(
+    marker: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Legacy(_RegistrationObserver):
+        exclusive_group = 42
+
+    monkeypatch.setattr(Legacy, "__durable_registration_api__", marker)
+    instance = Legacy()
+    assert load_configured_plugins([instance], environment={}) == [instance]
+    assert instance.results == []
+
+
+def test_base_class_does_not_shadow_legacy_dynamic_attributes() -> None:
+    class Legacy(DurableInstrumentationPlugin):
+        def __getattr__(self, name: str) -> str:
+            return "legacy-" + name
+
+    assert Legacy().exclusive_group == "legacy-exclusive_group"
+    assert Legacy().on_registration_result == "legacy-on_registration_result"
+    assert "__durable_registration_api__" not in DurableInstrumentationPlugin.__dict__
+
+
+def test_legacy_metaclass_dict_property_is_not_executed() -> None:
+    def namespace(_cls: object) -> None:
+        raise RuntimeError("legacy metaclass property")
+
+    def helper(_self: object, _registered: bool) -> None:
+        raise AssertionError("legacy helper must not run")
+
+    # Dynamically authored plugin classes can legally shadow type.__dict__ at
+    # runtime, even though static stubs mark that attribute final.
+    legacy_meta = type("LegacyMeta", (type,), {"__dict__": property(namespace)})
+    legacy_type = legacy_meta(
+        "Legacy",
+        (DurableInstrumentationPlugin,),
+        {
+            "exclusive_group": 42,
+            "on_registration_result": helper,
+        },
+    )
+    legacy = legacy_type()
+    assert load_configured_plugins([legacy], environment={}) == [legacy]

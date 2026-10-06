@@ -66,6 +66,13 @@ rejects both at cold start with `PluginLoadError` naming both views. Keep only o
 `plugins=[...]` and `DURABLE_EXECUTION_PLUGINS` configuration. Unrelated plugins
 may run alongside the selected view; using no OTel plugin is also supported.
 
+The bundled concrete views explicitly declare `__durable_registration_api__ = 1`.
+This opt-in is not inherited: custom subclasses must repeat that declaration to
+adopt group validation and registration cleanup. Existing subclasses without it
+keep their prior loading behavior, including unrelated fields/helpers named
+`exclusive_group` or `on_registration_result`. Re-accepting a previously rejected
+bundled instance restores its constructor-time logger enrichment immediately.
+
 ### 1. ADOT Lambda Layer
 
 This plugin requires the [AWS Distro for OpenTelemetry (ADOT) Lambda layer](https://aws-otel.github.io/docs/getting-started/lambda) to export traces from your Lambda function.

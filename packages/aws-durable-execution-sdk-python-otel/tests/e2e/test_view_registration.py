@@ -299,3 +299,86 @@ def test_wrong_type_discovered_factory_releases_constructor_filter(
         durable_execution(_handler)
     assert handler.filters == []
     assert not exporter.get_finished_spans()
+
+
+@pytest.mark.parametrize("plugin_type", [ExecutionOtelPlugin, InvocationOtelPlugin])
+@pytest.mark.parametrize("enrich_logger", [False, True])
+def test_rejected_instance_can_be_accepted_without_losing_startup_enrichment(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_type: type[ExecutionOtelPlugin] | type[InvocationOtelPlugin],
+    enrich_logger: bool,
+) -> None:
+    from aws_durable_execution_sdk_python.plugin import InvocationStartInfo
+
+    provider, _ = telemetry
+    handler = _RecordingHandler()
+    monkeypatch.setattr(logging.getLogger(), "handlers", [handler])
+    plugin = plugin_type(
+        OtelPluginConfig(tracer_provider=provider, enrich_logger=enrich_logger)
+    )
+    other_type = (
+        InvocationOtelPlugin
+        if plugin_type is ExecutionOtelPlugin
+        else ExecutionOtelPlugin
+    )
+    with pytest.raises(PluginLoadError, match="mutually exclusive"):
+        durable_execution(
+            _handler,
+            plugins=[
+                plugin,
+                other_type(
+                    OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
+                ),
+            ],
+        )
+    assert handler.filters == []
+    # Reuse the exact rejected instance, as a singleton provider can do.
+    durable_execution(_handler, plugins=[plugin])
+    assert len(handler.filters) == int(enrich_logger)
+    durable_execution(_handler, plugins=[plugin])
+    assert len(handler.filters) == int(enrich_logger)
+    if enrich_logger:
+        assert getattr(handler.filters[0], "_plugin") is plugin
+    # Missing execution time exits before the invocation-time install path.
+    plugin.on_invocation_start(
+        InvocationStartInfo(
+            execution_arn="test",
+            request_id="request",
+            is_first_invocation=True,
+            execution_start_time=None,
+        )
+    )
+    assert len(handler.filters) == int(enrich_logger)
+    if plugin_type is ExecutionOtelPlugin and enrich_logger:
+        with provider.get_tracer("startup").start_as_current_span("startup") as ambient:
+            logging.getLogger("startup-recovery").warning("after re-registration")
+            assert (
+                getattr(handler.records[-1], "traceId")
+                == f"{ambient.get_span_context().trace_id:032x}"
+            )
+
+
+@pytest.mark.parametrize("plugin_type", [ExecutionOtelPlugin, InvocationOtelPlugin])
+def test_legacy_otel_subclass_is_not_implicitly_opted_in(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_type: type[ExecutionOtelPlugin] | type[InvocationOtelPlugin],
+) -> None:
+    provider, _ = telemetry
+    calls: list[bool] = []
+    legacy_type = type(
+        "LegacyOtelSubclass",
+        (plugin_type,),
+        {
+            "exclusive_group": 42,
+            "on_registration_result": lambda self, accepted: calls.append(accepted),
+        },
+    )
+    plugin = legacy_type(
+        OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
+    )
+    handler = durable_execution(_handler, plugins=[plugin])
+    with DurableFunctionTestRunner(handler=handler) as runner:
+        assert runner.run(input="{}", timeout=15).status.value == "SUCCEEDED"
+    assert calls == []

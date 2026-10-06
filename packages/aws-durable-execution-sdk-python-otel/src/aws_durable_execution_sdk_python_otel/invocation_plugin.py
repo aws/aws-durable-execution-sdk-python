@@ -109,6 +109,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
 
     DEFAULT_INSTRUMENT_NAME = "aws-durable-execution-sdk-python"
 
+    __durable_registration_api__: ClassVar[int] = 1
     exclusive_group: ClassVar[str | None] = "aws-durable-execution-otel-view"
 
     def __init__(self, config: OtelPluginConfig | None = None) -> None:
@@ -175,6 +176,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         """Preserve accepted resources, releasing only a discarded constructor."""
         if registered:
             self._registration_accepted = True
+            if self._enrich_logger:
+                install_log_filter(self)
         elif not self._registration_accepted:
             uninstall_log_filter(self)
 

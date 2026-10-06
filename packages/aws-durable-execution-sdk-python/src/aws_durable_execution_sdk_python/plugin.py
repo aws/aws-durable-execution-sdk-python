@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, ClassVar, MutableMapping, cast
+from typing import Any, Callable, MutableMapping, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -383,19 +383,6 @@ class InvocationEndInfo(InvocationInfo):
 
 class DurableInstrumentationPlugin:
     """Base class for plugins. Override only the methods you need."""
-
-    # Plugins in the same non-empty group cannot be registered together.
-    # Class metadata lets discovery and explicit registration share validation
-    # without coupling the core SDK to individual instrumentation packages.
-    exclusive_group: ClassVar[str | None] = None
-
-    def on_registration_result(self, registered: bool) -> None:
-        """Observe cold-start registration acceptance or rejection.
-
-        Optional cleanup for constructor-owned resources. Existing plugins may
-        inherit the no-op default. Rejection must not undo earlier accepted use.
-        """
-        pass
 
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         """Called when an invocation starts. This is called within the thread that runs user function handler.
