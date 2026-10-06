@@ -70,11 +70,15 @@ class CheckpointIdempotencyRecord:
     ``(client_token, inbound_checkpoint_token)`` pair is entitled to a
     byte-identical response; this record is what we compare
     against and replay from.
+
+    ``outbound_checkpoint_token`` is None when the response withheld the
+    token because the execution was paused, so the replay stays identical
+    after a resume.
     """
 
     client_token: str
     inbound_checkpoint_token: str
-    outbound_checkpoint_token: str
+    outbound_checkpoint_token: str | None
     operations: list[Operation]
     next_marker: str | None
 
@@ -94,7 +98,7 @@ class CheckpointIdempotencyRecord:
         return cls(
             client_token=data["ClientToken"],
             inbound_checkpoint_token=data["InboundCheckpointToken"],
-            outbound_checkpoint_token=data["OutboundCheckpointToken"],
+            outbound_checkpoint_token=data.get("OutboundCheckpointToken"),
             operations=[
                 Operation.from_json_dict(op_data) for op_data in data["Operations"]
             ],

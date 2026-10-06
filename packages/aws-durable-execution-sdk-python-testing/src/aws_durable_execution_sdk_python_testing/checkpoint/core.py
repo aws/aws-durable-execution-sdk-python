@@ -38,9 +38,13 @@ if TYPE_CHECKING:
 
 class CheckpointResult(NamedTuple):
     """Outcome of applying a checkpoint: the new token, the operations to
-    return to the handler this round, and the lifecycle effects raised."""
+    return to the handler this round, and the lifecycle effects raised.
 
-    checkpoint_token: str
+    ``checkpoint_token`` is None when the execution is paused and the token
+    is withheld, telling the SDK this invocation may checkpoint no further.
+    """
+
+    checkpoint_token: str | None
     operations: list[Operation]
     effects: list[CheckpointEffect]
 
@@ -137,12 +141,25 @@ class CheckpointCore:
             invocation_id=execution.current_invocation_id,
         ).to_str()
 
+        # A paused execution registers this checkpoint's updates but withholds
+        # the token: a response without one tells the SDK this invocation may
+        # checkpoint no further, so it reports PENDING at its next checkpoint
+        # rather than continuing, and owes a re-invoke once resumed.
+        #
+        # The withheld token is recorded as the idempotency record's outbound
+        # token so a retry of this call replays the same tokenless response,
+        # even after a resume has moved the execution on.
+        outbound_token: str | None = new_token
+        if execution.paused:
+            outbound_token = None
+            execution.deferred_invocation = True
+
         execution.last_checkpoint = CheckpointIdempotencyRecord(
             client_token=client_token or "",
             inbound_checkpoint_token=checkpoint_token,
-            outbound_checkpoint_token=new_token,
+            outbound_checkpoint_token=outbound_token,
             operations=list(response_ops),
             next_marker=None,
         )
 
-        return CheckpointResult(new_token, response_ops, effects)
+        return CheckpointResult(outbound_token, response_ops, effects)

@@ -1025,17 +1025,10 @@ class Executor(ExecutionObserver):
             now,
         )
 
-        # This checkpoint's updates are registered below either way. Only
-        # the token is withheld: a response without one tells the SDK this
-        # invocation may checkpoint no further, so it reports PENDING at
-        # its next checkpoint rather than continuing. The invocation that
-        # gets cut short this way owes a re-invoke once resumed.
-        if execution.paused:
-            execution.deferred_invocation = True
         self._store.update(execution)
 
         response = CheckpointDurableExecutionResponse(
-            checkpoint_token=None if execution.paused else result.checkpoint_token,
+            checkpoint_token=result.checkpoint_token,
             new_execution_state=CheckpointUpdatedExecutionState(
                 operations=result.operations,
                 next_marker=None,
@@ -1795,20 +1788,7 @@ class Executor(ExecutionObserver):
         return invoke
 
     def _invoke_execution(self, execution_arn: str, delay: float = 0) -> None:
-        """Invoke execution after delay in seconds.
-
-        While paused, holds the invocation back instead of scheduling it
-        and remembers that one is owed; resume_execution() starts it. A
-        wait elapsing or a callback arriving while paused routes through
-        here, so both are deferred the same way.
-        """
-        execution = self._store.load(execution_arn)
-        if execution.paused:
-            execution.deferred_invocation = True
-            self._store.save(execution)
-            logger.debug("[%s] Holding back invocation while paused", execution_arn)
-            return
-
+        """Invoke execution after delay in seconds."""
         completion_event = self._completion_events.get(execution_arn)
         self._scheduler.call_later(
             self._invoke_handler(execution_arn),

@@ -1046,7 +1046,7 @@ def test_invoke_handler_general_exception(
 
 
 def test_invoke_execution_through_start_execution(
-    executor, mock_store, mock_scheduler, start_input
+    executor, mock_scheduler, start_input
 ):
     """Test execution invocation behavior through public start_execution method."""
     mock_event = Mock()
@@ -1059,8 +1059,6 @@ def test_invoke_execution_through_start_execution(
         mock_execution.paused = False
         mock_execution.durable_execution_arn = "test-arn"
         mock_execution_class.new.return_value = mock_execution
-        # _invoke_execution reloads to check `paused` before scheduling.
-        mock_store.load.return_value = mock_execution
 
         # Start execution which internally calls _invoke_execution
         executor.start_execution(start_input)
@@ -1245,14 +1243,8 @@ def test_should_prevent_multiple_workflow_failures_on_complete_execution(
         "aws_durable_execution_sdk_python_testing.executor.Execution"
     ) as mock_execution_class:
         mock_execution_class.new.return_value = mock_execution
-        # First load is _invoke_execution's `paused` check, second is the
-        # handler's own incomplete check, third (in _fail_workflow) returns
-        # complete.
-        mock_store.load.side_effect = [
-            mock_execution,
-            mock_execution,
-            completed_execution,
-        ]
+        # First load returns incomplete, second load (in _fail_workflow) returns complete
+        mock_store.load.side_effect = [mock_execution, completed_execution]
 
         # Act & Assert - triggering workflow failure on completed execution should raise exception
         executor.start_execution(start_input)
@@ -1755,9 +1747,7 @@ def test_invoke_handler_general_exception_async(
         assert mock_scheduler.call_later.call_count == 3
 
 
-def test_invoke_execution_no_delay_through_start_execution(
-    executor, mock_store, mock_scheduler
-):
+def test_invoke_execution_no_delay_through_start_execution(executor, mock_scheduler):
     """Test execution invocation with no delay through start_execution."""
     mock_event = Mock()
     mock_scheduler.create_event.return_value = mock_event
@@ -1770,8 +1760,6 @@ def test_invoke_execution_no_delay_through_start_execution(
         mock_execution.paused = False
         mock_execution.durable_execution_arn = "test-arn"
         mock_execution_class.new.return_value = mock_execution
-        # _invoke_execution reloads to check `paused` before scheduling.
-        mock_store.load.return_value = mock_execution
 
         start_input = Mock()
         start_input.execution_timeout_seconds = 0

@@ -168,3 +168,49 @@ def test_resume_is_a_no_op_when_not_paused():
     reloaded = store.load(execution.durable_execution_arn)
     assert reloaded.paused is False
     assert reloaded.deferred_invocation is False
+
+
+def test_paused_checkpoint_retries_without_a_token_even_after_resume():
+    """A retry of a checkpoint answered while paused replays the same
+    tokenless response on the HTTP path, including after a resume."""
+    executor, store, execution, token_0 = _make_executor_with_started_execution()
+    execution.paused = True
+    store.save(execution)
+
+    first = executor.checkpoint_execution(
+        execution_arn=execution.durable_execution_arn,
+        checkpoint_token=token_0,
+        updates=[_step_start_update("step-A")],
+        client_token="c1",
+    )
+    assert first.checkpoint_token is None
+
+    retry = executor.checkpoint_execution(
+        execution_arn=execution.durable_execution_arn,
+        checkpoint_token=token_0,
+        updates=[_step_start_update("step-A")],
+        client_token="c1",
+    )
+    assert retry.checkpoint_token is None
+
+    executor.resume_execution(execution.durable_execution_arn)
+
+    retry_after_resume = executor.checkpoint_execution(
+        execution_arn=execution.durable_execution_arn,
+        checkpoint_token=token_0,
+        updates=[_step_start_update("step-A")],
+        client_token="c1",
+    )
+    assert retry_after_resume.checkpoint_token is None
+
+
+def test_invoke_execution_while_paused_still_schedules_with_its_delay():
+    executor, store, execution, _ = _make_executor_with_started_execution()
+    execution.paused = True
+    store.save(execution)
+
+    executor._invoke_execution(execution.durable_execution_arn, delay=7)  # noqa: SLF001
+
+    executor._scheduler.call_later.assert_called_once()  # noqa: SLF001
+    assert executor._scheduler.call_later.call_args.kwargs["delay"] == 7  # noqa: SLF001
+    assert store.load(execution.durable_execution_arn).deferred_invocation is False

@@ -7,8 +7,8 @@ and ``resume_execution()`` reverses that.
 Experimental; may change or be removed in a future release.
 
 Covers:
-* Pausing mid-step: the next step does not start while the execution
-  is paused.
+* Pausing mid-step: the next step does not start while the execution is
+  paused, and runs once resumed.
 * A callback answered while paused does not trigger a new invocation
   until resumed.
 * A wait elapsing while paused does not trigger a new invocation
@@ -72,36 +72,39 @@ def _assert_execution_does_not_succeed_for(
     assert not _has_history_event(runner, execution_arn, "ExecutionSucceeded")
 
 
-def _two_step_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
-    """A step that takes a moment, then a second, instant step."""
+def test_pause_mid_step_holds_back_the_next_step_until_resumed() -> None:
+    """Pausing while step1 is in flight holds back step2 until resumed."""
 
-    def step1(_step_context: Any) -> str:
-        ThreadingEvent().wait(0.3)
-        return "s1"
+    def _two_step_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
+        """A step that takes a moment, then a second, instant step."""
 
-    def step2(_step_context: Any) -> str:
-        return "s2"
+        def step1(_step_context: Any) -> str:
+            ThreadingEvent().wait(0.3)
+            return "s1"
 
-    first = context.step(step1, name="step1")
-    second = context.step(step2, name="step2")
-    return first + second
+        def step2(_step_context: Any) -> str:
+            return "s2"
 
+        first = context.step(step1, name="step1")
+        second = context.step(step2, name="step2")
+        return first + second
 
-two_step_handler = durable_execution(_two_step_handler)
-
-
-def test_pause_mid_step_holds_back_the_next_step() -> None:
-    """Pausing while step1 is in flight holds back step2."""
     with DurableFunctionTestRunner(
-        handler=two_step_handler, execution_timeout=15
+        handler=durable_execution(_two_step_handler), execution_timeout=15
     ) as runner:
         arn = runner.run_async(input="{}")
+        _wait_until(lambda: _has_history_event(runner, arn, "StepStarted", "step1"))
 
-        ThreadingEvent().wait(0.05)
         runner.pause_execution(arn)
 
         assert not _has_history_event(runner, arn, "StepStarted", "step2")
-        assert not _has_history_event(runner, arn, "ExecutionSucceeded")
+        _assert_execution_does_not_succeed_for(runner, arn)
+
+        runner.resume_execution(arn)
+        result: DurableFunctionTestResult = runner.wait_for_result(arn)
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert result.result == json.dumps("s1s2")
 
 
 def test_callback_answered_while_paused_defers_invocation_until_resumed() -> None:

@@ -408,3 +408,52 @@ def test_process_checkpoint_delivers_due_wait_completion() -> None:
         op for op in persisted.operations if op.operation_id == "wait-1"
     )
     assert persisted_wait.status is OperationStatus.SUCCEEDED
+
+
+def test_paused_checkpoint_retries_without_a_token_even_after_resume():
+    """A retry of a checkpoint answered while paused replays the same
+    tokenless response, so the invocation cannot keep checkpointing. The
+    withholding is recorded on the idempotency entry, so a resume in
+    between does not hand the retry a live token."""
+    store = InMemoryExecutionStore()
+    scheduler = Mock(spec=Scheduler)
+    processor = CheckpointProcessor(store, scheduler)
+
+    start_input = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="test-function",
+        function_qualifier="$LATEST",
+        execution_name="test-execution",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+        invocation_id="inv-paused-idem",
+    )
+    execution = Execution.new(start_input)
+    execution.start()
+    execution.paused = True
+    store.save(execution)
+
+    inbound = CheckpointToken(
+        execution_arn=execution.durable_execution_arn, token_sequence=0
+    ).to_str()
+    updates = [
+        OperationUpdate(
+            operation_id="step-A",
+            operation_type=OperationType.STEP,
+            action=OperationAction.START,
+            name="step-A",
+        )
+    ]
+
+    first = processor.process_checkpoint(inbound, updates, "c1")
+    assert first.checkpoint_token is None
+
+    retry = processor.process_checkpoint(inbound, updates, "c1")
+    assert retry.checkpoint_token is None
+
+    resumed = store.load(execution.durable_execution_arn)
+    resumed.paused = False
+    store.save(resumed)
+
+    retry_after_resume = processor.process_checkpoint(inbound, updates, "c1")
+    assert retry_after_resume.checkpoint_token is None
