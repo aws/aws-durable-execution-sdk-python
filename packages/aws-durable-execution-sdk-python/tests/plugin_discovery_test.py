@@ -748,7 +748,7 @@ def test_unopted_legacy_metadata_and_helpers_are_never_interpreted(
     assert calls == []
 
 
-def test_legacy_descriptors_are_not_read_without_class_local_opt_in() -> None:
+def test_legacy_descriptors_are_not_read_without_registration_opt_in() -> None:
     reads: list[str] = []
 
     class LegacyMeta(type):
@@ -769,13 +769,23 @@ def test_legacy_descriptors_are_not_read_without_class_local_opt_in() -> None:
     assert reads == []
 
 
-def test_registration_opt_in_is_not_inherited_by_existing_subclasses() -> None:
+def test_inherited_registration_preserves_legacy_attribute_meaning() -> None:
+    calls: list[bool] = []
+
     class LegacyChild(_RegistrationObserver):
         exclusive_group = 42
 
+        def on_registration_result(self, registered: bool) -> None:
+            calls.append(registered)
+
     old = LegacyChild()
     assert load_configured_plugins([old], environment={}) == [old]
-    assert old.results == []
+    assert old.results == [True]
+    with pytest.raises(PluginLoadError, match="non-empty"):
+        load_configured_plugins([old], environment={PLUGIN_ENVIRONMENT_VARIABLE: ","})
+    assert old.results == [True, False]
+    assert calls == []
+    assert old.exclusive_group == 42
 
     class DeliberateChild(_RegistrationObserver):
         __durable_registration_api__ = 1
@@ -785,8 +795,51 @@ def test_registration_opt_in_is_not_inherited_by_existing_subclasses() -> None:
     assert enabled.results == [True]
 
 
+@pytest.mark.parametrize("discovered", [False, True])
+def test_subclass_inherits_exclusive_group_before_factory_runs(
+    discovered: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Child(_ExclusivePluginA):
+        pass
+
+    monkeypatch.setattr(Child, "exclusive_group", 42)
+    factory = Mock(side_effect=Child)
+    entry = _FakeEntryPoint("child", _provider(factory, plugin_type=Child))
+    explicit: list[DurableInstrumentationPlugin] = [_ExclusivePluginB()]
+    if not discovered:
+        explicit.append(Child())
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry],
+        ),
+        pytest.raises(PluginLoadError, match="mutually exclusive"),
+    ):
+        load_configured_plugins(
+            explicit,
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "child"} if discovered else {},
+        )
+    factory.assert_not_called()
+
+
+def test_subclass_can_explicitly_customize_registration_contract() -> None:
+    class Child(_RegistrationObserver):
+        __durable_registration_api__ = 1
+        exclusive_group = "custom"
+
+        def on_registration_result(self, registered: bool) -> None:
+            self.results.append(not registered)
+
+    child = Child()
+    assert load_configured_plugins([child], environment={}) == [child]
+    assert child.results == [False]
+    with pytest.raises(PluginLoadError, match="exclusive group 'custom'"):
+        load_configured_plugins([child, Child()], environment={})
+
+
 @pytest.mark.parametrize("marker", [None, True, "1", 1.0, property(lambda _: 1)])
-def test_only_literal_registration_api_version_opts_in(
+def test_invalid_registration_marker_shadows_inherited_opt_in(
     marker: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class Legacy(_RegistrationObserver):
@@ -817,7 +870,11 @@ def test_legacy_metaclass_dict_property_is_not_executed() -> None:
 
     # Dynamically authored plugin classes can legally shadow type.__dict__ at
     # runtime, even though static stubs mark that attribute final.
-    legacy_meta = type("LegacyMeta", (type,), {"__dict__": property(namespace)})
+    legacy_meta = type(
+        "LegacyMeta",
+        (type,),
+        {"__dict__": property(namespace), "__mro__": property(namespace)},
+    )
     legacy_type = legacy_meta(
         "Legacy",
         (DurableInstrumentationPlugin,),

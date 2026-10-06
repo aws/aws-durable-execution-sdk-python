@@ -360,7 +360,7 @@ def test_rejected_instance_can_be_accepted_without_losing_startup_enrichment(
 
 
 @pytest.mark.parametrize("plugin_type", [ExecutionOtelPlugin, InvocationOtelPlugin])
-def test_legacy_otel_subclass_is_not_implicitly_opted_in(
+def test_legacy_otel_subclass_keeps_same_named_helpers_inert(
     telemetry: tuple[TracerProvider, InMemorySpanExporter],
     monkeypatch: pytest.MonkeyPatch,
     plugin_type: type[ExecutionOtelPlugin] | type[InvocationOtelPlugin],
@@ -382,3 +382,75 @@ def test_legacy_otel_subclass_is_not_implicitly_opted_in(
     with DurableFunctionTestRunner(handler=handler) as runner:
         assert runner.run(input="{}", timeout=15).status.value == "SUCCEEDED"
     assert calls == []
+
+
+@pytest.mark.parametrize("plugin_type", [ExecutionOtelPlugin, InvocationOtelPlugin])
+@pytest.mark.parametrize("registration", ["explicit", "environment", "mixed"])
+@pytest.mark.parametrize("legacy_attributes", [False, True])
+def test_subclass_inherits_view_exclusion_and_rejection_cleanup(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_type: type[ExecutionOtelPlugin] | type[InvocationOtelPlugin],
+    registration: str,
+    legacy_attributes: bool,
+) -> None:
+    provider, exporter = telemetry
+    calls: list[bool] = []
+    subclass = type(
+        "CustomOtelView",
+        (plugin_type,),
+        {
+            "exclusive_group": 42,
+            "on_registration_result": lambda self, accepted: calls.append(accepted),
+        }
+        if legacy_attributes
+        else {},
+    )
+    other_type = (
+        InvocationOtelPlugin
+        if plugin_type is ExecutionOtelPlugin
+        else ExecutionOtelPlugin
+    )
+    handler = _RecordingHandler()
+    monkeypatch.setattr(logging.getLogger(), "handlers", [handler])
+    config = OtelPluginConfig(tracer_provider=provider, enrich_logger=True)
+    factory_calls: list[str] = []
+
+    def factory() -> DurableInstrumentationPlugin:
+        factory_calls.append("constructed")
+        return subclass(config)
+
+    selected = DurableInstrumentationPluginProvider(
+        plugin_type=subclass,
+        factory=factory,
+        plugin_api_version=DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION,
+    )
+    entry = SimpleNamespace(
+        name="custom-view", value="test:custom", dist=None, load=lambda: selected
+    )
+    explicit: list[DurableInstrumentationPlugin]
+    if registration == "environment":
+        monkeypatch.setattr(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            lambda **_: [entry],
+        )
+        monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", "custom-view")
+        explicit = [other_type(config)]
+    elif registration == "mixed":
+        monkeypatch.setenv(
+            "DURABLE_EXECUTION_PLUGINS",
+            "otel-invocation"
+            if other_type is InvocationOtelPlugin
+            else "otel-execution",
+        )
+        explicit = [subclass(config)]
+    else:
+        explicit = [subclass(config), other_type(config)]
+
+    assert len(handler.filters) == 1
+    with pytest.raises(PluginLoadError, match="mutually exclusive"):
+        durable_execution(_handler, plugins=explicit)
+    assert handler.filters == []
+    assert calls == []
+    assert factory_calls == []
+    assert not exporter.get_finished_spans()

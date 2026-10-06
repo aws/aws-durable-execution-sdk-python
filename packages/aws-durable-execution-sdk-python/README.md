@@ -90,18 +90,22 @@ registrations remain supported with OTel 1.1 on older core 2.0.x; those cores do
 not implement the new exclusivity validation.
 
 Plugin authors explicitly opt in by declaring
-`__durable_registration_api__ = 1` on the concrete plugin class. Only those
-classes have their optional `exclusive_group` metadata validated and their
+`__durable_registration_api__ = 1` on a plugin class. That class and its subclasses
+have their optional `exclusive_group` metadata validated and their
 optional `on_registration_result(registered)` callback invoked. A missing group
 or `None` imposes no exclusivity constraint. The callback can release rejected
 constructor resources and must preserve resources from earlier accepted use.
 
-The marker must be defined in the concrete class's own namespace; it is never
-inherited. Custom subclasses, including subclasses of the bundled OTel views,
-must repeat the marker if they intentionally adopt this capability. Unopted
-legacy plugins retain their existing attributes/helpers even if they happen to
-use either name. The generic plugin base defines neither attribute nor hook,
-and provider API version 1 and existing plugin lifecycle order are unchanged.
+The first class declaring the marker in the method resolution order supplies
+the registration contract. Subclasses of the bundled OTel views inherit their
+mutual exclusion and cleanup. Metadata and callbacks come from that declaring
+class, so a subclass's coincidental same-named legacy fields/helpers remain inert.
+A subclass repeats the marker to intentionally customize that contract. An
+explicit marker other than the integer `1` shadows an ancestor's opt-in and
+disables this capability. Plugins with no marker anywhere in their hierarchy
+retain their existing attributes/helpers. The generic plugin base defines
+neither attribute nor hook, and provider API version 1 and existing plugin
+lifecycle order are unchanged.
 
 ## 🚀 Quick Start
 

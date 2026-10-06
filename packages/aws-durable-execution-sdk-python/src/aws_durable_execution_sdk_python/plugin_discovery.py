@@ -133,16 +133,42 @@ def _create_plugin(
     return plugin
 
 
-def _registration_api_enabled(plugin_type: type[object]) -> bool:
-    """Require a concrete class's explicit opt-in; never enable old subclasses.
+def _registration_api_owner(plugin_type: type[object]) -> type[object] | None:
+    """Find the first explicit marker in the MRO without metaclass descriptors.
 
-    Inspect the class namespace directly without running metaclass descriptors.
-    A marker on a base class intentionally does not opt in its subclasses.
-    Legacy attributes named exclusive_group/on_registration_result stay inert.
+    A subclass inherits its declaring class's registration contract. Its legacy
+    same-named fields/helpers are not part of that contract unless it repeats
+    the marker. An explicit unsupported marker shadows any inherited opt-in.
     """
-    namespace = type.__dict__["__dict__"].__get__(plugin_type, type(plugin_type))
-    version = namespace.get("__durable_registration_api__")
-    return type(version) is int and version == 1
+    mro: tuple[type[object], ...] = type.__dict__["__mro__"].__get__(
+        plugin_type, type(plugin_type)
+    )
+    for declaring_type in mro:
+        namespace = type.__dict__["__dict__"].__get__(
+            declaring_type, type(declaring_type)
+        )
+        if "__durable_registration_api__" in namespace:
+            version = namespace["__durable_registration_api__"]
+            return declaring_type if type(version) is int and version == 1 else None
+    return None
+
+
+def _registration_result_callback(
+    plugin: DurableInstrumentationPlugin, owner: type[object]
+) -> object | None:
+    """Bind the opted-in contract without calling a legacy subclass helper."""
+    if owner is type(plugin):
+        return getattr(plugin, "on_registration_result", None)
+    mro: tuple[type[object], ...] = type.__dict__["__mro__"].__get__(owner, type(owner))
+    for declaring_type in mro:
+        namespace = type.__dict__["__dict__"].__get__(
+            declaring_type, type(declaring_type)
+        )
+        if "on_registration_result" in namespace:
+            callback = namespace["on_registration_result"]
+            bind = getattr(callback, "__get__", None)
+            return bind(plugin, type(plugin)) if bind is not None else callback
+    return None
 
 
 def _validate_exclusive_groups(
@@ -151,10 +177,11 @@ def _validate_exclusive_groups(
     """Reject competing instrumentation before any lifecycle hooks run."""
     groups: dict[str, type[DurableInstrumentationPlugin]] = {}
     for plugin_type in plugin_types:
-        if not _registration_api_enabled(plugin_type):
+        owner = _registration_api_owner(plugin_type)
+        if owner is None:
             continue
         try:
-            group = getattr(plugin_type, "exclusive_group", None)
+            group = getattr(owner, "exclusive_group", None)
         except Exception as error:
             raise PluginLoadError(
                 f"Cannot read exclusive_group for {_qualified_class_name(plugin_type)}."
@@ -212,10 +239,11 @@ def _notify_registration_result(
 ) -> None:
     """Let a plugin release rejected constructor resources without failing loading."""
     for plugin in plugins:
-        if not _registration_api_enabled(type(plugin)):
+        owner = _registration_api_owner(type(plugin))
+        if owner is None:
             continue
         try:
-            callback = getattr(plugin, "on_registration_result", None)
+            callback = _registration_result_callback(plugin, owner)
             if callable(callback):
                 callback(registered)
         except Exception:
