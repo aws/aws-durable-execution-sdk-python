@@ -167,6 +167,12 @@ def _validate_exclusive_groups(
                 "must declare exclusive_group as None or a non-empty string."
             )
         if (previous := groups.get(group)) is not None:
+            if previous is plugin_type:
+                raise PluginLoadError(
+                    f"Durable instrumentation plugin {_qualified_class_name(plugin_type)} "
+                    f"is registered more than once in exclusive group '{group}'. "
+                    "Register this plugin only once in plugins."
+                )
             raise PluginLoadError(
                 f"Durable instrumentation plugins {_qualified_class_name(previous)} "
                 f"and {_qualified_class_name(plugin_type)} are mutually exclusive "

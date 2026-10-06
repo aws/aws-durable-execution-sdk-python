@@ -501,6 +501,57 @@ def test_explicit_plugins_in_same_group_are_rejected(reverse: bool) -> None:
     assert "Keep only one" in str(error.value)
 
 
+@pytest.mark.parametrize("same_instance", [False, True])
+def test_repeated_explicit_exclusive_plugin_type_is_rejected(
+    same_instance: bool,
+) -> None:
+    plugin = _ExclusivePluginA()
+    duplicate = plugin if same_instance else _ExclusivePluginA()
+
+    with pytest.raises(PluginLoadError) as error:
+        load_configured_plugins([plugin, duplicate], environment={})
+
+    message = str(error.value)
+    assert "_ExclusivePluginA" in message
+    assert "registered more than once in exclusive group 'test-telemetry'" in message
+    assert "Register this plugin only once" in message
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_discovery_preserves_first_registration_of_exclusive_type(
+    explicit: bool,
+) -> None:
+    first_plugin = _ExclusivePluginA()
+    first_factory = Mock(return_value=first_plugin)
+    second_factory = Mock(side_effect=_ExclusivePluginA)
+    entries = [
+        _FakeEntryPoint(
+            "first", _provider(first_factory, plugin_type=_ExclusivePluginA)
+        ),
+        _FakeEntryPoint(
+            "second", _provider(second_factory, plugin_type=_ExclusivePluginA)
+        ),
+    ]
+
+    with patch(
+        "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+        return_value=entries,
+    ):
+        result = load_configured_plugins(
+            [first_plugin] if explicit else None,
+            environment={
+                PLUGIN_ENVIRONMENT_VARIABLE: "second" if explicit else "first,second"
+            },
+        )
+
+    assert result == [first_plugin]
+    second_factory.assert_not_called()
+    if explicit:
+        first_factory.assert_not_called()
+    else:
+        first_factory.assert_called_once_with()
+
+
 def test_unrelated_plugins_can_accompany_exclusive_plugin() -> None:
     plugins = [_PluginA(), _ExclusivePluginA(), _PluginB()]
     assert load_configured_plugins(plugins, environment={}) == plugins
