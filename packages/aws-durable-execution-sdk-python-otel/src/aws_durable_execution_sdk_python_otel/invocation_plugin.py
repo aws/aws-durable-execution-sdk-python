@@ -16,6 +16,7 @@ from aws_durable_execution_sdk_python.plugin import (
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
+    OperationStatus,
     OperationType,
     UserFunctionEndInfo,
     UserFunctionOutcome,
@@ -698,7 +699,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         invocation_span = self._get_span(None)
         if invocation_span:
             invocation_span.set_attribute(
-                "durable.invocation.status", info.status.value
+                "durable.invocation.status",
+                "RETRYING"
+                if info.status is InvocationStatus.RETRY
+                else info.status.value,
             )
             # Span status mapping: SUCCEEDED/PENDING -> OK, FAILED -> ERROR,
             # RETRY -> UNSET. RETRY is left UNSET because the plugin interface
@@ -802,7 +806,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             span.record_exception(
                 Exception(info.error.message or info.error.type or "Unknown error")
             )
-        else:
+        elif info.status is OperationStatus.SUCCEEDED:
             span.set_status(StatusCode.OK)
 
         self._end_span(info.operation_id, info.end_time)

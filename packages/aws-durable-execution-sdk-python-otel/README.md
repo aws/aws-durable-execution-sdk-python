@@ -318,6 +318,17 @@ The resolved decision is applied to Workflow, Invocation, operation, and attempt
 spans. This avoids independently querying stateful or ratio-based samplers for
 each durable span in the same invocation.
 
+### Status attributes
+
+`durable.invocation.status` uses `RETRYING` when the core plugin hook reports
+`InvocationStatus.RETRY`. The core enum remains unchanged. Operation spans use
+OTel `OK` only for `SUCCEEDED`, `ERROR` when error details are delivered, and
+`UNSET` for other outcomes without error details, including `FAILED`,
+`CANCELLED`, `TIMED_OUT`, and `STOPPED`. The original durable operation status
+remains in `durable.operation.status`.
+
+### Invocation context isolation
+
 Invocation hooks retain their caller thread and registration order. With the
 updated core, invocation-local context-variable bindings are isolated from the
 host: hooks see the incoming context and the handler receives their resulting
@@ -331,7 +342,6 @@ hook or handler-scope entry raises, subsequent setup and the handler retain the
 bindings from before that hook. Successful scopes still clean up in their original
 context, preserving token ownership. This isolates context-variable bindings;
 it does not undo a plugin's mutations to shared objects or external side effects.
-
 
 ### Log Correlation
 
