@@ -6,6 +6,7 @@ on:
       - '.github/scripts/build_lambda_layer.py'
       - '.github/scripts/check_otel_wheel_dependencies.py'
       - '.github/scripts/parse_sdk_branch.py'
+      - '.github/scripts/js_examples/**'
       - '.github/scripts/tests/**'
       - '.github/workflows/ai-pr-review.yml'
       - '.github/workflows/opentelemetry-conformance-tests.yml'
@@ -17,6 +18,7 @@ on:
       - '.github/scripts/build_lambda_layer.py'
       - '.github/scripts/check_otel_wheel_dependencies.py'
       - '.github/scripts/parse_sdk_branch.py'
+      - '.github/scripts/js_examples/**'
       - '.github/scripts/tests/**'
       - '.github/workflows/ai-pr-review.yml'
       - '.github/workflows/opentelemetry-conformance-tests.yml'
@@ -52,7 +54,7 @@ jobs:
     - name: Install test dependencies
       # build_lambda_layer.py shells out to `python -m pip`; a uv-created venv
       # has no pip, so install it alongside the test dependencies.
-      run: uv pip install packaging pytest pip
+      run: uv pip install packaging pytest pip PyYAML==6.0.2
 
     - name: Run script tests
       run: |
@@ -60,5 +62,6 @@ jobs:
           .github/scripts/tests/test_ai_pr_review_workflow.py \
           .github/scripts/tests/test_build_lambda_layer.py \
           .github/scripts/tests/test_check_otel_wheel_dependencies.py \
+          .github/scripts/tests/test_js_examples.py \
           .github/scripts/tests/test_opentelemetry_conformance_workflow.py \
           .github/scripts/tests/test_parse_sdk_branch.py
