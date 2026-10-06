@@ -409,7 +409,9 @@ class DurableInstrumentationPlugin:
         order on success, failure, or suspension. They are for context binding,
         not exception handling: cleanup receives no handler exception and cannot
         suppress or replace the handler's outcome. Existing invocation hooks keep
-        their original thread and ordering. Older cores ignore this optional hook.
+        their original thread and ordering. Failed setup bindings are discarded;
+        successful scopes are closed in the Context where they entered so their
+        ContextVar tokens remain valid. Older cores ignore this optional hook.
         """
         return contextlib.nullcontext()
 
@@ -479,6 +481,8 @@ class PluginExecutor:
         self._executor: ThreadPoolExecutor | None = None
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
+        self._startup_context: contextvars.Context | None = None
+        self._invocation_contexts: list[contextvars.Context | None] = []
 
     @contextlib.contextmanager
     def run(self):
@@ -492,12 +496,14 @@ class PluginExecutor:
         finally:
             self._invocation_status = None
             self._operations_provider = None
+            self._startup_context = None
+            self._invocation_contexts.clear()
             # Shut down the thread pool, waiting for pending tasks to complete.
             if self._executor:
                 self._executor.shutdown(wait=True)
 
     @staticmethod
-    def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> None:
+    def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> bool:
         """Invoke the appropriate plugin callback. Runs inside the thread pool."""
         try:
             match info:
@@ -520,14 +526,44 @@ class PluginExecutor:
         except Exception:
             # log and ignore the exception
             logger.exception("Plugin %s exception ignored", plugin.__class__.__name__)
+            return False
+        return True
 
     def execute_plugins(self, info, sync):
         if not self._executor:
             return
-        for plugin in self._plugins:
-            if sync:
-                # this is called synchronously, so plugins will be able to manipulate thread local objects
-                self._dispatch_plugin(plugin, info)
+        if sync and isinstance(info, InvocationStartInfo):
+            self._startup_context = None
+            self._invocation_contexts.clear()
+        for index, plugin in enumerate(self._plugins):
+            if sync and isinstance(info, InvocationStartInfo):
+                owner = self._startup_context
+                before = (
+                    owner.copy() if owner is not None else contextvars.copy_context()
+                )
+                self._invocation_contexts.append(owner)
+                succeeded = (
+                    owner.run(self._dispatch_plugin, plugin, info)
+                    if owner is not None
+                    else self._dispatch_plugin(plugin, info)
+                )
+                if not succeeded:
+                    # A failing hook may have left new bindings with no reset token.
+                    # Continue setup and the handler in the pre-hook snapshot.
+                    self._startup_context = before
+            elif sync:
+                # End hooks must reset tokens in the Context that created them,
+                # even when a failed start hook moved later setup to a snapshot.
+                owner = (
+                    self._invocation_contexts[index]
+                    if isinstance(info, InvocationEndInfo)
+                    and index < len(self._invocation_contexts)
+                    else None
+                )
+                if owner is not None:
+                    owner.run(self._dispatch_plugin, plugin, info)
+                else:
+                    self._dispatch_plugin(plugin, info)
             else:
                 # this is called asynchronously, so plugins cannot manipulate thread local objects
                 self._executor.submit(self._dispatch_plugin, plugin, info)
@@ -535,9 +571,10 @@ class PluginExecutor:
     @contextlib.contextmanager
     def _safe_handler_context(
         self, plugin: DurableInstrumentationPlugin, info: InvocationStartInfo
-    ) -> Iterator[None]:
+    ) -> Iterator[bool]:
         # Old plugin objects may not inherit this core's new optional method.
         scope = None
+        succeeded = True
         try:
             factory = getattr(plugin, "handler_context", None)
             if factory is not None:
@@ -545,11 +582,12 @@ class PluginExecutor:
                 scope.__enter__()
         except Exception:
             scope = None
+            succeeded = False
             logger.exception(
                 "Plugin %s handler context failed", plugin.__class__.__name__
             )
         try:
-            yield
+            yield succeeded
         finally:
             if scope is not None:
                 try:
@@ -562,13 +600,24 @@ class PluginExecutor:
 
     def run_handler(self, handler: Callable[..., Any], *args: Any) -> Any:
         """Run the user handler inside optional, balanced plugin context scopes."""
-        with contextlib.ExitStack() as scopes:
-            if self._invocation_status is not None:
-                for plugin in self._plugins:
-                    scopes.enter_context(
-                        self._safe_handler_context(plugin, self._invocation_status)
-                    )
+        if not self._plugins or self._invocation_status is None:
             return handler(*args)
+        owner = (
+            self._startup_context.copy()
+            if self._startup_context is not None
+            else contextvars.copy_context()
+        )
+        with contextlib.ExitStack() as scopes:
+            for plugin in self._plugins:
+                before = owner.copy()
+                scope = self._safe_handler_context(plugin, self._invocation_status)
+                succeeded = owner.run(scope.__enter__)
+                # Keep finalizers with their entry Context: ContextVar tokens
+                # cannot be reset in a copy, even when its bindings are identical.
+                scopes.callback(owner.run, scope.__exit__, None, None, None)
+                if not succeeded:
+                    owner = before
+            return owner.run(handler, *args)
 
     def _snapshot_operation_infos(
         self,

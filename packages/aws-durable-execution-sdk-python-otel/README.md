@@ -317,7 +317,11 @@ plugin fails during setup or cleanup. Plugins must not use invocation context
 bindings to mutate the host context after the invocation has returned. Older
 supported cores retain their existing lifecycle behavior, including the
 execution-view limitation when later plugins open invocation context scopes.
-The new isolation applies only when plugins are registered.
+The new isolation applies only when plugins are registered. If an invocation-start
+hook or handler-scope entry raises, subsequent setup and the handler retain the
+bindings from before that hook. Successful scopes still clean up in their original
+context, preserving token ownership. This isolates context-variable bindings;
+it does not undo a plugin's mutations to shared objects or external side effects.
 
 
 ### Log Correlation

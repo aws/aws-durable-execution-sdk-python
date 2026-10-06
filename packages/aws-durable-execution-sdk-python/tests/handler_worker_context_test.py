@@ -22,9 +22,9 @@ from aws_durable_execution_sdk_python.plugin import (
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "retry"])
-@pytest.mark.parametrize("with_plugin", [False, True])
+@pytest.mark.parametrize("plugin_mode", ["none", "healthy", "partial-failure"])
 def test_handler_worker_preserves_context_and_restores_its_caller(
-    monkeypatch: pytest.MonkeyPatch, outcome: str, with_plugin: bool
+    monkeypatch: pytest.MonkeyPatch, outcome: str, plugin_mode: str
 ) -> None:
     marker = contextvars.ContextVar("handler-worker-context", default="worker-empty")
     seen: list[str] = []
@@ -36,6 +36,8 @@ def test_handler_worker_preserves_context_and_restores_its_caller(
 
         def on_invocation_start(self, info: InvocationStartInfo) -> None:
             self.token = marker.set("invocation-start")
+            if plugin_mode == "partial-failure":
+                raise ValueError("partial plugin setup")
 
         def on_invocation_end(self, info: InvocationEndInfo) -> None:
             statuses.append(info.status)
@@ -76,7 +78,9 @@ def test_handler_worker_preserves_context_and_restores_its_caller(
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
     client = Mock()
     handler = durable_execution(
-        body, boto3_client=client, plugins=[ClaimPlugin()] if with_plugin else []
+        body,
+        boto3_client=client,
+        plugins=[ClaimPlugin()] if plugin_mode != "none" else [],
     )
     event = {
         "DurableExecutionArn": "test-arn/handler-context",
@@ -115,8 +119,10 @@ def test_handler_worker_preserves_context_and_restores_its_caller(
         marker.reset(token)
     assert len(worker_boundaries) == 1
     worker_before, worker_after = worker_boundaries[0]
-    if with_plugin:
-        assert seen == ["invocation-start"]
+    if plugin_mode != "none":
+        assert seen == [
+            "caller" if plugin_mode == "partial-failure" else "invocation-start"
+        ]
         assert worker_after == worker_before
         assert worker_after != "worker-mutation"
         assert statuses == [
@@ -249,7 +255,7 @@ def test_invocation_context_scopes_do_not_escape_to_host(
     @executor.handle_durable_output
     def invoke(_event: Any, _context: Any) -> dict[str, str]:
         executor.on_invocation_start("test", True, datetime.now(UTC), None)
-        assert marker.get() == names[-1]
+        assert executor.run_handler(marker.get) == names[-1]
         if outcome == "retry":
             raise handler_failure
         return expected_output
@@ -292,3 +298,126 @@ def test_no_plugin_invocation_keeps_original_caller_context_semantics() -> None:
         assert marker.get() == "caller-side-change"
     finally:
         marker.reset(token)
+
+
+@pytest.mark.parametrize("stage", ["start", "factory", "enter"])
+@pytest.mark.parametrize("bad_first", [False, True])
+@pytest.mark.parametrize("outcome", ["SUCCEEDED", "PENDING", "FAILED", "retry"])
+def test_failed_plugin_setup_discards_partial_context_bindings(
+    stage: str, bad_first: bool, outcome: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Keep healthy bindings, unset bindings, hook order, and token ownership."""
+    from contextlib import nullcontext
+    from datetime import UTC, datetime
+    from typing import ContextManager
+    from aws_durable_execution_sdk_python.plugin import PluginExecutor
+
+    marker = contextvars.ContextVar("partial-setup", default="default")
+    new_binding = contextvars.ContextVar[str]("partial-setup-no-default")
+    events: list[tuple[str, str]] = []
+    cleanup: list[str] = []
+    healthy_inputs: list[tuple[str, str | None]] = []
+
+    class Scope:
+        def __init__(self, plugin: SetupPlugin) -> None:
+            self.plugin = plugin
+
+        def __enter__(self) -> None:
+            self.plugin.bind("enter")
+
+        def __exit__(self, *_args: Any) -> None:
+            self.plugin.reset("exit")
+
+    class SetupPlugin(DurableInstrumentationPlugin):
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.token: contextvars.Token[str] | None = None
+
+        def bind(self, where: str) -> None:
+            events.append((where, self.name))
+            if self.name == "healthy":
+                healthy_inputs.append((marker.get(), new_binding.get(None)))
+            self.token = marker.set(self.name)
+            if self.name == "bad":
+                new_binding.set("partial")
+                raise ValueError("partial plugin setup")
+
+        def reset(self, where: str) -> None:
+            events.append((where, self.name))
+            assert self.token is not None
+            marker.reset(self.token)
+            self.token = None
+            cleanup.append(self.name)
+
+        def on_invocation_start(self, _info: InvocationStartInfo) -> None:
+            if stage == "start":
+                self.bind("start")
+
+        def on_invocation_end(self, _info: InvocationEndInfo) -> None:
+            if stage == "start":
+                self.reset("end")
+
+        def handler_context(self, _info: InvocationStartInfo) -> ContextManager[None]:
+            if stage == "start":
+                return nullcontext()
+            if self.name == "bad" and stage == "factory":
+                self.bind("factory")
+            return Scope(self)
+
+    names = ["bad", "healthy"] if bad_first else ["healthy", "bad"]
+    executor = PluginExecutor([SetupPlugin(name) for name in names])
+    output = {"Status": outcome}
+    failure = InvocationError("original retry")
+    handler_failure = RuntimeError("original handler error")
+
+    def body() -> dict[str, str]:
+        assert marker.get() == "healthy"
+        with pytest.raises(LookupError):
+            new_binding.get()
+        if outcome == "retry":
+            raise failure
+        if outcome == "FAILED":
+            raise handler_failure
+        return output
+
+    @executor.handle_durable_output
+    def invoke(_event: Any, _context: Any) -> dict[str, str]:
+        executor.on_invocation_start("partial-setup", True, datetime.now(UTC), None)
+        try:
+            return executor.run_handler(body)
+        except RuntimeError as error:
+            assert error is handler_failure
+            return output
+
+    token = marker.set("incoming")
+    try:
+        for _ in range(2):
+            if outcome == "retry":
+                with pytest.raises(InvocationError) as caught:
+                    invoke({}, None)
+                assert caught.value is failure
+            else:
+                assert invoke({}, None) is output
+            assert marker.get() == "incoming"
+            with pytest.raises(LookupError):
+                new_binding.get()
+    finally:
+        marker.reset(token)
+    assert healthy_inputs == [("incoming", None)] * 2
+    assert cleanup == (names if stage == "start" else ["healthy"]) * 2
+    setup = "start" if stage == "start" else "enter"
+    expected_setup = [
+        ("factory" if name == "bad" and stage == "factory" else setup, name)
+        for name in names
+    ]
+    expected_cleanup = (
+        [("end", name) for name in names] if stage == "start" else [("exit", "healthy")]
+    )
+    assert events == (expected_setup + expected_cleanup) * 2
+    # A token reset in the wrong Context is caught by the SDK, so explicitly
+    # check diagnostics and successful cleanup rather than relying on raises.
+    errors = [
+        record.exc_info for record in caplog.records if record.exc_info is not None
+    ]
+    assert len(errors) == 2
+    assert all(str(error[1]) == "partial plugin setup" for error in errors)
