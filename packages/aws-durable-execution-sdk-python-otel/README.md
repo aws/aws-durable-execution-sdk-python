@@ -323,6 +323,15 @@ The resolved decision is applied to Workflow, Invocation, operation, and attempt
 spans. This avoids independently querying stateful or ratio-based samplers for
 each durable span in the same invocation.
 
+### Status attributes
+
+`durable.invocation.status` uses `RETRYING` when the core plugin hook reports
+`InvocationStatus.RETRY`. The core enum remains unchanged. Operation spans use
+OTel `OK` only for `SUCCEEDED`, `ERROR` when error details are delivered, and
+`UNSET` for other outcomes without error details, including `FAILED`,
+`CANCELLED`, `TIMED_OUT`, and `STOPPED`. The original durable operation status
+remains in `durable.operation.status`.
+
 ### Log Correlation
 
 When `enrich_logger=True` (the default), the plugin installs a logging filter on

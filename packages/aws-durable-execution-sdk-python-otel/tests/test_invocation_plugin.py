@@ -563,7 +563,11 @@ def test_invocation_span_status_reflects_execution_status(
     invocation = next(s for s in spans if s.name == "Invocation")
     attributes = invocation.attributes
     assert attributes is not None
-    assert attributes["durable.invocation.status"] == invocation_status.value
+    assert attributes["durable.invocation.status"] == (
+        "RETRYING"
+        if invocation_status is InvocationStatus.RETRY
+        else invocation_status.value
+    )
     assert invocation.status.status_code is expected_span_status
 
 
