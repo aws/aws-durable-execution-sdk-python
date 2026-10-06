@@ -123,6 +123,8 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             span).
     """
 
+    __durable_handler_context_api__ = 1
+
     def __init__(self, config: OtelPluginConfig | None = None) -> None:
         self._config = config or OtelPluginConfig()
         self._context_extractor: ContextExtractor = (

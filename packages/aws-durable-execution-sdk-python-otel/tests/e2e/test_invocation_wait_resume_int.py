@@ -26,6 +26,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     StepDetails,
 )
+from aws_durable_execution_sdk_python import plugin as core_plugin_api
 from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     derive_workflow_span_id,
@@ -272,7 +273,10 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
     # the legacy lane continues checking its supported combinations above.
     + (
         [(ExecutionOtelPlugin, True)]
-        if hasattr(DurableInstrumentationPlugin, "handler_context")
+        if getattr(
+            core_plugin_api, "DURABLE_INSTRUMENTATION_HANDLER_CONTEXT_API_VERSION", None
+        )
+        == 1
         else []
     ),
 )
@@ -292,7 +296,12 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
     # The documented PyPI compatibility environment deliberately uses an older
     # core. Keep exercising its supported operation tracing and lifecycle while
     # asserting the new handler contract only when that core exposes the scope.
-    supports_handler_context = hasattr(DurableInstrumentationPlugin, "handler_context")
+    supports_handler_context = (
+        getattr(
+            core_plugin_api, "DURABLE_INSTRUMENTATION_HANDLER_CONTEXT_API_VERSION", None
+        )
+        == 1
+    )
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))

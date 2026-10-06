@@ -10,7 +10,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, ContextManager, MutableMapping, cast
+from typing import Any, Callable, MutableMapping, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -30,6 +30,7 @@ from aws_durable_execution_sdk_python.types import LambdaContext
 logger = logging.getLogger(__name__)
 
 DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION = 1
+DURABLE_INSTRUMENTATION_HANDLER_CONTEXT_API_VERSION = 1
 
 
 class InvocationStatus(Enum):
@@ -401,20 +402,6 @@ class DurableInstrumentationPlugin:
         """
         pass
 
-    def handler_context(self, info: InvocationStartInfo) -> ContextManager[None]:
-        """Optional scope around the top-level handler on its worker thread.
-
-        The worker already carries a copy of the caller's context after the
-        invocation-start hooks. Scopes enter in plugin order and close in reverse
-        order on success, failure, or suspension. They are for context binding,
-        not exception handling: cleanup receives no handler exception and cannot
-        suppress or replace the handler's outcome. Existing invocation hooks keep
-        their original thread and ordering. Failed setup bindings are discarded;
-        successful scopes are closed in the Context where they entered so their
-        ContextVar tokens remain valid. Older cores ignore this optional hook.
-        """
-        return contextlib.nullcontext()
-
     def on_operation_start(self, info: OperationStartInfo) -> None:
         """
         Called before an operation's START checkpoint is queued, or when a
@@ -473,6 +460,18 @@ class DurableInstrumentationPluginProvider:
     plugin_type: type[DurableInstrumentationPlugin]
     factory: Callable[[], DurableInstrumentationPlugin]
     plugin_api_version: int
+
+
+def _handler_context_api_enabled(
+    plugin_type: type[DurableInstrumentationPlugin],
+) -> bool:
+    """Read only the concrete class namespace, bypassing metaclass descriptors."""
+    namespace = type.__dict__["__dict__"].__get__(plugin_type, type(plugin_type))
+    version = namespace.get("__durable_handler_context_api__")
+    return (
+        type(version) is int
+        and version == DURABLE_INSTRUMENTATION_HANDLER_CONTEXT_API_VERSION
+    )
 
 
 class PluginExecutor:
@@ -576,7 +575,13 @@ class PluginExecutor:
         scope = None
         succeeded = True
         try:
-            factory = getattr(plugin, "handler_context", None)
+            # Old plugins may have an unrelated helper/property with this name.
+            # Never even inspect it unless this concrete class explicitly opts in.
+            factory = (
+                getattr(plugin, "handler_context", None)
+                if _handler_context_api_enabled(type(plugin))
+                else None
+            )
             if factory is not None:
                 scope = factory(info)
                 scope.__enter__()

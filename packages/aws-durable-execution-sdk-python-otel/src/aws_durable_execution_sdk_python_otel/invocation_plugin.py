@@ -106,6 +106,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             provider installed by the ADOT Lambda layer).
     """
 
+    __durable_handler_context_api__ = 1
+
     DEFAULT_INSTRUMENT_NAME = "aws-durable-execution-sdk-python"
 
     def __init__(self, config: OtelPluginConfig | None = None) -> None:

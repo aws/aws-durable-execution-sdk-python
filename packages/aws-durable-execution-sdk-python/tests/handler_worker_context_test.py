@@ -155,6 +155,8 @@ def test_optional_handler_scopes_are_balanced_and_cannot_change_outcome(
     events: list[str] = []
 
     class ScopePlugin(DurableInstrumentationPlugin):
+        __durable_handler_context_api__ = 1
+
         def __init__(self, name: str):
             self.name = name
 
@@ -329,6 +331,8 @@ def test_failed_plugin_setup_discards_partial_context_bindings(
             self.plugin.reset("exit")
 
     class SetupPlugin(DurableInstrumentationPlugin):
+        __durable_handler_context_api__ = 1
+
         def __init__(self, name: str) -> None:
             self.name = name
             self.token: contextvars.Token[str] | None = None
@@ -421,3 +425,138 @@ def test_failed_plugin_setup_discards_partial_context_bindings(
     ]
     assert len(errors) == 2
     assert all(str(error[1]) == "partial plugin setup" for error in errors)
+
+
+@pytest.mark.parametrize("shape", ["helper", "property", "dynamic"])
+def test_unopted_legacy_handler_context_is_never_inspected(shape: str) -> None:
+    from contextlib import contextmanager
+    from collections.abc import Iterator
+    from datetime import UTC, datetime
+    from aws_durable_execution_sdk_python.plugin import PluginExecutor
+
+    calls: list[str] = []
+
+    @contextmanager
+    def helper(_info: InvocationStartInfo) -> Iterator[None]:
+        calls.append("helper")
+        yield
+
+    def property_getter(_self: Any) -> Any:
+        calls.append("property")
+        return helper
+
+    def dynamic_getter(_self: Any, name: str) -> Any:
+        if name == "handler_context":
+            calls.append("dynamic")
+            return "legacy-business-value"
+        raise AttributeError(name)
+
+    members_by_shape: dict[str, dict[str, Any]] = {
+        "helper": {"handler_context": staticmethod(helper)},
+        "property": {"handler_context": property(property_getter)},
+        "dynamic": {"__getattr__": dynamic_getter},
+    }
+    plugin_type = type(
+        "Legacy", (DurableInstrumentationPlugin,), members_by_shape[shape]
+    )
+    plugin = plugin_type()
+    if shape == "dynamic":
+        assert plugin.handler_context == "legacy-business-value"
+        calls.clear()
+    executor = PluginExecutor([plugin])
+    with executor.run():
+        executor.on_invocation_start("legacy-helper", True, datetime.now(UTC), None)
+        assert executor.run_handler(lambda: list(calls)) == []
+    assert calls == []
+
+
+@pytest.mark.parametrize("marker", [None, 0, 2, True, "1", property(lambda _: 1)])
+def test_handler_scope_requires_literal_class_local_version(marker: Any) -> None:
+    from contextlib import nullcontext
+    from datetime import UTC, datetime
+    from aws_durable_execution_sdk_python.plugin import PluginExecutor
+
+    calls: list[str] = []
+
+    def helper(_self: Any, _info: InvocationStartInfo) -> Any:
+        calls.append("scope")
+        return nullcontext()
+
+    plugin_type = type(
+        "Legacy",
+        (DurableInstrumentationPlugin,),
+        {"__durable_handler_context_api__": marker, "handler_context": helper},
+    )
+    executor = PluginExecutor([plugin_type()])
+    with executor.run():
+        executor.on_invocation_start("invalid-marker", True, datetime.now(UTC), None)
+        assert executor.run_handler(lambda: "ok") == "ok"
+    assert calls == []
+
+
+def test_handler_scope_opt_in_is_not_inherited_or_taken_from_instance() -> None:
+    from contextlib import contextmanager
+    from collections.abc import Iterator
+    from datetime import UTC, datetime
+    from aws_durable_execution_sdk_python.plugin import PluginExecutor
+
+    marker = contextvars.ContextVar("explicit-scope", default="outside")
+    events: list[str] = []
+
+    class OptedPlugin(DurableInstrumentationPlugin):
+        __durable_handler_context_api__ = 1
+
+        @contextmanager
+        def handler_context(self, _info: InvocationStartInfo) -> Iterator[None]:
+            events.append("enter")
+            token = marker.set("inside")
+            try:
+                yield
+            finally:
+                marker.reset(token)
+                events.append("exit")
+
+    class LegacySubclass(OptedPlugin):
+        pass
+
+    class ExplicitSubclass(OptedPlugin):
+        __durable_handler_context_api__ = 1
+
+    for plugin, expected in [
+        (OptedPlugin(), "inside"),
+        (LegacySubclass(), "outside"),
+        (ExplicitSubclass(), "inside"),
+    ]:
+        # Assigning a marker to an instance cannot accidentally enable the hook.
+        plugin.__durable_handler_context_api__ = 1
+        executor = PluginExecutor([plugin])
+        with executor.run():
+            executor.on_invocation_start("subclass", True, datetime.now(UTC), None)
+            assert executor.run_handler(marker.get) == expected
+        assert marker.get() == "outside"
+    assert events == ["enter", "exit", "enter", "exit"]
+
+
+def test_handler_opt_in_does_not_trigger_legacy_metaclass_descriptors() -> None:
+    from datetime import UTC, datetime
+    from aws_durable_execution_sdk_python.plugin import PluginExecutor
+
+    reads: list[str] = []
+
+    def namespace(_cls: Any) -> Any:
+        reads.append("metaclass-dict")
+        raise RuntimeError("legacy namespace")
+
+    def helper(_self: Any, _info: Any) -> Any:
+        reads.append("legacy-helper")
+        raise RuntimeError("legacy helper")
+
+    meta = type("LegacyMeta", (type,), {"__dict__": property(namespace)})
+    plugin_type = meta(
+        "Legacy", (DurableInstrumentationPlugin,), {"handler_context": helper}
+    )
+    executor = PluginExecutor([plugin_type()])
+    with executor.run():
+        executor.on_invocation_start("metaclass", True, datetime.now(UTC), None)
+        assert executor.run_handler(lambda: "ok") == "ok"
+    assert reads == []

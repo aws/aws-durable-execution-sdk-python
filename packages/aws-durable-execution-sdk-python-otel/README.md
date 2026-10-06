@@ -166,6 +166,11 @@ span current only while the handler runs. The scope closes on the same worker in
 reverse plugin order, including on failure and suspension, without changing the
 invocation-hook caller. Older cores ignore this optional scope and retain their
 existing behavior; install the updated core as well to get handler context propagation.
+The bundled OTel classes explicitly opt in with `__durable_handler_context_api__ = 1`.
+Custom subclasses must repeat that literal marker on their own concrete class to
+use the scope; inherited or instance markers are ignored. Unopted legacy helpers
+and properties with the same name are never inspected. Older cores ignore the
+marker without importing any new core API.
 Existing plugin registration, factory lifetime, and checkpoint formats are unchanged.
 
 ### 3. In your Lambda handler (index.py)
