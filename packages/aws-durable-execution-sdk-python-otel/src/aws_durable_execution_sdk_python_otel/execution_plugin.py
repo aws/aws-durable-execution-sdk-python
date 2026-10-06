@@ -43,6 +43,7 @@ from aws_durable_execution_sdk_python.plugin import (
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
+    OperationStatus,
     OperationType,
     UserFunctionEndInfo,
     UserFunctionOutcome,
@@ -628,7 +629,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         if self._invocation_span is not None:
             self._invocation_span.set_attribute(
                 "durable.invocation.status",
-                info.status.value if info.status else "",
+                "RETRYING"
+                if info.status is InvocationStatus.RETRY
+                else info.status.value,
             )
             if info.status in (InvocationStatus.SUCCEEDED, InvocationStatus.PENDING):
                 self._invocation_span.set_status(StatusCode.OK)
@@ -747,7 +750,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             span.record_exception(
                 Exception(info.error.message or info.error.type or "Unknown error")
             )
-        else:
+        elif info.status is OperationStatus.SUCCEEDED:
             span.set_status(StatusCode.OK)
 
         self._note_parent_end(info.parent_id, end_time)
