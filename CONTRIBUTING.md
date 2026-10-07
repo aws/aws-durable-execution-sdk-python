@@ -75,7 +75,8 @@ hatch run dev-examples:test    # run examples tests only
 To verify packages work against the published PyPI version of the core SDK (rather than the local workspace):
 
 ```bash
-hatch run test-pypi-otel:test       # test otel against PyPI core SDK
+hatch run test-pypi-otel:test       # test new OTel capabilities against capable installed core
+hatch run test-pypi-otel-legacy:test # valid registrations/lifecycles on supported core 2.0.x
 hatch run test-pypi-examples:test   # test examples against PyPI core SDK
 ```
 
