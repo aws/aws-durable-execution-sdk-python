@@ -34,7 +34,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
-from typing import Any
+from typing import Any, ClassVar
 
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -91,7 +91,10 @@ from aws_durable_execution_sdk_python_otel.execution_trace_context import (
     canonical_trace_id,
 )
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
-from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
+from aws_durable_execution_sdk_python_otel.log_filter import (
+    install_log_filter,
+    uninstall_log_filter,
+)
 from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
 
 
@@ -123,6 +126,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             (globally configured provider, X-Ray extractor, "Workflow" root
             span).
     """
+
+    __durable_registration_api__: ClassVar[int] = 1
+    exclusive_group: ClassVar[str | None] = "aws-durable-execution-otel-view"
 
     def __init__(self, config: OtelPluginConfig | None = None) -> None:
         self._config = config or OtelPluginConfig()
@@ -165,8 +171,18 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._lock = threading.RLock()
         self._tracing_enabled = False
 
+        self._registration_accepted = False
         if self._config.enrich_logger:
             install_log_filter(self)
+
+    def on_registration_result(self, registered: bool) -> None:
+        """Preserve accepted resources, releasing only a discarded constructor."""
+        if registered:
+            self._registration_accepted = True
+            if self._config.enrich_logger:
+                install_log_filter(self)
+        elif not self._registration_accepted:
+            uninstall_log_filter(self)
 
     def _bind_sdk_tracer(self) -> bool:
         """Bind to an SDK tracer, retrying a deferred global provider."""
@@ -414,6 +430,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     # ------------------------------------------------------------------
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         logger.debug("Durable invocation started: %s", info)
+        self._registration_accepted = True
         self._reset_state()
         if info.execution_start_time is None:
             logger.warning(
@@ -487,6 +504,10 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                     self._workflow_span, otel_context.get_current()
                 ),
             )
+
+        # Cover handlers installed after construction as well.
+        if self._config.enrich_logger:
+            install_log_filter(self)
 
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
         """Install a non-recording placeholder for the execution-scoped Workflow span.

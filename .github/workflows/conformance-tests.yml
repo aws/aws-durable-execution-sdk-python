@@ -32,6 +32,7 @@ concurrency:
   # run against the shared stack.
   group: conformance-tests-global
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
