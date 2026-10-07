@@ -62,6 +62,7 @@ jobs:
     uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@6182cee00ed33ce01e0579066fb31096f988817f
     with:
       language: python
+      runs_on: codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
       resource_prefix: p
       sdk_repository: aws/aws-durable-execution-sdk-python
       sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}
