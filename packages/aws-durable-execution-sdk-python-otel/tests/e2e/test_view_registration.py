@@ -454,3 +454,83 @@ def test_subclass_inherits_view_exclusion_and_rejection_cleanup(
     assert calls == []
     assert factory_calls == []
     assert not exporter.get_finished_spans()
+
+
+@pytest.mark.parametrize("plugin_type", [ExecutionOtelPlugin, InvocationOtelPlugin])
+@pytest.mark.parametrize("registration", ["explicit", "environment", "mixed"])
+@pytest.mark.parametrize("inherited_group", [False, True])
+def test_redeclared_view_group_keeps_inherited_and_own_exclusion(
+    telemetry: tuple[TracerProvider, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_type: type[ExecutionOtelPlugin] | type[InvocationOtelPlugin],
+    registration: str,
+    inherited_group: bool,
+) -> None:
+    class OwnGroupPeer(DurableInstrumentationPlugin):
+        __durable_registration_api__ = 1
+        exclusive_group = "custom-otel-view"
+
+    subclass = type(
+        "CustomOtelView",
+        (plugin_type,),
+        {
+            "__durable_registration_api__": 1,
+            "exclusive_group": "custom-otel-view",
+        },
+    )
+    opposite = (
+        InvocationOtelPlugin
+        if plugin_type is ExecutionOtelPlugin
+        else ExecutionOtelPlugin
+    )
+    peer_type = opposite if inherited_group else OwnGroupPeer
+    provider, exporter = telemetry
+    log_handler = _RecordingHandler()
+    monkeypatch.setattr(logging.getLogger(), "handlers", [log_handler])
+    config = OtelPluginConfig(tracer_provider=provider, enrich_logger=True)
+    factory_calls: list[str] = []
+
+    def peer() -> DurableInstrumentationPlugin:
+        return opposite(config) if inherited_group else OwnGroupPeer()
+
+    def custom_factory() -> DurableInstrumentationPlugin:
+        factory_calls.append("custom")
+        return subclass(config)
+
+    def peer_factory() -> DurableInstrumentationPlugin:
+        factory_calls.append("peer")
+        return peer()
+
+    entries = [
+        SimpleNamespace(
+            name=name,
+            value=f"test:{name}",
+            dist=None,
+            load=lambda cls=cls, factory=factory: DurableInstrumentationPluginProvider(
+                plugin_type=cls,
+                factory=factory,
+                plugin_api_version=DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION,
+            ),
+        )
+        for name, cls, factory in [
+            ("custom", subclass, custom_factory),
+            ("peer", peer_type, peer_factory),
+        ]
+    ]
+    monkeypatch.setattr(
+        "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+        lambda **_: entries,
+    )
+    if registration == "environment":
+        explicit: list[DurableInstrumentationPlugin] = []
+        monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", "custom,peer")
+    elif registration == "mixed":
+        explicit = [subclass(config)]
+        monkeypatch.setenv("DURABLE_EXECUTION_PLUGINS", "peer")
+    else:
+        explicit = [subclass(config), peer()]
+    with pytest.raises(PluginLoadError, match="mutually exclusive"):
+        durable_execution(_handler, plugins=explicit)
+    assert factory_calls == []
+    assert log_handler.filters == []
+    assert not exporter.get_finished_spans()

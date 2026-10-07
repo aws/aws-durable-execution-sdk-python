@@ -68,11 +68,15 @@ may run alongside the selected view; using no OTel plugin is also supported.
 
 The bundled views explicitly declare `__durable_registration_api__ = 1`.
 Custom subclasses inherit their group validation and registration cleanup.
-The closest class declaring the marker supplies the metadata and callback, so
-unrelated subclass fields/helpers named `exclusive_group` or
-`on_registration_result` remain inert. Repeat the marker to intentionally
-customize the contract; an explicit value other than the integer `1` shadows
-the inherited opt-in. Re-accepting a previously rejected bundled instance
+The closest marker gates registration and selects the callback contract; an
+explicit value other than the integer `1` shadows the inherited opt-in.
+Once enabled, each MRO class explicitly declaring the integer `1` contributes
+its resolved `exclusive_group`. A subclass's own group adds to the inherited
+view group rather than replacing it; `None` cannot remove an inherited group.
+Repeated groups count once per plugin. Unmarked classes' unrelated fields/helpers
+named `exclusive_group` or `on_registration_result` remain inert. Repeat the marker
+to add a group or customize the callback, which is still notified once per plugin.
+Re-accepting a previously rejected bundled instance
 restores its constructor-time logger enrichment immediately.
 
 ### 1. ADOT Lambda Layer

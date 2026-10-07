@@ -171,17 +171,21 @@ def _registration_result_callback(
     return None
 
 
-def _validate_exclusive_groups(
-    plugin_types: Sequence[type[DurableInstrumentationPlugin]],
-) -> None:
-    """Reject competing instrumentation before any lifecycle hooks run."""
-    groups: dict[str, type[DurableInstrumentationPlugin]] = {}
-    for plugin_type in plugin_types:
-        owner = _registration_api_owner(plugin_type)
-        if owner is None:
+def _exclusive_groups(plugin_type: type[DurableInstrumentationPlugin]) -> list[str]:
+    """Accumulate opted-in MRO contracts without interpreting legacy fields."""
+    mro: tuple[type[object], ...] = type.__dict__["__mro__"].__get__(
+        plugin_type, type(plugin_type)
+    )
+    groups: list[str] = []
+    for declaring_type in mro:
+        namespace = type.__dict__["__dict__"].__get__(
+            declaring_type, type(declaring_type)
+        )
+        version = namespace.get("__durable_registration_api__")
+        if type(version) is not int or version != 1:
             continue
         try:
-            group = getattr(owner, "exclusive_group", None)
+            group = getattr(declaring_type, "exclusive_group", None)
         except Exception as error:
             raise PluginLoadError(
                 f"Cannot read exclusive_group for {_qualified_class_name(plugin_type)}."
@@ -193,20 +197,35 @@ def _validate_exclusive_groups(
                 f"Durable instrumentation plugin {_qualified_class_name(plugin_type)} "
                 "must declare exclusive_group as None or a non-empty string."
             )
-        if (previous := groups.get(group)) is not None:
-            if previous is plugin_type:
+        # Repeating a marker or a group does not register this one plugin twice.
+        if group not in groups:
+            groups.append(group)
+    return groups
+
+
+def _validate_exclusive_groups(
+    plugin_types: Sequence[type[DurableInstrumentationPlugin]],
+) -> None:
+    """Reject competing instrumentation before any lifecycle hooks run."""
+    groups: dict[str, type[DurableInstrumentationPlugin]] = {}
+    for plugin_type in plugin_types:
+        if _registration_api_owner(plugin_type) is None:
+            continue
+        for group in _exclusive_groups(plugin_type):
+            if (previous := groups.get(group)) is not None:
+                if previous is plugin_type:
+                    raise PluginLoadError(
+                        f"Durable instrumentation plugin {_qualified_class_name(plugin_type)} "
+                        f"is registered more than once in exclusive group '{group}'. "
+                        "Register this plugin only once in plugins."
+                    )
                 raise PluginLoadError(
-                    f"Durable instrumentation plugin {_qualified_class_name(plugin_type)} "
-                    f"is registered more than once in exclusive group '{group}'. "
-                    "Register this plugin only once in plugins."
+                    f"Durable instrumentation plugins {_qualified_class_name(previous)} "
+                    f"and {_qualified_class_name(plugin_type)} are mutually exclusive "
+                    f"(group '{group}'). Keep only one plugin from this group in "
+                    "plugins and DURABLE_EXECUTION_PLUGINS."
                 )
-            raise PluginLoadError(
-                f"Durable instrumentation plugins {_qualified_class_name(previous)} "
-                f"and {_qualified_class_name(plugin_type)} are mutually exclusive "
-                f"(group '{group}'). Keep only one plugin from this group in "
-                "plugins and DURABLE_EXECUTION_PLUGINS."
-            )
-        groups[group] = plugin_type
+            groups[group] = plugin_type
 
 
 def load_configured_plugins(

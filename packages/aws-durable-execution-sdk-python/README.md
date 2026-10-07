@@ -93,17 +93,22 @@ Plugin authors explicitly opt in by declaring
 `__durable_registration_api__ = 1` on a plugin class. That class and its subclasses
 have their optional `exclusive_group` metadata validated and their
 optional `on_registration_result(registered)` callback invoked. A missing group
-or `None` imposes no exclusivity constraint. The callback can release rejected
+or `None` adds no exclusivity constraint. The callback can release rejected
 constructor resources and must preserve resources from earlier accepted use.
 
-The first class declaring the marker in the method resolution order supplies
-the registration contract. Subclasses of the bundled OTel views inherit their
-mutual exclusion and cleanup. Metadata and callbacks come from that declaring
-class, so a subclass's coincidental same-named legacy fields/helpers remain inert.
-A subclass repeats the marker to intentionally customize that contract. An
-explicit marker other than the integer `1` shadows an ancestor's opt-in and
-disables this capability. Plugins with no marker anywhere in their hierarchy
-retain their existing attributes/helpers. The generic plugin base defines
+The first class declaring the marker in the method resolution order gates
+registration and selects the callback contract. An explicit marker other than
+the integer `1` shadows an ancestor's opt-in and disables this capability.
+Once enabled, every class in the MRO explicitly declaring the integer `1`
+contributes its resolved `exclusive_group`. These constraints accumulate:
+repeating the marker with a new group adds to inherited groups rather than
+replacing them, and `None` does not erase an inherited constraint. A group is
+counted once per plugin registration even if several ancestors declare it.
+Unmarked classes' coincidental same-named legacy fields/helpers remain inert.
+Subclasses of the bundled OTel views therefore retain the view group when they
+add their own group. Repeat the marker to add a group or customize the callback;
+the callback is still notified once per plugin. Plugins with no marker anywhere
+in their hierarchy retain their existing attributes/helpers. The generic plugin base defines
 neither attribute nor hook, and provider API version 1 and existing plugin
 lifecycle order are unchanged.
 

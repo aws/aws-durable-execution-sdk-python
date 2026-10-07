@@ -838,6 +838,121 @@ def test_subclass_can_explicitly_customize_registration_contract() -> None:
         load_configured_plugins([child, Child()], environment={})
 
 
+class _CustomExclusivePlugin(DurableInstrumentationPlugin):
+    __durable_registration_api__ = 1
+    exclusive_group = "custom"
+
+
+@pytest.mark.parametrize("discovered", [False, True])
+@pytest.mark.parametrize("inherited_group", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_redeclared_group_adds_to_inherited_exclusion(
+    discovered: bool, inherited_group: bool, reverse: bool
+) -> None:
+    class Child(_ExclusivePluginA):
+        __durable_registration_api__ = 1
+        exclusive_group = "custom"
+
+    competitor = _ExclusivePluginB if inherited_group else _CustomExclusivePlugin
+    classes = [Child, competitor]
+    if reverse:
+        classes.reverse()
+    factories = [Mock(side_effect=cls) for cls in classes]
+    entries = [
+        _FakeEntryPoint(str(index), _provider(factory, plugin_type=cls))
+        for index, (cls, factory) in enumerate(zip(classes, factories))
+    ]
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=entries,
+        ),
+        pytest.raises(PluginLoadError, match="mutually exclusive"),
+    ):
+        load_configured_plugins(
+            None if discovered else [cls() for cls in classes],
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "0,1"} if discovered else {},
+        )
+    for factory in factories:
+        factory.assert_not_called()
+
+
+def test_redeclared_none_does_not_erase_inherited_exclusion() -> None:
+    class Child(_ExclusivePluginA):
+        __durable_registration_api__ = 1
+
+    with patch.object(Child, "exclusive_group", None):
+        with pytest.raises(PluginLoadError, match="mutually exclusive"):
+            load_configured_plugins([Child(), _ExclusivePluginB()], environment={})
+
+
+@pytest.mark.parametrize("legacy_group", [42, property(lambda _: "business-group")])
+def test_group_accumulation_preserves_unmarked_legacy_intermediate(
+    legacy_group: object,
+) -> None:
+    class LegacyMiddle(_ExclusivePluginA):
+        pass
+
+    class Child(LegacyMiddle):
+        __durable_registration_api__ = 1
+        exclusive_group = "custom"
+
+    with patch.object(LegacyMiddle, "exclusive_group", legacy_group):
+        child = Child()
+        assert load_configured_plugins([child], environment={}) == [child]
+        assert vars(LegacyMiddle)["exclusive_group"] is legacy_group
+        with pytest.raises(PluginLoadError, match="mutually exclusive"):
+            load_configured_plugins([child, _ExclusivePluginB()], environment={})
+
+
+@pytest.mark.parametrize("redeclare_same_group", [False, True])
+def test_inherited_group_is_counted_once_per_registration(
+    redeclare_same_group: bool,
+) -> None:
+    namespace: dict[str, object] = {"__durable_registration_api__": 1}
+    if redeclare_same_group:
+        namespace["exclusive_group"] = "test-telemetry"
+    child_type = type("Child", (_ExclusivePluginA,), namespace)
+    child = child_type()
+    assert load_configured_plugins([child], environment={}) == [child]
+    with pytest.raises(PluginLoadError, match="registered more than once"):
+        load_configured_plugins([child, child_type()], environment={})
+
+
+def test_multiple_inheritance_retains_each_opted_in_group() -> None:
+    class Child(_ExclusivePluginA, _CustomExclusivePlugin):
+        pass
+
+    child = Child()
+    assert load_configured_plugins([child], environment={}) == [child]
+    for competitor in [_ExclusivePluginB(), _CustomExclusivePlugin()]:
+        with pytest.raises(PluginLoadError, match="mutually exclusive"):
+            load_configured_plugins([child, competitor], environment={})
+
+
+@pytest.mark.parametrize("marker", [None, 2, True])
+def test_invalid_marker_still_disables_all_inherited_groups(marker: object) -> None:
+    class Child(_ExclusivePluginA):
+        exclusive_group = "custom"
+
+    with patch.object(Child, "__durable_registration_api__", marker):
+        plugins = [Child(), _ExclusivePluginB(), _CustomExclusivePlugin()]
+        assert load_configured_plugins(plugins, environment={}) == plugins
+
+
+def test_multiple_groups_do_not_duplicate_registration_callbacks() -> None:
+    class Child(_RegistrationObserver, _ExclusivePluginA):
+        __durable_registration_api__ = 1
+        exclusive_group = "custom"
+
+    child = Child()
+    assert load_configured_plugins([child], environment={}) == [child]
+    assert child.results == [True]
+    with pytest.raises(PluginLoadError, match="mutually exclusive"):
+        load_configured_plugins([child, _ExclusivePluginB()], environment={})
+    assert child.results == [True, False]
+
+
 @pytest.mark.parametrize("marker", [None, True, "1", 1.0, property(lambda _: 1)])
 def test_invalid_registration_marker_shadows_inherited_opt_in(
     marker: object, monkeypatch: pytest.MonkeyPatch
