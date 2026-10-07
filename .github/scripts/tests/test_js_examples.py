@@ -623,6 +623,58 @@ def test_source_fingerprint_changes_with_local_edits(tmp_path: Path) -> None:
     assert run.source_fingerprint(tmp_path) != untracked
 
 
+@pytest.mark.parametrize("has_microvm_packages", [False, True])
+def test_build_produces_example_workspace_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    has_microvm_packages: bool,
+) -> None:
+    core = "packages/aws-durable-execution-sdk-js"
+    testing = "packages/aws-durable-execution-sdk-js-testing"
+    otel = "packages/aws-durable-execution-sdk-js-otel"
+    extras = "packages/aws-durable-execution-sdk-js-extras"
+    worker = "packages/aws-durable-execution-sdk-js-microvm-worker"
+    examples_package = "packages/aws-durable-execution-sdk-js-examples"
+    packages = [core, testing, otel, examples_package]
+    if has_microvm_packages:
+        packages.extend([extras, worker])
+    for package in packages:
+        directory = tmp_path / package
+        directory.mkdir(parents=True)
+        (directory / "package.json").write_text("{}")
+
+    built: list[str] = []
+
+    def execute(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[1] == "ci":
+            return subprocess.CompletedProcess(args, 0)
+        workspace = args[-1]
+        assert (tmp_path / workspace / "package.json").is_file()
+        if workspace == worker:
+            assert testing in built
+        if workspace == examples_package and has_microvm_packages:
+            # The generator imports extras/microvm and typechecks the worker.
+            # A successful examples build requires both artifacts to exist.
+            assert extras in built
+            assert worker in built
+        built.append(workspace)
+        return subprocess.CompletedProcess(args, 0)
+
+    stamp = tmp_path / "built-stamp"
+    monkeypatch.setattr(run, "_head", lambda _: "test-head")
+    monkeypatch.setattr(run, "state_file", lambda *_: stamp)
+    monkeypatch.setattr(run, "source_fingerprint", lambda _: "fingerprint")
+    monkeypatch.setattr(run.shutil, "which", lambda _: "/fake/npm")
+    monkeypatch.setattr(run.subprocess, "run", execute)
+
+    run.build_js_sdk(tmp_path, force=True)
+
+    assert built[-1] == examples_package
+    assert stamp.read_text() == "fingerprint\n"
+    if not has_microvm_packages:
+        assert built == [core, testing, otel, examples_package]
+
+
 def test_proxy_creates_the_dump_directory(tmp_path: Path) -> None:
     dump_dir = tmp_path / "new" / "dump"
     proxy = invoke_proxy.ProxyServer(0, "http://127.0.0.1:1", dump_dir)
