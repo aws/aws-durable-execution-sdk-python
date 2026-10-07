@@ -1,0 +1,1 @@
+{"finding_digest":"b7fabdadf04687c0488b83b27e3dca17136da9e1401c4ac8cb1f1d8e97ed00e0","finding_id":"arf_v1_w75l3lpqi2d4aselqozh4pokc4","identity_key":"core/state.py::checkpoint_batches_forever::revoked-response-state-not-applied","pull_request_number":757,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
