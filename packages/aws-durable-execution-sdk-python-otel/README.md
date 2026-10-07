@@ -55,6 +55,30 @@ DURABLE_EXECUTION_PLUGINS=otel-execution
 cold start, so the handler does not need to import or explicitly register the
 plugin.
 
+Automatic mutual-exclusion validation requires core SDK 2.1.0 or later together
+with OTel 1.1.0 or later. OTel 1.1 remains compatible with core 2.0.x for existing
+valid registrations; those older cores do not enforce the new group metadata.
+Configure only one OTel view on every core version. `InvocationOtelPlugin`
+shows work within each Lambda invocation; `ExecutionOtelPlugin` shows logical
+operations across the whole execution. They emit overlapping telemetry and
+manage competing active contexts, so the coordinated core 2.1+/OTel 1.1+ pair
+rejects both at cold start with `PluginLoadError` naming both views. Keep only one across the combined
+`plugins=[...]` and `DURABLE_EXECUTION_PLUGINS` configuration. Unrelated plugins
+may run alongside the selected view; using no OTel plugin is also supported.
+
+The bundled views explicitly declare `__durable_registration_api__ = 1`.
+Custom subclasses inherit their group validation and registration cleanup.
+The closest marker gates registration and selects the callback contract; an
+explicit value other than the integer `1` shadows the inherited opt-in.
+Once enabled, each MRO class explicitly declaring the integer `1` contributes
+its resolved `exclusive_group`. A subclass's own group adds to the inherited
+view group rather than replacing it; `None` cannot remove an inherited group.
+Repeated groups count once per plugin. Unmarked classes' unrelated fields/helpers
+named `exclusive_group` or `on_registration_result` remain inert. Repeat the marker
+to add a group or customize the callback, which is still notified once per plugin.
+Re-accepting a previously rejected bundled instance
+restores its constructor-time logger enrichment immediately.
+
 ### 1. ADOT Lambda Layer
 
 This plugin requires the [AWS Distro for OpenTelemetry (ADOT) Lambda layer](https://aws-otel.github.io/docs/getting-started/lambda) to export traces from your Lambda function.
@@ -443,7 +467,7 @@ setups.
 ## Requirements
 
 - Python >= 3.11
-- `aws-durable-execution-sdk-python` >= 2.0.0
+- `aws-durable-execution-sdk-python` >= 2.0.0 (core >= 2.1.0 with OTel >= 1.1.0 for automatic view-exclusivity validation)
 - An ADOT/community OpenTelemetry Lambda layer, or the `standalone` extra
 
 ## License
