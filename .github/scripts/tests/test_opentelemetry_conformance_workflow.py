@@ -1,13 +1,13 @@
 import re
 from pathlib import Path
 
+import yaml
+
 
 WORKFLOW_PATH = (
     Path(__file__).parents[2] / "workflows" / "opentelemetry-conformance-tests.yml"
 )
-EXAMPLES_DIR = (
-    ".build/durable-sdk/packages/aws-durable-execution-sdk-python-conformance-tests-otel"
-)
+EXAMPLES_DIR = ".build/durable-sdk/packages/aws-durable-execution-sdk-python-conformance-tests-otel"
 
 
 def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> None:
@@ -71,8 +71,39 @@ def test_opentelemetry_conformance_runs_when_the_handlers_change() -> None:
     workflow = WORKFLOW_PATH.read_text()
 
     trigger_path = (
-        "      - "
-        '"packages/aws-durable-execution-sdk-python-conformance-tests-otel/**"'
+        '      - "packages/aws-durable-execution-sdk-python-conformance-tests-otel/**"'
     )
     # Once for pull_request, once for push.
     assert workflow.count(trigger_path) == 2
+
+
+def test_opentelemetry_conformance_queues_complete_runs() -> None:
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text())
+
+    assert workflow["concurrency"] == {
+        "group": "otel-conformance-tests",
+        "cancel-in-progress": False,
+        "queue": "max",
+    }
+
+
+def test_cloud_tests_queue_each_shared_runtime_stack() -> None:
+    workflow = yaml.safe_load(WORKFLOW_PATH.with_name("cloud-tests.yml").read_text())
+
+    assert workflow["jobs"]["example-tests"]["concurrency"] == {
+        "group": "cloud-tests-${{ matrix.python-prefix }}",
+        "cancel-in-progress": False,
+        "queue": "max",
+    }
+
+
+def test_general_conformance_keeps_all_pending_runs() -> None:
+    workflow = yaml.safe_load(
+        WORKFLOW_PATH.with_name("conformance-tests.yml").read_text()
+    )
+
+    assert workflow["concurrency"] == {
+        "group": "conformance-tests-global",
+        "cancel-in-progress": False,
+        "queue": "max",
+    }

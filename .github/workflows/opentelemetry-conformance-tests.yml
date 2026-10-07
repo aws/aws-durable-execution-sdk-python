@@ -48,6 +48,13 @@ on:
         default: 6182cee00ed33ce01e0579066fb31096f988817f
         type: string
 
+# Backend stacks are shared across PRs. Queue whole runs so reusable
+# backend jobs do not displace another PR from their pending slots.
+concurrency:
+  group: otel-conformance-tests
+  cancel-in-progress: false
+  queue: max
+
 permissions: {}
 
 jobs:
