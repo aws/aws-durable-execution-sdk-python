@@ -12,7 +12,7 @@ from aws_durable_execution_sdk_python.plugin import (
 )
 from opentelemetry import context
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import Span, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.sdk.trace.sampling import (
@@ -348,5 +348,75 @@ def test_root_preserves_resolved_sampling_without_resampling(
             assert root.context.trace_state == TraceState([("vendor", "1")])
         else:
             assert not roots
+    finally:
+        provider.shutdown()
+
+
+class _CollidingSampler(_CountingSampler):
+    def __init__(self) -> None:
+        super().__init__(Decision.RECORD_AND_SAMPLE)
+        self.results: list[SamplingResult] = []
+
+    def should_sample(self, *args: Any, **kwargs: Any) -> SamplingResult:
+        original = super().should_sample(*args, **kwargs)
+        result = SamplingResult(
+            original.decision,
+            attributes={
+                **dict(original.attributes or {}),
+                "durable.execution.arn": f"sampler-arn-{self.calls}",
+                "durable.execution.synthetic_root": False,
+            },
+            trace_state=original.trace_state,
+        )
+        self.results.append(result)
+        return result
+
+
+class _RootAttributeRecorder(SpanProcessor):
+    def __init__(self) -> None:
+        self.attributes: list[dict[str, Any]] = []
+
+    def on_start(self, span: Span, parent_context: Any = None) -> None:
+        if span.name == "DurableExecutionRoot":
+            self.attributes.append(dict(span.attributes or {}))
+
+
+def test_root_identity_wins_over_sampler_attributes_before_processors(
+    plugin_type: PluginType,
+) -> None:
+    sampler = _CollidingSampler()
+    plugin, provider, exporter = create_plugin(plugin_type, sampler=sampler)
+    recorder = _RootAttributeRecorder()
+    provider.add_span_processor(recorder)
+    try:
+        for index, status in enumerate(
+            [InvocationStatus.PENDING, InvocationStatus.SUCCEEDED]
+        ):
+            plugin.on_invocation_start(start_info(first=index == 0))
+            plugin.on_invocation_end(end_info(status, first=index == 0))
+        roots = [
+            span
+            for span in exporter.get_finished_spans()
+            if span.name == "DurableExecutionRoot"
+        ]
+        assert len(roots) == len(recorder.attributes) == sampler.calls == 2
+        assert roots[0].context is not None
+        assert roots[1].context is not None
+        assert roots[0].context.trace_id == roots[1].context.trace_id
+        assert roots[0].context.span_id == roots[1].context.span_id
+        for index, root in enumerate(roots, start=1):
+            expected = {
+                "durable.execution.arn": ARN,
+                "durable.execution.synthetic_root": True,
+                "sampler.call": index,
+            }
+            assert recorder.attributes[index - 1] == root.attributes == expected
+            assert root.context is not None
+            assert root.context.trace_state == TraceState([("vendor", str(index))])
+            # Protect only this anchor; do not mutate the invocation's result.
+            attributes = sampler.results[index - 1].attributes
+            assert attributes is not None
+            assert attributes["durable.execution.arn"] == f"sampler-arn-{index}"
+            assert attributes["durable.execution.synthetic_root"] is False
     finally:
         provider.shutdown()
