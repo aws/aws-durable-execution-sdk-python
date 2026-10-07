@@ -84,9 +84,11 @@ jobs:
       run: hatch run types:check
     - name: Run tests + coverage
       run: hatch run test:cov
+    - name: Verify supported legacy core compatibility
+      run: hatch run test-pypi-otel-legacy:test
     - name: Test OTel with the minimum supported core
       run: |
-        hatch run test-pypi-otel:python - <<'PYTHON'
+        hatch run test-pypi-otel-minimum:python - <<'PYTHON'
         from importlib.metadata import version
         from pathlib import Path
         import aws_durable_execution_sdk_python.plugin as plugin
@@ -96,7 +98,7 @@ jobs:
         assert not hasattr(plugin.DurableInstrumentationPlugin, "handler_context")
         assert not hasattr(plugin, "DURABLE_INSTRUMENTATION_HANDLER_CONTEXT_API_VERSION")
         PYTHON
-        hatch run test-pypi-otel:test
+        hatch run test-pypi-otel-minimum:test
     - name: Build distribution
       run: |
         for pkg in packages/*/; do
