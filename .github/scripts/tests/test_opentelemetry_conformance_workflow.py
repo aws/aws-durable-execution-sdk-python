@@ -24,6 +24,7 @@ def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> No
 
     for configuration in (
         "language: python",
+        "runs_on: codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}",
         "resource_prefix: p",
         "sdk_repository: aws/aws-durable-execution-sdk-python",
         "sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}",
