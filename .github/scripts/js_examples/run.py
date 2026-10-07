@@ -61,14 +61,23 @@ TESTING_PACKAGE = "aws_durable_execution_sdk_python_testing"
 TESTING_SOURCE = REPO_ROOT / "packages/aws-durable-execution-sdk-python-testing/src"
 JS_SDK_URL = "https://github.com/aws/aws-durable-execution-sdk-js.git"
 EXAMPLES_REL = Path("packages/aws-durable-execution-sdk-js-examples")
-# The examples depend on these workspaces by "*". The root "npm run build"
+# The examples depend on these local workspaces. The root "npm run build"
 # also builds the insight tools and the VS Code extension, which the harness
 # does not need, so the script builds only these, in dependency order.
 JS_BUILD_WORKSPACES = (
     "packages/aws-durable-execution-sdk-js",
     "packages/aws-durable-execution-sdk-js-testing",
     "packages/aws-durable-execution-sdk-js-otel",
+    "packages/aws-durable-execution-sdk-js-extras",
+    "packages/aws-durable-execution-sdk-js-microvm-worker",
     "packages/aws-durable-execution-sdk-js-examples",
+)
+# Older JS refs predate these packages; their examples do not need them.
+OPTIONAL_JS_BUILD_WORKSPACES = frozenset(
+    {
+        "packages/aws-durable-execution-sdk-js-extras",
+        "packages/aws-durable-execution-sdk-js-microvm-worker",
+    }
 )
 # otel examples export spans to an OpenTelemetry collector. The harness does
 # not run one, so these examples cannot pass here. They are not selected.
@@ -202,6 +211,11 @@ def build_js_sdk(js_dir: Path, *, force: bool) -> None:
         [npm, "ci", "--no-audit", "--no-fund"], cwd=js_dir, env=env, check=True
     )
     for workspace in JS_BUILD_WORKSPACES:
+        if (
+            workspace in OPTIONAL_JS_BUILD_WORKSPACES
+            and not (js_dir / workspace / "package.json").is_file()
+        ):
+            continue
         log(f"npm run build -w {workspace}")
         subprocess.run(
             [npm, "run", "build", "-w", workspace], cwd=js_dir, env=env, check=True
