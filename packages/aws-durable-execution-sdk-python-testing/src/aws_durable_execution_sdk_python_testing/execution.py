@@ -442,7 +442,8 @@ class Execution:
         delivers state in the invocation input. So the list is reset when
         that input is built, not when the invocation completes: an
         operation that completes while the handler is still running is
-        reported on the next invocation.
+        reported on the next invocation unless a checkpoint response has
+        already delivered it through ``advance_handler_seen``.
         """
         self.updated_operation_ids = []
 
@@ -883,6 +884,13 @@ class OperationPaginatorState:
         smaller or equal values are ignored."""
         if seq > self.execution.handler_seen_seq:
             self.execution.handler_seen_seq = seq
+            # A checkpoint has delivered these updates to the running handler.
+            # Retain only changes newer than that response for the next input.
+            self.execution.updated_operation_ids = [
+                operation_id
+                for operation_id in self.execution.updated_operation_ids
+                if self.execution.operation_last_touched_seq.get(operation_id, 0) > seq
+            ]
 
     # --- internals -------------------------------------------------
 

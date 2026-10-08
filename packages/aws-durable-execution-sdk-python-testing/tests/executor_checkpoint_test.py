@@ -17,6 +17,7 @@ from unittest.mock import Mock
 import pytest
 from aws_durable_execution_sdk_python.execution import InvocationStatus
 from aws_durable_execution_sdk_python.lambda_service import (
+    CallbackDetails,
     ErrorObject,
     Operation as SvcOperation,
     OperationAction,
@@ -124,6 +125,49 @@ def test_empty_poll_returns_empty_operations_and_advances_token():
     assert response.checkpoint_token != token_0
     # Embedded sequence on the returned token should be +1
     assert CheckpointToken.from_str(response.checkpoint_token).token_sequence == 1
+
+
+@pytest.mark.parametrize("rejection", ["token", "operation"])
+def test_rejected_checkpoint_retains_undelivered_callback_update(rejection):
+    executor, store, execution, token = _make_executor_with_started_execution()
+    execution.operations.append(
+        SvcOperation(
+            operation_id="callback",
+            operation_type=OperationType.CALLBACK,
+            status=OperationStatus.STARTED,
+            callback_details=CallbackDetails(callback_id="callback-id"),
+        )
+    )
+    execution.complete_callback_success("callback-id", b"result")
+    store.save(execution)
+    before = (
+        execution.token_sequence,
+        execution.handler_seen_seq,
+        execution.seq_counter,
+    )
+    assert execution.updated_operation_ids == ["callback"]
+    with pytest.raises(InvalidParameterValueException):
+        executor.checkpoint_execution(
+            execution_arn=execution.durable_execution_arn,
+            checkpoint_token="invalid" if rejection == "token" else token,
+            updates=(
+                [
+                    OperationUpdate(
+                        operation_id="callback",
+                        operation_type=OperationType.CALLBACK,
+                        action=OperationAction.SUCCEED,
+                    )
+                ]
+                if rejection == "operation"
+                else []
+            ),
+        )
+    assert execution.updated_operation_ids == ["callback"]
+    assert (
+        execution.token_sequence,
+        execution.handler_seen_seq,
+        execution.seq_counter,
+    ) == before
 
 
 # endregion

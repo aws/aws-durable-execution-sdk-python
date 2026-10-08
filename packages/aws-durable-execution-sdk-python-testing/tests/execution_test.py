@@ -3,6 +3,7 @@
 import json
 from dataclasses import replace
 from datetime import datetime, timezone
+from threading import Event, Thread
 from unittest.mock import patch, Mock
 
 import pytest
@@ -1719,6 +1720,61 @@ def test_record_invocation_completion_keeps_updated_operation_ids():
     assert execution.updated_operation_ids == ["wait-1"]
 
     execution.mark_state_delivered()
+    assert execution.updated_operation_ids == []
+
+
+@pytest.mark.parametrize("complete_before_advance", [False, True])
+def test_checkpoint_consumes_only_updates_covered_by_its_watermark(
+    complete_before_advance,
+):
+    """A late update survives reads and retries of an older state delivery."""
+    execution = Execution(
+        "test-arn",
+        _make_start_input(),
+        [
+            Operation(
+                operation_id=name,
+                operation_type=OperationType.CALLBACK,
+                status=OperationStatus.STARTED,
+                callback_details=CallbackDetails(callback_id=name),
+            )
+            for name in ["delivered", "later"]
+        ],
+    )
+    execution.complete_callback_success("delivered", b"first")
+    response = OperationPaginatorState.pin(execution)
+    ready = Event()
+    finished = Event()
+
+    def complete_later():
+        assert ready.wait(5)
+        execution.complete_callback_failure("later", ErrorObject.from_message("later"))
+        finished.set()
+
+    worker = Thread(target=complete_later)
+    worker.start()
+    if complete_before_advance:
+        ready.set()
+        assert finished.wait(5)
+    expected = ["delivered", "later"] if complete_before_advance else ["delivered"]
+    assert execution.updated_operation_ids == expected
+    response.page(None, max_size_bytes=1024 * 1024)
+    assert execution.updated_operation_ids == expected
+
+    response.advance_handler_seen(1)
+    ready.set()
+    assert finished.wait(5)
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert execution.updated_operation_ids == ["later"]
+    assert execution.handler_seen_seq == 1
+    assert execution.token_sequence == 0
+    assert execution.seq_counter == 2
+    # An idempotent/older delivery cannot consume the later completion.
+    response.advance_handler_seen(1)
+    response.advance_handler_seen(0)
+    assert execution.updated_operation_ids == ["later"]
+    OperationPaginatorState.pin(execution).advance_handler_seen(2)
     assert execution.updated_operation_ids == []
 
 

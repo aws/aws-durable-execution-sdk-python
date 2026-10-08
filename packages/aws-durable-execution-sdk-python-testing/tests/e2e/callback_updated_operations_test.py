@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from queue import Queue
+from threading import Event
 from typing import Any
 
 import pytest
@@ -159,3 +161,93 @@ def test_callback_update_is_consumed_before_user_code(
     if outcome == "failure":
         assert terminal.error is not None
         assert terminal.error.message == "explicit callback failure"
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "timeout"])
+@pytest.mark.parametrize("filesystem", [False, True])
+def test_callback_delivered_by_checkpoint_is_not_updated_on_later_resume(
+    outcome: str, filesystem: bool, tmp_path: Path
+) -> None:
+    observer = CallbackObserver()
+    submitter_entered = Event()
+    release_submitter = Event()
+    submission_calls: list[str] = []
+    published_callbacks: Queue[str] = Queue()
+
+    @durable_step
+    def submit(_context: StepContext, callback_id: str) -> str:
+        submission_calls.append(callback_id)
+        published_callbacks.put(callback_id)
+        submitter_entered.set()
+        assert release_submitter.wait(10)
+        return "submitted"
+
+    def handler(_event: Any, context: DurableContext) -> str:
+        callback = context.create_callback(
+            name="target",
+            config=CallbackConfig(
+                timeout=Duration.from_seconds(1 if outcome == "timeout" else 30),
+                serdes=JsonSerDes(),
+            ),
+        )
+        context.step(submit(callback.callback_id), name="submit")
+        try:
+            result = callback.result()
+        except CallbackError:
+            result = outcome
+        context.wait(Duration.from_seconds(1), name="first-replay")
+        context.wait(Duration.from_seconds(1), name="second-replay")
+        assert isinstance(result, str)
+        return result
+
+    store = FileSystemExecutionStore.create(tmp_path) if filesystem else None
+    with DurableFunctionTestRunner(
+        handler=durable_execution(handler, plugins=[observer]),
+        store=store,
+        skip_time=False,
+        poll_interval=0.01,
+        execution_timeout=25,
+    ) as runner:
+        arn = runner.run_async(input="{}")
+        try:
+            assert submitter_entered.wait(5)
+            callback_id = published_callbacks.get(timeout=5)
+            if outcome == "success":
+                runner.send_callback_success(callback_id, result=b'"target"')
+            elif outcome == "failure":
+                runner.send_callback_failure(
+                    callback_id, error=ErrorObject.from_message("early failure")
+                )
+            expected_event = {
+                "success": "CallbackSucceeded",
+                "failure": "CallbackFailed",
+                "timeout": "CallbackTimedOut",
+            }[outcome]
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                events = runner.get_execution_history(
+                    arn, include_execution_data=True
+                ).events
+                if any(event.event_type == expected_event for event in events):
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError("Callback did not complete during submission")
+            assert not any(
+                event.event_type == "InvocationCompleted" for event in events
+            )
+        finally:
+            release_submitter.set()
+        result = runner.wait_for_result(arn, timeout=15)
+
+    assert result.status.value == "SUCCEEDED"
+    assert result.result is not None
+    assert json.loads(result.result) == ("target" if outcome == "success" else outcome)
+    assert len(submission_calls) == 1
+    assert len(observer.invocations) >= 3
+    assert len(observer.ends) == 1
+    target_id = observer.ends[0].operation_id
+    assert all(
+        target_id not in invocation.updated_operations
+        for invocation in observer.invocations[1:]
+    )
