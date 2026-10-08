@@ -480,6 +480,9 @@ class PluginExecutor:
         self._executor: ThreadPoolExecutor | None = None
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
+        # Non-None only after a start hook fails: the pre-hook snapshot excludes
+        # its partial bindings from later setup and the handler. Otherwise this
+        # stays None, and run_handler uses a fresh copy_context().
         self._startup_context: contextvars.Context | None = None
         self._invocation_contexts: list[contextvars.Context | None] = []
 
