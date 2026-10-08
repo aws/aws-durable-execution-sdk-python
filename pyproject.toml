@@ -31,6 +31,7 @@ addopts = "-v --strict-markers --import-mode=importlib"
 testpaths = [
     "packages/aws-durable-execution-sdk-python/tests",
     "packages/aws-durable-execution-sdk-python-insight/tests",
+    "packages/aws-durable-execution-sdk-python-microvm-worker/tests",
     "packages/aws-durable-execution-sdk-python-otel/tests",
     "packages/aws-durable-execution-sdk-python-testing/tests",
     "packages/aws-durable-execution-sdk-python-examples/test",
@@ -211,6 +212,7 @@ select = ["E4", "E7", "E9", "F", "TID252"]  # pycodestyle (E4/E7/E9) + Pyflakes 
 known-first-party = [
   "aws_durable_execution_sdk_python",
   "aws_durable_execution_sdk_python_insight",
+  "aws_durable_execution_sdk_python_microvm_worker",
   "aws_durable_execution_sdk_python_otel",
   "aws_durable_execution_sdk_python_testing",
 ]
