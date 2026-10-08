@@ -14,6 +14,10 @@ from pathlib import Path
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from aws_durable_execution_sdk_python.plugin import OperationEndInfo, OperationType
+from aws_durable_execution_sdk_python_testing.model import (
+    GetDurableExecutionHistoryResponse,
+    events_to_operations,
+)
 from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
 from aws_durable_execution_sdk_python_testing.stores.filesystem import (
     FileSystemExecutionStore,
@@ -175,6 +179,33 @@ def _run_public_callback_failure(
         assert statuses == ["PENDING", "FAILED"]
         assert result.error is not None
         assert context.get_current() == original_context
+        for history in (with_data, without_data):
+            wire = history.to_dict()
+            decoded = GetDurableExecutionHistoryResponse.from_dict(wire)
+            original_error = next(
+                event["CallbackFailedDetails"]["Error"]
+                for event in wire["Events"]
+                if event["EventType"] == "CallbackFailed"
+            )
+            for candidate in (history, decoded):
+                assert (
+                    next(
+                        event.to_dict()["CallbackFailedDetails"]["Error"]
+                        for event in candidate.events
+                        if event.event_type == "CallbackFailed"
+                    )
+                    == original_error
+                )
+                callback = next(
+                    operation
+                    for operation in events_to_operations(candidate.events)
+                    if operation.callback_details is not None
+                )
+                details = callback.callback_details
+                assert details is not None
+                assert (
+                    details.error.to_dict() if details.error is not None else None
+                ) == (error.to_dict() if has_details and error is not None else None)
         return {
             "status": result.status.value,
             "caller_error": dict(result.error.to_dict()),

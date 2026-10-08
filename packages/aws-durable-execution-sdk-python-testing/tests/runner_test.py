@@ -1116,6 +1116,82 @@ def test_durable_child_context_test_runner_init_with_args(
 # Tests for DurableFunctionCloudTestRunner and from_execution_history
 
 
+@pytest.mark.parametrize("decode_wire", [False, True])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"ErrorMessage": ""},
+        {"ErrorType": ""},
+        {"ErrorData": ""},
+        {"StackTrace": []},
+        {"ErrorMessage": "failure"},
+    ],
+)
+def test_callback_history_result_preserves_wire_and_canonical_error(
+    payload, decode_wire
+):
+    from aws_durable_execution_sdk_python.lambda_service import ErrorObject
+    from aws_durable_execution_sdk_python_testing.model import (
+        CallbackFailedDetails,
+        CallbackStartedDetails,
+        Event,
+        EventError,
+        GetDurableExecutionResponse,
+    )
+
+    timestamp = datetime.datetime(2026, 10, 7, tzinfo=datetime.UTC)
+    caller_error = ErrorObject.from_message("Callback failed")
+    execution = GetDurableExecutionResponse(
+        durable_execution_arn="arn:execution",
+        durable_execution_name="execution",
+        function_arn="arn:function",
+        status="FAILED",
+        start_timestamp=timestamp,
+        error=caller_error,
+    )
+    history = GetDurableExecutionHistoryResponse(
+        events=[
+            Event(
+                event_type="CallbackStarted",
+                event_timestamp=timestamp,
+                event_id=1,
+                operation_id="callback",
+                name="callback",
+                callback_started_details=CallbackStartedDetails(
+                    callback_id="callback-id"
+                ),
+            ),
+            Event(
+                event_type="CallbackFailed",
+                event_timestamp=timestamp,
+                event_id=2,
+                operation_id="callback",
+                name="callback",
+                callback_failed_details=CallbackFailedDetails(
+                    error=EventError(
+                        payload=ErrorObject.from_dict(payload), truncated=False
+                    )
+                ),
+            ),
+        ]
+    )
+    if decode_wire:
+        history = GetDurableExecutionHistoryResponse.from_dict(history.to_dict())
+    assert history.events[-1].callback_failed_details.error.to_dict() == {
+        "Payload": payload,
+        "Truncated": False,
+    }
+    result = DurableFunctionTestResult.from_execution_history(execution, history)
+    callback = result.get_callback("callback")
+    assert callback.status is OperationStatus.FAILED
+    assert (callback.error.to_dict() if callback.error is not None else None) == (
+        payload if payload else None
+    )
+    assert result.status is InvocationStatus.FAILED
+    assert result.error is caller_error
+
+
 def test_durable_function_test_result_from_execution_history():
     """Test DurableFunctionTestResult.from_execution_history factory method."""
     import datetime

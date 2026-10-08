@@ -677,7 +677,8 @@ class EventError:
     @classmethod
     def from_dict(cls, data: dict) -> EventError:
         payload = None
-        if payload_data := data.get("Payload"):
+        payload_data = data.get("Payload")
+        if payload_data is not None:
             payload = ErrorObject.from_dict(payload_data)
 
         return cls(
@@ -2752,7 +2753,9 @@ def events_to_operations(events: list[Event]) -> list[Operation]:
                 callback_details=CallbackDetails(
                     callback_id=callback_id,
                     result=result,
-                    error=error,
+                    # History preserves a present empty Payload object, while
+                    # CallbackDetails uses None for an empty wire error.
+                    error=error if error is not None and error.to_dict() else None,
                 ),
             )
 

@@ -1461,6 +1461,36 @@ def test_event_error_with_payload_only():
     }
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"ErrorMessage": ""},
+        {"ErrorType": ""},
+        {"ErrorData": ""},
+        {"StackTrace": []},
+    ],
+)
+def test_event_error_roundtrip_preserves_present_payload(payload):
+    wire = {"Payload": payload, "Truncated": False}
+    assert EventError.from_dict(wire).to_dict() == wire
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+@pytest.mark.parametrize("payload_field", [{}, {"Payload": None}])
+def test_event_error_absent_or_null_payload_retains_existing_meaning(
+    payload_field, truncated
+):
+    parsed = EventError.from_dict({**payload_field, "Truncated": truncated})
+    assert parsed.payload is None
+    assert parsed.to_dict() == {"Truncated": truncated}
+
+
+def test_event_error_empty_payload_retains_truncation_flag():
+    wire = {"Payload": {}, "Truncated": True}
+    assert EventError.from_dict(wire).to_dict() == wire
+
+
 # Tests for RetryDetails
 def test_retry_details_serialization():
     """Test RetryDetails from_dict/to_dict round-trip."""
