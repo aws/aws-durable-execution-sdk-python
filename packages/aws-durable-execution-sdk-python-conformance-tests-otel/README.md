@@ -112,6 +112,10 @@ checkpoint response carry the same completion. It tracks actual notifications,
 preserves first delivery when the update-ID metadata is absent, and clears that
 tracking at invocation boundaries. Public runner regressions cover memory and
 file stores, stored step results, failure payloads and two subsequent replays.
+An exactly empty serialized callback error is represented as absent in both
+stores, matching the SDK's service parser. Present fields remain intact,
+including empty messages, types, data and stack lists; the enclosing failed
+callback future still raises the same error as the file-store baseline.
 
 Case 24 covers invocation `RETRY` becoming `RETRYING`/`UNSET`. Case 25 targets the
 separate rule that a failed operation without error details remains `UNSET`.

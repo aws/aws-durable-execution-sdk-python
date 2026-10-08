@@ -665,8 +665,11 @@ class Execution:
             self.touch_operation(operation.operation_id)
             updated_callback_details = None
             if operation.callback_details:
+                # Match CallbackDetails.from_dict without depending on a store
+                # serialization round trip: an empty wire Error has no details.
                 updated_callback_details = replace(
-                    operation.callback_details, error=error
+                    operation.callback_details,
+                    error=error if error is not None and error.to_dict() else None,
                 )
 
             self.operations[index] = replace(
