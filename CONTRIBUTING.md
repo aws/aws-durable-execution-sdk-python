@@ -70,23 +70,25 @@ hatch run dev-otel:typecheck   # type check otel only
 hatch run dev-examples:test    # run examples tests only
 ```
 
-### PyPI release testing
+### Installed package compatibility testing
 
-To verify packages work against the published PyPI version of the core SDK (rather than the local workspace):
+Build the core and OTel distributions with `hatch build` in each package, then run
+these commands from the repository root:
 
 ```bash
-hatch run test-pypi-otel:test       # test new OTel capabilities against capable installed core
-hatch run test-pypi-otel-legacy:test # valid registrations/lifecycles on supported core 2.0.x
-hatch run test-pypi-otel-minimum:test # all prior OTel tests and valid registrations on core 2.0.0
-hatch run test-pypi-examples:test   # test examples against PyPI core SDK
+hatch run test-wheel-otel:test        # full OTel suite on the two built wheels
+hatch run test-wheel-otel-legacy:test # released OTel 1.0.0 with the built core
+hatch run test-pypi-examples:test     # examples against the published core
 ```
 
-The OTel minimum-core environment excludes the local core and pins 2.0.0, so
-newer PyPI releases cannot remove legacy compatibility coverage. It retains all
-pre-existing OTel tests plus valid registration/wait-resume cases. Exclusivity
-validation requires the newer core and is exercised by the complete workspace
-suite and the capable-core environment. Use `hatch run dev-otel:test` for the
-current workspace core.
+The wheel lanes have no editable workspace members. They verify installed source
+bytes and artifact hashes before exercising public handlers. OTel 1.1 requires
+the redesigned core 2.1.0 lifecycle; it no longer claims compatibility with core
+2.0.x. Publish core first. Building both wheels lets CI verify the intended pair
+before that minimum is available on PyPI. The legacy-plugin lane documents the
+actual core-only upgrade: host isolation is provided by the new core, while old
+Invocation OTel does not gain the new fallback. Workspace tests continue to cover
+the complete current implementation with `hatch run dev-otel:test`.
 
 ### Package-level commands
 

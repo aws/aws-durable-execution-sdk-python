@@ -4,13 +4,12 @@ import contextlib
 import contextvars
 import copy
 import datetime
-import functools
 import logging
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, MutableMapping, cast
+from typing import Any, Callable, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -467,9 +466,8 @@ class PluginExecutor:
         self._executor: ThreadPoolExecutor | None = None
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
-        # Non-None only after a start hook fails: the pre-hook snapshot excludes
-        # its partial bindings from later setup and the handler. Otherwise this
-        # stays None, and run_handler uses a fresh copy_context().
+        # Non-None only after a Start hook fails: later setup and invocation
+        # work use its pre-hook snapshot. End still uses each hook's token owner.
         self._startup_context: contextvars.Context | None = None
         self._invocation_contexts: list[contextvars.Context | None] = []
 
@@ -557,56 +555,11 @@ class PluginExecutor:
                 # this is called asynchronously, so plugins cannot manipulate thread local objects
                 self._executor.submit(self._dispatch_plugin, plugin, info)
 
-    @contextlib.contextmanager
-    def _safe_handler_context(
-        self, plugin: DurableInstrumentationPlugin, info: InvocationStartInfo
-    ) -> Iterator[bool]:
-        # Plugins may omit this optional scope method.
-        scope = None
-        succeeded = True
-        try:
-            factory = getattr(plugin, "handler_context", None)
-            if callable(factory):
-                scope = factory(info)
-                scope.__enter__()
-        except Exception:
-            scope = None
-            succeeded = False
-            logger.exception(
-                "Plugin %s handler context failed", plugin.__class__.__name__
-            )
-        try:
-            yield succeeded
-        finally:
-            if scope is not None:
-                try:
-                    scope.__exit__(None, None, None)
-                except Exception:
-                    logger.exception(
-                        "Plugin %s handler context cleanup failed",
-                        plugin.__class__.__name__,
-                    )
-
-    def run_handler(self, handler: Callable[..., Any], *args: Any) -> Any:
-        """Run the user handler inside optional, balanced plugin context scopes."""
-        if not self._plugins or self._invocation_status is None:
-            return handler(*args)
-        owner = (
-            self._startup_context.copy()
-            if self._startup_context is not None
-            else contextvars.copy_context()
-        )
-        with contextlib.ExitStack() as scopes:
-            for plugin in self._plugins:
-                before = owner.copy()
-                scope = self._safe_handler_context(plugin, self._invocation_status)
-                succeeded = owner.run(scope.__enter__)
-                # Keep finalizers with their entry Context: ContextVar tokens
-                # cannot be reset in a copy, even when its bindings are identical.
-                scopes.callback(owner.run, scope.__exit__, None, None, None)
-                if not succeeded:
-                    owner = before
-            return owner.run(handler, *args)
+    def _run_in_invocation_context(self, invoke: Callable[[], Any]) -> Any:
+        """Continue in the pre-hook Context only after a failed Start hook."""
+        if self._startup_context is not None:
+            return self._startup_context.run(invoke)
+        return invoke()
 
     def _snapshot_operation_infos(
         self,
@@ -925,37 +878,3 @@ class PluginExecutor:
             OperationStatus.CANCELLED,
             OperationStatus.STOPPED,
         ]
-
-    @property
-    def handle_durable_output(self):
-        def decorator(func: Callable[[Any, LambdaContext], MutableMapping[str, Any]]):
-            def invoke(event: Any, context: LambdaContext):
-                with self.run():
-                    try:
-                        output = func(event, context)
-
-                        self.on_invocation_end(
-                            output=DurableExecutionInvocationOutput.from_dict(output),
-                        )
-                        return output
-                    except Exception as e:
-                        self.on_invocation_end(
-                            output=DurableExecutionInvocationOutput.create_retry(
-                                ErrorObject.from_exception(e)
-                            ),
-                        )
-                        raise
-
-            @functools.wraps(func)
-            def wrapper(event: Any, context: LambdaContext):
-                if not self._plugins:
-                    return invoke(event, context)
-                # Keep hooks on their existing caller thread and in registration
-                # order, but isolate their context bindings from the host. Two
-                # plugins can otherwise restore a stale predecessor when their
-                # invocation-end hooks close scopes in the original order.
-                return contextvars.copy_context().run(invoke, event, context)
-
-            return wrapper
-
-        return decorator

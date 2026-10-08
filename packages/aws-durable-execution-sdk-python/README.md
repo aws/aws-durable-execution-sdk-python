@@ -85,9 +85,8 @@ constraint applies to the combined `plugins=[...]` argument and
 Core 2.1+ with OTel 1.1+ rejects both at cold start with `PluginLoadError` naming the
 conflicting views; keep only one. Choose Invocation for work within each Lambda
 invocation or Execution for logical operations across the durable execution.
-Unrelated instrumentation plugins can run alongside either view. Existing valid
-registrations remain supported with OTel 1.1 on older core 2.0.x; those cores do
-not implement the new exclusivity validation.
+Unrelated instrumentation plugins can run alongside either view. OTel 1.1 requires core 2.1 or later for the invocation-worker lifecycle as well
+as view-exclusivity validation. Release core 2.1 before releasing OTel 1.1.
 
 Plugin authors explicitly opt in by declaring
 `__durable_registration_api__ = 1` on a plugin class. That class and its subclasses
@@ -112,22 +111,34 @@ in their hierarchy retain their existing attributes/helpers. The generic plugin 
 neither attribute nor hook, and provider API version 1 and existing plugin
 lifecycle order are unchanged.
 
-### Optional handler context scopes
+### Invocation worker lifecycle
 
-A plugin can provide `handler_context(info)` returning a context manager. The
-updated core looks up this optional method normally, so inherited methods work
-without extra declarations. A missing or non-callable attribute is ignored.
-The core enters these scopes around the top-level handler on its worker thread,
-in registration order, and closes them in reverse order. Cleanup receives no
-handler exception and cannot suppress or replace its outcome. Invocation hooks
-retain their original thread and order; failed lookup, setup or entry bindings
-are discarded, and successful scope cleanup stays in the context that owns its
-tokens.
+The existing `on_invocation_start` and `on_invocation_end` hooks run on the
+handler's invocation worker, both in registration order. Start hooks finish
+before background checkpoint processing begins. The same worker runs the handler
+(including its `finally` blocks), prepares the existing serialized output or
+error, checkpoints large results when necessary, joins registered branches while
+checkpointing is available, stops and waits for checkpoint processing, then calls
+End before returning the outcome. The caller shuts down the handler executor.
+There is no separate handler-context hook or context-manager plugin API.
 
-`handler_context` is an optional plugin API name: callable methods or attributes
-with that name are invoked. The generic plugin base does not require a default
-method. Older cores ignore this optional API and retain their existing behavior.
-The provider API version and dependency requirements are unchanged.
+When plugins are registered, the worker begins with a copy of the caller's
+context-variable bindings. Successful Start bindings flow into later Start hooks,
+the handler, serialization and resource cleanup. A later successful Start may
+replace an earlier binding. If a Start hook raises, its new bindings are discarded
+for subsequent work; its End still runs in the original Context so its tokens can
+be reset. End hooks retain forward registration order, not reverse stack order,
+so they must not rely on observing a stack-like unwind of other plugins' contexts.
+The worker's invocation context is discarded on return, including after plugin
+cleanup failures, leaving the host's bindings unchanged. This isolates bindings,
+not mutations to shared objects or external side effects. Without plugins, the
+handler retains its existing fresh-worker context behavior.
+
+These lifecycle guarantees require core 2.1.0 or later. The OTel 1.1 plugin
+requires that core version and uses the existing Start/End hooks. Upgrading the
+core alone with OTel 1.0 isolates worker bindings, but does not add the newer
+Invocation-view fallback to that older plugin; upgrade both packages for it.
+Provider API version 1 and the independent registration API are unchanged.
 
 ## 🚀 Quick Start
 

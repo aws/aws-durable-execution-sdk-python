@@ -6,8 +6,7 @@ from packaging.requirements import Requirement
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
-CORE_DEPENDENCY = "aws-durable-execution-sdk-python>=2.0.0"
-EXCLUSIVITY_TEST_CORE = "aws-durable-execution-sdk-python>=2.1.0"
+CORE_DEPENDENCY = "aws-durable-execution-sdk-python>=2.1.0"
 TEST_OTEL_DEPENDENCIES = {
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-propagator-aws-xray",
@@ -68,7 +67,7 @@ def test_test_environments_install_layer_provided_dependencies() -> None:
         "test",
         "dev-otel",
         "dev-examples",
-        "test-pypi-otel",
+        "test-wheel-otel",
         "test-pypi-examples",
     ):
         assert TEST_OTEL_DEPENDENCIES <= set(
@@ -77,22 +76,7 @@ def test_test_environments_install_layer_provided_dependencies() -> None:
     assert TEST_OTEL_DEPENDENCIES <= set(environments["types"]["extra-dependencies"])
 
 
-def test_pypi_compatibility_environment_requires_exclusivity_core() -> None:
-    dependencies = _load_pyproject(REPOSITORY_ROOT / "pyproject.toml")["tool"]["hatch"][
-        "envs"
-    ]["test-pypi-otel"]["dependencies"]
-
-    assert EXCLUSIVITY_TEST_CORE in dependencies
-
-
-def test_pypi_otel_environment_installs_lifecycle_test_runner() -> None:
-    dependencies = _load_pyproject(REPOSITORY_ROOT / "pyproject.toml")["tool"]["hatch"][
-        "envs"
-    ]["test-pypi-otel"]["dependencies"]
-    assert "aws-durable-execution-sdk-python-testing>=1.2.1" in dependencies
-
-
-def test_core_dependency_preserves_previously_supported_releases() -> None:
+def test_core_dependency_requires_worker_lifecycle_release() -> None:
     dependencies = _load_pyproject(PACKAGE_ROOT / "pyproject.toml")["project"][
         "dependencies"
     ]
@@ -101,42 +85,23 @@ def test_core_dependency_preserves_previously_supported_releases() -> None:
         for value in dependencies
         if Requirement(value).name == "aws-durable-execution-sdk-python"
     )
-    assert requirement.specifier.contains("2.0.0")
-    assert requirement.specifier.contains("2.0.1")
+    assert not requirement.specifier.contains("2.0.0")
+    assert not requirement.specifier.contains("2.0.1")
     assert requirement.specifier.contains("2.1.0")
 
 
-def test_pypi_otel_environment_does_not_shadow_installed_core() -> None:
-    environment = _load_pyproject(REPOSITORY_ROOT / "pyproject.toml")["tool"]["hatch"][
+def test_wheel_lanes_do_not_shadow_installed_artifacts() -> None:
+    environments = _load_pyproject(REPOSITORY_ROOT / "pyproject.toml")["tool"]["hatch"][
         "envs"
-    ]["test-pypi-otel"]
-    assert environment["workspace"]["members"] == [
-        "packages/aws-durable-execution-sdk-python-otel"
     ]
-
-
-def test_legacy_lane_retains_supported_core_20_range() -> None:
-    environment = _load_pyproject(REPOSITORY_ROOT / "pyproject.toml")["tool"]["hatch"][
-        "envs"
-    ]["test-pypi-otel-legacy"]
-    requirement = next(
-        Requirement(value)
-        for value in environment["dependencies"]
-        if Requirement(value).name == "aws-durable-execution-sdk-python"
+    for name in ("test-wheel-otel", "test-wheel-otel-legacy"):
+        assert environments[name]["workspace"]["members"] == []
+        assert environments[name]["detached"] is True
+    assert (
+        "aws-durable-execution-sdk-python-otel==1.0.0"
+        in environments["test-wheel-otel-legacy"]["dependencies"]
     )
-    assert requirement.specifier.contains("2.0.0")
-    assert requirement.specifier.contains("2.0.1")
-    assert not requirement.specifier.contains("2.1.0")
-    assert environment["workspace"]["members"] == [
-        "packages/aws-durable-execution-sdk-python-otel"
-    ]
-
-
-def test_minimum_core_lane_retains_exact_supported_floor() -> None:
-    environment = _load_pyproject(REPOSITORY_ROOT / "pyproject.toml")["tool"]["hatch"][
-        "envs"
-    ]["test-pypi-otel-minimum"]
-    assert "aws-durable-execution-sdk-python==2.0.0" in environment["dependencies"]
-    assert environment["workspace"]["members"] == [
-        "packages/aws-durable-execution-sdk-python-otel"
-    ]
+    assert (
+        "aws-durable-execution-sdk-python-testing>=1.2.1"
+        in environments["test-wheel-otel"]["dependencies"]
+    )

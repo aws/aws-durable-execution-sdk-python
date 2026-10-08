@@ -55,9 +55,11 @@ DURABLE_EXECUTION_PLUGINS=otel-execution
 cold start, so the handler does not need to import or explicitly register the
 plugin.
 
-Automatic mutual-exclusion validation requires core SDK 2.1.0 or later together
-with OTel 1.1.0 or later. OTel 1.1 remains compatible with core 2.0.x for existing
-valid registrations; those older cores do not enforce the new group metadata.
+OTel 1.1.0 requires core SDK 2.1.0 or later for the invocation-worker lifecycle
+and automatic mutual-exclusion validation. Publish the redesigned core first,
+then the plugin. Core 2.0.x runs invocation hooks on the caller and cannot provide
+the new plugin's handler propagation and host-context isolation; that version
+pair is not supported by OTel 1.1.0.
 Configure only one OTel view on every core version. `InvocationOtelPlugin`
 shows work within each Lambda invocation; `ExecutionOtelPlugin` shows logical
 operations across the whole execution. They emit overlapping telemetry and
@@ -182,24 +184,31 @@ lambda_.Function(
 
 ### Handler context propagation
 
-A core SDK with handler-worker context propagation carries the context established
-by invocation-start hooks into the handler. Invocation view preserves an active
-ambient span on the canonical execution trace; when that context is absent or
-belongs to a different trace, its optional `handler_context` scope makes the Invocation
-span current only while the handler runs. The scope closes on the same worker in
-reverse plugin order, including on failure and suspension, without changing the
-invocation-hook caller. Older cores ignore this optional scope and retain their
-existing behavior; install the updated core as well to get handler context propagation.
-The bundled OTel classes provide this optional method directly; custom subclasses
-inherit it normally and can override it using standard Python method resolution.
-The updated core invokes a callable `handler_context` attribute when present;
-there is no separate plugin opt-in marker. Older cores ignore the method without
-importing any new core API.
-Execution view similarly restores the Workflow span inside the handler scope if
-another invocation-start hook clears the active span or switches to an unrelated
-trace. Both views retain valid same-trace parents and baggage, and restore the
-worker's previous context when the scope ends.
-Existing plugin registration, factory lifetime, and checkpoint formats are unchanged.
+The core runs the existing Start hooks, handler, output preparation, resource
+cleanup and End hooks on one invocation worker. Start finishes before checkpoint
+processing begins. End follows registered-branch joins and checkpoint shutdown,
+and output serialization or checkpoint errors retain their normal classification.
+There is no separate handler-context plugin API.
+
+During Start, Invocation view preserves a valid active span on the canonical
+execution trace; when it is absent or unrelated, it attaches the Invocation span.
+Execution view attaches the Workflow span, including when an incoming span is on
+the same trace. The Invocation span's own ambient parenting is separate from the
+active context supplied to handler instrumentation. Both views preserve baggage.
+
+Start hooks run in registration order. A later successful plugin that deliberately
+sets or clears the active span wins; OTel does not apply a second correction pass.
+Place OTel after a span-replacing plugin when OTel's view-specific context is
+desired. Baggage-only plugins that extend the current context can appear on either
+side. End hooks also retain registration order and reset tokens in their owning
+Context; they do not promise a reverse-stack observation of other plugins' spans.
+Existing registration, factory lifetime and checkpoint formats are unchanged.
+
+Upgrade both core to 2.1+ and OTel to 1.1+ for these guarantees. The released
+OTel 1.0 plugin can run on the new core with worker/host isolation, but its
+Invocation view does not attach the new fallback; a core-only upgrade does not
+supply that plugin behavior. CI tests the new pair as installed wheels and tests
+the actual released plugin separately, including before core 2.1 is on PyPI.
 
 ### 3. In your Lambda handler (index.py)
 
@@ -353,19 +362,14 @@ remains in `durable.operation.status`.
 
 ### Invocation context isolation
 
-Invocation hooks retain their caller thread and registration order. With the
-updated core, invocation-local context-variable bindings are isolated from the
-host: hooks see the incoming context and the handler receives their resulting
-context, while invocation exit restores the host's original bindings even if a
-plugin fails during setup or cleanup. Plugins must not use invocation context
-bindings to mutate the host context after the invocation has returned. Older
-supported cores retain their existing lifecycle behavior, including the
-execution-view limitation when later plugins open invocation context scopes.
-The new isolation applies only when plugins are registered. If an invocation-start
-hook or handler-scope entry raises, subsequent setup and the handler retain the
-bindings from before that hook. Successful scopes still clean up in their original
-context, preserving token ownership. This isolates context-variable bindings;
-it does not undo a plugin's mutations to shared objects or external side effects.
+With core 2.1+, invocation hooks and the handler run on one worker in an
+invocation-local Context initialized from the host's bindings. Successful Start
+bindings are visible to later hooks, the handler and resource cleanup. The host's
+bindings remain unchanged after return, even if a plugin fails during Start or
+End. A failed Start's bindings are discarded for subsequent work, while End runs
+in that Start's original Context to preserve token ownership. This isolates
+context-variable bindings; it does not undo mutations to shared objects or
+external side effects. The isolation applies when plugins are registered.
 
 ### Log Correlation
 
@@ -467,7 +471,7 @@ setups.
 ## Requirements
 
 - Python >= 3.11
-- `aws-durable-execution-sdk-python` >= 2.0.0 (core >= 2.1.0 with OTel >= 1.1.0 for automatic view-exclusivity validation)
+- `aws-durable-execution-sdk-python` >= 2.1.0 (release the redesigned core before OTel 1.1.0)
 - An ADOT/community OpenTelemetry Lambda layer, or the `standalone` extra
 
 ## License
