@@ -1455,17 +1455,16 @@ class Executor(ExecutionObserver):
                 )
 
             case InvocationStatus.PENDING:
-                # PENDING is valid while paused because pause can make a
-                # checkpoint response omit the next checkpoint token, forcing
-                # the current handler invocation to stop as PENDING.
-                #
-                # Otherwise, PENDING requires either pending durable operations
-                # or a change the handler has not seen yet. The unseen-change
-                # case can happen when an operation completes after this
-                # invocation's input was built but before this response is
-                # validated, so a follow-up invocation is needed.
+                # A paused execution answers the running invocation's
+                # checkpoint without a token and sets deferred_invocation;
+                # that invocation must stop as PENDING even with nothing
+                # pending, and resume re-invokes it. Any other PENDING needs
+                # pending operations or a change the handler has not seen
+                # since its input was built. The unseen-change case happens
+                # when an operation completes after this invocation's input
+                # was built but before this response is validated.
                 if (
-                    not execution.paused
+                    not execution.deferred_invocation
                     and not execution.has_pending_operations(execution)
                     and not (
                         invocation_seq is not None
@@ -1475,9 +1474,7 @@ class Executor(ExecutionObserver):
                     )
                 ):
                     msg_pending_ops: str = (
-                        "Cannot return PENDING status unless execution is paused, "
-                        "has pending durable operations, or has unseen changes "
-                        "after invocation input was built."
+                        "Cannot return PENDING status with no pending operations."
                     )
                     raise InvalidParameterValueException(msg_pending_ops)
                 logger.info("[%s] Execution pending async work", execution_arn)
@@ -1846,9 +1843,11 @@ class Executor(ExecutionObserver):
         execution = self._store.load(execution_arn)
         if execution.is_complete or not execution.paused:
             return
+        
         execution.paused = False
         deferred = execution.deferred_invocation
         execution.deferred_invocation = False
+        
         self._store.save(execution)
         if deferred:
             self._invoke_execution(execution_arn)

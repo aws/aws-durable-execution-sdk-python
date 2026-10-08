@@ -10,12 +10,18 @@ from __future__ import annotations
 
 from unittest.mock import Mock
 
+import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
+    DurableExecutionInvocationOutput,
+    InvocationStatus,
     OperationAction,
     OperationType,
     OperationUpdate,
 )
 
+from aws_durable_execution_sdk_python_testing.exceptions import (
+    InvalidParameterValueException,
+)
 from aws_durable_execution_sdk_python_testing.execution import Execution
 from aws_durable_execution_sdk_python_testing.executor import Executor, InvocationState
 from aws_durable_execution_sdk_python_testing.model import StartDurableExecutionInput
@@ -214,3 +220,23 @@ def test_invoke_execution_while_paused_still_schedules_with_its_delay():
     executor._scheduler.call_later.assert_called_once()  # noqa: SLF001
     assert executor._scheduler.call_later.call_args.kwargs["delay"] == 7  # noqa: SLF001
     assert store.load(execution.durable_execution_arn).deferred_invocation is False
+
+
+def test_paused_pending_is_accepted_only_when_a_token_was_withheld():
+    executor, store, execution, _ = _make_executor_with_started_execution()
+    execution.paused = True
+    store.save(execution)
+    pending = DurableExecutionInvocationOutput(status=InvocationStatus.PENDING)
+
+    with pytest.raises(InvalidParameterValueException) as exc_info:
+        executor._validate_invocation_response_and_store(  # noqa: SLF001
+            execution.durable_execution_arn, pending, execution, execution.seq_counter
+        )
+    assert str(exc_info.value) == (
+        "Cannot return PENDING status with no pending operations."
+    )
+
+    execution.deferred_invocation = True
+    executor._validate_invocation_response_and_store(  # noqa: SLF001
+        execution.durable_execution_arn, pending, execution, execution.seq_counter
+    )

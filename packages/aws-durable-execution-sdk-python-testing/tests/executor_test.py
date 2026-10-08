@@ -433,6 +433,7 @@ def test_should_handle_pending_status_when_operations_exist(
     # Arrange
     mock_execution = Mock()
     mock_execution.paused = False
+    mock_execution.deferred_invocation = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -656,6 +657,7 @@ def test_should_retry_when_pending_response_has_no_operations(
     # Arrange
     mock_execution = Mock()
     mock_execution.paused = False
+    mock_execution.deferred_invocation = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -705,6 +707,7 @@ def test_pending_response_is_valid_when_an_operation_completed_after_the_handler
     is re-invoked instead of counted as a failed attempt."""
     mock_execution = Mock()
     mock_execution.paused = False
+    mock_execution.deferred_invocation = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -734,6 +737,7 @@ def test_pending_response_is_valid_when_an_operation_completed_after_the_handler
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
         asyncio.run(handler())
 
+        mock_execution.has_changes_after.assert_called_once_with(4)
         assert mock_execution.consecutive_failed_invocation_attempts == 0
         # timeout + initial invocation + the re-invoke, with no retry delay
         assert mock_scheduler.call_later.call_count == 3
@@ -786,7 +790,7 @@ def test_pending_response_with_only_input_time_state_is_still_an_error(
 
     with pytest.raises(
         InvalidParameterValueException,
-        match="unless execution is paused, has pending durable operations",
+        match="no pending operations",
     ):
         executor._validate_invocation_response_and_store(  # noqa: SLF001
             execution.durable_execution_arn,
@@ -815,7 +819,7 @@ def test_pending_response_is_an_error_when_the_handler_saw_the_completion(
 
     with pytest.raises(
         InvalidParameterValueException,
-        match="unless execution is paused, has pending durable operations",
+        match="no pending operations",
     ):
         executor._validate_invocation_response_and_store(  # noqa: SLF001
             execution.durable_execution_arn,
