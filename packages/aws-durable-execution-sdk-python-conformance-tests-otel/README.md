@@ -67,6 +67,8 @@ view named by its `OtelSuite` parameter.
 | `otel-invocation-22` | `otel_22_user_function_context.handler` | Creates ordinary user spans under the active handler, attempt, child, branch, and iteration contexts. |
 | `otel-invocation-23` | `otel_23_callback_function_context.handler` | Verifies retry/check attempts, callback submitter, wrapped retry helper, and virtual-child callback parents. |
 | `otel-invocation-24` | `otel_24_invocation_retry_status.handler` | Raises a retryable invocation error after a completed step, then resumes with its saved result. |
+| `otel-invocation-25` | `otel_17_wait_for_callback_failure.handler` | Targets a failed callback without error details; service history must satisfy the explicit no-error-details precondition. |
+| `otel-invocation-26` | `otel_26_external_callback_completion_replay.handler` | Completes a root callback after suspension, saves its result in a step, and replays it through two callback barriers. |
 | `otel-execution-1` | `otel_1_success.handler` | Verifies the execution-view workflow, step, and attempt hierarchy. |
 | `otel-execution-2` | `otel_2_wait_resume.handler` | Verifies the execution view across a resumed invocation. |
 | `otel-execution-3` | `otel_3_retry.handler` | Verifies the execution view across retry attempts. |
@@ -91,6 +93,8 @@ view named by its `OtelSuite` parameter.
 | `otel-execution-22` | `otel_22_user_function_context.handler` | Observes active execution-view callback contexts without supplying or repairing parents. |
 | `otel-execution-23` | `otel_23_callback_function_context.handler` | Verifies the same SDK-owned callback lifecycle parents in the execution view. |
 | `otel-execution-24` | `otel_24_invocation_retry_status.handler` | Verifies invocation retry status independently of step retry and recovery re-exports. |
+| `otel-execution-25` | `otel_17_wait_for_callback_failure.handler` | Targets the same errorless failed callback and its `UNSET` leaf in the execution view. |
+| `otel-execution-26` | `otel_26_external_callback_completion_replay.handler` | Requires one terminal root-callback export at first completion and no duplicate exports on two later replays. |
 | `otel-long-running-1` | `otel_long_running_1_wait.handler` | Verifies wait and resume telemetry across a long durable suspension. |
 | `otel-long-running-2` | `otel_long_running_2_retry.handler` | Verifies retry telemetry across a long durable backoff. |
 | `otel-long-running-3` | `otel_long_running_3_callback.handler` | Verifies callback telemetry when completion arrives after a long delay. |
@@ -98,6 +102,33 @@ view named by its `OtelSuite` parameter.
 
 The runner discovers each mapping from `TestingMetadata.TestDescription` on the
 functions in the templates.
+
+## External completion and status coverage
+
+The local testing library includes callback success, failure and timeout in the
+next invocation's `UpdatedOperationIds`. The core delivers each terminal update
+notification once per invocation, including when a resumed operation and a later
+checkpoint response carry the same completion. It tracks actual notifications,
+preserves first delivery when the update-ID metadata is absent, and clears that
+tracking at invocation boundaries. Public runner regressions cover memory and
+file stores, stored step results, failure payloads and two subsequent replays.
+
+Case 24 covers invocation `RETRY` becoming `RETRYING`/`UNSET`. Case 25 targets the
+separate rule that a failed operation without error details remains `UNSET`.
+Its cloud coverage requires both views to pass the raw service-history no-error-details
+precondition and the telemetry assertions. Local file-store results establish
+SDK behavior; that AWS service precondition still needs independent validation.
+`CANCELLED`, `TIMED_OUT` and `STOPPED` without error details have explicit unit
+coverage in both views; their corresponding cloud paths are not established.
+The existing success/`OK` and detailed-error/`ERROR` controls remain in the suites.
+
+Case 26 revisits a root-level public callback on every replay. The driver waits
+for `InvocationCompleted` before completing the target and each barrier. The
+target's terminal span must precede the observed step and must not be exported
+again during the two later resumes. Invocation view also retains its initial
+pending callback segment. Cloud validation must count the raw S3 export records
+without deduplicating equal span IDs; local runner checks alone do not establish
+cloud coverage.
 
 ## Callback coverage boundary
 

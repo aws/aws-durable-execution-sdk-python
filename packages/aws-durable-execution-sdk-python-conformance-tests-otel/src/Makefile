@@ -6,6 +6,7 @@
 	build-Otel17WaitForCallbackFailure build-Otel18ChainedInvokeFailure \
 	build-Otel18InvokeTarget build-Otel19ExecutionFailure build-Otel20VirtualContext \
 	build-Otel21CompletedStepReplay build-Otel22UserFunctionContext build-Otel23CallbackFunctionContext build-Otel24InvocationRetryStatus \
+	build-Otel25CallbackFailureWithoutError build-Otel26ExternalCallbackReplay \
 	build-OtelExecution1Success \
 	build-OtelExecution2WaitResume build-OtelExecution3Retry \
 	build-OtelExecution4TerminalFailure build-OtelExecution5ChildContext \
@@ -20,6 +21,7 @@
 	build-OtelExecution20VirtualContext \
 	build-OtelExecution21CompletedStepReplay build-OtelExecution22UserFunctionContext build-OtelExecution23CallbackFunctionContext \
 	build-OtelExecution24InvocationRetryStatus \
+	build-OtelExecution25CallbackFailureWithoutError build-OtelExecution26ExternalCallbackReplay \
 	build-OtelLongRunning1Wait \
 	build-OtelLongRunning2Retry build-OtelLongRunning3Callback \
 	build-OtelLongRunning4ChainedInvoke build-OtelLongRunning4InvokeTarget
@@ -32,6 +34,7 @@ build-Otel14MapFailure build-Otel15WaitInterrupted build-Otel16WaitForConditionF
 build-Otel17WaitForCallbackFailure build-Otel18ChainedInvokeFailure \
 build-Otel18InvokeTarget build-Otel19ExecutionFailure build-Otel20VirtualContext \
 build-Otel21CompletedStepReplay build-Otel22UserFunctionContext build-Otel23CallbackFunctionContext build-Otel24InvocationRetryStatus \
+build-Otel25CallbackFailureWithoutError build-Otel26ExternalCallbackReplay \
 build-OtelExecution1Success \
 build-OtelExecution2WaitResume build-OtelExecution3Retry \
 build-OtelExecution4TerminalFailure build-OtelExecution5ChildContext \
@@ -46,6 +49,7 @@ build-OtelExecution18InvokeTarget build-OtelExecution19ExecutionFailure \
 build-OtelExecution20VirtualContext \
 build-OtelExecution21CompletedStepReplay build-OtelExecution22UserFunctionContext build-OtelExecution23CallbackFunctionContext \
 build-OtelExecution24InvocationRetryStatus \
+build-OtelExecution25CallbackFailureWithoutError build-OtelExecution26ExternalCallbackReplay \
 build-OtelLongRunning1Wait \
 build-OtelLongRunning2Retry build-OtelLongRunning3Callback \
 build-OtelLongRunning4ChainedInvoke build-OtelLongRunning4InvokeTarget:

@@ -54,6 +54,8 @@ EXPECTED_MAPPINGS: list[tuple[str, str]] = [
     ("Otel22UserFunctionContext", "otel-invocation-22"),
     ("Otel23CallbackFunctionContext", "otel-invocation-23"),
     ("Otel24InvocationRetryStatus", "otel-invocation-24"),
+    ("Otel25CallbackFailureWithoutError", "otel-invocation-25"),
+    ("Otel26ExternalCallbackReplay", "otel-invocation-26"),
     ("OtelExecution1Success", "otel-execution-1"),
     ("OtelExecution2WaitResume", "otel-execution-2"),
     ("OtelExecution3Retry", "otel-execution-3"),
@@ -78,6 +80,8 @@ EXPECTED_MAPPINGS: list[tuple[str, str]] = [
     ("OtelExecution22UserFunctionContext", "otel-execution-22"),
     ("OtelExecution23CallbackFunctionContext", "otel-execution-23"),
     ("OtelExecution24InvocationRetryStatus", "otel-execution-24"),
+    ("OtelExecution25CallbackFailureWithoutError", "otel-execution-25"),
+    ("OtelExecution26ExternalCallbackReplay", "otel-execution-26"),
 ]
 EXPECTED_LONG_RUNNING_MAPPINGS: list[tuple[str, str]] = [
     ("OtelLongRunning1Wait", "otel-long-running-1"),
@@ -164,6 +168,7 @@ EXPECTED_MODULES: frozenset[str] = frozenset(
         "otel_22_user_function_context",
         "otel_23_callback_function_context",
         "otel_24_invocation_retry_status",
+        "otel_26_external_callback_completion_replay",
         "otel_long_running_1_wait",
         "otel_long_running_2_retry",
         "otel_long_running_3_callback",
