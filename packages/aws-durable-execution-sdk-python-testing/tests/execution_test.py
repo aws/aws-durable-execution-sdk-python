@@ -955,6 +955,38 @@ def test_from_dict_with_none_result():
 
 
 # region callback
+@pytest.mark.parametrize("outcome", ["success", "failure", "timeout"])
+def test_callback_completion_records_only_successful_state_changes(outcome):
+    """Preserve payloads, token versions and consumed metadata on rejection."""
+    operation = Operation(
+        operation_id="callback",
+        operation_type=OperationType.CALLBACK,
+        status=OperationStatus.STARTED,
+        callback_details=CallbackDetails(callback_id="callback-id"),
+    )
+    execution = Execution("test-arn", _make_start_input(), [operation])
+    complete = getattr(execution, f"complete_callback_{outcome}")
+    payload = b'"result"' if outcome == "success" else ErrorObject.from_message("error")
+    token_version = execution.token_sequence
+    result = complete("callback-id", payload)
+
+    assert execution.updated_operation_ids == ["callback"]
+    assert execution.token_sequence == token_version
+    assert execution.seq_counter == 1
+    assert result.callback_details.result == (
+        '"result"' if outcome == "success" else None
+    )
+    assert result.callback_details.error == (None if outcome == "success" else payload)
+    restored = Execution.from_json_dict(execution.to_json_dict())
+    assert restored.updated_operation_ids == ["callback"]
+    execution.mark_state_delivered()
+    with pytest.raises(IllegalStateException, match="not in STARTED state"):
+        complete("callback-id", payload)
+    assert execution.updated_operation_ids == []
+    assert execution.seq_counter == 1
+    assert execution.token_sequence == token_version
+
+
 def test_find_callback_operation_not_found():
     """Test find_callback_operation raises exception when callback not found."""
     execution = Execution("test-arn", Mock(), [])

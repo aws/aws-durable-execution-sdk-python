@@ -2,6 +2,7 @@ import datetime
 import logging
 import pickle
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict, fields
 from unittest.mock import MagicMock, patch
@@ -1536,6 +1537,65 @@ class TestPluginExecutorOnOperationUpdate(unittest.TestCase):
             self.executor.on_operation_update(op)
 
         self.assertIn("operation_end:op-1", self.plugin.calls)
+
+    def test_checkpoint_does_not_repeat_an_observed_terminal_update(self):
+        """A resumed external result can also appear in the next checkpoint."""
+        for status in (
+            OperationStatus.SUCCEEDED,
+            OperationStatus.FAILED,
+            OperationStatus.CANCELLED,
+            OperationStatus.TIMED_OUT,
+            OperationStatus.STOPPED,
+        ):
+            with self.subTest(status=status):
+                plugin = _TrackingPlugin()
+                executor = PluginExecutor(plugins=[plugin])
+                operation = self._make_operation(status=status)
+                with executor.run():
+                    # First completion delivered through UpdatedOperationIds.
+                    executor.on_operation_update(operation)
+                    # The next response carries the already observed state.
+                    executor.on_operation_update(
+                        [operation],
+                        operations={operation.operation_id: operation},
+                        previous_operations={operation.operation_id: operation},
+                    )
+                self.assertEqual(plugin.calls.count("operation_end:op-1"), 1)
+
+    def test_checkpoint_terminal_transition_still_emits(self):
+        previous = self._make_operation(status=OperationStatus.STARTED)
+        operation = self._make_operation(status=OperationStatus.SUCCEEDED)
+        with self.executor.run():
+            self.executor.on_operation_update(
+                [operation],
+                operations={operation.operation_id: operation},
+                previous_operations={previous.operation_id: previous},
+            )
+        self.assertEqual(self.plugin.calls.count("operation_end:op-1"), 1)
+
+    def test_checkpoint_preserves_first_terminal_notification(self):
+        """State can predate notification, e.g. without UpdatedOperationIds."""
+        operation = self._make_operation(status=OperationStatus.SUCCEEDED)
+        with self.executor.run():
+            self.executor.on_operation_update(
+                [operation],
+                operations={operation.operation_id: operation},
+                previous_operations={operation.operation_id: operation},
+            )
+        self.assertEqual(self.plugin.calls.count("operation_end:op-1"), 1)
+
+    def test_terminal_notification_resets_between_invocations(self):
+        operation = self._make_operation(status=OperationStatus.SUCCEEDED)
+        for _ in range(2):
+            with self.executor.run():
+                self.executor.on_operation_update(operation)
+        self.assertEqual(self.plugin.calls.count("operation_end:op-1"), 2)
+
+    def test_concurrent_completion_notifications_emit_once(self):
+        operation = self._make_operation(status=OperationStatus.SUCCEEDED)
+        with self.executor.run(), ThreadPoolExecutor(max_workers=8) as workers:
+            list(workers.map(self.executor.on_operation_update, [operation] * 16))
+        self.assertEqual(self.plugin.calls.count("operation_end:op-1"), 1)
 
     def test_non_terminal_status_without_step_details_fires_nothing(self):
         op = self._make_operation(status=OperationStatus.STARTED, step_details=None)
