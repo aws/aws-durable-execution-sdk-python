@@ -105,6 +105,25 @@ class CallbackTimeoutType(Enum):
 
 
 class OperationSubType(Enum):
+    """The subtype that an operation records in its checkpoint.
+
+    The members are the subtypes that this SDK records. The checkpointed
+    state can also hold a subtype that this enum does not list:
+
+    1. Another SDK version, or a library built on the SDK, can record a
+       subtype of its own.
+    2. The SDK loads every operation of the execution on each invocation.
+    3. So a lookup that raised on an unknown subtype would fail the whole
+       execution, even when the current code never reads that operation.
+
+    So ``OperationSubType("SomeSubtype")`` returns a member for any non-empty
+    string. A listed value returns its listed member. Any other string
+    returns a member that this class creates once and then reuses. So
+    ``.value`` returns the recorded string, and ``is`` compares two lookups
+    of the same string as equal. The created members do not appear in
+    iteration or in ``__members__``.
+    """
+
     STEP = "Step"
     WAIT = "Wait"
     CALLBACK = "Callback"
@@ -116,6 +135,26 @@ class OperationSubType(Enum):
     WAIT_FOR_CALLBACK = "WaitForCallback"
     WAIT_FOR_CONDITION = "WaitForCondition"
     CHAINED_INVOKE = "ChainedInvoke"
+
+    @classmethod
+    def _missing_(cls, value: object) -> OperationSubType | None:
+        """Return the member for a subtype string that the enum does not list.
+
+        The Enum lookup checks ``_value2member_map_`` before it calls this
+        method. So the member is stored there, and every later lookup of the
+        same string returns the same object without calling this method.
+        Two threads can create a member for the same string at once.
+        ``setdefault`` keeps the first one, so both lookups return it.
+
+        A value that is not a non-empty string returns ``None``, and the
+        lookup raises ``ValueError`` as before.
+        """
+        if not isinstance(value, str) or not value:
+            return None
+        member = object.__new__(cls)
+        member._name_ = value
+        member._value_ = value
+        return cls._value2member_map_.setdefault(value, member)  # type: ignore[return-value]
 
 
 class InvocationStatus(Enum):

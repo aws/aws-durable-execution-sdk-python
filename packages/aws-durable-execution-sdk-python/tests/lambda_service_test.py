@@ -1604,6 +1604,58 @@ def test_operation_from_dict_with_subtype():
     assert operation.sub_type is OperationSubType.STEP
 
 
+def test_operation_sub_type_lookup_returns_member_for_unlisted_string():
+    """A subtype that the enum does not list resolves to a reused member."""
+    sub_type = OperationSubType("PyTestUnlistedLookup")
+
+    assert isinstance(sub_type, OperationSubType)
+    assert sub_type.value == "PyTestUnlistedLookup"
+    assert OperationSubType("PyTestUnlistedLookup") is sub_type
+    assert sub_type is not OperationSubType.STEP
+    # A listed value still resolves to its listed member.
+    assert OperationSubType("Step") is OperationSubType.STEP
+    # The created member does not join the listed members.
+    assert "PyTestUnlistedLookup" not in OperationSubType.__members__
+    assert sub_type not in list(OperationSubType)
+
+
+@pytest.mark.parametrize("value", ["", None, 3])
+def test_operation_sub_type_lookup_rejects_non_string_or_empty(value):
+    """Only a non-empty string resolves to a created member."""
+    with pytest.raises(ValueError, match="is not a valid OperationSubType"):
+        OperationSubType(value)
+
+
+def test_operation_from_dict_keeps_unlisted_subtype():
+    """State recorded with an unlisted subtype loads and round-trips."""
+    data = {
+        "Id": "op1",
+        "Type": "STEP",
+        "Status": "SUCCEEDED",
+        "SubType": "PyTestUnlistedOperation",
+    }
+
+    operation = Operation.from_dict(data)
+
+    assert operation.sub_type is OperationSubType("PyTestUnlistedOperation")
+    assert operation.to_dict()["SubType"] == "PyTestUnlistedOperation"
+
+
+def test_operation_update_from_dict_keeps_unlisted_subtype():
+    """An update with an unlisted subtype loads and round-trips."""
+    data = {
+        "Id": "op1",
+        "Type": "STEP",
+        "Action": "START",
+        "SubType": "PyTestUnlistedUpdate",
+    }
+
+    update = OperationUpdate.from_dict(data)
+
+    assert update.sub_type is OperationSubType("PyTestUnlistedUpdate")
+    assert update.to_dict()["SubType"] == "PyTestUnlistedUpdate"
+
+
 def test_operation_from_dict_complete():
     """Test Operation.from_dict with all fields."""
     start_time = datetime.datetime(2023, 1, 1, 10, 0, 0, tzinfo=datetime.UTC)
