@@ -2957,6 +2957,102 @@ def test_durable_execution_replays_child_context_with_step_subtype():
     assert child_body_calls == []
 
 
+def _unlisted_subtype_event(operation: dict[str, Any]) -> dict[str, Any]:
+    """An invocation event whose state holds one more operation."""
+    return {
+        "DurableExecutionArn": "arn:test:execution/exec1",
+        "CheckpointToken": "token123",
+        "InitialExecutionState": {
+            "Operations": [
+                {
+                    "Id": "exec1",
+                    "Type": "EXECUTION",
+                    "Status": "STARTED",
+                    "ExecutionDetails": {"InputPayload": "{}"},
+                },
+                operation,
+            ],
+            "NextMarker": "",
+        },
+    }
+
+
+def test_durable_execution_loads_state_with_unlisted_subtype():
+    """An operation with an unlisted subtype does not fail the invocation.
+
+    Another SDK version, or a library on top of the SDK, can record a subtype
+    that this SDK does not list. The SDK parses every operation in the state
+    on each invocation, including operations that the code never reads.
+    """
+    with patch(
+        "aws_durable_execution_sdk_python.execution.LambdaClient"
+    ) as mock_lambda_client:
+        mock_client = Mock(spec=DurableServiceClient)
+        mock_lambda_client.initialize_client.return_value = mock_client
+        event = _unlisted_subtype_event(
+            {
+                "Id": "other-operation",
+                "Type": "STEP",
+                "Status": "SUCCEEDED",
+                "Name": "launch",
+                "SubType": "PyTestUnlistedLaunch",
+                "StepDetails": {"Result": json.dumps("launched")},
+            }
+        )
+
+        @durable_execution
+        def test_handler(event: Any, context: DurableContext) -> str:
+            return "done"
+
+        result = test_handler(event, _make_lambda_context())
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert result["Result"] == json.dumps("done")
+
+
+def test_durable_execution_reports_unlisted_subtype_replay_mismatch():
+    """A replayed operation whose checkpoint has another subtype fails as nondeterministic.
+
+    The checkpoint's unlisted subtype appears in the error message, instead of
+    a ValueError from parsing the state.
+    """
+    with patch(
+        "aws_durable_execution_sdk_python.execution.LambdaClient"
+    ) as mock_lambda_client:
+        mock_client = Mock(spec=DurableServiceClient)
+        mock_lambda_client.initialize_client.return_value = mock_client
+        event = _unlisted_subtype_event(
+            {
+                "Id": OperationIdNamespace().create_id_for_step(1),
+                "Type": "CONTEXT",
+                "Status": "SUCCEEDED",
+                "Name": "child",
+                "SubType": "PyTestUnlistedChild",
+                "ContextDetails": {"Result": json.dumps("cached")},
+            }
+        )
+        child_body_calls: list[bool] = []
+
+        def child_body(_child: DurableContext) -> str:
+            child_body_calls.append(True)
+            return "executed"
+
+        @durable_execution
+        def test_handler(event: Any, context: DurableContext) -> str:
+            return context.run_in_child_context(child_body, name="child")
+
+        result = test_handler(event, _make_lambda_context())
+
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.NonDeterministicExecutionError"
+    )
+    assert "subtype checkpoint='PyTestUnlistedChild'" in result["Error"]["ErrorMessage"]
+    assert "current='RunInChildContext'" in result["Error"]["ErrorMessage"]
+    assert child_body_calls == []
+
+
 @pytest.mark.parametrize("operation_kind", ["map", "parallel"])
 @pytest.mark.parametrize("parent_replay_children", [False, True])
 @pytest.mark.parametrize(

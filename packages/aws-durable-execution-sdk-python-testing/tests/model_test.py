@@ -8,6 +8,7 @@ import json
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
     OperationStatus,
+    OperationSubType,
     OperationType,
 )
 
@@ -3552,21 +3553,21 @@ def test_events_to_operations_preserves_sub_type():
     assert operations[0].sub_type.value == "Step"
 
 
-def test_events_to_operations_invalid_sub_type():
-    """Test events_to_operations raises InvalidParameterValueException when sub_type is invalid."""
-    invalid_sub_type: str = "INVALID_SUB_TYPE"
+def test_events_to_operations_keeps_unlisted_sub_type():
+    """An event subtype that the enum does not list loads as its own member."""
+    unlisted_sub_type: str = "PyTestUnlistedHistory"
     event = Event(
         event_type="StepStarted",
         event_timestamp=datetime.datetime(2023, 1, 1, 0, 0, 0, tzinfo=datetime.UTC),
         operation_id="step-1",
-        sub_type=invalid_sub_type,
+        sub_type=unlisted_sub_type,
     )
 
-    with pytest.raises(
-        InvalidParameterValueException,
-        match=f"'{invalid_sub_type}' is not a valid OperationSubType",
-    ):
-        events_to_operations([event])
+    operations = events_to_operations([event])
+
+    assert len(operations) == 1
+    assert operations[0].sub_type is OperationSubType(unlisted_sub_type)
+    assert operations[0].sub_type.value == unlisted_sub_type
 
 
 def test_invocation_completed_details_to_json_dict():
