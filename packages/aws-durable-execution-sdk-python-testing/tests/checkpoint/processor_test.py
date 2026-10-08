@@ -430,7 +430,7 @@ def test_paused_checkpoint_retries_without_a_token_even_after_resume():
     )
     execution = Execution.new(start_input)
     execution.start()
-    execution.paused = True
+    execution.pause()
     store.save(execution)
 
     inbound = CheckpointToken(
@@ -452,7 +452,8 @@ def test_paused_checkpoint_retries_without_a_token_even_after_resume():
     assert retry.checkpoint_token is None
 
     resumed = store.load(execution.durable_execution_arn)
-    resumed.paused = False
+    assert resumed.resume() is True
+    assert resumed.is_paused is False
     store.save(resumed)
 
     retry_after_resume = processor.process_checkpoint(inbound, updates, "c1")

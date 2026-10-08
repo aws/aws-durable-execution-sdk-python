@@ -1456,7 +1456,7 @@ class Executor(ExecutionObserver):
 
             case InvocationStatus.PENDING:
                 # A paused execution answers the running invocation's
-                # checkpoint without a token and sets deferred_invocation;
+                # checkpoint without a token and defers its next invocation;
                 # that invocation must stop as PENDING even with nothing
                 # pending, and resume re-invokes it. Any other PENDING needs
                 # pending operations or a change the handler has not seen
@@ -1464,7 +1464,7 @@ class Executor(ExecutionObserver):
                 # when an operation completes after this invocation's input
                 # was built but before this response is validated.
                 if (
-                    not execution.deferred_invocation
+                    not execution.has_deferred_invocation
                     and not execution.has_pending_operations(execution)
                     and not (
                         invocation_seq is not None
@@ -1529,8 +1529,8 @@ class Executor(ExecutionObserver):
             )
             return None
 
-        if execution.paused:
-            execution.deferred_invocation = True
+        if execution.is_paused:
+            execution.defer_invocation()
             self._store.save(execution)
             logger.debug(
                 "[%s] Holding back scheduled invocation while paused",
@@ -1834,20 +1834,18 @@ class Executor(ExecutionObserver):
 
     def _set_paused(self, execution_arn: str) -> None:
         execution = self._store.load(execution_arn)
-        if execution.is_complete or execution.paused:
+        if execution.is_complete or execution.is_paused:
             return
-        execution.paused = True
+        execution.pause()
         self._store.save(execution)
 
     def _resume_execution(self, execution_arn: str) -> None:
         execution = self._store.load(execution_arn)
-        if execution.is_complete or not execution.paused:
+        if execution.is_complete or not execution.is_paused:
             return
-        
-        execution.paused = False
-        deferred = execution.deferred_invocation
-        execution.deferred_invocation = False
-        
+
+        deferred = execution.resume()
+
         self._store.save(execution)
         if deferred:
             self._invoke_execution(execution_arn)

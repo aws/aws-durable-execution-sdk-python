@@ -150,9 +150,9 @@ class CheckpointCore:
         # token so a retry of this call replays the same tokenless response,
         # even after a resume has moved the execution on.
         outbound_token: str | None = new_token
-        if execution.paused:
+        if execution.is_paused:
             outbound_token = None
-            execution.deferred_invocation = True
+            execution.defer_invocation()
 
         execution.last_checkpoint = CheckpointIdempotencyRecord(
             client_token=client_token or "",

@@ -62,6 +62,20 @@ class ExecutionStatus(Enum):
     TIMED_OUT = "TIMED_OUT"
 
 
+class PauseState(Enum):
+    """Whether a test paused this execution, and whether resume must invoke."""
+
+    NOT_PAUSED = "NOT_PAUSED"
+    # Paused while idle: no handler was running and no invocation was due.
+    # Resume lifts the pause and the next trigger invokes as usual.
+    PAUSED = "PAUSED"
+    # Paused while progress was owed. Either the running handler checkpointed
+    # and was answered without a token, so it stopped as PENDING before it
+    # finished, or a scheduled invocation came due and was held back.
+    # Resume must start one new invocation to make up for it.
+    PAUSED_INVOCATION_DEFERRED = "PAUSED_INVOCATION_DEFERRED"
+
+
 @dataclass(frozen=True)
 class CheckpointIdempotencyRecord:
     """Single-slot cache of the most recent accepted checkpoint response.
@@ -167,17 +181,33 @@ class Execution:
         self.result: DurableExecutionInvocationOutput | None = None
         self.consecutive_failed_invocation_attempts: int = 0
         self.close_status: ExecutionStatus | None = None
-        # While True, every checkpoint from pause_execution() until resume_execution()
-        # is answered without a checkpoint token.
-        # If responses have no token then no new invocation will start.
-        self.paused: bool = False
-        # Set while paused when progress was stopped and must be resumed later.
-        # This means either a new handler invocation was not started because the
-        # execution is paused, or the current handler was given no next checkpoint
-        # token and therefore must stop as PENDING.
-        #
-        # resume_execution() clears this flag and starts one new invocation.
-        self.deferred_invocation: bool = False
+        self._pause_state: PauseState = PauseState.NOT_PAUSED
+
+    @property
+    def pause_state(self) -> PauseState:
+        return self._pause_state
+
+    @property
+    def is_paused(self) -> bool:
+        return self._pause_state is not PauseState.NOT_PAUSED
+
+    @property
+    def has_deferred_invocation(self) -> bool:
+        return self._pause_state is PauseState.PAUSED_INVOCATION_DEFERRED
+
+    def pause(self) -> None:
+        if self._pause_state is PauseState.NOT_PAUSED:
+            self._pause_state = PauseState.PAUSED
+
+    def defer_invocation(self) -> None:
+        if self._pause_state is PauseState.PAUSED:
+            self._pause_state = PauseState.PAUSED_INVOCATION_DEFERRED
+
+    def resume(self) -> bool:
+        """Clear the pause and return whether the caller must schedule an invocation."""
+        deferred: bool = self._pause_state is PauseState.PAUSED_INVOCATION_DEFERRED
+        self._pause_state = PauseState.NOT_PAUSED
+        return deferred
 
     def touch_operation(self, operation_id: str) -> None:
         """Record a state-affecting event on an operation.
@@ -263,8 +293,7 @@ class Execution:
             "ConsecutiveFailedInvocationAttempts": self.consecutive_failed_invocation_attempts,
             "CloseStatus": self.close_status.value if self.close_status else None,
             "CurrentInvocationId": self.current_invocation_id,
-            "Paused": self.paused,
-            "DeferredInvocation": self.deferred_invocation,
+            "PauseState": self._pause_state.value,
         }
 
     @classmethod
@@ -333,8 +362,9 @@ class Execution:
         execution.close_status = (
             ExecutionStatus(close_status_str) if close_status_str else None
         )
-        execution.paused = data.get("Paused", False)
-        execution.deferred_invocation = data.get("DeferredInvocation", False)
+        execution._pause_state = PauseState(
+            data.get("PauseState", PauseState.NOT_PAUSED.value)
+        )
 
         return execution
 
