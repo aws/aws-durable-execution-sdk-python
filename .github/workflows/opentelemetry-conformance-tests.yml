@@ -45,7 +45,7 @@ on:
       conformance_test_ref:
         description: Conformance test commit SHA or branch name
         required: true
-        default: fb95e20acb0b9b10f5fc032ac521a4fd45efdd73
+        default: ad35bd36b67821d52a17db4f9d80d8696694a7f3
         type: string
 
 # Backend stacks are shared across PRs. Queue whole runs so reusable
@@ -66,14 +66,14 @@ jobs:
       actions: write
       contents: read
       id-token: write
-    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@fb95e20acb0b9b10f5fc032ac521a4fd45efdd73
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@ad35bd36b67821d52a17db4f9d80d8696694a7f3
     with:
       language: python
       runs_on: codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
       resource_prefix: p
       sdk_repository: aws/aws-durable-execution-sdk-python
       sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      conformance_test_ref: ${{ inputs.conformance_test_ref || 'fb95e20acb0b9b10f5fc032ac521a4fd45efdd73' }}
+      conformance_test_ref: ${{ inputs.conformance_test_ref || 'ad35bd36b67821d52a17db4f9d80d8696694a7f3' }}
       # Check the SDK out so the handlers and templates below are on disk. The handlers
       # themselves are installed from sdk_ref by src/requirements.txt during the SAM build.
       checkout_sdk: true
