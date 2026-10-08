@@ -155,8 +155,6 @@ def test_optional_handler_scopes_are_balanced_and_cannot_change_outcome(
     events: list[str] = []
 
     class ScopePlugin(DurableInstrumentationPlugin):
-        __durable_handler_context_api__ = 1
-
         def __init__(self, name: str):
             self.name = name
 
@@ -331,8 +329,6 @@ def test_failed_plugin_setup_discards_partial_context_bindings(
             self.plugin.reset("exit")
 
     class SetupPlugin(DurableInstrumentationPlugin):
-        __durable_handler_context_api__ = 1
-
         def __init__(self, name: str) -> None:
             self.name = name
             self.token: contextvars.Token[str] | None = None
@@ -427,85 +423,21 @@ def test_failed_plugin_setup_discards_partial_context_bindings(
     assert all(str(error[1]) == "partial plugin setup" for error in errors)
 
 
-@pytest.mark.parametrize("shape", ["helper", "property", "dynamic"])
-def test_unopted_legacy_handler_context_is_never_inspected(shape: str) -> None:
+@pytest.mark.parametrize("inherited", [False, True])
+@pytest.mark.parametrize("fail_handler", [False, True])
+def test_handler_scope_uses_direct_or_inherited_optional_method(
+    inherited: bool, fail_handler: bool
+) -> None:
     from contextlib import contextmanager
     from collections.abc import Iterator
     from datetime import UTC, datetime
     from aws_durable_execution_sdk_python.plugin import PluginExecutor
 
-    calls: list[str] = []
-
-    @contextmanager
-    def helper(_info: InvocationStartInfo) -> Iterator[None]:
-        calls.append("helper")
-        yield
-
-    def property_getter(_self: Any) -> Any:
-        calls.append("property")
-        return helper
-
-    def dynamic_getter(_self: Any, name: str) -> Any:
-        if name == "handler_context":
-            calls.append("dynamic")
-            return "legacy-business-value"
-        raise AttributeError(name)
-
-    members_by_shape: dict[str, dict[str, Any]] = {
-        "helper": {"handler_context": staticmethod(helper)},
-        "property": {"handler_context": property(property_getter)},
-        "dynamic": {"__getattr__": dynamic_getter},
-    }
-    plugin_type = type(
-        "Legacy", (DurableInstrumentationPlugin,), members_by_shape[shape]
-    )
-    plugin = plugin_type()
-    if shape == "dynamic":
-        assert plugin.handler_context == "legacy-business-value"
-        calls.clear()
-    executor = PluginExecutor([plugin])
-    with executor.run():
-        executor.on_invocation_start("legacy-helper", True, datetime.now(UTC), None)
-        assert executor.run_handler(lambda: list(calls)) == []
-    assert calls == []
-
-
-@pytest.mark.parametrize("marker", [None, 0, 2, True, "1", property(lambda _: 1)])
-def test_handler_scope_requires_literal_class_local_version(marker: Any) -> None:
-    from contextlib import nullcontext
-    from datetime import UTC, datetime
-    from aws_durable_execution_sdk_python.plugin import PluginExecutor
-
-    calls: list[str] = []
-
-    def helper(_self: Any, _info: InvocationStartInfo) -> Any:
-        calls.append("scope")
-        return nullcontext()
-
-    plugin_type = type(
-        "Legacy",
-        (DurableInstrumentationPlugin,),
-        {"__durable_handler_context_api__": marker, "handler_context": helper},
-    )
-    executor = PluginExecutor([plugin_type()])
-    with executor.run():
-        executor.on_invocation_start("invalid-marker", True, datetime.now(UTC), None)
-        assert executor.run_handler(lambda: "ok") == "ok"
-    assert calls == []
-
-
-def test_handler_scope_opt_in_is_not_inherited_or_taken_from_instance() -> None:
-    from contextlib import contextmanager
-    from collections.abc import Iterator
-    from datetime import UTC, datetime
-    from aws_durable_execution_sdk_python.plugin import PluginExecutor
-
-    marker = contextvars.ContextVar("explicit-scope", default="outside")
+    marker = contextvars.ContextVar("inherited-scope", default="outside")
     events: list[str] = []
+    error = RuntimeError("original handler failure")
 
-    class OptedPlugin(DurableInstrumentationPlugin):
-        __durable_handler_context_api__ = 1
-
+    class ScopePlugin(DurableInstrumentationPlugin):
         @contextmanager
         def handler_context(self, _info: InvocationStartInfo) -> Iterator[None]:
             events.append("enter")
@@ -516,47 +448,66 @@ def test_handler_scope_opt_in_is_not_inherited_or_taken_from_instance() -> None:
                 marker.reset(token)
                 events.append("exit")
 
-    class LegacySubclass(OptedPlugin):
+    class InheritedPlugin(ScopePlugin):
         pass
 
-    class ExplicitSubclass(OptedPlugin):
-        __durable_handler_context_api__ = 1
+    plugin = InheritedPlugin() if inherited else ScopePlugin()
+    executor = PluginExecutor([plugin])
 
-    for plugin, expected in [
-        (OptedPlugin(), "inside"),
-        (LegacySubclass(), "outside"),
-        (ExplicitSubclass(), "inside"),
-    ]:
-        # Assigning a marker to an instance cannot accidentally enable the hook.
-        plugin.__durable_handler_context_api__ = 1
-        executor = PluginExecutor([plugin])
-        with executor.run():
-            executor.on_invocation_start("subclass", True, datetime.now(UTC), None)
-            assert executor.run_handler(marker.get) == expected
-        assert marker.get() == "outside"
-    assert events == ["enter", "exit", "enter", "exit"]
+    def handler() -> str:
+        assert marker.get() == "inside"
+        events.append("body")
+        if fail_handler:
+            raise error
+        return "ok"
+
+    with executor.run():
+        for _ in range(2):
+            executor.on_invocation_start("inherited", True, datetime.now(UTC), None)
+            if fail_handler:
+                with pytest.raises(RuntimeError) as caught:
+                    executor.run_handler(handler)
+                assert caught.value is error
+            else:
+                assert executor.run_handler(handler) == "ok"
+            assert marker.get() == "outside"
+    assert events == ["enter", "body", "exit"] * 2
 
 
-def test_handler_opt_in_does_not_trigger_legacy_metaclass_descriptors() -> None:
+@pytest.mark.parametrize("value", [None, "not a method", 42])
+def test_noncallable_optional_handler_scope_is_ignored(value: Any) -> None:
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from typing import cast
+    from aws_durable_execution_sdk_python.plugin import PluginExecutor
+
+    plugin = cast(
+        DurableInstrumentationPlugin,
+        SimpleNamespace(on_invocation_start=lambda info: None, handler_context=value),
+    )
+    executor = PluginExecutor([plugin])
+    with executor.run():
+        executor.on_invocation_start("noncallable", True, datetime.now(UTC), None)
+        assert executor.run_handler(lambda: "unchanged") == "unchanged"
+
+
+def test_handler_scope_lookup_failure_discards_partial_bindings(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     from datetime import UTC, datetime
     from aws_durable_execution_sdk_python.plugin import PluginExecutor
 
-    reads: list[str] = []
+    marker = contextvars.ContextVar("lookup-failure", default="outside")
 
-    def namespace(_cls: Any) -> Any:
-        reads.append("metaclass-dict")
-        raise RuntimeError("legacy namespace")
+    class BrokenPlugin(DurableInstrumentationPlugin):
+        @property
+        def handler_context(self) -> Any:
+            marker.set("partial")
+            raise ValueError("scope lookup failed")
 
-    def helper(_self: Any, _info: Any) -> Any:
-        reads.append("legacy-helper")
-        raise RuntimeError("legacy helper")
-
-    meta = type("LegacyMeta", (type,), {"__dict__": property(namespace)})
-    plugin_type = meta(
-        "Legacy", (DurableInstrumentationPlugin,), {"handler_context": helper}
-    )
-    executor = PluginExecutor([plugin_type()])
+    executor = PluginExecutor([BrokenPlugin()])
     with executor.run():
-        executor.on_invocation_start("metaclass", True, datetime.now(UTC), None)
-        assert executor.run_handler(lambda: "ok") == "ok"
-    assert reads == []
+        executor.on_invocation_start("lookup", True, datetime.now(UTC), None)
+        assert executor.run_handler(marker.get) == "outside"
+    assert marker.get() == "outside"
+    assert "scope lookup failed" in caplog.text

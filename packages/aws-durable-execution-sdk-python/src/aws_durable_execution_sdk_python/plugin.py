@@ -31,7 +31,6 @@ from aws_durable_execution_sdk_python.types import LambdaContext
 logger = logging.getLogger(__name__)
 
 DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION = 1
-DURABLE_INSTRUMENTATION_HANDLER_CONTEXT_API_VERSION = 1
 
 
 class InvocationStatus(Enum):
@@ -463,18 +462,6 @@ class DurableInstrumentationPluginProvider:
     plugin_api_version: int
 
 
-def _handler_context_api_enabled(
-    plugin_type: type[DurableInstrumentationPlugin],
-) -> bool:
-    """Read only the concrete class namespace, bypassing metaclass descriptors."""
-    namespace = type.__dict__["__dict__"].__get__(plugin_type, type(plugin_type))
-    version = namespace.get("__durable_handler_context_api__")
-    return (
-        type(version) is int
-        and version == DURABLE_INSTRUMENTATION_HANDLER_CONTEXT_API_VERSION
-    )
-
-
 class PluginExecutor:
     def __init__(self, plugins: list[DurableInstrumentationPlugin] | None):
         self._plugins = plugins or []
@@ -578,18 +565,12 @@ class PluginExecutor:
     def _safe_handler_context(
         self, plugin: DurableInstrumentationPlugin, info: InvocationStartInfo
     ) -> Iterator[bool]:
-        # Old plugin objects may not inherit this core's new optional method.
+        # Plugins may omit this optional scope method.
         scope = None
         succeeded = True
         try:
-            # Old plugins may have an unrelated helper/property with this name.
-            # Never even inspect it unless this concrete class explicitly opts in.
-            factory = (
-                getattr(plugin, "handler_context", None)
-                if _handler_context_api_enabled(type(plugin))
-                else None
-            )
-            if factory is not None:
+            factory = getattr(plugin, "handler_context", None)
+            if callable(factory):
                 scope = factory(info)
                 scope.__enter__()
         except Exception:

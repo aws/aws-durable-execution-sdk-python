@@ -114,22 +114,20 @@ lifecycle order are unchanged.
 
 ### Optional handler context scopes
 
-A plugin can declare `__durable_handler_context_api__ = 1` directly on its
-concrete class and implement `handler_context(info)` returning a context manager.
-The updated core enters these scopes around the top-level handler on its worker
-thread, in registration order, and closes them in reverse order. Cleanup receives
-no handler exception and cannot suppress or replace its outcome. Invocation hooks
-retain their original thread and order; failed setup bindings are discarded and
-successful scope cleanup stays in the context that owns its tokens.
+A plugin can provide `handler_context(info)` returning a context manager. The
+updated core looks up this optional method normally, so inherited methods work
+without extra declarations. A missing or non-callable attribute is ignored.
+The core enters these scopes around the top-level handler on its worker thread,
+in registration order, and closes them in reverse order. Cleanup receives no
+handler exception and cannot suppress or replace its outcome. Invocation hooks
+retain their original thread and order; failed lookup, setup or entry bindings
+are discarded, and successful scope cleanup stays in the context that owns its
+tokens.
 
-The marker must be the literal integer `1`; instance and inherited markers do not
-opt in. A subclass must redeclare the marker to adopt this new hook. Unopted legacy
-helpers, properties and dynamic attributes named `handler_context` are untouched.
-The generic plugin base supplies neither a marker nor a default method. Core
-support is advertised by module constant
-`aws_durable_execution_sdk_python.plugin.DURABLE_INSTRUMENTATION_HANDLER_CONTEXT_API_VERSION`.
-Older cores ignore this optional API. The provider API version and dependency
-requirements are unchanged.
+`handler_context` is an optional plugin API name: callable methods or attributes
+with that name are invoked. The generic plugin base does not require a default
+method. Older cores ignore this optional API and retain their existing behavior.
+The provider API version and dependency requirements are unchanged.
 
 ## 🚀 Quick Start
 
