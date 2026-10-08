@@ -129,6 +129,10 @@ def _run_public_callback_failure(
             else:
                 runner.send_callback_failure(callback_id, error=error)
             result = runner.wait_for_result(arn, timeout=10)
+            with_data = runner.get_execution_history(arn, include_execution_data=True)
+            without_data = runner.get_execution_history(
+                arn, include_execution_data=False
+            )
 
         assert result.status.value == "FAILED"
         spans = exporter.get_finished_spans()
@@ -175,6 +179,17 @@ def _run_public_callback_failure(
             "status": result.status.value,
             "caller_error": dict(result.error.to_dict()),
             "invocation_statuses": statuses,
+            "submitted_error": dict(error.to_dict()) if error is not None else {},
+            "history_error": next(
+                event.to_dict()["CallbackFailedDetails"]["Error"]
+                for event in with_data.events
+                if event.event_type == "CallbackFailed"
+            ),
+            "metadata_error": next(
+                event.to_dict()["CallbackFailedDetails"]["Error"]
+                for event in without_data.events
+                if event.event_type == "CallbackFailed"
+            ),
         }
     finally:
         provider.shutdown()
@@ -206,3 +221,19 @@ def test_public_callback_failure_preserves_error_details(
         monkeypatch, tmp_path / "filesystem", plugin_type, True, error_kind
     )
     assert memory == filesystem
+    expected_payload = memory["submitted_error"]
+    for outcome in [memory, filesystem]:
+        # Actual AWS history retains an empty Payload object for this failure,
+        # independently of the SDK-facing absent callback error.
+        # Retain the existing flags for nonempty errors; only the observed
+        # no-details projection is changed here.
+        assert outcome["history_error"] == {
+            "Payload": expected_payload,
+            "Truncated": bool(expected_payload),
+        }
+        # Preserve this API's existing metadata-only projection.
+        assert outcome["metadata_error"] == (
+            {"Payload": expected_payload, "Truncated": True}
+            if expected_payload
+            else {"Truncated": True}
+        )

@@ -116,6 +116,9 @@ An exactly empty serialized callback error is represented as absent in both
 stores, matching the SDK's service parser. Present fields remain intact,
 including empty messages, types, data and stack lists; the enclosing failed
 callback future still raises the same error as the file-store baseline.
+Detailed callback-failure history retains the service's empty error `Payload`
+object with `Truncated: false`, while SDK-facing state still has no error details.
+Metadata-only history and nonempty errors retain their existing representation.
 
 Case 24 covers invocation `RETRY` becoming `RETRYING`/`UNSET`. Case 25 targets the
 separate rule that a failed operation without error details remains `UNSET`.

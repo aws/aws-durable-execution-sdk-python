@@ -9,8 +9,10 @@ from unittest.mock import Mock
 
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
+    CallbackDetails,
     ChainedInvokeOptions,
     ErrorObject,
+    Operation as ServiceOperation,
     OperationStatus,
     OperationType,
     StepDetails,
@@ -847,6 +849,65 @@ def test_create_callback_failed():
 
     assert event.event_type == "CallbackFailed"
     assert event.callback_failed_details.error.payload.message == "Callback failed"
+
+
+@pytest.mark.parametrize("include_data", [False, True])
+@pytest.mark.parametrize("has_error", [False, True])
+def test_callback_failure_history_projection_preserves_sdk_state(
+    include_data, has_error
+):
+    error = ErrorObject.from_message("details") if has_error else None
+    operation = ServiceOperation(
+        operation_id="callback",
+        operation_type=OperationType.CALLBACK,
+        status=OperationStatus.FAILED,
+        callback_details=CallbackDetails(callback_id="callback-id", error=error),
+    )
+    context = EventCreationContext.create(
+        operation=operation,
+        event_id=3,
+        durable_execution_arn="arn:test",
+        start_input=StartDurableExecutionInput(
+            account_id="123",
+            function_name="test",
+            function_qualifier="$LATEST",
+            execution_name="test",
+            execution_timeout_seconds=300,
+            execution_retention_period_days=7,
+        ),
+        include_execution_data=include_data,
+    )
+    event = Event.create_callback_event(context)
+    expected = {"Truncated": not (include_data and not has_error)}
+    if has_error or include_data:
+        expected["Payload"] = error.to_dict() if error else {}
+    assert event.callback_failed_details.error.to_dict() == expected
+    assert operation.callback_details.error is error
+
+
+def test_callback_timeout_history_projection_is_unchanged():
+    operation = ServiceOperation(
+        operation_id="callback",
+        operation_type=OperationType.CALLBACK,
+        status=OperationStatus.TIMED_OUT,
+        callback_details=CallbackDetails(callback_id="callback-id", error=None),
+    )
+    context = EventCreationContext.create(
+        operation=operation,
+        event_id=3,
+        durable_execution_arn="arn:test",
+        start_input=StartDurableExecutionInput(
+            account_id="123",
+            function_name="test",
+            function_qualifier="$LATEST",
+            execution_name="test",
+            execution_timeout_seconds=300,
+            execution_retention_period_days=7,
+        ),
+        include_execution_data=True,
+    )
+    event = Event.create_callback_event(context)
+    assert event.callback_timed_out_details.error.to_dict() == {"Truncated": True}
 
 
 def test_create_callback_timed_out():

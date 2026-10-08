@@ -2239,6 +2239,14 @@ class Event:
         event_error: EventError | None = (
             EventError.from_details(callback_details) if callback_details else None
         )
+        if (
+            context.include_execution_data
+            and callback_details is not None
+            and callback_details.error is None
+        ):
+            # Detailed service history retains an empty Error.Payload object.
+            # This projection must not turn the SDK-facing absent error into one.
+            event_error = EventError(payload=ErrorObject.from_dict({}), truncated=False)
         return cls(
             event_type=EventType.CALLBACK_FAILED.value,
             event_timestamp=context.end_timestamp,
