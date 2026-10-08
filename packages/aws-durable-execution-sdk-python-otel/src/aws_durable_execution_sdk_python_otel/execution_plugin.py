@@ -31,11 +31,9 @@ the plugin never leaves an ended or suspended span current.
 
 from __future__ import annotations
 
-import contextlib
 import datetime
 import logging
 import threading
-from collections.abc import Iterator
 from typing import Any, ClassVar
 
 from aws_durable_execution_sdk_python.plugin import (
@@ -510,24 +508,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # Cover handlers installed after construction as well.
         if self._config.enrich_logger:
             install_log_filter(self)
-
-    @contextlib.contextmanager
-    def handler_context(self, info: InvocationStartInfo) -> Iterator[None]:
-        """Keep handler instrumentation on this execution's trace in its worker."""
-        ambient = trace.get_current_span().get_span_context()
-        workflow = self._workflow_span
-        token = None
-        if (
-            self._tracing_enabled
-            and workflow is not None
-            and (not ambient.is_valid or ambient.trace_id != self._execution_trace_id)
-        ):
-            token = otel_context.attach(trace.set_span_in_context(workflow))
-        try:
-            yield
-        finally:
-            if token is not None:
-                otel_context.detach(token)
 
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
         """Install a non-recording placeholder for the execution-scoped Workflow span.

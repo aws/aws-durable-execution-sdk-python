@@ -26,7 +26,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     StepDetails,
 )
-from aws_durable_execution_sdk_python import plugin as core_plugin_api
 from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     derive_workflow_span_id,
@@ -272,20 +271,11 @@ class InheritedExecutionPlugin(ExecutionOtelPlugin):
 @pytest.mark.parametrize(
     ("plugin_type", "extra_context_plugin"),
     [
-        (InvocationOtelPlugin, False),
-        (InvocationOtelPlugin, True),
-        (ExecutionOtelPlugin, False),
+        (view, extra)
+        for view in (InvocationOtelPlugin, ExecutionOtelPlugin)
+        for extra in (False, True, "same", "unrelated", "absent")
     ]
-    # Execution-view caller isolation requires the coordinated newer core.
-    # Released 2.0.x retains the pre-existing same-order teardown limitation;
-    # the legacy lane continues checking its supported combinations above.
-    + (
-        [(ExecutionOtelPlugin, True)]
-        + [(ExecutionOtelPlugin, kind) for kind in ("same", "unrelated", "absent")]
-        + [(InheritedInvocationPlugin, False), (InheritedExecutionPlugin, "absent")]
-        if hasattr(core_plugin_api.PluginExecutor, "run_handler")
-        else []
-    ),
+    + [(InheritedInvocationPlugin, False), (InheritedExecutionPlugin, "absent")],
 )
 @pytest.mark.parametrize("reverse_plugins", [False, True])
 @pytest.mark.parametrize("fail_after_resume", [False, True])
@@ -300,10 +290,6 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
 ) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
     monkeypatch.setenv("_X_AMZN_TRACE_ID", XRAY_TRACE_HEADER)
-    # The documented PyPI compatibility environment deliberately uses an older
-    # core. Keep exercising its supported operation tracing and lifecycle while
-    # asserting the new handler contract only when that core exposes the scope.
-    supports_handler_context = hasattr(core_plugin_api.PluginExecutor, "run_handler")
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
@@ -326,9 +312,7 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
 
     def handler_body(_event: Any, context: DurableContext) -> str:
         if extra_context_plugin:
-            assert baggage.get_baggage("customer") == (
-                "present" if supports_handler_context else None
-            )
+            assert baggage.get_baggage("customer") == "present"
         user_span("handler-entry")
         saved = context.step(step_body, name="before-wait")
         user_span("handler-after-step")
@@ -338,8 +322,8 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
             raise ValueError("handler failed after resume")
         return saved
 
-    # An unrelated plugin may own a caller-thread OTel baggage scope. The
-    # invocation-view fallback must never become part of its saved token.
+    # Start hooks share the invocation worker, in registration order. A later
+    # successful plugin may deliberately replace or clear the active span.
     from opentelemetry import baggage
 
     class BaggagePlugin(DurableInstrumentationPlugin):
@@ -449,37 +433,54 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
         assert calls == ["step"]
         assert otel_context.get_current() == before_context
         spans = exporter.get_finished_spans()
-        expected_parents = (
-            [None, None]
-            if not supports_handler_context
-            else [
-                0xCAFE
-                if extra_context_plugin == "same" and not reverse_plugins
-                else derive_workflow_span_id(EXECUTION_ARN)
+        expected_parents: list[int | None]
+        if isinstance(extra_context_plugin, str) and not reverse_plugins:
+            # No second OTel correction pass: the later successful Start wins.
+            expected_parents = [
+                None if extra_context_plugin == "absent" else 0xCAFE
+            ] * 2
+            expected_trace_id = {"same": XRAY_TRACE_ID, "unrelated": 1, "absent": None}[
+                extra_context_plugin
             ]
-            * 2
-            if issubclass(plugin_type, ExecutionOtelPlugin)
-            else ambient_ids
-            if ambient_kind == "same"
-            else [
-                span.context.span_id
-                for span in spans
-                if span.name == "Invocation" and span.context is not None
-            ]
-        )
+        elif issubclass(plugin_type, ExecutionOtelPlugin):
+            expected_parents = [derive_workflow_span_id(EXECUTION_ARN)] * 2
+            expected_trace_id = XRAY_TRACE_ID
+        elif reverse_plugins and isinstance(extra_context_plugin, str):
+            expected_parents = (
+                [0xCAFE] * 2
+                if extra_context_plugin == "same"
+                else [
+                    span.context.span_id
+                    for span in spans
+                    if span.name == "Invocation" and span.context is not None
+                ]
+            )
+            expected_trace_id = XRAY_TRACE_ID
+        else:
+            expected_parents = (
+                [*ambient_ids]
+                if ambient_kind == "same"
+                else [
+                    span.context.span_id
+                    for span in spans
+                    if span.name == "Invocation" and span.context is not None
+                ]
+            )
+            expected_trace_id = XRAY_TRACE_ID
         for name in ("handler-entry", "handler-after-step"):
             users = [span for span in spans if span.name == name]
             assert len(users) == 2
             assert [span.parent.span_id if span.parent else None for span in users] == (
                 expected_parents
             )
-            assert all(
-                span.context is not None
-                and (
-                    (span.context.trace_id == XRAY_TRACE_ID) == supports_handler_context
+            assert all(span.context is not None for span in users)
+            if expected_trace_id is None:
+                assert all(
+                    span.parent is None and span.context.trace_id != XRAY_TRACE_ID
+                    for span in users
                 )
-                for span in users
-            )
+            else:
+                assert all(span.context.trace_id == expected_trace_id for span in users)
         after_resume = next(
             span for span in spans if span.name == "handler-after-resume"
         )

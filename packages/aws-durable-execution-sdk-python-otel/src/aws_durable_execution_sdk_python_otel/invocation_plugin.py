@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import contextlib
 import datetime
 import logging
 import threading
-from collections.abc import Iterator
 from typing import Any, ClassVar
 
 from aws_durable_execution_sdk_python.plugin import (
@@ -75,6 +73,7 @@ _TERMINAL_INVOCATION_STATUSES = frozenset(
     {InvocationStatus.SUCCEEDED, InvocationStatus.FAILED}
 )
 _TIMESTAMP_STEP_NANOS = 1_000
+_INVOCATION_CONTEXT_KEY = "__invocation_context__"
 
 _SpanAttributes = dict[str, str | bool | int]
 
@@ -302,7 +301,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
            on_user_function_start). Unrelated ambient spans are ignored so logs
            stay correlated to the durable execution trace.
         2. The invocation span from the plugin registry, including lifecycle
-           phases outside the optional handler-worker context scope.
+           phases where another plugin changed the active context.
 
         Returns:
             A valid SpanContext, or None if no span is active.
@@ -591,27 +590,20 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             attributes=self._extract_attributes(info),
         )
 
+        # Start and End share the invocation worker and token-owning Context.
+        # Retain a valid same-trace ambient parent; otherwise bind this invocation.
+        ambient = trace.get_current_span().get_span_context()
+        invocation_span = self._get_span(None)
+        if invocation_span is not None and (
+            not ambient.is_valid or ambient.trace_id != self._execution_trace_id
+        ):
+            self._attach_context(
+                _INVOCATION_CONTEXT_KEY, trace.set_span_in_context(invocation_span)
+            )
+
         # Cover handlers installed after construction as well.
         if self._enrich_logger:
             install_log_filter(self)
-
-    @contextlib.contextmanager
-    def handler_context(self, info: InvocationStartInfo) -> Iterator[None]:
-        """Bind the fallback only inside the SDK-owned handler worker scope."""
-        ambient = trace.get_current_span().get_span_context()
-        invocation_span = self._get_span(None)
-        token = None
-        if (
-            self._tracing_enabled
-            and invocation_span is not None
-            and (not ambient.is_valid or ambient.trace_id != self._execution_trace_id)
-        ):
-            token = context.attach(trace.set_span_in_context(invocation_span))
-        try:
-            yield
-        finally:
-            if token is not None:
-                context.detach(token)
 
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
         """Install a non-recording placeholder for the execution-scoped Workflow span.
@@ -689,8 +681,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             self._reset_state()
             return
 
-        # User execution has finished; the worker has already closed its handler
-        # context scope without modifying the invocation-hook caller.
+        # User work and checkpoint cleanup have finished. Release Start bindings
+        # in the Context that created their tokens before closing the spans.
         self._detach_remaining_contexts()
 
         # Spans are registered parent-first, so close pending spans in reverse

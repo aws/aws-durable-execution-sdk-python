@@ -84,20 +84,6 @@ jobs:
       run: hatch run types:check
     - name: Run tests + coverage
       run: hatch run test:cov
-    - name: Verify supported legacy core compatibility
-      run: hatch run test-pypi-otel-legacy:test
-    - name: Test OTel with the minimum supported core
-      run: |
-        hatch run test-pypi-otel-minimum:python - <<'PYTHON'
-        from importlib.metadata import version
-        from pathlib import Path
-        import aws_durable_execution_sdk_python.plugin as plugin
-
-        assert version("aws-durable-execution-sdk-python") == "2.0.0"
-        assert "site-packages" in Path(plugin.__file__).parts
-        assert not hasattr(plugin.PluginExecutor, "run_handler")
-        PYTHON
-        hatch run test-pypi-otel-minimum:test
     - name: Build distribution
       run: |
         for pkg in packages/*/; do
@@ -108,6 +94,10 @@ jobs:
             cd "$GITHUB_WORKSPACE"
           fi
         done
+    - name: Test installed core and OTel wheels
+      run: hatch run test-wheel-otel:test
+    - name: Test released OTel with the new core wheel
+      run: hatch run test-wheel-otel-legacy:test
     - name: Verify OTel wheel dependency contract
       run: |
         OTEL_WHEEL=$(find packages/aws-durable-execution-sdk-python-otel/dist \

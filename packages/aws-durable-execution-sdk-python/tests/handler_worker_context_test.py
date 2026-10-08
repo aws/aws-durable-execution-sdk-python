@@ -1,513 +1,589 @@
-"""Focused handler-dispatch tests with a mock service and real worker thread."""
+"""Real public invocation-worker lifecycle and ContextVar ownership controls."""
 
 from __future__ import annotations
 
 import contextvars
-from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
 
 from aws_durable_execution_sdk_python.context import DurableContext
-from aws_durable_execution_sdk_python.exceptions import InvocationError
-from aws_durable_execution_sdk_python.execution import durable_execution
+from aws_durable_execution_sdk_python.exceptions import (
+    CheckpointError,
+    CheckpointErrorCategory,
+    InvocationError,
+    SuspendExecution,
+)
+from aws_durable_execution_sdk_python.execution import (
+    DurableExecutionInvocationInputWithClient,
+    InitialExecutionState,
+    durable_execution,
+)
+from aws_durable_execution_sdk_python.lambda_service import (
+    CheckpointOutput,
+    CheckpointUpdatedExecutionState,
+    DurableServiceClient,
+    ExecutionDetails,
+    Operation,
+    OperationStatus,
+    OperationType,
+    OperationUpdate,
+)
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationEndInfo,
     InvocationStartInfo,
     InvocationStatus,
 )
+from aws_durable_execution_sdk_python.state import ExecutionState
 
 
-@pytest.mark.parametrize("outcome", ["success", "failure", "retry"])
-@pytest.mark.parametrize("plugin_mode", ["none", "healthy", "partial-failure"])
-def test_handler_worker_preserves_context_and_restores_its_caller(
-    monkeypatch: pytest.MonkeyPatch, outcome: str, plugin_mode: str
+def invocation(client: Any = None) -> tuple[Any, Any]:
+    client = client or Mock(spec=DurableServiceClient)
+    client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="next", new_execution_state=CheckpointUpdatedExecutionState()
+    )
+    event = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="test-arn/worker-lifecycle",
+        checkpoint_token="initial",
+        initial_execution_state=InitialExecutionState(
+            operations=[
+                Operation(
+                    operation_id="execution",
+                    operation_type=OperationType.EXECUTION,
+                    status=OperationStatus.STARTED,
+                    execution_details=ExecutionDetails(input_payload="{}"),
+                )
+            ],
+            next_marker="",
+        ),
+        service_client=client,
+    )
+    context = Mock()
+    context.aws_request_id = "worker-request"
+    context.client_context = context.identity = context.invoked_function_arn = None
+    context._epoch_deadline_time_in_ms = 0
+    context.tenant_id = None
+    return event, context
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "retry", "pending"])
+@pytest.mark.parametrize("mode", ["none", "healthy", "failed-start", "failed-end"])
+def test_public_worker_lifecycle_owns_context_and_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    outcome: str,
+    mode: str,
 ) -> None:
-    marker = contextvars.ContextVar("handler-worker-context", default="worker-empty")
-    seen: list[str] = []
-    worker_boundaries: list[tuple[str, str]] = []
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    marker = contextvars.ContextVar("worker-owner", default="fresh-worker")
+    phases: list[tuple[str, int, str]] = []
+    boundary: list[tuple[str, int, str, str]] = []
+    retry = InvocationError("original retry")
+    fail = ValueError("original body failure")
     statuses: list[InvocationStatus] = []
+    caller_thread = threading.get_ident()
 
-    class ClaimPlugin(DurableInstrumentationPlugin):
-        token: contextvars.Token[str] | None = None
+    class Observer(ThreadPoolExecutor):
+        def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+            role = (
+                "checkpoint"
+                if getattr(fn, "__name__", "") == "checkpoint_batches_forever"
+                else "invocation"
+            )
 
-        def on_invocation_start(self, info: InvocationStartInfo) -> None:
-            self.token = marker.set("invocation-start")
-            if plugin_mode == "partial-failure":
-                raise ValueError("partial plugin setup")
-
-        def on_invocation_end(self, info: InvocationEndInfo) -> None:
-            statuses.append(info.status)
-            assert self.token is not None
-            marker.reset(self.token)
-            self.token = None
-
-    def body(_event: Any, _context: DurableContext) -> str:
-        seen.append(marker.get())
-        marker.set("worker-mutation")
-        if outcome == "failure":
-            raise ValueError("handler failure")
-        if outcome == "retry":
-            raise InvocationError("handler retry")
-        return "ok"
-
-    class ObservingExecutor(ThreadPoolExecutor):
-        def submit(
-            self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any
-        ) -> Future[Any]:
-            if fn is not body and body not in args:
-                return super().submit(fn, *args, **kwargs)
-
-            def observe() -> Any:
+            def observed() -> Any:
                 before = marker.get()
                 try:
                     return fn(*args, **kwargs)
                 finally:
-                    # This runs outside Context.run, on the actual SDK worker.
-                    worker_boundaries.append((before, marker.get()))
+                    boundary.append((role, threading.get_ident(), before, marker.get()))
 
-            return super().submit(observe)
+            return super().submit(observed)
 
     monkeypatch.setattr(
-        "aws_durable_execution_sdk_python.execution.ThreadPoolExecutor",
-        ObservingExecutor,
-    )
-    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
-    client = Mock()
-    handler = durable_execution(
-        body,
-        boto3_client=client,
-        plugins=[ClaimPlugin()] if plugin_mode != "none" else [],
-    )
-    event = {
-        "DurableExecutionArn": "test-arn/handler-context",
-        "CheckpointToken": "test-token",
-        "InitialExecutionState": {
-            "Operations": [
-                {
-                    "Id": "handler-context",
-                    "Type": "EXECUTION",
-                    "Status": "STARTED",
-                    "ExecutionDetails": {"InputPayload": "{}"},
-                }
-            ],
-            "NextMarker": "",
-        },
-    }
-    lambda_context = Mock()
-    lambda_context.aws_request_id = "context-request"
-    lambda_context.client_context = None
-    lambda_context.identity = None
-    lambda_context._epoch_deadline_time_in_ms = 0
-    lambda_context.invoked_function_arn = "test-arn"
-    lambda_context.tenant_id = None
-    token = marker.set("caller")
-    try:
-        if outcome == "retry":
-            with pytest.raises(InvocationError, match="handler retry"):
-                handler(event, lambda_context)
-        else:
-            result = handler(event, lambda_context)
-            assert result["Status"] == (
-                "SUCCEEDED" if outcome == "success" else "FAILED"
-            )
-        assert marker.get() == "caller"
-    finally:
-        marker.reset(token)
-    assert len(worker_boundaries) == 1
-    worker_before, worker_after = worker_boundaries[0]
-    if plugin_mode != "none":
-        assert seen == [
-            "caller" if plugin_mode == "partial-failure" else "invocation-start"
-        ]
-        assert worker_after == worker_before
-        assert worker_after != "worker-mutation"
-        assert statuses == [
-            {
-                "success": InvocationStatus.SUCCEEDED,
-                "failure": InvocationStatus.FAILED,
-                "retry": InvocationStatus.RETRY,
-            }[outcome]
-        ]
-    else:
-        # No plugin means the original direct worker call: caller bindings are
-        # absent, and mutations belong to the worker's own context.
-        assert seen == [worker_before]
-        assert seen != ["caller"]
-        assert worker_after == "worker-mutation"
-        assert statuses == []
-    client.checkpoint_durable_execution.assert_not_called()
-
-
-@pytest.mark.parametrize("failure", [None, "body", "enter", "exit"])
-def test_optional_handler_scopes_are_balanced_and_cannot_change_outcome(
-    failure: str | None,
-) -> None:
-    from contextlib import contextmanager
-    from datetime import UTC, datetime
-    from collections.abc import Iterator
-    from aws_durable_execution_sdk_python.plugin import PluginExecutor
-
-    marker = contextvars.ContextVar("handler-scope", default="caller")
-    events: list[str] = []
-
-    class ScopePlugin(DurableInstrumentationPlugin):
-        def __init__(self, name: str):
-            self.name = name
-
-        @contextmanager
-        def handler_context(self, info: InvocationStartInfo) -> Iterator[None]:
-            assert info.execution_arn == "handler-scope"
-            events.append("enter-" + self.name)
-            if self.name == "inner" and failure == "enter":
-                raise ValueError("plugin entry failure")
-            token = marker.set(self.name)
-            try:
-                yield
-            finally:
-                marker.reset(token)
-                events.append("exit-" + self.name)
-                if self.name == "inner" and failure == "exit":
-                    raise ValueError("plugin cleanup failure")
-
-    executor = PluginExecutor([ScopePlugin("outer"), ScopePlugin("inner")])
-
-    def body() -> str:
-        assert marker.get() == ("outer" if failure == "enter" else "inner")
-        events.append("body")
-        if failure in ("body", "exit"):
-            raise RuntimeError("original handler failure")
-        return "ok"
-
-    with executor.run():
-        executor.on_invocation_start("handler-scope", True, datetime.now(UTC), None)
-        if failure in ("body", "exit"):
-            with pytest.raises(RuntimeError, match="original handler failure"):
-                executor.run_handler(body)
-        else:
-            assert executor.run_handler(body) == "ok"
-    assert marker.get() == "caller"
-    assert events == ["enter-outer", "enter-inner", "body"] + (
-        ["exit-outer"] if failure == "enter" else ["exit-inner", "exit-outer"]
+        "aws_durable_execution_sdk_python.execution.ThreadPoolExecutor", Observer
     )
 
+    class Plugin(DurableInstrumentationPlugin):
+        token: Any = None
 
-def test_handler_accepts_plugin_without_optional_scope() -> None:
-    from datetime import UTC, datetime
-    from types import SimpleNamespace
-    from typing import cast
-    from aws_durable_execution_sdk_python.plugin import PluginExecutor
+        def on_invocation_start(self, info: InvocationStartInfo) -> None:
+            phases.append(("start", threading.get_ident(), marker.get()))
+            self.token = marker.set("start-binding")
+            if mode == "failed-start":
+                raise ValueError("startup failure")
 
-    legacy = cast(
-        DurableInstrumentationPlugin,
-        SimpleNamespace(on_invocation_start=lambda info: None),
-    )
-    executor = PluginExecutor([legacy])
-    with executor.run():
-        executor.on_invocation_start("legacy", True, datetime.now(UTC), None)
-        assert executor.run_handler(lambda: "unchanged") == "unchanged"
-
-
-@pytest.mark.parametrize("outcome", ["SUCCEEDED", "PENDING", "FAILED", "retry"])
-@pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("hook_failure", [None, "start", "end"])
-def test_invocation_context_scopes_do_not_escape_to_host(
-    outcome: str, reverse: bool, hook_failure: str | None
-) -> None:
-    """Legacy hook order must not leave an already-ended plugin scope current."""
-    from datetime import UTC, datetime
-    import threading
-    from aws_durable_execution_sdk_python.plugin import PluginExecutor
-
-    marker = contextvars.ContextVar("invocation-scope", default="host")
-    events: list[tuple[str, str, str, int]] = []
-    caller_thread = threading.get_ident()
-
-    class ScopePlugin(DurableInstrumentationPlugin):
-        def __init__(self, name: str) -> None:
-            self.name = name
-            self.token: contextvars.Token[str] | None = None
-
-        def on_invocation_start(self, _info: InvocationStartInfo) -> None:
-            events.append(("start", self.name, marker.get(), threading.get_ident()))
-            self.token = marker.set(self.name)
-            if self.name == names[0] and hook_failure == "start":
-                raise ValueError("plugin initialization failed")
-
-        def on_invocation_end(self, _info: InvocationEndInfo) -> None:
-            events.append(("end", self.name, marker.get(), threading.get_ident()))
-            if self.name == names[0] and hook_failure == "end":
-                raise ValueError("plugin finalization failed")
+        def on_invocation_end(self, info: InvocationEndInfo) -> None:
+            phases.append(("end", threading.get_ident(), marker.get()))
+            statuses.append(info.status)
             assert self.token is not None
             marker.reset(self.token)
             self.token = None
+            if mode == "failed-end":
+                raise ValueError("end failure")
 
-    names = ["first", "second"]
-    if reverse:
-        names.reverse()
-    executor = PluginExecutor([ScopePlugin(name) for name in names])
-    handler_failure = InvocationError("retry")
-    expected_output = {"Status": outcome}
-
-    @executor.handle_durable_output
-    def invoke(_event: Any, _context: Any) -> dict[str, str]:
-        executor.on_invocation_start("test", True, datetime.now(UTC), None)
-        assert executor.run_handler(marker.get) == names[-1]
-        if outcome == "retry":
-            raise handler_failure
-        return expected_output
-
-    token = marker.set("incoming")
-    try:
-        for _ in range(2):
-            if outcome == "retry":
-                with pytest.raises(InvocationError, match="retry") as caught:
-                    invoke({}, None)
-                assert caught.value is handler_failure
-            else:
-                assert invoke({}, None) is expected_output
-            assert marker.get() == "incoming"
-    finally:
-        marker.reset(token)
-    assert [(kind, name) for kind, name, _, _ in events] == [
-        (kind, name) for _ in range(2) for kind in ("start", "end") for name in names
-    ]
-    assert all(thread == caller_thread for _, _, _, thread in events)
-    assert [
-        value for kind, name, value, _ in events if kind == "start" and name == names[0]
-    ] == ["incoming", "incoming"]
-
-
-def test_no_plugin_invocation_keeps_original_caller_context_semantics() -> None:
-    from aws_durable_execution_sdk_python.plugin import PluginExecutor
-
-    marker = contextvars.ContextVar("no-plugin-caller", default="host")
-    executor = PluginExecutor([])
-
-    @executor.handle_durable_output
-    def invoke(_event: Any, _context: Any) -> dict[str, str]:
-        marker.set("caller-side-change")
-        return {"Status": "SUCCEEDED"}
-
-    token = marker.set("incoming")
-    try:
-        invoke({}, None)
-        assert marker.get() == "caller-side-change"
-    finally:
-        marker.reset(token)
-
-
-@pytest.mark.parametrize("stage", ["start", "factory", "enter"])
-@pytest.mark.parametrize("bad_first", [False, True])
-@pytest.mark.parametrize("outcome", ["SUCCEEDED", "PENDING", "FAILED", "retry"])
-def test_failed_plugin_setup_discards_partial_context_bindings(
-    stage: str, bad_first: bool, outcome: str, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Keep healthy bindings, unset bindings, hook order, and token ownership."""
-    from contextlib import nullcontext
-    from datetime import UTC, datetime
-    from typing import ContextManager
-    from aws_durable_execution_sdk_python.plugin import PluginExecutor
-
-    marker = contextvars.ContextVar("partial-setup", default="default")
-    new_binding = contextvars.ContextVar[str]("partial-setup-no-default")
-    events: list[tuple[str, str]] = []
-    cleanup: list[str] = []
-    healthy_inputs: list[tuple[str, str | None]] = []
-
-    class Scope:
-        def __init__(self, plugin: SetupPlugin) -> None:
-            self.plugin = plugin
-
-        def __enter__(self) -> None:
-            self.plugin.bind("enter")
-
-        def __exit__(self, *_args: Any) -> None:
-            self.plugin.reset("exit")
-
-    class SetupPlugin(DurableInstrumentationPlugin):
-        def __init__(self, name: str) -> None:
-            self.name = name
-            self.token: contextvars.Token[str] | None = None
-
-        def bind(self, where: str) -> None:
-            events.append((where, self.name))
-            if self.name == "healthy":
-                healthy_inputs.append((marker.get(), new_binding.get(None)))
-            self.token = marker.set(self.name)
-            if self.name == "bad":
-                new_binding.set("partial")
-                raise ValueError("partial plugin setup")
-
-        def reset(self, where: str) -> None:
-            events.append((where, self.name))
-            assert self.token is not None
-            marker.reset(self.token)
-            self.token = None
-            cleanup.append(self.name)
-
-        def on_invocation_start(self, _info: InvocationStartInfo) -> None:
-            if stage == "start":
-                self.bind("start")
-
-        def on_invocation_end(self, _info: InvocationEndInfo) -> None:
-            if stage == "start":
-                self.reset("end")
-
-        def handler_context(self, _info: InvocationStartInfo) -> ContextManager[None]:
-            if stage == "start":
-                return nullcontext()
-            if self.name == "bad" and stage == "factory":
-                self.bind("factory")
-            return Scope(self)
-
-    names = ["bad", "healthy"] if bad_first else ["healthy", "bad"]
-    executor = PluginExecutor([SetupPlugin(name) for name in names])
-    output = {"Status": outcome}
-    failure = InvocationError("original retry")
-    handler_failure = RuntimeError("original handler error")
-
-    def body() -> dict[str, str]:
-        assert marker.get() == "healthy"
-        with pytest.raises(LookupError):
-            new_binding.get()
-        if outcome == "retry":
-            raise failure
-        if outcome == "FAILED":
-            raise handler_failure
-        return output
-
-    @executor.handle_durable_output
-    def invoke(_event: Any, _context: Any) -> dict[str, str]:
-        executor.on_invocation_start("partial-setup", True, datetime.now(UTC), None)
+    def body(_event: Any, _context: DurableContext) -> str:
+        phases.append(("body", threading.get_ident(), marker.get()))
+        marker.set("body-binding")
         try:
-            return executor.run_handler(body)
-        except RuntimeError as error:
-            assert error is handler_failure
-            return output
+            if outcome == "failure":
+                raise fail
+            if outcome == "retry":
+                raise retry
+            if outcome == "pending":
+                raise SuspendExecution("test suspension")
+            return "ok"
+        finally:
+            phases.append(("finally", threading.get_ident(), marker.get()))
 
-    token = marker.set("incoming")
+    handler = durable_execution(body, plugins=[] if mode == "none" else [Plugin()])
+    event, context = invocation()
+    token = marker.set("host")
     try:
         for _ in range(2):
             if outcome == "retry":
                 with pytest.raises(InvocationError) as caught:
-                    invoke({}, None)
-                assert caught.value is failure
+                    handler(event, context)
+                assert caught.value is retry
             else:
-                assert invoke({}, None) is output
-            assert marker.get() == "incoming"
-            with pytest.raises(LookupError):
-                new_binding.get()
+                result = handler(event, context)
+                assert (
+                    result["Status"]
+                    == {
+                        "success": "SUCCEEDED",
+                        "failure": "FAILED",
+                        "pending": "PENDING",
+                    }[outcome]
+                )
+                if outcome == "failure":
+                    assert result["Error"]["ErrorMessage"] == "original body failure"
+            assert marker.get() == "host"
     finally:
         marker.reset(token)
-    assert healthy_inputs == [("incoming", None)] * 2
-    assert cleanup == (names if stage == "start" else ["healthy"]) * 2
-    setup = "start" if stage == "start" else "enter"
-    expected_setup = [
-        ("factory" if name == "bad" and stage == "factory" else setup, name)
-        for name in names
-    ]
-    expected_cleanup = (
-        [("end", name) for name in names] if stage == "start" else [("exit", "healthy")]
+    per_call = 2 if mode == "none" else 4
+    for offset in range(0, len(phases), per_call):
+        batch = phases[offset : offset + per_call]
+        assert [p[0] for p in batch] == (
+            ["body", "finally"]
+            if mode == "none"
+            else ["start", "body", "finally", "end"]
+        )
+        assert len({p[1] for p in batch}) == 1
+        assert batch[0][1] != caller_thread
+    bodies = [p for p in phases if p[0] == "body"]
+    expected = (
+        "fresh-worker"
+        if mode == "none"
+        else "host"
+        if mode == "failed-start"
+        else "start-binding"
     )
-    assert events == (expected_setup + expected_cleanup) * 2
-    # A token reset in the wrong Context is caught by the SDK, so explicitly
-    # check diagnostics and successful cleanup rather than relying on raises.
-    errors = [
-        record.exc_info for record in caplog.records if record.exc_info is not None
-    ]
-    assert len(errors) == 2
-    assert all(str(error[1]) == "partial plugin setup" for error in errors)
+    assert [p[2] for p in bodies] == [expected, expected]
+    for role, tid, before, after in boundary:
+        if role == "invocation":
+            assert after == ("body-binding" if mode == "none" else before)
+    if mode != "none":
+        assert (
+            statuses
+            == [
+                {
+                    "success": InvocationStatus.SUCCEEDED,
+                    "failure": InvocationStatus.FAILED,
+                    "retry": InvocationStatus.RETRY,
+                    "pending": InvocationStatus.PENDING,
+                }[outcome]
+            ]
+            * 2
+        )
+    assert "different Context" not in caplog.text
 
 
-@pytest.mark.parametrize("inherited", [False, True])
-@pytest.mark.parametrize("fail_handler", [False, True])
-def test_handler_scope_uses_direct_or_inherited_optional_method(
-    inherited: bool, fail_handler: bool
+@pytest.mark.parametrize("bad_first", [False, True])
+@pytest.mark.parametrize("outcome", ["success", "failure", "retry", "pending"])
+def test_failed_start_preserves_clean_bindings_and_original_token_owners(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    bad_first: bool,
+    outcome: str,
 ) -> None:
-    from contextlib import contextmanager
-    from collections.abc import Iterator
-    from datetime import UTC, datetime
-    from aws_durable_execution_sdk_python.plugin import PluginExecutor
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    marker = contextvars.ContextVar("failed-start-owner", default="host")
+    added = contextvars.ContextVar[str]("failed-start-added")
+    events: list[tuple[str, str, int]] = []
+    cleanup_contexts: list[str] = []
+    original_close = ExecutionState.close
 
-    marker = contextvars.ContextVar("inherited-scope", default="outside")
-    events: list[str] = []
-    error = RuntimeError("original handler failure")
+    def close(state: ExecutionState) -> None:
+        cleanup_contexts.append(marker.get())
+        with pytest.raises(LookupError):
+            added.get()
+        original_close(state)
 
-    class ScopePlugin(DurableInstrumentationPlugin):
-        @contextmanager
-        def handler_context(self, _info: InvocationStartInfo) -> Iterator[None]:
-            events.append("enter")
-            token = marker.set("inside")
-            try:
-                yield
-            finally:
-                marker.reset(token)
-                events.append("exit")
+    monkeypatch.setattr(ExecutionState, "close", close)
 
-    class InheritedPlugin(ScopePlugin):
-        pass
+    class Plugin(DurableInstrumentationPlugin):
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.token: contextvars.Token[str] | None = None
+            self.added: contextvars.Token[str] | None = None
 
-    plugin = InheritedPlugin() if inherited else ScopePlugin()
-    executor = PluginExecutor([plugin])
+        def on_invocation_start(self, _info: InvocationStartInfo) -> None:
+            events.append(("start", self.name, threading.get_ident()))
+            self.token = marker.set(self.name)
+            if self.name == "bad":
+                self.added = added.set("partial")
+                raise ValueError("partial startup")
 
-    def handler() -> str:
-        assert marker.get() == "inside"
-        events.append("body")
-        if fail_handler:
-            raise error
+        def on_invocation_end(self, _info: InvocationEndInfo) -> None:
+            events.append(("end", self.name, threading.get_ident()))
+            assert self.token is not None
+            marker.reset(self.token)
+            if self.added is not None:
+                added.reset(self.added)
+
+    failure = InvocationError("retry")
+
+    def body(_event: Any, _context: DurableContext) -> str:
+        events.append(("body", "handler", threading.get_ident()))
+        assert marker.get() == "healthy"
+        with pytest.raises(LookupError):
+            added.get()
+        if outcome == "retry":
+            raise failure
+        if outcome == "failure":
+            raise ValueError("body")
+        if outcome == "pending":
+            raise SuspendExecution("test suspension")
         return "ok"
 
-    with executor.run():
-        for _ in range(2):
-            executor.on_invocation_start("inherited", True, datetime.now(UTC), None)
-            if fail_handler:
-                with pytest.raises(RuntimeError) as caught:
-                    executor.run_handler(handler)
-                assert caught.value is error
-            else:
-                assert executor.run_handler(handler) == "ok"
-            assert marker.get() == "outside"
-    assert events == ["enter", "body", "exit"] * 2
+    names = ["bad", "healthy"] if bad_first else ["healthy", "bad"]
+    handler = durable_execution(body, plugins=[Plugin(name) for name in names])
+    event, context = invocation()
+    for _ in range(2):
+        if outcome == "retry":
+            with pytest.raises(InvocationError) as caught:
+                handler(event, context)
+            assert caught.value is failure
+        else:
+            assert (
+                handler(event, context)["Status"]
+                == {"success": "SUCCEEDED", "failure": "FAILED", "pending": "PENDING"}[
+                    outcome
+                ]
+            )
+        assert marker.get() == "host"
+        with pytest.raises(LookupError):
+            added.get()
+    assert cleanup_contexts == ["healthy"] * 2
+    for offset in (0, 5):
+        batch = events[offset : offset + 5]
+        assert [(x[0], x[1]) for x in batch] == [("start", n) for n in names] + [
+            ("body", "handler")
+        ] + [("end", n) for n in names]
+        assert len({x[2] for x in batch}) == 1
+    errors = [
+        r.exc_info
+        for r in caplog.records
+        if r.exc_info and r.name == "aws_durable_execution_sdk_python.plugin"
+    ]
+    assert len(errors) == 2 and all(str(e[1]) == "partial startup" for e in errors)
 
 
-@pytest.mark.parametrize("value", [None, "not a method", 42])
-def test_noncallable_optional_handler_scope_is_ignored(value: Any) -> None:
-    from datetime import UTC, datetime
-    from types import SimpleNamespace
-    from typing import cast
-    from aws_durable_execution_sdk_python.plugin import PluginExecutor
-
-    plugin = cast(
-        DurableInstrumentationPlugin,
-        SimpleNamespace(on_invocation_start=lambda info: None, handler_context=value),
-    )
-    executor = PluginExecutor([plugin])
-    with executor.run():
-        executor.on_invocation_start("noncallable", True, datetime.now(UTC), None)
-        assert executor.run_handler(lambda: "unchanged") == "unchanged"
-
-
-def test_handler_scope_lookup_failure_discards_partial_bindings(
-    caplog: pytest.LogCaptureFixture,
+@pytest.mark.parametrize("result_kind", ["normal", "bad-json", "large", "large-error"])
+def test_worker_prepares_output_joins_branches_waits_checkpoint_then_ends(
+    monkeypatch: pytest.MonkeyPatch,
+    result_kind: str,
 ) -> None:
-    from datetime import UTC, datetime
-    from aws_durable_execution_sdk_python.plugin import PluginExecutor
+    import aws_durable_execution_sdk_python.execution as execution
 
-    marker = contextvars.ContextVar("lookup-failure", default="outside")
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    events: list[tuple[str, int]] = []
+    started = threading.Event()
+    checkpoint_started = threading.Event()
+    closing = threading.Event()
+    branch_done = threading.Event()
+    real_checkpoint = ExecutionState.checkpoint_batches_forever
+    real_close = ExecutionState.close
+    real_stop = ExecutionState.stop_checkpointing
+    real_dumps = execution.json.dumps
+    result: Any = {
+        "normal": {"ok": True},
+        "bad-json": object(),
+        "large": "x" * 256,
+        "large-error": None,
+    }[result_kind]
 
-    class BrokenPlugin(DurableInstrumentationPlugin):
-        @property
-        def handler_context(self) -> Any:
-            marker.set("partial")
-            raise ValueError("scope lookup failed")
+    def record(name: str) -> None:
+        events.append((name, threading.get_ident()))
 
-    executor = PluginExecutor([BrokenPlugin()])
-    with executor.run():
-        executor.on_invocation_start("lookup", True, datetime.now(UTC), None)
-        assert executor.run_handler(marker.get) == "outside"
-    assert marker.get() == "outside"
-    assert "scope lookup failed" in caplog.text
+    def checkpoint(state: ExecutionState) -> None:
+        assert started.is_set()
+        record("checkpoint-start")
+        checkpoint_started.set()
+        try:
+            real_checkpoint(state)
+        finally:
+            record("checkpoint-end")
+
+    def stop(state: ExecutionState) -> None:
+        assert branch_done.is_set()
+        record("checkpoint-stop")
+        real_stop(state)
+
+    def close(state: ExecutionState) -> None:
+        record("close")
+        closing.set()
+        real_close(state)
+
+    def dumps(value: Any, *args: Any, **kwargs: Any) -> str:
+        if value is result or (
+            isinstance(value, dict) and value.get("Status") == "FAILED"
+        ):
+            record("serialize")
+        return real_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(ExecutionState, "checkpoint_batches_forever", checkpoint)
+    monkeypatch.setattr(ExecutionState, "stop_checkpointing", stop)
+    monkeypatch.setattr(ExecutionState, "close", close)
+    monkeypatch.setattr(execution.json, "dumps", dumps)
+    if result_kind in ("large", "large-error"):
+        monkeypatch.setattr(execution, "LAMBDA_RESPONSE_SIZE_LIMIT", 64)
+
+    class Plugin(DurableInstrumentationPlugin):
+        def on_invocation_start(self, _info: InvocationStartInfo) -> None:
+            record("start")
+            assert not checkpoint_started.is_set()
+            started.set()
+
+        def on_invocation_end(self, info: InvocationEndInfo) -> None:
+            record("end")
+            assert branch_done.is_set()
+            assert any(x[0] == "checkpoint-end" for x in events)
+            assert info.status is (
+                InvocationStatus.FAILED
+                if result_kind in ("bad-json", "large-error")
+                else InvocationStatus.SUCCEEDED
+            )
+
+    def body(_event: Any, ctx: DurableContext) -> Any:
+        assert checkpoint_started.wait(5)
+        record("body")
+        pool = ThreadPoolExecutor(max_workers=1)
+        ctx.state.register_branch_pool(pool)
+
+        def late_branch() -> None:
+            assert closing.wait(5)
+            assert not ctx.state._checkpointing_stopped.is_set()
+            ctx.state.create_checkpoint(
+                OperationUpdate.create_execution_succeed(payload='"branch"'),
+                is_sync=True,
+            )
+            record("branch-done")
+            branch_done.set()
+
+        pool.submit(late_branch)
+        try:
+            if result_kind == "large-error":
+                raise ValueError("x" * 256)
+            return result
+        finally:
+            record("finally")
+
+    handler = durable_execution(body, plugins=[Plugin()])
+    event, context = invocation()
+    output = handler(event, context)
+    record("caller")
+    names = [x[0] for x in events]
+    assert (
+        names.index("start")
+        < names.index("checkpoint-start")
+        < names.index("body")
+        < names.index("finally")
+        < names.index("serialize")
+        < names.index("close")
+    )
+    assert (
+        names.index("branch-done")
+        < names.index("checkpoint-stop")
+        < names.index("checkpoint-end")
+        < names.index("end")
+        < names.index("caller")
+    )
+    worker_events = {
+        tid
+        for name, tid in events
+        if name
+        in {"start", "body", "finally", "serialize", "close", "checkpoint-stop", "end"}
+    }
+    assert len(worker_events) == 1 and threading.get_ident() not in worker_events
+    assert output["Status"] == (
+        "FAILED" if result_kind in ("bad-json", "large-error") else "SUCCEEDED"
+    )
+
+
+@pytest.mark.parametrize("shape", ["method", "property", "dynamic"])
+def test_removed_handler_scope_api_is_not_inspected(
+    monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    calls = []
+
+    def legacy(*_args: Any) -> Any:
+        calls.append("unexpected")
+        raise AssertionError("Removed API called")
+
+    choices: dict[str, dict[str, Any]] = {
+        "method": {"handler_context": legacy},
+        "property": {"handler_context": property(legacy)},
+        "dynamic": {
+            "__getattr__": lambda self, name: legacy()
+            if name == "handler_context"
+            else (_ for _ in ()).throw(AttributeError(name))
+        },
+    }
+    plugin = type("LegacyPlugin", (DurableInstrumentationPlugin,), choices[shape])()
+    handler = durable_execution(lambda _e, _c: "ok", plugins=[plugin])
+    event, context = invocation()
+    assert handler(event, context)["Status"] == "SUCCEEDED"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "checkpoint_path", ["step-start", "large-result", "large-error"]
+)
+@pytest.mark.parametrize("retryable", [False, True])
+def test_checkpoint_failure_reports_prepared_outcome_after_worker_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    checkpoint_path: str,
+    retryable: bool,
+) -> None:
+    import aws_durable_execution_sdk_python.execution as execution
+
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    if checkpoint_path != "step-start":
+        monkeypatch.setattr(execution, "LAMBDA_RESPONSE_SIZE_LIMIT", 128)
+    marker = contextvars.ContextVar("checkpoint-worker", default="host")
+    failure = CheckpointError(
+        "actual checkpoint failure",
+        error_category=(
+            CheckpointErrorCategory.INVOCATION
+            if retryable
+            else CheckpointErrorCategory.EXECUTION
+        ),
+    )
+    events: list[tuple[str, int]] = []
+    ends: list[tuple[InvocationEndInfo, str]] = []
+    real_checkpoint = ExecutionState.checkpoint_batches_forever
+    real_close = ExecutionState.close
+
+    def record(name: str) -> None:
+        events.append((name, threading.get_ident()))
+
+    def checkpoint(state: ExecutionState) -> None:
+        record("checkpoint-start")
+        try:
+            real_checkpoint(state)
+        finally:
+            record("checkpoint-end")
+
+    def close(state: ExecutionState) -> None:
+        record("close")
+        assert marker.get() == "plugin"
+        real_close(state)
+        record("closed")
+
+    def service_checkpoint(*_args: Any, **_kwargs: Any) -> Any:
+        record("service-failure")
+        raise failure
+
+    monkeypatch.setattr(ExecutionState, "checkpoint_batches_forever", checkpoint)
+    monkeypatch.setattr(ExecutionState, "close", close)
+
+    class Plugin(DurableInstrumentationPlugin):
+        token: contextvars.Token[str] | None = None
+
+        def on_invocation_start(self, _info: InvocationStartInfo) -> None:
+            record("start")
+            self.token = marker.set("plugin")
+
+        def on_invocation_end(self, info: InvocationEndInfo) -> None:
+            record("end")
+            ends.append((info, marker.get()))
+            assert self.token is not None
+            marker.reset(self.token)
+            self.token = None
+
+    def body(_event: Any, ctx: DurableContext) -> str:
+        record("body")
+        try:
+            if checkpoint_path == "step-start":
+                ctx.step(lambda _step: "ok", name="failed-checkpoint")
+            if checkpoint_path == "large-error":
+                raise ValueError("x" * 256)
+            return "x" * 256
+        finally:
+            record("finally")
+
+    plugin = Plugin()
+    handler = durable_execution(body, plugins=[plugin])
+    client = Mock(spec=DurableServiceClient)
+    client.checkpoint.side_effect = service_checkpoint
+    event, context = invocation(client)
+    for _ in range(2):
+        events.clear()
+        ends.clear()
+        if retryable:
+            with pytest.raises(CheckpointError) as caught:
+                handler(event, context)
+            assert caught.value is failure
+        else:
+            output = handler(event, context)
+            assert output["Status"] == "FAILED"
+            assert output["Error"]["ErrorMessage"] == str(failure)
+            assert output["Error"]["ErrorType"].endswith(".CheckpointError")
+        record("caller")
+        assert marker.get() == "host" and plugin.token is None
+        assert len(ends) == 1
+        info, active = ends[0]
+        assert active == "plugin"
+        assert info.status is (
+            InvocationStatus.RETRY if retryable else InvocationStatus.FAILED
+        )
+        assert info.error is not None and info.error.message == str(failure)
+        assert info.error.type is not None and info.error.type.endswith(
+            ".CheckpointError"
+        )
+        names = [name for name, _tid in events]
+        assert (
+            names.index("start")
+            < names.index("checkpoint-start")
+            < names.index("service-failure")
+        )
+        assert (
+            names.index("body")
+            < names.index("finally")
+            < names.index("close")
+            < names.index("closed")
+            < names.index("end")
+            < names.index("caller")
+        )
+        assert (
+            names.index("service-failure")
+            < names.index("checkpoint-end")
+            < names.index("end")
+        )
+        workers = {
+            tid
+            for name, tid in events
+            if name in {"start", "body", "finally", "close", "closed", "end"}
+        }
+        assert len(workers) == 1 and threading.get_ident() not in workers
+    assert not any(
+        record.exc_info and record.name == "aws_durable_execution_sdk_python.plugin"
+        for record in caplog.records
+    )

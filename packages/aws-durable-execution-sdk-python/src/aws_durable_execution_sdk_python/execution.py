@@ -5,7 +5,7 @@ import contextvars
 import functools
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -192,7 +192,6 @@ def durable_execution(
     configured_plugins = load_configured_plugins(plugins)
     plugin_executor = PluginExecutor(configured_plugins)
 
-    @plugin_executor.handle_durable_output
     def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
         invocation_input: DurableExecutionInvocationInput
         service_client: DurableServiceClient
@@ -281,63 +280,13 @@ def durable_execution(
             ),
         )
 
-        # Use ThreadPoolExecutor for concurrent execution of user code and background checkpoint processing
-        with (
-            ThreadPoolExecutor(
-                max_workers=2, thread_name_prefix="dex-handler"
-            ) as executor,
-            contextlib.closing(execution_state) as execution_state,
-        ):
-            execution_operation = execution_state.get_execution_operation()
-
-            # execute the plugins
-            plugin_executor.on_invocation_start(
-                execution_arn=invocation_input.durable_execution_arn,
-                lambda_context=context,
-                execution_start_time=(
-                    execution_operation.start_timestamp
-                    if execution_operation is not None
-                    else None
-                ),
-                is_first_invocation=not has_prior_operations,
-                execution_input=input_event,
-                # Read the map through a callable rather than snapshotting it
-                # here: the invocation-end hook needs the state as of the end of
-                # the invocation, and neither hook pays for the conversion until
-                # a plugin actually reads it.
-                operations_provider=lambda: execution_state.operations,
-                updated_operation_ids=invocation_input.updated_operation_ids,
-            )
-            # Thread 1: Run background checkpoint processing
-            executor.submit(execution_state.checkpoint_batches_forever)
-
-            # Thread 2: Execute user function
+        def invoke_handler() -> MutableMapping[str, Any]:
             logger.debug(
                 "%s entering user-space...", invocation_input.durable_execution_arn
             )
-            if configured_plugins:
-                # Invocation-start hooks can establish tracing and other contextvars.
-                # Context.run restores worker bindings on both return and failure.
-                user_future = executor.submit(
-                    contextvars.copy_context().run,
-                    plugin_executor.run_handler,
-                    func,
-                    input_event,
-                    durable_context,
-                )
-            else:
-                # Preserve the original fresh-worker context for uninstrumented
-                # handlers, including the absence of caller ContextVar bindings.
-                user_future = executor.submit(func, input_event, durable_context)
-
-            logger.debug(
-                "%s waiting for user code completion...",
-                invocation_input.durable_execution_arn,
-            )
-
             try:
                 # Background checkpointing errors will propagate through CompletionEvent.wait() as BackgroundThreadError
-                result = user_future.result()
+                result = func(input_event, durable_context)
 
                 # done with userland
                 logger.debug(
@@ -472,6 +421,78 @@ def durable_execution(
                     ).to_dict()
 
                 return result
+
+        def invoke_worker() -> MutableMapping[str, Any]:
+            # This task owns Start, user cleanup, output preparation, resource
+            # cleanup and End. The caller owns the executor that runs this task.
+            with plugin_executor.run():
+                checkpoint_future: Future[None] | None = None
+
+                def wait_for_checkpoint() -> None:
+                    if checkpoint_future is not None:
+                        # Match the former executor join: observed checkpoint
+                        # errors retain their existing classification paths.
+                        wait((checkpoint_future,))
+
+                try:
+                    with contextlib.ExitStack() as resources:
+                        # LIFO cleanup: branches join with checkpointing alive;
+                        # then close stops checkpointing and the wait completes.
+                        resources.callback(wait_for_checkpoint)
+                        resources.callback(
+                            plugin_executor._run_in_invocation_context,
+                            execution_state.close,
+                        )
+                        execution_operation = execution_state.get_execution_operation()
+
+                        # execute the plugins
+                        plugin_executor.on_invocation_start(
+                            execution_arn=invocation_input.durable_execution_arn,
+                            lambda_context=context,
+                            execution_start_time=(
+                                execution_operation.start_timestamp
+                                if execution_operation is not None
+                                else None
+                            ),
+                            is_first_invocation=not has_prior_operations,
+                            execution_input=input_event,
+                            # Read the map through a callable rather than snapshotting it
+                            # here: the invocation-end hook needs the state as of the end of
+                            # the invocation, and neither hook pays for the conversion until
+                            # a plugin actually reads it.
+                            operations_provider=lambda: execution_state.operations,
+                            updated_operation_ids=invocation_input.updated_operation_ids,
+                        )
+                        # No checkpoint work starts until all Start hooks finish.
+                        checkpoint_future = executor.submit(
+                            execution_state.checkpoint_batches_forever
+                        )
+                        output = plugin_executor._run_in_invocation_context(
+                            invoke_handler
+                        )
+                    plugin_executor.on_invocation_end(
+                        DurableExecutionInvocationOutput.from_dict(output)
+                    )
+                    return output
+                except Exception as error:
+                    plugin_executor.on_invocation_end(
+                        DurableExecutionInvocationOutput.create_retry(
+                            ErrorObject.from_exception(error)
+                        )
+                    )
+                    raise
+
+        with ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="dex-handler"
+        ) as executor:
+            if configured_plugins:
+                invocation_future = executor.submit(
+                    contextvars.copy_context().run, invoke_worker
+                )
+            else:
+                # Preserve the original fresh-worker context without plugins.
+                invocation_future = executor.submit(invoke_worker)
+            return invocation_future.result()
 
     return wrapper
 

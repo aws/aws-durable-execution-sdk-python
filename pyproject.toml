@@ -131,66 +131,48 @@ dependencies = [
 [tool.hatch.envs.dev-examples.scripts]
 test = "pytest packages/aws-durable-execution-sdk-python-examples/test {args}"
 
-[tool.hatch.envs.test-pypi-otel]
-# Test new exclusivity capability against an installed capable core.
-# Legacy valid-registration combinations are verified separately against 2.0.x.
-# Override inherited workspace membership: core must come from an installed distribution.
-workspace.members = ["packages/aws-durable-execution-sdk-python-otel"]
+# Install immutable artifacts built from this checkout, including before the
+# first compatible core is published. No editable workspace packages in this lane.
+[tool.hatch.envs.test-wheel-otel]
+detached = true
+workspace.members = []
 dependencies = [
-  "aws-durable-execution-sdk-python-testing>=1.2.1",
-  "aws-durable-execution-sdk-python>=2.1.0",
-  "opentelemetry-sdk>=1.20.0",
-  "opentelemetry-propagator-aws-xray",
-  "pytest",
-  "pytest-cov",
-  "coverage[toml]",
-]
-pre-install-commands = [
-  "pip install -e packages/aws-durable-execution-sdk-python-otel",
-]
-
-[tool.hatch.envs.test-pypi-otel.scripts]
-test = "pytest packages/aws-durable-execution-sdk-python-otel/tests {args}"
-
-[tool.hatch.envs.test-pypi-otel-legacy]
-template = "test-pypi-otel"
-workspace.members = ["packages/aws-durable-execution-sdk-python-otel"]
-dependencies = [
-  "aws-durable-execution-sdk-python>=2.0.0,<2.1.0",
   "aws-durable-execution-sdk-python-testing>=1.2.1",
   "opentelemetry-sdk>=1.20.0",
   "opentelemetry-propagator-aws-xray",
   "pytest",
-  "pytest-cov",
-  "coverage[toml]",
+  "packaging",
 ]
 
-[tool.hatch.envs.test-pypi-otel-legacy.scripts]
+[tool.hatch.envs.test-wheel-otel.scripts]
 test = [
-  "python -c 'from pathlib import Path; from importlib.metadata import version; from packaging.version import Version; import aws_durable_execution_sdk_python.execution as core; assert Version(version(\"aws-durable-execution-sdk-python\")).release[:2] == (2, 0); assert \"site-packages\" in Path(core.__file__).resolve().parts; print(version(\"aws-durable-execution-sdk-python\"), core.__file__)' ",
-  "pytest packages/aws-durable-execution-sdk-python-otel/tests/e2e/test_view_registration.py -k 'one_view_and_unrelated_plugin_suspend_resume or no_otel_plugin_remains_valid or execution_constructor_retains_ambient_log_correlation' {args}"
+  "python .github/scripts/install_otel_test_wheels.py",
+  "pytest packages/aws-durable-execution-sdk-python-otel/tests {args}",
+  "pytest .github/tests/otel_lifecycle_compatibility_test.py {args}",
 ]
 
-# Keep every pre-existing OTel test on the minimum core; the newly added view
-# registration file has capability-only cases plus the legacy-valid cases below.
-[tool.hatch.envs.test-pypi-otel-minimum]
-template = "test-pypi-otel"
-workspace.members = ["packages/aws-durable-execution-sdk-python-otel"]
+# A core-only upgrade retains the released plugin's more limited Invocation
+# fallback. Validate the real published plugin separately from the new pair.
+[tool.hatch.envs.test-wheel-otel-legacy]
+template = "test-wheel-otel"
+detached = true
+workspace.members = []
 dependencies = [
-  "aws-durable-execution-sdk-python==2.0.0",
+  "aws-durable-execution-sdk-python-otel==1.0.0",
   "aws-durable-execution-sdk-python-testing>=1.2.1",
   "opentelemetry-sdk>=1.20.0",
   "opentelemetry-propagator-aws-xray",
   "pytest",
-  "pytest-cov",
-  "coverage[toml]",
+  "packaging",
 ]
 
-[tool.hatch.envs.test-pypi-otel-minimum.scripts]
+[tool.hatch.envs.test-wheel-otel-legacy.env-vars]
+OTEL_COMPAT_LEGACY = "1"
+
+[tool.hatch.envs.test-wheel-otel-legacy.scripts]
 test = [
-  "python -c 'from pathlib import Path; from importlib.metadata import version; from packaging.version import Version; import aws_durable_execution_sdk_python.execution as core; assert version(\"aws-durable-execution-sdk-python\") == \"2.0.0\"; assert \"site-packages\" in Path(core.__file__).resolve().parts; print(version(\"aws-durable-execution-sdk-python\"), core.__file__)' ",
-  "pytest packages/aws-durable-execution-sdk-python-otel/tests --ignore=packages/aws-durable-execution-sdk-python-otel/tests/e2e/test_view_registration.py {args}",
-  "pytest packages/aws-durable-execution-sdk-python-otel/tests/e2e/test_view_registration.py -k 'one_view_and_unrelated_plugin_suspend_resume or no_otel_plugin_remains_valid or execution_constructor_retains_ambient_log_correlation' {args}"
+  "python .github/scripts/install_otel_test_wheels.py --legacy-plugin",
+  "pytest .github/tests/otel_lifecycle_compatibility_test.py {args}",
 ]
 
 [tool.hatch.envs.test-pypi-examples]
