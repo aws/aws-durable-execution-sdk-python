@@ -129,7 +129,6 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             span).
     """
 
-    __durable_handler_context_api__ = 1
     __durable_registration_api__: ClassVar[int] = 1
     exclusive_group: ClassVar[str | None] = "aws-durable-execution-otel-view"
 

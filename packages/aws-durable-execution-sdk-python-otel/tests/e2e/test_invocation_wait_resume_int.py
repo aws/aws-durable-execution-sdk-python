@@ -261,6 +261,14 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
     assert completed_wait_span.end_time <= after_resume.start_time
 
 
+class InheritedInvocationPlugin(InvocationOtelPlugin):
+    pass
+
+
+class InheritedExecutionPlugin(ExecutionOtelPlugin):
+    pass
+
+
 @pytest.mark.parametrize(
     ("plugin_type", "extra_context_plugin"),
     [
@@ -274,10 +282,8 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
     + (
         [(ExecutionOtelPlugin, True)]
         + [(ExecutionOtelPlugin, kind) for kind in ("same", "unrelated", "absent")]
-        if getattr(
-            core_plugin_api, "DURABLE_INSTRUMENTATION_HANDLER_CONTEXT_API_VERSION", None
-        )
-        == 1
+        + [(InheritedInvocationPlugin, False), (InheritedExecutionPlugin, "absent")]
+        if hasattr(core_plugin_api.PluginExecutor, "run_handler")
         else []
     ),
 )
@@ -297,12 +303,7 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
     # The documented PyPI compatibility environment deliberately uses an older
     # core. Keep exercising its supported operation tracing and lifecycle while
     # asserting the new handler contract only when that core exposes the scope.
-    supports_handler_context = (
-        getattr(
-            core_plugin_api, "DURABLE_INSTRUMENTATION_HANDLER_CONTEXT_API_VERSION", None
-        )
-        == 1
-    )
+    supports_handler_context = hasattr(core_plugin_api.PluginExecutor, "run_handler")
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
@@ -457,7 +458,7 @@ def test_handler_user_spans_inherit_context_across_resume_and_failure(
                 else derive_workflow_span_id(EXECUTION_ARN)
             ]
             * 2
-            if plugin_type is ExecutionOtelPlugin
+            if issubclass(plugin_type, ExecutionOtelPlugin)
             else ambient_ids
             if ambient_kind == "same"
             else [
