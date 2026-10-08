@@ -19,9 +19,8 @@ from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
 )
 from aws_durable_execution_sdk_python_microvm_worker.heartbeats import Heartbeats
 from aws_durable_execution_sdk_python_microvm_worker.logger import (
-    JsonLogger,
     MicrovmWorkerLogger,
-    SafeLogger,
+    default_logger,
 )
 from aws_durable_execution_sdk_python_microvm_worker.payload import (
     SUPPORTED_PAYLOAD_VERSION,
@@ -31,8 +30,6 @@ from aws_durable_execution_sdk_python_microvm_worker.payload import (
     MicrovmRunHookPayload,
     RunHookRequest,
     loads_strict,
-    parse_job_request,
-    parse_run_hook_request,
 )
 
 
@@ -44,7 +41,6 @@ __all__ = [
     "CancelScope",
     "Heartbeats",
     "InvalidRunHookPayloadError",
-    "JsonLogger",
     "MicrovmJobDocument",
     "MicrovmJobRequest",
     "MicrovmRunHookPayload",
@@ -52,11 +48,9 @@ __all__ = [
     "ResultSerializationError",
     "ResultTooLargeError",
     "RunHookRequest",
-    "SafeLogger",
     "__version__",
+    "default_logger",
     "is_permanent_error",
     "is_terminal_callback_error",
     "loads_strict",
-    "parse_job_request",
-    "parse_run_hook_request",
 ]

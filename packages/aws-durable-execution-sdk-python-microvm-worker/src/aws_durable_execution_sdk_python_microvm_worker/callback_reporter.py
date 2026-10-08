@@ -37,6 +37,7 @@ MAX_ERROR_TYPE_CHARS = 256
 """The longest error type that the worker sends."""
 
 COMPLETION_ATTEMPTS = 5
+"""Completion attempts. The delays between them are 1, 2, 4, and 8 seconds."""
 
 COMPLETION_CALL_TIMEOUT_SECONDS = 30.0
 """How long one completion attempt may take.
@@ -45,8 +46,6 @@ A request on a dead connection would otherwise wait for the operating
 system's TCP timeout, which is minutes. A timed-out attempt is retried like
 any transient failure.
 """
-
-_MAX_COMPLETION_DELAY_SECONDS = 16.0
 
 _TERMINAL_ERROR_CODES = frozenset(
     {
@@ -419,7 +418,7 @@ class CallbackReporter:
                 if is_permanent_error(error) or attempt >= COMPLETION_ATTEMPTS:
                     raise
                 uncertain = uncertain or _is_uncertain_outcome(error)
-                self._sleep(min(2.0 ** (attempt - 1), _MAX_COMPLETION_DELAY_SECONDS))
+                self._sleep(2.0 ** (attempt - 1))
                 attempt += 1
             else:
                 return

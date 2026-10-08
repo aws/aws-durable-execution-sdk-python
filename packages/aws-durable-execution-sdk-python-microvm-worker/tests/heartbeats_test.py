@@ -17,6 +17,7 @@ from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
 )
 from aws_durable_execution_sdk_python_microvm_worker.heartbeats import (
     MAX_HEARTBEAT_INTERVAL_SECONDS,
+    MAX_QUICK_HEARTBEAT_RETRIES,
     Heartbeats,
     heartbeat_call_timeout,
     heartbeat_delay,
@@ -25,7 +26,7 @@ from aws_durable_execution_sdk_python_microvm_worker.heartbeats import (
     jitter_source,
 )
 
-# A short interval keeps each test fast. The call timeout is half of it.
+# A short interval keeps each test fast. The call timeout is a third of it.
 INTERVAL = 0.06
 
 
@@ -42,15 +43,14 @@ def start(
     client: Any, logger: Any, gone: list[BaseException] | None = None, **kwargs: Any
 ) -> Heartbeats:
     reporter = CallbackReporter("cb-1", "us-east-1", client=client)
-    return Heartbeats(
+    return Heartbeats.start(
         reporter,
-        "cb-1",
-        kwargs.pop("heartbeat_timeout_seconds", 60),
-        kwargs.pop(
+        heartbeat_timeout_seconds=kwargs.pop("heartbeat_timeout_seconds", 60),
+        on_callback_gone=kwargs.pop(
             "on_callback_gone", (gone.append if gone is not None else lambda _e: None)
         ),
-        kwargs.pop("interval_override", INTERVAL),
-        logger,
+        heartbeat_interval_seconds=kwargs.pop("heartbeat_interval_seconds", INTERVAL),
+        logger=logger,
     )
 
 
@@ -78,8 +78,33 @@ def test_retry_delay_is_an_eighth_to_a_quarter_of_the_interval():
     assert heartbeat_retry_delay(8, lambda: 0.999) == pytest.approx(1.001)
 
 
-def test_call_timeout_is_half_the_interval():
-    assert heartbeat_call_timeout(10) == 5
+def test_call_timeout_is_a_third_of_the_interval():
+    assert heartbeat_call_timeout(9) == 3
+
+
+@pytest.mark.parametrize(
+    "interval", [0.3, 1, 2, 4, 10, 60, MAX_HEARTBEAT_INTERVAL_SECONDS]
+)
+def test_two_failures_in_a_row_stay_within_the_heartbeat_timeout(interval):
+    """The worst gap between two heartbeats that the service receives.
+
+    The service times the gap from when it received the last good call. That
+    can be at the call's start, so the call's whole duration counts. The next
+    good call can be received at its end. See heartbeat_call_timeout.
+    """
+    call = heartbeat_call_timeout(interval)
+    smallest_jitter = min(1.0, interval / 2)
+    longest_retry_wait = heartbeat_retry_delay(interval, lambda: 0.0)
+    longest_wait = heartbeat_delay(interval, lambda: 0.0)
+    assert longest_wait == interval - smallest_jitter
+    gap = (
+        call
+        + longest_wait
+        + MAX_QUICK_HEARTBEAT_RETRIES * (call + longest_retry_wait)
+        + call
+    )
+    # The heartbeat timeout is at least three intervals.
+    assert gap < 3 * interval
 
 
 def test_jitter_is_deterministic_per_callback_and_differs_between_callbacks():
@@ -194,7 +219,7 @@ def test_stop_cancels_a_call_in_flight(fake_client, logger):
     release = threading.Event()
     client = fake_client(lambda: release.wait(5))
     # A long interval gives a long call timeout. Only the cancel can end it.
-    heartbeats = start(client, logger, interval_override=20)
+    heartbeats = start(client, logger, heartbeat_interval_seconds=20)
     wait_until(lambda: len(client.calls) == 1)
     started = time.monotonic()
     heartbeats.stop()
@@ -232,3 +257,46 @@ def test_stop_from_the_heartbeat_thread_does_not_join_itself(
 
 
 # endregion running heartbeats
+
+
+# region validation
+
+
+@pytest.mark.parametrize(
+    "value", [0, -1, 900.5, float("nan"), float("inf"), True, "10"]
+)
+def test_start_rejects_an_invalid_interval(fake_client, logger, value):
+    client = fake_client()
+    with pytest.raises(ValueError, match="heartbeat_interval_seconds"):
+        start(client, logger, heartbeat_interval_seconds=value)
+    time.sleep(0.02)
+    assert client.calls == []
+
+
+def test_start_accepts_the_largest_interval(fake_client, logger):
+    heartbeats = start(fake_client(), logger, heartbeat_interval_seconds=900)
+    # The interval is cut to a third of the 60-second heartbeat timeout.
+    assert heartbeats.interval == 20
+    heartbeats.stop()
+
+
+def test_start_without_an_interval_uses_a_third_of_the_timeout(fake_client, logger):
+    heartbeats = start(fake_client(), logger, heartbeat_interval_seconds=None)
+    assert heartbeats.interval == 20
+    heartbeats.stop()
+
+
+def test_the_constructor_starts_no_thread(fake_client, logger):
+    client = fake_client()
+    reporter = CallbackReporter("cb-1", "us-east-1", client=client)
+    Heartbeats(
+        reporter=reporter,
+        on_callback_gone=lambda _e: None,
+        interval=INTERVAL,
+        logger=logger,
+    )
+    time.sleep(INTERVAL * 2)
+    assert client.calls == []
+
+
+# endregion validation

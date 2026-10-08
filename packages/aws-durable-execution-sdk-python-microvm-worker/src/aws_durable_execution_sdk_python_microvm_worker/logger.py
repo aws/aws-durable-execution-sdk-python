@@ -5,60 +5,47 @@
 
 from __future__ import annotations
 
-import json
-import sys
-from collections.abc import Mapping
-from typing import Any, Protocol, runtime_checkable
+import logging
+from collections.abc import Callable, Mapping
+from typing import Protocol
 
 
-@runtime_checkable
+DEFAULT_LOGGER_NAME = "aws_durable_execution_sdk_python_microvm_worker"
+"""The name of the standard library logger that the worker uses by default."""
+
+
 class MicrovmWorkerLogger(Protocol):
     """Receives the worker's log lines.
 
-    Each method takes a message and an optional mapping of structured data.
+    The signature is the one of :class:`logging.Logger`, and of the core
+    SDK's ``LoggerInterface``. So a ``logging.Logger`` or a ``LoggerAdapter``
+    works as it is. The worker passes its structured fields in ``extra``.
     """
 
-    def info(self, message: str, data: Mapping[str, Any] | None = None) -> None:
-        """Log a line at INFO."""
+    def info(
+        self, msg: object, *args: object, extra: Mapping[str, object] | None = None
+    ) -> None: ...  # pragma: no cover
 
-    def warning(self, message: str, data: Mapping[str, Any] | None = None) -> None:
-        """Log a line at WARNING."""
+    def warning(
+        self, msg: object, *args: object, extra: Mapping[str, object] | None = None
+    ) -> None: ...  # pragma: no cover
 
-    def error(self, message: str, data: Mapping[str, Any] | None = None) -> None:
-        """Log a line at ERROR."""
+    def error(
+        self, msg: object, *args: object, extra: Mapping[str, object] | None = None
+    ) -> None: ...  # pragma: no cover
 
 
-class JsonLogger:
-    """Writes each line as one JSON object: INFO to stdout, others to stderr.
+def default_logger() -> MicrovmWorkerLogger:
+    """Return the worker's standard library logger.
 
-    A MicroVM's log configuration collects both streams. One object per line
-    keeps each line one log event.
+    The logger has no handler of its own. Configure the ``logging`` module in
+    the image, for example with ``logging.basicConfig(level=logging.INFO)``,
+    to see the worker's INFO lines.
     """
-
-    def info(self, message: str, data: Mapping[str, Any] | None = None) -> None:
-        """Log a line at INFO."""
-        _write(sys.stdout, "INFO", message, data)
-
-    def warning(self, message: str, data: Mapping[str, Any] | None = None) -> None:
-        """Log a line at WARNING."""
-        _write(sys.stderr, "WARN", message, data)
-
-    def error(self, message: str, data: Mapping[str, Any] | None = None) -> None:
-        """Log a line at ERROR."""
-        _write(sys.stderr, "ERROR", message, data)
+    return logging.getLogger(DEFAULT_LOGGER_NAME)
 
 
-def _write(
-    stream: Any, level: str, message: str, data: Mapping[str, Any] | None
-) -> None:
-    # default=str keeps a value that JSON cannot encode, such as an
-    # exception, as its text instead of failing the line.
-    line = json.dumps({"level": level, "message": message, **(data or {})}, default=str)
-    stream.write(line + "\n")
-    stream.flush()
-
-
-class SafeLogger:
+class _SafeLogger:
     """Wraps a logger, and drops a line whose logger raises.
 
     The worker logs from job threads and from background threads. A logger
@@ -70,26 +57,38 @@ class SafeLogger:
     def __init__(self, inner: MicrovmWorkerLogger) -> None:
         self._inner = inner
 
-    def info(self, message: str, data: Mapping[str, Any] | None = None) -> None:
-        """Log a line at INFO."""
+    def info(
+        self, msg: object, *args: object, extra: Mapping[str, object] | None = None
+    ) -> None:
         try:
-            self._inner.info(message, data)
+            self._inner.info(msg, *args, extra=extra)
         except Exception:  # noqa: BLE001, S110
             pass
 
-    def warning(self, message: str, data: Mapping[str, Any] | None = None) -> None:
-        """Log a line at WARNING."""
+    def warning(
+        self, msg: object, *args: object, extra: Mapping[str, object] | None = None
+    ) -> None:
         try:
-            self._inner.warning(message, data)
+            self._inner.warning(msg, *args, extra=extra)
         except Exception:  # noqa: BLE001, S110
             pass
 
-    def error(self, message: str, data: Mapping[str, Any] | None = None) -> None:
-        """Log a line at ERROR."""
+    def error(
+        self, msg: object, *args: object, extra: Mapping[str, object] | None = None
+    ) -> None:
         try:
-            self._inner.error(message, data)
+            self._inner.error(msg, *args, extra=extra)
         except Exception:  # noqa: BLE001, S110
             pass
+
+
+def safe_logger(inner: MicrovmWorkerLogger | None = None) -> MicrovmWorkerLogger:
+    """Return a logger that drops a line whose logger raises.
+
+    Args:
+        inner: The logger to wrap. Defaults to :func:`default_logger`.
+    """
+    return _SafeLogger(inner if inner is not None else default_logger())
 
 
 def describe(value: object) -> object:
@@ -102,7 +101,7 @@ def describe(value: object) -> object:
     }
 
 
-def _safe_text(read: Any, fallback: str) -> str:
+def _safe_text(read: Callable[[], object], fallback: str) -> str:
     try:
         text = read()
     except Exception:  # noqa: BLE001

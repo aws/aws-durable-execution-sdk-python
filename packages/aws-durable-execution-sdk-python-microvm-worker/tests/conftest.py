@@ -80,14 +80,14 @@ class RecordingLogger:
         with self._lock:
             self.lines.append((level, message, dict(data or {})))
 
-    def info(self, message: str, data: Any = None) -> None:
-        self._add("info", message, data)
+    def info(self, msg: object, *args: object, extra: Any = None) -> None:
+        self._add("info", str(msg), extra)
 
-    def warning(self, message: str, data: Any = None) -> None:
-        self._add("warning", message, data)
+    def warning(self, msg: object, *args: object, extra: Any = None) -> None:
+        self._add("warning", str(msg), extra)
 
-    def error(self, message: str, data: Any = None) -> None:
-        self._add("error", message, data)
+    def error(self, msg: object, *args: object, extra: Any = None) -> None:
+        self._add("error", str(msg), extra)
 
     def messages(self, level: str) -> list[str]:
         with self._lock:
