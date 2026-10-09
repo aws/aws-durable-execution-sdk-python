@@ -31,6 +31,7 @@ addopts = "-v --strict-markers --import-mode=importlib"
 testpaths = [
     "packages/aws-durable-execution-sdk-python/tests",
     "packages/aws-durable-execution-sdk-python-insight/tests",
+    "packages/aws-durable-execution-sdk-python-microvm-worker/tests",
     "packages/aws-durable-execution-sdk-python-otel/tests",
     "packages/aws-durable-execution-sdk-python-testing/tests",
     "packages/aws-durable-execution-sdk-python-examples/test",
@@ -93,6 +94,21 @@ dependencies = [
 test = "pytest packages/aws-durable-execution-sdk-python-otel/tests {args}"
 cov = "pytest --cov-report=term-missing --cov-config=packages/aws-durable-execution-sdk-python-otel/pyproject.toml --cov=packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel packages/aws-durable-execution-sdk-python-otel/tests {args}"
 typecheck = "mypy --install-types --non-interactive packages/aws-durable-execution-sdk-python-otel/src/aws_durable_execution_sdk_python_otel packages/aws-durable-execution-sdk-python-otel/tests"
+
+[tool.hatch.envs.dev-microvm-worker]
+workspace.members = ["packages/aws-durable-execution-sdk-python-microvm-worker"]
+dependencies = [
+  "pytest",
+  "pytest-cov",
+  "coverage[toml]",
+  "mypy>=1.0.0",
+  "boto3-stubs[lambda]",
+]
+
+[tool.hatch.envs.dev-microvm-worker.scripts]
+test = "pytest packages/aws-durable-execution-sdk-python-microvm-worker/tests {args}"
+cov = "pytest --cov-report=term-missing --cov-config=packages/aws-durable-execution-sdk-python-microvm-worker/pyproject.toml --cov=packages/aws-durable-execution-sdk-python-microvm-worker/src/aws_durable_execution_sdk_python_microvm_worker packages/aws-durable-execution-sdk-python-microvm-worker/tests {args}"
+typecheck = "mypy --install-types --non-interactive packages/aws-durable-execution-sdk-python-microvm-worker/src/aws_durable_execution_sdk_python_microvm_worker packages/aws-durable-execution-sdk-python-microvm-worker/tests"
 
 [tool.hatch.envs.dev-testing]
 workspace.members = [
@@ -215,6 +231,7 @@ select = ["E4", "E7", "E9", "F", "TID252"]  # pycodestyle (E4/E7/E9) + Pyflakes 
 known-first-party = [
   "aws_durable_execution_sdk_python",
   "aws_durable_execution_sdk_python_insight",
+  "aws_durable_execution_sdk_python_microvm_worker",
   "aws_durable_execution_sdk_python_otel",
   "aws_durable_execution_sdk_python_testing",
 ]

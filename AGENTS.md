@@ -82,7 +82,9 @@ Do NOT add or modify **conformance tests** without coordinating with the team. C
 - Packages live under `packages/`: the core SDK
   (`aws-durable-execution-sdk-python`), the testing library
   (`aws-durable-execution-sdk-python-testing`), the OpenTelemetry plugin
-  (`aws-durable-execution-sdk-python-otel`), and examples
+  (`aws-durable-execution-sdk-python-otel`), the Workflow Insight plugin
+  (`aws-durable-execution-sdk-python-insight`), the Lambda MicroVM worker
+  (`aws-durable-execution-sdk-python-microvm-worker`), and examples
   (`aws-durable-execution-sdk-python-examples`).
 - Read [CONTRIBUTING.md](CONTRIBUTING.md) before making changes. Use
   `hatch` for all tests, type checks, and formatting (for example
