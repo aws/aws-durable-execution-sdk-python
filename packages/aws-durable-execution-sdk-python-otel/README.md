@@ -364,6 +364,13 @@ OTel `OK` only for `SUCCEEDED`, `ERROR` when error details are delivered, and
 `CANCELLED`, `TIMED_OUT`, and `STOPPED`. The original durable operation status
 remains in `durable.operation.status`.
 
+When a concurrent branch's terminal completion arrives before replay has created
+its parent span, Invocation view retains that completion until the actual parent
+span is registered. The terminal segment is exported under that parent before
+control returns to the branch's user code. No ancestor is invented and SDK
+completion delivery is unchanged. If the parent never becomes active, normal
+invocation cleanup and flushing still run before the missing parent is reported.
+
 ### Invocation context isolation
 
 With core 2.1+, invocation hooks and the handler run on one worker in an
