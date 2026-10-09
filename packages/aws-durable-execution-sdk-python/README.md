@@ -129,6 +129,11 @@ replace an earlier binding. If a Start hook raises, its new bindings are discard
 for subsequent work; its End still runs in the original Context so its tokens can
 be reset. End hooks retain forward registration order, not reverse stack order,
 so they must not rely on observing a stack-like unwind of other plugins' contexts.
+Each SDK-managed `map` or `parallel` branch admission, including an in-process
+resume, receives a fresh copy of the coordinator's bindings when plugins are
+registered. Branch changes remain local even when pool threads are reused.
+User-created threads retain normal Python context-variable behavior; without
+registered plugins, SDK branch submission keeps its existing behavior.
 The worker's invocation context is discarded on return, including after plugin
 cleanup failures, leaving the host's bindings unchanged. This isolates bindings,
 not mutations to shared objects or external side effects. Without plugins, the
