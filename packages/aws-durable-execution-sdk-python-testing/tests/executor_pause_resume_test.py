@@ -163,7 +163,7 @@ def test_pause_state_properties_are_read_only(attribute: str) -> None:
 
 
 @pytest.mark.parametrize("with_updates", [True, False])
-def test_checkpoint_while_paused_omits_token_but_registers_update(
+def test_checkpoint_while_paused_omits_token_and_state_but_registers_update(
     with_updates: bool,
 ) -> None:
     executor, store, execution, token_0 = _make_executor_with_started_execution()
@@ -180,11 +180,11 @@ def test_checkpoint_while_paused_omits_token_but_registers_update(
     )
 
     assert response.checkpoint_token is None
-    assert [
-        op.operation_id for op in response.new_execution_state.operations
-    ] == expected_operation_ids
+    assert response.new_execution_state is not None
+    assert response.new_execution_state.operations == []
 
     reloaded = store.load(execution.durable_execution_arn)
+    assert reloaded.handler_seen_seq == 0
     assert reloaded.token_sequence == previous_sequence + 1
     assert [
         op.operation_id

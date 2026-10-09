@@ -443,7 +443,7 @@ def test_paused_checkpoint_returns_no_token() -> None:
     assert response.checkpoint_token is None
 
 
-def test_paused_checkpoint_returns_and_persists_step_update() -> None:
+def test_paused_checkpoint_persists_step_update_without_returning_state() -> None:
     processor, store, execution, token = _make_processor_with_started_execution()
     execution.pause()
     store.save(execution)
@@ -456,10 +456,10 @@ def test_paused_checkpoint_returns_and_persists_step_update() -> None:
 
     response = processor.process_checkpoint(token, [update], "c1")
 
-    assert [op.operation_id for op in response.new_execution_state.operations] == [
-        "step-A"
-    ]
+    assert response.checkpoint_token is None
+    assert response.new_execution_state.operations == []
     persisted = store.load(execution.durable_execution_arn)
+    assert persisted.handler_seen_seq == 0
     assert [
         op.operation_id
         for op in persisted.get_navigable_operations()
@@ -470,7 +470,7 @@ def test_paused_checkpoint_returns_and_persists_step_update() -> None:
 def test_empty_paused_checkpoint_advances_token_sequence_once() -> None:
     processor, store, execution, token = _make_processor_with_started_execution()
     previous_sequence = execution.token_sequence
-    
+
     execution.pause()
     store.save(execution)
     processor.process_checkpoint(token, [], "c1")

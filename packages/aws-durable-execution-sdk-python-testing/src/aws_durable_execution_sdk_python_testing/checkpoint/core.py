@@ -90,9 +90,9 @@ class CheckpointCore:
         """Apply ``updates`` to ``execution`` and compute the response delta.
 
         Advances ``token_sequence`` exactly once, returns the full set of
-        operations the handler has not yet seen, advances
-        ``handler_seen_seq`` to cover them, and records an idempotency
-        entry for a byte-identical replay of a retried call 
+        operations the handler has not yet seen unless paused, advances
+        ``handler_seen_seq`` only for returned operations, and records an
+        idempotency entry for a byte-identical replay of a retried call
         only when returning a checkpoint token.
 
         The caller is responsible for the invocation gate, locking,
@@ -129,7 +129,10 @@ class CheckpointCore:
         # The checkpoint response returns the full unseen delta in a single
         # response. Advance handler_seen_seq to cover every returned op so
         # the next delta carries only operations touched after this response.
-        response_ops: list[Operation] = paginator.unseen_operations()
+        # Paused checkpoints persist updates without delivering any state.
+        response_ops: list[Operation] = (
+            [] if execution.is_paused else paginator.unseen_operations()
+        )
         if response_ops:
             highest_delivered_seq: int = max(
                 execution.operation_last_touched_seq[op.operation_id]
