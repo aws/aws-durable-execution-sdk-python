@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
-from typing import Protocol
+from collections.abc import Callable, Mapping
+from typing import Protocol, TypeVar
 
-from aws_durable_execution_sdk_python_microvm_worker._util import safe_text
 
+T = TypeVar("T")
 
 DEFAULT_LOGGER_NAME = "aws_durable_execution_sdk_python_microvm_worker"
 """The name of the standard library logger that the worker uses by default."""
@@ -101,3 +101,21 @@ def describe(value: object) -> object:
         "name": safe_text(lambda: type(value).__name__, "Exception") or "Exception",
         "message": safe_text(lambda: str(value), "unknown error"),
     }
+
+
+def safe_get(read: Callable[[], T]) -> T | None:
+    """Return what ``read`` returns, or ``None`` when it raises."""
+    try:
+        return read()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def safe_text(read: Callable[[], object], fallback: str) -> str:
+    """Return the text that ``read`` gives, or ``fallback``.
+
+    ``fallback`` is used when ``read`` raises or returns something other than
+    a string. A ``__str__`` that raises is the usual cause.
+    """
+    value = safe_get(read)
+    return value if isinstance(value, str) else fallback

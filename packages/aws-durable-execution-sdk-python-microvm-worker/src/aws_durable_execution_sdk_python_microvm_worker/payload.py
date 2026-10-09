@@ -23,8 +23,6 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from aws_durable_execution_sdk_python_microvm_worker._util import is_finite_number
-
 
 SUPPORTED_PAYLOAD_VERSION = 1
 """The payload version that this package can process."""
@@ -316,3 +314,19 @@ def _to_float(value: float) -> float:
 
 def _non_empty_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def is_finite_number(value: object) -> bool:
+    """Whether a value is a JSON number that is finite.
+
+    1. A ``bool`` is an ``int`` in Python, and JSON ``true`` is not a number.
+       So a ``bool`` is not a number here.
+    2. An ``int`` is always finite. ``math.isfinite`` would raise
+       ``OverflowError`` for an ``int`` too large for a float. So only a
+       ``float`` goes through it.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    return isinstance(value, float) and math.isfinite(value)

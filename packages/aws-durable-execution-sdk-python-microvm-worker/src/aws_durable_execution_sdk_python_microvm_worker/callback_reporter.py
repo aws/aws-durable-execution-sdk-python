@@ -9,17 +9,19 @@ import json
 import threading
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from concurrent.futures import Future
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError
 
 
-from aws_durable_execution_sdk_python_microvm_worker._util import safe_get, safe_text
 from aws_durable_execution_sdk_python_microvm_worker.logger import (
     MicrovmWorkerLogger,
+    safe_get,
     safe_logger,
+    safe_text,
 )
 
 
@@ -461,16 +463,19 @@ class CallbackReporter:
             msg = f"the {label} call was cancelled"
             raise CallCancelledError(msg)
 
+        # The call's thread settles the future. The waiting thread wakes on
+        # `done`, which the future sets when it settles, and which a cancel
+        # sets too. A call that settles after the bound settles a future that
+        # nobody reads.
+        future: Future[T] = Future()
         done = threading.Event()
-        outcome: _Outcome[T] = _Outcome()
+        future.add_done_callback(lambda _future: done.set())
 
         def run() -> None:
             try:
-                outcome.succeed(call())
+                future.set_result(call())
             except BaseException as error:  # noqa: BLE001
-                outcome.fail(error)
-            finally:
-                done.set()
+                future.set_exception(error)
 
         if cancel is not None and not cancel._register(done):  # noqa: SLF001
             msg = f"the {label} call was cancelled"
@@ -481,38 +486,13 @@ class CallbackReporter:
         finally:
             if cancel is not None:
                 cancel._unregister(done)  # noqa: SLF001
-        if outcome.error is not None:
-            raise outcome.error
-        if outcome.values:
-            return outcome.values[0]
+        if future.done():
+            return future.result()
         if not finished:
             msg = f"the {label} call took longer than {timeout} seconds"
             raise TimeoutError(msg)
         msg = f"the {label} call was cancelled"
         raise CallCancelledError(msg)
-
-
-class _Outcome(Generic[T]):
-    """The result of a call that runs in another thread.
-
-    The call's thread sets it once, before it sets the ``done`` event. The
-    waiting thread reads it only after the event, or after the timeout. A
-    call that ends after the timeout sets it, and nobody reads it.
-    """
-
-    __slots__ = ("error", "values")
-
-    def __init__(self) -> None:
-        # A list, not an optional value: a call can return None, and the
-        # list tells "returned None" apart from "has not returned".
-        self.values: list[T] = []
-        self.error: BaseException | None = None
-
-    def succeed(self, value: T) -> None:
-        self.values.append(value)
-
-    def fail(self, error: BaseException) -> None:
-        self.error = error
 
 
 def _encode_result(result: Any) -> bytes:
