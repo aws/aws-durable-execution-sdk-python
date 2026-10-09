@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 class _IdOverride:
     trace_id: int | None
     span_id: int | None
+    trace_id_consumed: bool = False
+    consume_trace_id: bool = False
 
 
 def _to_otel_trace_id(execution_arn: str, start_timestamp: datetime) -> int:
@@ -83,9 +85,10 @@ def derive_workflow_span_id(durable_execution_arn: str) -> int:
 def derive_execution_root_span_id(durable_execution_arn: str) -> int:
     """Derive the deterministic synthetic execution-root span ID.
 
-    The synthetic root is a non-recording parent context used when the backend
-    does not provide a complete remote parent. Its ID is stable across
-    reinvocations and uses a namespace distinct from Workflow and operation
+    The synthetic root anchors the trace when the backend does not provide a
+    complete remote parent. Its zero-duration span is exported on each sampled
+    fallback invocation. Its ID is stable across reinvocations and uses a
+    namespace distinct from Workflow and operation
     span IDs.
     """
     if not durable_execution_arn:
@@ -143,28 +146,61 @@ class DeterministicIdGenerator(RandomIdGenerator):
         finally:
             self._id_override.reset(token)
 
+    @contextmanager
+    def _use_ids_for_span(
+        self,
+        *,
+        trace_id: int,
+        span_id: int,
+    ) -> Iterator[None]:
+        """Reserve IDs for one SDK-created span without changing public scope semantics."""
+        token = self._id_override.set(
+            _IdOverride(trace_id, span_id, consume_trace_id=True)
+        )
+        try:
+            yield
+        finally:
+            self._id_override.reset(token)
+
     def generate_trace_id(self) -> int:
         """Generate a 128-bit trace ID."""
         override = self._id_override.get()
         if override is not None and override.trace_id is not None:
+            # Consume the identity once, but keep its non-random classification
+            # until the SDK asks for the span ID below.
+            if override.consume_trace_id:
+                self._id_override.set(_IdOverride(None, override.span_id, True, True))
             return override.trace_id
+        if override is not None and override.trace_id_consumed:
+            self._id_override.set(
+                _IdOverride(
+                    None, override.span_id, consume_trace_id=override.consume_trace_id
+                )
+            )
         return self._fallback_id_generator.generate_trace_id()
 
     def generate_span_id(self) -> int:
         """Generate a 64-bit span ID."""
         override = self._id_override.get()
-        if override is not None and override.span_id is not None:
-            span_id = override.span_id
-            # Consume before returning so a re-entrant call in the same span
-            # creation falls back instead of reusing the deterministic ID.
-            self._id_override.set(_IdOverride(override.trace_id, None))
-            return span_id
+        if override is not None:
+            # Span ID generation completes the ID phase of SDK start_span, before
+            # processors run. Release the consumed trace classification too, so
+            # a processor creating another root sees only its own generator.
+            self._id_override.set(
+                _IdOverride(
+                    override.trace_id, None, consume_trace_id=override.consume_trace_id
+                )
+            )
+            if override.span_id is not None:
+                return override.span_id
         return self._fallback_id_generator.generate_span_id()
 
     def is_trace_id_random(self) -> bool:
         """Report whether the current trace ID is randomly generated."""
         override = self._id_override.get()
-        if override is not None and override.trace_id is not None:
+        if override is not None and (
+            override.trace_id is not None or override.trace_id_consumed
+        ):
             return False
         fallback_method = getattr(
             self._fallback_id_generator, "is_trace_id_random", None

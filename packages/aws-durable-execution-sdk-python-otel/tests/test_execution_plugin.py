@@ -551,7 +551,7 @@ def test_context_span_waits_for_terminal_operation_status(
     # Still a placeholder, still not exported, until the terminal operation end.
     assert plugin._get_span(operation_id) is active_span
     assert not active_span.is_recording()
-    assert not exporter.get_finished_spans()
+    assert {s.name for s in exporter.get_finished_spans()} == {"DurableExecutionRoot"}
 
     plugin.on_operation_end(
         OperationEndInfo(
@@ -568,7 +568,9 @@ def test_context_span_waits_for_terminal_operation_status(
         )
     )
 
-    span = exporter.get_finished_spans()[0]
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name != "DurableExecutionRoot"
+    )
     assert span.attributes["durable.operation.status"] == terminal_status.value
     assert span.status.status_code is expected_span_status
 
@@ -616,7 +618,9 @@ def test_step_attempt_span_omits_operation_status():
         )
     )
 
-    span = exporter.get_finished_spans()[0]
+    span = next(
+        s for s in exporter.get_finished_spans() if s.name != "DurableExecutionRoot"
+    )
     assert (
         span.attributes["durable.attempt.outcome"]
         == UserFunctionOutcome.SUCCEEDED.value
@@ -1551,7 +1555,9 @@ def test_suspension_releases_the_scope_on_the_originating_worker():
         assert span_still_current is False
         assert span_key not in plugin._context_tokens
         assert suspended_span is not None
-        assert not exporter.get_finished_spans()
+        assert {s.name for s in exporter.get_finished_spans()} == {
+            "DurableExecutionRoot"
+        }
 
         # The timed resume lands on this thread, with nothing stale to unwind.
         plugin.on_user_function_start(_step_start_info("step-1"))
@@ -1597,7 +1603,7 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
     assert otel_context.get_current() == before_context
     assert set(plugin._context_tokens) == {"__invocation_context__"}
     # Neither span is ended: both operations are still in flight.
-    assert not exporter.get_finished_spans()
+    assert {s.name for s in exporter.get_finished_spans()} == {"DurableExecutionRoot"}
 
     # The timed in-process resume replays both contexts, outer first.
     plugin.on_user_function_start(_context_start_info("ctx-outer"))
