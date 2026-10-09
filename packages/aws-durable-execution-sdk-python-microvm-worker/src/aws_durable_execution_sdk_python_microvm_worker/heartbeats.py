@@ -15,7 +15,7 @@ import threading
 from collections.abc import Callable
 
 from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
-    ALREADY_COMPLETE_CODE,
+    CLOSED_CALLBACK_CODE,
     CallbackReporter,
     CancelScope,
     error_code,
@@ -86,11 +86,12 @@ def heartbeat_interval(
     )
 
 
-def jitter_source(callback_id: str) -> Callable[[], float]:
-    """Return a source of numbers in [0, 1) that differs per job.
+def heartbeat_jitter(callback_id: str, n: int) -> float:
+    """Return the n-th jitter value of a job, a number in [0, 1).
 
-    The n-th call returns the first 32 bits of SHA-256 of
-    ``<callback_id>:<n>``, scaled to [0, 1).
+    The value is the first 32 bits of SHA-256 of ``<callback_id>:<n>``,
+    scaled to [0, 1). The JavaScript worker's ``jitterSource`` returns the
+    same sequence.
 
     Why not the ``random`` module:
 
@@ -103,44 +104,34 @@ def jitter_source(callback_id: str) -> Callable[[], float]:
     5. Each job has its own callback ID. So a hash of the ID differs per job,
        whatever the generator state is after a restore.
     """
-    counter = 0
-    lock = threading.Lock()
-
-    def next_value() -> float:
-        nonlocal counter
-        with lock:
-            n = counter
-            counter += 1
-        digest = hashlib.sha256(f"{callback_id}:{n}".encode()).digest()
-        return int.from_bytes(digest[:4], "big") / 2**32
-
-    return next_value
+    digest = hashlib.sha256(f"{callback_id}:{n}".encode()).digest()
+    return int.from_bytes(digest[:4], "big") / 2**32
 
 
-def heartbeat_delay(interval: float, jitter: Callable[[], float]) -> float:
+def heartbeat_delay(interval: float, jitter: float) -> float:
     """Return the delay before the next heartbeat, in seconds.
 
     Many MicroVMs can start at the same moment, for example from a ``map``.
     With a fixed interval, their heartbeats would reach the service at the
     same moments. So each delay is the interval minus 1 to 2 seconds. The
-    amount comes from ``jitter``, a source of numbers in [0, 1).
+    amount comes from ``jitter``, a number in [0, 1).
 
     The jitter is subtracted, not added. So a heartbeat never arrives later
     than the interval. The jitter is capped at half the interval. So a short
     interval stays positive.
     """
     amount = min(
-        _MIN_JITTER_SECONDS + jitter() * (_MAX_JITTER_SECONDS - _MIN_JITTER_SECONDS),
+        _MIN_JITTER_SECONDS + jitter * (_MAX_JITTER_SECONDS - _MIN_JITTER_SECONDS),
         interval / 2,
     )
     return interval - amount
 
 
-def heartbeat_retry_delay(interval: float, jitter: Callable[[], float]) -> float:
+def heartbeat_retry_delay(interval: float, jitter: float) -> float:
     """Return the delay after a failed heartbeat: an eighth to a quarter of
     the interval. The jitter keeps MicroVMs that failed together from
     retrying together."""
-    return max(0.001, interval / 4 - jitter() * interval / 8)
+    return max(0.001, interval / 4 - jitter * interval / 8)
 
 
 def heartbeat_call_timeout(interval: float) -> float:
@@ -209,10 +200,17 @@ class Heartbeats:
         self._interval = interval
         self._logger = logger
         self._stopped = threading.Event()
+        # Guards the decision between handler_settled() and a terminal
+        # heartbeat error. The job thread and the heartbeat thread both make
+        # it, so exactly one of them must win.
+        self._lock = threading.Lock()
         # Set when the handler has settled. A terminal heartbeat error then
         # only stops the heartbeats. The durable function has probably
         # received the outcome already, so the job must not be cancelled.
         self._handler_settled = False
+        # Set when a heartbeat found the callback gone before the handler
+        # settled. on_callback_gone is then called, or is about to be.
+        self._gone_first = False
         # Ends a heartbeat in flight when the job ends. The job then does not
         # wait for a stalled call's timeout, which can be minutes.
         self._cancel = CancelScope()
@@ -268,9 +266,17 @@ class Heartbeats:
         """The interval in seconds, or ``None`` when the job has no heartbeats."""
         return self._interval
 
-    def handler_settled(self) -> None:
-        """Mark the handler as settled. ``on_callback_gone`` is not called after it."""
-        self._handler_settled = True
+    def handler_settled(self) -> bool:
+        """Mark the handler as settled.
+
+        Returns ``False`` when a heartbeat found the callback gone first. The
+        caller must then not report the outcome, as the JavaScript worker
+        checks ``controller.signal.aborted``. After a ``True`` return,
+        ``on_callback_gone`` is never called.
+        """
+        with self._lock:
+            self._handler_settled = True
+            return not self._gone_first
 
     def stop(self) -> None:
         """Stop the heartbeats, cancel one in flight, and wait for the thread."""
@@ -283,21 +289,24 @@ class Heartbeats:
     def _start_thread(self) -> None:
         if self._interval is None:
             return
-        callback_id = self._reporter.callback_id
         self._thread = threading.Thread(
             target=self._run,
-            args=(self._interval, jitter_source(callback_id)),
-            name=f"heartbeats-{callback_id[:16]}",
+            args=(self._interval,),
+            name=f"heartbeats-{self._reporter.callback_id[:16]}",
             daemon=True,
         )
         self._thread.start()
 
-    def _run(self, interval: float, jitter: Callable[[], float]) -> None:
+    def _run(self, interval: float) -> None:
         call_timeout = heartbeat_call_timeout(interval)
+        callback_id = self._reporter.callback_id
         # Failed heartbeats since the last success, rejections included.
         failures = 0
         # The rejection codes logged as errors since the last success.
         logged_rejections: set[str] = set()
+        # The delays computed so far. The n-th delay uses the n-th jitter
+        # value. Only this thread reads or writes it, so it needs no lock.
+        n = 0
         while not self._stopped.is_set():
             failed = False
             try:
@@ -316,6 +325,8 @@ class Heartbeats:
                 logged_rejections.clear()
                 self._logger.info("heartbeats are accepted again", extra=self._fields())
             failures = failures + 1 if failed else 0
+            jitter = heartbeat_jitter(callback_id, n)
+            n += 1
             delay = (
                 heartbeat_retry_delay(interval, jitter)
                 if 0 < failures <= MAX_QUICK_HEARTBEAT_RETRIES
@@ -326,7 +337,12 @@ class Heartbeats:
 
     def _callback_gone(self, error: BaseException) -> None:
         self._stopped.set()
-        if not self._handler_settled:
+        # Decide under the lock, call outside it. on_callback_gone may call
+        # back into this object, for example stop().
+        with self._lock:
+            gone_first = not self._handler_settled
+            self._gone_first = gone_first
+        if gone_first:
             try:
                 self._on_callback_gone(error)
             except Exception as callback_error:  # noqa: BLE001
@@ -334,9 +350,9 @@ class Heartbeats:
                     "the callback-gone handler raised",
                     extra=self._fields(error=describe(callback_error)),
                 )
-        elif error_code(error) != ALREADY_COMPLETE_CODE:
-            # "Already complete" usually means that the completion landed
-            # while this heartbeat was in flight. Any other terminal answer is
+        elif error_code(error) != CLOSED_CALLBACK_CODE:
+            # A closed callback usually means that the completion landed while
+            # this heartbeat was in flight. Any other terminal answer is
             # logged. The completion call meets it too, and reports it.
             self._logger.info(
                 "the callback no longer accepts heartbeats",

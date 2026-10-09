@@ -126,6 +126,15 @@ def test_run_hook_rejects_malformed_payload(raw, message):
         RunHookRequest.from_dict({"microvmId": "mvm-1", "runHookPayload": raw})
 
 
+def test_invalid_json_error_keeps_the_parse_position():
+    """The payload comes from another SDK language, so the position matters."""
+    with pytest.raises(InvalidRunHookPayloadError) as raised:
+        RunHookRequest.from_dict({"microvmId": "mvm-1", "runHookPayload": '{"a":'})
+    cause = raised.value.__cause__
+    assert isinstance(cause, json.JSONDecodeError)
+    assert (cause.lineno, cause.colno) == (1, 6)
+
+
 @pytest.mark.parametrize("version", [None, 2, "1", True, 1.5])
 def test_run_hook_rejects_unsupported_version(version):
     payload = {"version": version, "region": "us-east-1", "job": JOB}

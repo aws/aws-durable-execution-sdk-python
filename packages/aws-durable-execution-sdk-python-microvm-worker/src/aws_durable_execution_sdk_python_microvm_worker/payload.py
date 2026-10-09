@@ -128,9 +128,11 @@ class MicrovmRunHookPayload:
         """
         try:
             payload = loads_strict(text)
-        except ValueError:
+        except ValueError as error:
+            # Keep the JSONDecodeError. Its line and column are the first
+            # thing to check, because the payload comes from another SDK.
             msg = "runHookPayload is not valid JSON"
-            raise InvalidRunHookPayloadError(msg) from None
+            raise InvalidRunHookPayloadError(msg) from error
         if not isinstance(payload, dict):
             msg = "runHookPayload must be an object"
             raise InvalidRunHookPayloadError(msg)

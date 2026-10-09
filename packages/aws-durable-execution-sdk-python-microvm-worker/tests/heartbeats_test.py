@@ -22,8 +22,8 @@ from aws_durable_execution_sdk_python_microvm_worker.heartbeats import (
     heartbeat_call_timeout,
     heartbeat_delay,
     heartbeat_interval,
+    heartbeat_jitter,
     heartbeat_retry_delay,
-    jitter_source,
 )
 
 # A short interval keeps each test fast. The call timeout is a third of it.
@@ -42,7 +42,7 @@ def wait_until(condition: Callable[[], bool], timeout: float = 5.0) -> None:
 def start(
     client: Any, logger: Any, gone: list[BaseException] | None = None, **kwargs: Any
 ) -> Heartbeats:
-    reporter = CallbackReporter("cb-1", "us-east-1", client=client)
+    reporter = CallbackReporter("cb-1", client)
     return Heartbeats.start(
         reporter,
         heartbeat_timeout_seconds=kwargs.pop("heartbeat_timeout_seconds", 60),
@@ -67,15 +67,15 @@ def test_interval_is_a_third_of_the_timeout_and_at_most_15_minutes():
 
 
 def test_delay_subtracts_one_to_two_seconds():
-    assert heartbeat_delay(10, lambda: 0.0) == 9
-    assert heartbeat_delay(10, lambda: 0.999) == pytest.approx(8.001)
+    assert heartbeat_delay(10, 0.0) == 9
+    assert heartbeat_delay(10, 0.999) == pytest.approx(8.001)
     # The jitter is at most half the interval.
-    assert heartbeat_delay(1, lambda: 0.5) == 0.5
+    assert heartbeat_delay(1, 0.5) == 0.5
 
 
 def test_retry_delay_is_an_eighth_to_a_quarter_of_the_interval():
-    assert heartbeat_retry_delay(8, lambda: 0.0) == 2
-    assert heartbeat_retry_delay(8, lambda: 0.999) == pytest.approx(1.001)
+    assert heartbeat_retry_delay(8, 0.0) == 2
+    assert heartbeat_retry_delay(8, 0.999) == pytest.approx(1.001)
 
 
 def test_call_timeout_is_a_third_of_the_interval():
@@ -94,8 +94,8 @@ def test_two_failures_in_a_row_stay_within_the_heartbeat_timeout(interval):
     """
     call = heartbeat_call_timeout(interval)
     smallest_jitter = min(1.0, interval / 2)
-    longest_retry_wait = heartbeat_retry_delay(interval, lambda: 0.0)
-    longest_wait = heartbeat_delay(interval, lambda: 0.0)
+    longest_retry_wait = heartbeat_retry_delay(interval, 0.0)
+    longest_wait = heartbeat_delay(interval, 0.0)
     assert longest_wait == interval - smallest_jitter
     gap = (
         call
@@ -108,14 +108,24 @@ def test_two_failures_in_a_row_stay_within_the_heartbeat_timeout(interval):
 
 
 def test_jitter_is_deterministic_per_callback_and_differs_between_callbacks():
-    first = jitter_source("cb-1")
-    again = jitter_source("cb-1")
-    other = jitter_source("cb-2")
-    values = [first() for _ in range(5)]
-    assert values == [again() for _ in range(5)]
-    assert values != [other() for _ in range(5)]
+    values = [heartbeat_jitter("cb-1", n) for n in range(5)]
+    assert values == [heartbeat_jitter("cb-1", n) for n in range(5)]
+    assert values != [heartbeat_jitter("cb-2", n) for n in range(5)]
     assert all(0 <= value < 1 for value in values)
     assert len(set(values)) == 5
+
+
+def test_jitter_matches_the_javascript_worker():
+    """The JavaScript worker's jitterSource("cb-1") returns these 3 values.
+
+    They come from running worker.ts's jitterSource. So the two workers
+    schedule the same heartbeats for the same job.
+    """
+    assert [heartbeat_jitter("cb-1", n) for n in range(3)] == [
+        0.8399852730799466,
+        0.5069360784254968,
+        0.24054260458797216,
+    ]
 
 
 # endregion schedule
@@ -159,7 +169,13 @@ def test_terminal_error_while_the_handler_runs_reports_the_callback_gone(
 
 @pytest.mark.parametrize(
     ("code", "logged"),
-    [("InvalidParameterValueException", False), ("CallbackTimeoutException", True)],
+    [
+        # A closed callback: the completion landed while the heartbeat was in
+        # flight. Expected, so not logged.
+        ("CallbackTimeoutException", False),
+        # An invalid callback ID is unexpected after a settled handler.
+        ("InvalidParameterValueException", True),
+    ],
 )
 def test_terminal_error_after_the_handler_settled_only_stops(
     fake_client, make_error, logger, code, logged
@@ -170,7 +186,7 @@ def test_terminal_error_after_the_handler_settled_only_stops(
     client = fake_client(lambda: release.wait(5), make_error(code))
     heartbeats = start(client, logger, gone)
     wait_until(lambda: len(client.calls) == 1)
-    heartbeats.handler_settled()
+    assert heartbeats.handler_settled() is True
     release.set()
     wait_until(lambda: len(client.calls) == 2)
     time.sleep(INTERVAL * 3)
@@ -180,6 +196,52 @@ def test_terminal_error_after_the_handler_settled_only_stops(
     assert (
         "the callback no longer accepts heartbeats" in logger.messages("info")
     ) is logged
+
+
+def test_handler_settled_after_the_callback_gone_returns_false(
+    fake_client, make_error, logger
+):
+    """The heartbeat thread decided first, so the caller must not report.
+
+    on_callback_gone is held open here. A handler_settled() call that arrives
+    while it runs is the interleaving the review found: before the fix, the
+    heartbeat thread read "not settled", then handler_settled() returned, then
+    on_callback_gone ran.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+    gone: list[BaseException] = []
+
+    def on_gone(error: BaseException) -> None:
+        entered.set()
+        release.wait(5)
+        gone.append(error)
+
+    client = fake_client(make_error("CallbackTimeoutException"))
+    heartbeats = start(client, logger, on_callback_gone=on_gone)
+    assert entered.wait(5)
+    assert heartbeats.handler_settled() is False
+    release.set()
+    wait_until(lambda: len(gone) == 1)
+    heartbeats.stop()
+
+
+def test_on_callback_gone_never_runs_after_handler_settled_returns_true(
+    fake_client, make_error, logger
+):
+    """Many races between the two threads. A True return always wins."""
+    for _ in range(50):
+        gone: list[BaseException] = []
+        client = fake_client(make_error("CallbackTimeoutException"))
+        heartbeats = start(client, logger, gone)
+        settled = heartbeats.handler_settled()
+        if settled:
+            time.sleep(0.01)
+            heartbeats.stop()
+            assert gone == []
+        else:
+            wait_until(lambda: len(gone) == 1)
+            heartbeats.stop()
 
 
 def test_rejection_is_logged_once_and_heartbeats_continue(
@@ -291,7 +353,7 @@ def test_start_without_an_interval_uses_a_third_of_the_timeout(fake_client, logg
 
 def test_the_constructor_starts_no_thread(fake_client, logger):
     client = fake_client()
-    reporter = CallbackReporter("cb-1", "us-east-1", client=client)
+    reporter = CallbackReporter("cb-1", client)
     Heartbeats(
         reporter=reporter,
         on_callback_gone=lambda _e: None,

@@ -8,8 +8,9 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import boto3
@@ -57,18 +58,25 @@ system's TCP timeout, which is minutes. A timed-out attempt is retried like
 any transient failure.
 """
 
-ALREADY_COMPLETE_CODE = "InvalidParameterValueException"
-"""The error code that the callback APIs return for a callback that is
-already complete. It also covers a callback ID that the service does not
-accept."""
+CLOSED_CALLBACK_CODE = "CallbackTimeoutException"
+"""The error code that the callback APIs return for a callback that is closed.
+
+The service returns it, with the message "The callback is either timed out or
+already completed", in each of these cases:
+
+1. The callback is already complete, with a success or a failure.
+2. The callback or its heartbeat timed out.
+3. The durable execution has stopped.
+
+So this one code cannot tell an already-delivered outcome from a lost one.
+"""
 
 _TERMINAL_ERROR_CODES = frozenset(
     {
-        # The callback or its heartbeat timed out.
-        "CallbackTimeoutException",
-        # The service does not accept the callback ID, for example because the
-        # callback is already complete.
-        ALREADY_COMPLETE_CODE,
+        CLOSED_CALLBACK_CODE,
+        # The callback ID is not valid. The service answers "Invalid callback
+        # id" for a malformed ID or an ID that it does not know.
+        "InvalidParameterValueException",
         # The callback does not exist.
         "ResourceNotFoundException",
     }
@@ -168,16 +176,23 @@ class CancelScope:
         for waiter in waiters:
             waiter.set()
 
-    def _register(self, waiter: threading.Event) -> bool:
+    @contextmanager
+    def wake(self, waiter: threading.Event) -> Iterator[None]:
+        """Set ``waiter`` when the scope is cancelled, while the block runs.
+
+        Raises:
+            CallCancelledError: On entry, when the scope is already cancelled.
+        """
         with self._lock:
             if self._cancelled:
-                return False
+                msg = "the call was cancelled"
+                raise CallCancelledError(msg)
             self._waiters.add(waiter)
-            return True
-
-    def _unregister(self, waiter: threading.Event) -> None:
-        with self._lock:
-            self._waiters.discard(waiter)
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._waiters.discard(waiter)
 
 
 def error_code(error: BaseException) -> str | None:
@@ -276,17 +291,15 @@ def _create_client(region: str) -> LambdaClient:
 class CallbackReporter:
     """Reports heartbeats and the job outcome for one durable callback.
 
-    Create the reporter after the job arrives, not at image build. Lambda
-    snapshots the running process when it builds the image. A client created
-    then would carry build-time state into every MicroVM.
+    Create the reporter with :meth:`create` after the job arrives, not at image
+    build. Lambda snapshots the running process when it builds the image. A
+    client created then would carry build-time state into every MicroVM.
 
     Args:
         callback_id: The callback ID from the job document.
-        region: The Region of the durable function.
-        client: The Lambda client. Defaults to a client for ``region`` that
-            uses the default credential chain. Inside a MicroVM, that chain
-            resolves the MicroVM's execution role. The reporter closes only a
-            client that it created.
+        client: The Lambda client.
+        owns_client: Whether :meth:`close` closes ``client``. :meth:`create`
+            sets it, because it creates the client.
         logger: Receives a warning when a completion was probably delivered
             by an earlier attempt whose answer never arrived. Defaults to the
             package's standard library logger.
@@ -296,19 +309,37 @@ class CallbackReporter:
     def __init__(
         self,
         callback_id: str,
-        region: str,
+        client: LambdaClient,
         *,
-        client: LambdaClient | None = None,
+        owns_client: bool = False,
         logger: MicrovmWorkerLogger | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.callback_id = callback_id
-        self._owns_client = client is None
-        self._client: LambdaClient = (
-            _create_client(region) if client is None else client
-        )
+        self._client = client
+        self._owns_client = owns_client
         self._logger = safe_logger(logger)
         self._sleep = sleep
+
+    @classmethod
+    def create(
+        cls,
+        callback_id: str,
+        region: str,
+        *,
+        logger: MicrovmWorkerLogger | None = None,
+    ) -> CallbackReporter:
+        """Create a reporter with its own client for ``region``.
+
+        The client uses the default credential chain. Inside a MicroVM, that
+        chain resolves the MicroVM's execution role. :meth:`close` closes the
+        client.
+
+        Raises:
+            botocore.exceptions.BotoCoreError: When boto3 cannot create the
+                client, for example for an unknown ``AWS_PROFILE``.
+        """
+        return cls(callback_id, _create_client(region), owns_client=True, logger=logger)
 
     def close(self) -> None:
         """Release the connections of a client that the reporter created."""
@@ -349,14 +380,16 @@ class CallbackReporter:
                 No call is made.
             ResultTooLargeError: When the serialized result exceeds 256 KB.
                 No call is made.
-            Exception: The last error when every attempt fails. An "already
-                complete" answer after an attempt with an unknown outcome
+            Exception: The last error when every attempt fails. A "closed
+                callback" answer after an attempt with an unknown outcome
                 returns with a warning instead.
         """
         try:
             encoded = _encode_result(result)
         except (TypeError, ValueError, RecursionError) as error:
-            raise ResultSerializationError(error) from error
+            # The constructor sets __cause__, as the JavaScript worker sets
+            # `cause` in its constructor.
+            raise ResultSerializationError(error)  # noqa: B904
         if len(encoded) > MAX_CALLBACK_RESULT_BYTES:
             raise ResultTooLargeError(len(encoded))
         self._with_retry(
@@ -378,8 +411,8 @@ class CallbackReporter:
         durable execution history.
 
         Raises:
-            Exception: The last error when every attempt fails. An "already
-                complete" answer after an attempt with an unknown outcome
+            Exception: The last error when every attempt fails. A "closed
+                callback" answer after an attempt with an unknown outcome
                 returns with a warning instead.
         """
         # The payload is built once, before the retries. A value whose str()
@@ -412,10 +445,10 @@ class CallbackReporter:
         callback timeout. So a transient failure is worth several attempts.
         A permanent error is raised at once.
 
-        One exception: :data:`ALREADY_COMPLETE_CODE` ("already
-        complete") after an attempt with an unknown outcome most likely
-        means that an earlier try delivered the outcome. The call then warns
-        and returns.
+        One exception: :data:`CLOSED_CALLBACK_CODE` after an attempt with an
+        unknown outcome most likely means that an earlier try delivered the
+        outcome. The call then warns and returns. The same code also means
+        that the callback timed out, so the warning names both cases.
         """
         uncertain = False
         attempt = 1
@@ -425,11 +458,11 @@ class CallbackReporter:
             except Exception as error:
                 if (uncertain or _sdk_retries(error) > 0) and error_code(
                     error
-                ) == ALREADY_COMPLETE_CODE:
+                ) == CLOSED_CALLBACK_CODE:
                     self._logger.warning(
-                        "the callback is already complete. An earlier attempt "
-                        "whose answer never arrived probably reported the "
-                        "outcome.",
+                        "the callback is already complete or timed out. An "
+                        "earlier attempt whose answer never arrived probably "
+                        "reported the outcome.",
                         extra={"callbackId": self.callback_id, "attempt": attempt},
                     )
                     return
@@ -482,15 +515,9 @@ class CallbackReporter:
             except BaseException as error:  # noqa: BLE001
                 future.set_exception(error)
 
-        if cancel is not None and not cancel._register(done):  # noqa: SLF001
-            msg = f"the {label} call was cancelled"
-            raise CallCancelledError(msg)
-        try:
+        with cancel.wake(done) if cancel is not None else nullcontext():
             threading.Thread(target=run, name=f"callback-{label}", daemon=True).start()
             finished = done.wait(timeout)
-        finally:
-            if cancel is not None:
-                cancel._unregister(done)  # noqa: SLF001
         if future.done():
             return future.result()
         if not finished:

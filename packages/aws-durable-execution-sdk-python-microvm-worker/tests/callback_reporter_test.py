@@ -14,9 +14,11 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import NoCredentialsError
+from botocore.stub import Stubber
 
 from aws_durable_execution_sdk_python_microvm_worker import callback_reporter
 from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
+    CLOSED_CALLBACK_CODE,
     MAX_CALLBACK_RESULT_BYTES,
     CallbackReporter,
     CallCancelledError,
@@ -33,8 +35,7 @@ def reporter_for(
 ) -> CallbackReporter:
     return CallbackReporter(
         "cb-1",
-        "us-east-1",
-        client=client,
+        client,
         sleep=(sleeps.append if sleeps is not None else lambda _s: None),
         logger=logger,
     )
@@ -201,9 +202,9 @@ def test_completion_does_not_retry_permanent_errors(
     assert client.names() == ["failure"]
 
 
-def test_already_complete_on_first_attempt_raises(fake_client, make_error):
-    client = fake_client(make_error("InvalidParameterValueException"))
-    with pytest.raises(Exception, match="InvalidParameterValueException"):
+def test_closed_callback_on_first_attempt_raises(fake_client, make_error):
+    client = fake_client(make_error(CLOSED_CALLBACK_CODE))
+    with pytest.raises(Exception, match=CLOSED_CALLBACK_CODE):
         reporter_for(client).succeed(1)
 
 
@@ -215,36 +216,48 @@ def test_already_complete_on_first_attempt_raises(fake_client, make_error):
         "sdk-retried",
     ],
 )
-def test_already_complete_after_uncertain_attempt_is_delivered(
+def test_closed_callback_after_uncertain_attempt_is_delivered(
     fake_client, make_error, logger, first
 ):
-    """An earlier attempt with an unknown outcome probably delivered the result."""
+    """An earlier attempt with an unknown outcome probably delivered the result.
+
+    The service answers CallbackTimeoutException for an already-completed
+    callback, measured against the real service.
+    """
     responses = {
-        "timeout": [TimeoutError("slow"), make_error("InvalidParameterValueException")],
+        "timeout": [TimeoutError("slow"), make_error(CLOSED_CALLBACK_CODE)],
         "server": [
             make_error("ServiceException", 500),
-            make_error("InvalidParameterValueException"),
+            make_error(CLOSED_CALLBACK_CODE),
         ],
         # botocore retried inside the first attempt, so an earlier try may
         # have reached the service.
-        "sdk-retried": [make_error("InvalidParameterValueException", retries=2)],
+        "sdk-retried": [make_error(CLOSED_CALLBACK_CODE, retries=2)],
     }[first]
     client = fake_client(*responses)
     reporter_for(client, logger=logger).succeed(1)
     assert len(logger.lines) == 1
     level, message, extra = logger.lines[0]
     assert level == "warning"
-    assert "already complete" in message
+    assert "already complete or timed out" in message
     assert extra["callbackId"] == "cb-1"
 
 
-def test_already_complete_warning_keeps_its_fields_in_a_stdlib_logger(
-    fake_client, make_error, caplog
-):
-    """The fields go in extra, so a logging.Logger keeps them on the record."""
+def test_invalid_callback_id_after_uncertain_attempt_raises(fake_client, make_error):
+    """InvalidParameterValueException means an invalid ID, not "already complete"."""
     client = fake_client(
         TimeoutError("slow"), make_error("InvalidParameterValueException")
     )
+    with pytest.raises(Exception, match="InvalidParameterValueException"):
+        reporter_for(client).succeed(1)
+    assert client.names() == ["success", "success"]
+
+
+def test_closed_callback_warning_keeps_its_fields_in_a_stdlib_logger(
+    fake_client, make_error, caplog
+):
+    """The fields go in extra, so a logging.Logger keeps them on the record."""
+    client = fake_client(TimeoutError("slow"), make_error(CLOSED_CALLBACK_CODE))
     stdlib = logging.getLogger("microvm-worker-test")
     with caplog.at_level(logging.WARNING, logger="microvm-worker-test"):
         reporter_for(client, logger=stdlib).succeed(1)
@@ -253,12 +266,10 @@ def test_already_complete_warning_keeps_its_fields_in_a_stdlib_logger(
     assert record.attempt == 2
 
 
-def test_already_complete_after_missing_credentials_raises(fake_client, make_error):
+def test_closed_callback_after_missing_credentials_raises(fake_client, make_error):
     """Missing credentials send no request, so the first attempt delivered nothing."""
-    client = fake_client(
-        NoCredentialsError(), make_error("InvalidParameterValueException")
-    )
-    with pytest.raises(Exception, match="InvalidParameterValueException"):
+    client = fake_client(NoCredentialsError(), make_error(CLOSED_CALLBACK_CODE))
+    with pytest.raises(Exception, match=CLOSED_CALLBACK_CODE):
         reporter_for(client).succeed(1)
     assert client.names() == ["success", "success"]
 
@@ -335,6 +346,19 @@ def test_heartbeat_with_a_cancelled_scope_makes_no_call(fake_client):
     assert client.calls == []
 
 
+def test_wake_sets_the_waiter_on_cancel_and_releases_it_after():
+    scope = CancelScope()
+    waiter = threading.Event()
+    with scope.wake(waiter):
+        scope.cancel()
+        assert waiter.is_set()
+    later = threading.Event()
+    with pytest.raises(CallCancelledError):
+        with scope.wake(later):
+            pass
+    assert not later.is_set()
+
+
 def test_bounded_call_returns_its_error(fake_client, make_error):
     client = fake_client(make_error("CallbackTimeoutException"))
     with pytest.raises(Exception, match="CallbackTimeoutException"):
@@ -377,14 +401,16 @@ class FalsyClient:
         return {}
 
 
-def test_a_falsy_client_is_used_as_given(monkeypatch):
+def test_the_given_client_is_used_and_no_client_is_created(monkeypatch):
+    """__init__ only assigns. A falsy test double is used as given."""
+
     def fail_create(_region: str) -> Any:
         msg = "the reporter created its own client"
         raise AssertionError(msg)
 
     monkeypatch.setattr(callback_reporter, "_create_client", fail_create)
     client = FalsyClient()
-    CallbackReporter("cb-1", "us-east-1", client=client).heartbeat()  # type: ignore[arg-type]
+    CallbackReporter("cb-1", client).heartbeat()  # type: ignore[arg-type]
     assert client.calls == 1
 
 
@@ -401,16 +427,20 @@ def test_reporter_closes_only_its_own_client(fake_client, monkeypatch):
         return created
 
     monkeypatch.setattr(callback_reporter, "_create_client", create)
-    owned = CallbackReporter("cb-1", "eu-west-1")
+    owned = CallbackReporter.create("cb-1", "eu-west-1")
     owned.close()
     assert regions == ["eu-west-1"]
     assert created.closed is True
 
 
+def test_create_raises_when_boto3_cannot_build_the_client(monkeypatch):
+    monkeypatch.setenv("AWS_PROFILE", "otelbb-no-such-profile")
+    with pytest.raises(Exception, match="otelbb-no-such-profile"):
+        CallbackReporter.create("cb-1", "us-east-1")
+
+
 def test_requests_match_the_lambda_api_model():
     """botocore validates each request against the Lambda service model."""
-    from botocore.stub import Stubber
-
     client = callback_reporter._create_client("us-east-1")  # noqa: SLF001
     with Stubber(client) as stub:
         stub.add_response(
@@ -429,7 +459,7 @@ def test_requests_match_the_lambda_api_model():
         stub.add_response(
             "send_durable_execution_callback_heartbeat", {}, {"CallbackId": "cb-1"}
         )
-        reporter = CallbackReporter("cb-1", "us-east-1", client=client)
+        reporter = CallbackReporter("cb-1", client)
         reporter.succeed([1])
         reporter.fail(ValueError("bad"))
         reporter.heartbeat()
