@@ -7,7 +7,7 @@ import logging
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
@@ -489,18 +489,10 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
         }
 
     def succeeded(self) -> list[BatchItem[R]]:
-        return [
-            item
-            for item in self.all
-            if item.status is BatchItemStatus.SUCCEEDED and item.result is not None
-        ]
+        return [item for item in self.all if item.status is BatchItemStatus.SUCCEEDED]
 
     def failed(self) -> list[BatchItem[R]]:
-        return [
-            item
-            for item in self.all
-            if item.status is BatchItemStatus.FAILED and item.error is not None
-        ]
+        return [item for item in self.all if item.status is BatchItemStatus.FAILED]
 
     def started(self) -> list[BatchItem[R]]:
         return [item for item in self.all if item.status is BatchItemStatus.STARTED]
@@ -533,18 +525,11 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
             raise BatchCompletionError(self.completion_reason)
 
     def get_results(self) -> list[R]:
-        return [
-            item.result
-            for item in self.all
-            if item.status is BatchItemStatus.SUCCEEDED and item.result is not None
-        ]
+        # None is a valid result for a branch that returns nothing.
+        return [cast("R", item.result) for item in self.succeeded()]
 
     def get_errors(self) -> list[ErrorObject]:
-        return [
-            item.error
-            for item in self.all
-            if item.status is BatchItemStatus.FAILED and item.error is not None
-        ]
+        return [cast("ErrorObject", item.error) for item in self.failed()]
 
     @property
     def success_count(self) -> int:
