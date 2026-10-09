@@ -8,12 +8,14 @@ This package is experimental. Its API can change in any release.
 
 from aws_durable_execution_sdk_python_microvm_worker.__about__ import __version__
 from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
+    ALREADY_COMPLETE_CODE,
     MAX_CALLBACK_RESULT_BYTES,
     CallbackReporter,
     CallCancelledError,
     CancelScope,
     ResultSerializationError,
     ResultTooLargeError,
+    error_code,
     is_permanent_error,
     is_terminal_callback_error,
 )
@@ -34,6 +36,7 @@ from aws_durable_execution_sdk_python_microvm_worker.payload import (
 
 
 __all__ = [
+    "ALREADY_COMPLETE_CODE",
     "MAX_CALLBACK_RESULT_BYTES",
     "SUPPORTED_PAYLOAD_VERSION",
     "CallCancelledError",
@@ -50,6 +53,7 @@ __all__ = [
     "RunHookRequest",
     "__version__",
     "default_logger",
+    "error_code",
     "is_permanent_error",
     "is_terminal_callback_error",
     "loads_strict",

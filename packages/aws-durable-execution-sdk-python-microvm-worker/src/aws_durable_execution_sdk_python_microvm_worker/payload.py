@@ -23,6 +23,8 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from aws_durable_execution_sdk_python_microvm_worker._util import is_finite_number
+
 
 SUPPORTED_PAYLOAD_VERSION = 1
 """The payload version that this package can process."""
@@ -92,7 +94,7 @@ class MicrovmJobDocument:
         heartbeat = data.get("heartbeatTimeoutSeconds")
         # A shorter heartbeat timeout would need heartbeats many times a second.
         if heartbeat is not None and not (
-            _is_finite_number(heartbeat) and heartbeat >= 1
+            is_finite_number(heartbeat) and heartbeat >= 1
         ):
             msg = f"{label} heartbeatTimeoutSeconds must be a number of at least 1"
             raise InvalidRunHookPayloadError(msg, callback_id, region)
@@ -156,7 +158,7 @@ class MicrovmRunHookPayload:
 
         idle = payload.get("autoSuspendIdleSeconds")
         if idle is not None and not (
-            _is_finite_number(idle) and 0 < idle <= MAX_MICROVM_LIFETIME_SECONDS
+            is_finite_number(idle) and 0 < idle <= MAX_MICROVM_LIFETIME_SECONDS
         ):
             msg = (
                 "runHookPayload autoSuspendIdleSeconds must be a positive number "
@@ -310,17 +312,6 @@ def _to_float(value: float) -> float:
         return float(value)
     except OverflowError:
         return math.inf
-
-
-def _is_finite_number(value: object) -> bool:
-    # A bool is an int in Python, and JSON true is not a number. An int is
-    # always finite. math.isfinite would raise OverflowError for an int too
-    # large for a float, so only a float goes through it.
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, int):
-        return True
-    return isinstance(value, float) and math.isfinite(value)
 
 
 def _non_empty_string(value: object) -> str | None:

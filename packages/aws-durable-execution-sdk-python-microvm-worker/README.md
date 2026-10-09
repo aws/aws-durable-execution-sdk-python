@@ -60,7 +60,7 @@ An explicit `heartbeat_interval_seconds` must be above 0 and at most 900, and it
 
 ## Logging
 
-The worker logs to the standard library logger `aws_durable_execution_sdk_python_microvm_worker`, and passes its structured fields in `extra`. Configure `logging` in the image to see its INFO lines, for example with `logging.basicConfig(level=logging.INFO)`. Any object with the `logging.Logger` signatures for `info`, `warning`, and `error` can replace it. A logger that raises does not stop the worker: the line is dropped.
+The worker logs to the standard library logger `aws_durable_execution_sdk_python_microvm_worker`, and passes its structured fields in `extra`. Every line about a job carries its `callbackId`. `CallbackReporter` and `Heartbeats.start` take the same `logger` argument. Configure `logging` in the image to see its INFO lines, for example with `logging.basicConfig(level=logging.INFO)`. Any object with the `logging.Logger` signatures for `info`, `warning`, and `error` can replace it. A logger that raises does not stop the worker: the line is dropped.
 
 ## Permissions
 

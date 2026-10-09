@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import threading
 import time
@@ -28,16 +29,14 @@ from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
 
 
 def reporter_for(
-    client: Any, sleeps: list[float] | None = None, warnings: list | None = None
+    client: Any, sleeps: list[float] | None = None, logger: Any = None
 ) -> CallbackReporter:
     return CallbackReporter(
         "cb-1",
         "us-east-1",
         client=client,
         sleep=(sleeps.append if sleeps is not None else lambda _s: None),
-        warn=(lambda message, data: warnings.append((message, data)))
-        if warnings is not None
-        else None,
+        logger=logger,
     )
 
 
@@ -217,7 +216,7 @@ def test_already_complete_on_first_attempt_raises(fake_client, make_error):
     ],
 )
 def test_already_complete_after_uncertain_attempt_is_delivered(
-    fake_client, make_error, first
+    fake_client, make_error, logger, first
 ):
     """An earlier attempt with an unknown outcome probably delivered the result."""
     responses = {
@@ -231,10 +230,27 @@ def test_already_complete_after_uncertain_attempt_is_delivered(
         "sdk-retried": [make_error("InvalidParameterValueException", retries=2)],
     }[first]
     client = fake_client(*responses)
-    warnings: list[Any] = []
-    reporter_for(client, warnings=warnings).succeed(1)
-    assert len(warnings) == 1
-    assert "already complete" in warnings[0][0]
+    reporter_for(client, logger=logger).succeed(1)
+    assert len(logger.lines) == 1
+    level, message, extra = logger.lines[0]
+    assert level == "warning"
+    assert "already complete" in message
+    assert extra["callbackId"] == "cb-1"
+
+
+def test_already_complete_warning_keeps_its_fields_in_a_stdlib_logger(
+    fake_client, make_error, caplog
+):
+    """The fields go in extra, so a logging.Logger keeps them on the record."""
+    client = fake_client(
+        TimeoutError("slow"), make_error("InvalidParameterValueException")
+    )
+    stdlib = logging.getLogger("microvm-worker-test")
+    with caplog.at_level(logging.WARNING, logger="microvm-worker-test"):
+        reporter_for(client, logger=stdlib).succeed(1)
+    [record] = caplog.records
+    assert record.callbackId == "cb-1"
+    assert record.attempt == 2
 
 
 def test_already_complete_after_missing_credentials_raises(fake_client, make_error):
@@ -345,6 +361,31 @@ def test_unbounded_heartbeat_runs_on_the_caller_thread(fake_client):
 # endregion bounded calls
 
 # region client
+
+
+class FalsyClient:
+    """A client whose truth value is False, such as some test doubles."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __bool__(self) -> bool:
+        return False
+
+    def send_durable_execution_callback_heartbeat(self, **_kwargs: Any) -> dict:
+        self.calls += 1
+        return {}
+
+
+def test_a_falsy_client_is_used_as_given(monkeypatch):
+    def fail_create(_region: str) -> Any:
+        msg = "the reporter created its own client"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(callback_reporter, "_create_client", fail_create)
+    client = FalsyClient()
+    CallbackReporter("cb-1", "us-east-1", client=client).heartbeat()  # type: ignore[arg-type]
+    assert client.calls == 1
 
 
 def test_reporter_closes_only_its_own_client(fake_client, monkeypatch):

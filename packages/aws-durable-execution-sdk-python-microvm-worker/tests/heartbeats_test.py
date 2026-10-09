@@ -192,6 +192,7 @@ def test_rejection_is_logged_once_and_heartbeats_continue(
     heartbeats.stop()
     errors = logger.messages("error")
     assert len(errors) == 1
+    assert all(extra["callbackId"] == "cb-1" for _, _, extra in logger.lines)
     assert "lambda:SendDurableExecutionCallbackHeartbeat" in errors[0]
     assert "heartbeats are accepted again" in logger.messages("info")
 
@@ -203,6 +204,8 @@ def test_transient_failure_is_a_warning(fake_client, make_error, logger):
     heartbeats.stop()
     assert logger.messages("warning") == ["heartbeat failed"]
     assert logger.messages("error") == []
+    # Each line names its job, because one thread runs per job.
+    assert all(extra["callbackId"] == "cb-1" for _, _, extra in logger.lines)
 
 
 def test_stalled_call_times_out_and_the_next_heartbeat_follows(fake_client, logger):
@@ -263,7 +266,7 @@ def test_stop_from_the_heartbeat_thread_does_not_join_itself(
 
 
 @pytest.mark.parametrize(
-    "value", [0, -1, 900.5, float("nan"), float("inf"), True, "10"]
+    "value", [0, -1, 900.5, float("nan"), float("inf"), True, "10", 10**400]
 )
 def test_start_rejects_an_invalid_interval(fake_client, logger, value):
     client = fake_client()

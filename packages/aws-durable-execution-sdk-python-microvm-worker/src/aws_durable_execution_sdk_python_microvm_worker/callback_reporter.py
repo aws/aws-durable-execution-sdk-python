@@ -8,16 +8,24 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, TypeVar
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError
 
 
+from aws_durable_execution_sdk_python_microvm_worker._util import safe_get, safe_text
+from aws_durable_execution_sdk_python_microvm_worker.logger import (
+    MicrovmWorkerLogger,
+    safe_logger,
+)
+
+
 if TYPE_CHECKING:
     from mypy_boto3_lambda import LambdaClient
+    from mypy_boto3_lambda.type_defs import ErrorObjectTypeDef
 else:
     LambdaClient = Any
 
@@ -47,13 +55,18 @@ system's TCP timeout, which is minutes. A timed-out attempt is retried like
 any transient failure.
 """
 
+ALREADY_COMPLETE_CODE = "InvalidParameterValueException"
+"""The error code that the callback APIs return for a callback that is
+already complete. It also covers a callback ID that the service does not
+accept."""
+
 _TERMINAL_ERROR_CODES = frozenset(
     {
         # The callback or its heartbeat timed out.
         "CallbackTimeoutException",
         # The service does not accept the callback ID, for example because the
         # callback is already complete.
-        "InvalidParameterValueException",
+        ALREADY_COMPLETE_CODE,
         # The callback does not exist.
         "ResourceNotFoundException",
     }
@@ -105,7 +118,7 @@ class ResultSerializationError(TypeError):
     def __init__(self, cause: BaseException) -> None:
         super().__init__(
             "The job result is not JSON-serializable: "
-            f"{_text(lambda: str(cause), 'unknown error')}"
+            f"{safe_text(lambda: str(cause), 'unknown error')}"
         )
         self.__cause__ = cause
 
@@ -169,14 +182,14 @@ def error_code(error: BaseException) -> str | None:
     """The service error code of a botocore ``ClientError``, or ``None``."""
     if not isinstance(error, ClientError):
         return None
-    code = _safe(lambda: error.response.get("Error", {}).get("Code"))
+    code = safe_get(lambda: error.response.get("Error", {}).get("Code"))
     return code if isinstance(code, str) else None
 
 
 def _http_status(error: BaseException) -> int | None:
     if not isinstance(error, ClientError):
         return None
-    status = _safe(
+    status = safe_get(
         lambda: error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
     )
     return status if isinstance(status, int) else None
@@ -186,7 +199,7 @@ def _sdk_retries(error: BaseException) -> int:
     """The retries botocore made inside one call: 0 for a single try."""
     if not isinstance(error, ClientError):
         return 0
-    retries = _safe(
+    retries = safe_get(
         lambda: error.response.get("ResponseMetadata", {}).get("RetryAttempts")
     )
     return retries if isinstance(retries, int) else 0
@@ -272,8 +285,9 @@ class CallbackReporter:
             uses the default credential chain. Inside a MicroVM, that chain
             resolves the MicroVM's execution role. The reporter closes only a
             client that it created.
-        warn: Receives a warning when a completion was probably delivered by
-            an earlier attempt whose answer never arrived.
+        logger: Receives a warning when a completion was probably delivered
+            by an earlier attempt whose answer never arrived. Defaults to the
+            package's standard library logger.
         sleep: Waits between completion attempts. Tests replace it.
     """
 
@@ -283,13 +297,15 @@ class CallbackReporter:
         region: str,
         *,
         client: LambdaClient | None = None,
-        warn: Callable[[str, Mapping[str, Any]], None] | None = None,
+        logger: MicrovmWorkerLogger | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.callback_id = callback_id
         self._owns_client = client is None
-        self._client: LambdaClient = client or _create_client(region)
-        self._warn = warn or (lambda _message, _data: None)
+        self._client: LambdaClient = (
+            _create_client(region) if client is None else client
+        )
+        self._logger = safe_logger(logger)
         self._sleep = sleep
 
     def close(self) -> None:
@@ -367,12 +383,12 @@ class CallbackReporter:
         # The payload is built once, before the retries. A value whose str()
         # raises must still be reported, not fail every attempt the same way.
         if isinstance(error, BaseException):
-            error_type = _text(lambda: type(error).__name__, "Error") or "Error"
-            message = _text(lambda: str(error), "unknown error")
+            error_type = safe_text(lambda: type(error).__name__, "Error") or "Error"
+            message = safe_text(lambda: str(error), "unknown error")
         else:
             error_type = "Error"
-            message = _text(lambda: str(error), "unknown error")
-        payload = {
+            message = safe_text(lambda: str(error), "unknown error")
+        payload: ErrorObjectTypeDef = {
             "ErrorType": _truncate(error_type, MAX_ERROR_TYPE_CHARS),
             "ErrorMessage": _truncate(message, MAX_ERROR_MESSAGE_CHARS),
         }
@@ -380,7 +396,7 @@ class CallbackReporter:
             lambda: self._send(
                 lambda: self._client.send_durable_execution_callback_failure(
                     CallbackId=self.callback_id,
-                    Error=payload,  # type: ignore[arg-type]
+                    Error=payload,
                 ),
                 COMPLETION_CALL_TIMEOUT_SECONDS,
                 "completion",
@@ -394,7 +410,7 @@ class CallbackReporter:
         callback timeout. So a transient failure is worth several attempts.
         A permanent error is raised at once.
 
-        One exception: ``InvalidParameterValueException`` ("already
+        One exception: :data:`ALREADY_COMPLETE_CODE` ("already
         complete") after an attempt with an unknown outcome most likely
         means that an earlier try delivered the outcome. The call then warns
         and returns.
@@ -407,12 +423,12 @@ class CallbackReporter:
             except Exception as error:
                 if (uncertain or _sdk_retries(error) > 0) and error_code(
                     error
-                ) == "InvalidParameterValueException":
-                    self._warn(
+                ) == ALREADY_COMPLETE_CODE:
+                    self._logger.warning(
                         "the callback is already complete. An earlier attempt "
                         "whose answer never arrived probably reported the "
                         "outcome.",
-                        {"callbackId": self.callback_id, "attempt": attempt},
+                        extra={"callbackId": self.callback_id, "attempt": attempt},
                     )
                     return
                 if is_permanent_error(error) or attempt >= COMPLETION_ATTEMPTS:
@@ -446,13 +462,13 @@ class CallbackReporter:
             raise CallCancelledError(msg)
 
         done = threading.Event()
-        outcome: dict[str, Any] = {}
+        outcome: _Outcome[T] = _Outcome()
 
         def run() -> None:
             try:
-                outcome["value"] = call()
+                outcome.succeed(call())
             except BaseException as error:  # noqa: BLE001
-                outcome["error"] = error
+                outcome.fail(error)
             finally:
                 done.set()
 
@@ -465,15 +481,38 @@ class CallbackReporter:
         finally:
             if cancel is not None:
                 cancel._unregister(done)  # noqa: SLF001
-        if "error" in outcome:
-            raise outcome["error"]
-        if "value" in outcome:
-            return outcome["value"]
+        if outcome.error is not None:
+            raise outcome.error
+        if outcome.values:
+            return outcome.values[0]
         if not finished:
             msg = f"the {label} call took longer than {timeout} seconds"
             raise TimeoutError(msg)
         msg = f"the {label} call was cancelled"
         raise CallCancelledError(msg)
+
+
+class _Outcome(Generic[T]):
+    """The result of a call that runs in another thread.
+
+    The call's thread sets it once, before it sets the ``done`` event. The
+    waiting thread reads it only after the event, or after the timeout. A
+    call that ends after the timeout sets it, and nobody reads it.
+    """
+
+    __slots__ = ("error", "values")
+
+    def __init__(self) -> None:
+        # A list, not an optional value: a call can return None, and the
+        # list tells "returned None" apart from "has not returned".
+        self.values: list[T] = []
+        self.error: BaseException | None = None
+
+    def succeed(self, value: T) -> None:
+        self.values.append(value)
+
+    def fail(self, error: BaseException) -> None:
+        self.error = error
 
 
 def _encode_result(result: Any) -> bytes:
@@ -495,19 +534,6 @@ def _encode_result(result: Any) -> bytes:
         return text.encode()
     except UnicodeEncodeError:
         return json.dumps(result, allow_nan=False, separators=(",", ":")).encode()
-
-
-def _safe(read: Callable[[], T]) -> T | None:
-    try:
-        return read()
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _text(read: Callable[[], object], fallback: str) -> str:
-    """Return the text that ``read`` gives, or ``fallback`` when it raises."""
-    value = _safe(read)
-    return value if isinstance(value, str) else fallback
 
 
 def _truncate(value: str, limit: int) -> str:

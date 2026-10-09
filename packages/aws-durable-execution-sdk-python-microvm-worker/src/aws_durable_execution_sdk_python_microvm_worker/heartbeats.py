@@ -11,11 +11,12 @@ while it reports the job's outcome.
 from __future__ import annotations
 
 import hashlib
-import math
 import threading
 from collections.abc import Callable
 
+from aws_durable_execution_sdk_python_microvm_worker._util import is_finite_number
 from aws_durable_execution_sdk_python_microvm_worker.callback_reporter import (
+    ALREADY_COMPLETE_CODE,
     CallbackReporter,
     CancelScope,
     error_code,
@@ -56,12 +57,9 @@ def validate_heartbeat_interval(heartbeat_interval_seconds: float | None) -> Non
     if heartbeat_interval_seconds is None:
         return
     value = heartbeat_interval_seconds
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int | float)
-        or not math.isfinite(value)
-        or not 0 < value <= MAX_HEARTBEAT_INTERVAL_SECONDS
-    ):
+    # is_finite_number accepts an int of any size, so a huge int reaches the
+    # range check and gets ValueError, not OverflowError.
+    if not is_finite_number(value) or not 0 < value <= MAX_HEARTBEAT_INTERVAL_SECONDS:
         msg = (
             "heartbeat_interval_seconds must be a number above 0 and at most "
             f"{MAX_HEARTBEAT_INTERVAL_SECONDS:g}. Got {value!r}."
@@ -316,7 +314,7 @@ class Heartbeats:
                 self._log_failure(error, logged_rejections)
             if not failed and logged_rejections:
                 logged_rejections.clear()
-                self._logger.info("heartbeats are accepted again")
+                self._logger.info("heartbeats are accepted again", extra=self._fields())
             failures = failures + 1 if failed else 0
             delay = (
                 heartbeat_retry_delay(interval, jitter)
@@ -334,20 +332,27 @@ class Heartbeats:
             except Exception as callback_error:  # noqa: BLE001
                 self._logger.error(
                     "the callback-gone handler raised",
-                    extra={"error": describe(callback_error)},
+                    extra=self._fields(error=describe(callback_error)),
                 )
-        elif error_code(error) != "InvalidParameterValueException":
+        elif error_code(error) != ALREADY_COMPLETE_CODE:
             # "Already complete" usually means that the completion landed
             # while this heartbeat was in flight. Any other terminal answer is
             # logged. The completion call meets it too, and reports it.
             self._logger.info(
                 "the callback no longer accepts heartbeats",
-                extra={"error": describe(error)},
+                extra=self._fields(error=describe(error)),
             )
+
+    def _fields(self, **fields: object) -> dict[str, object]:
+        """The structured fields of a log line. Each line names its job,
+        because the worker runs one heartbeat thread per job."""
+        return {"callbackId": self._reporter.callback_id, **fields}
 
     def _log_failure(self, error: BaseException, logged_rejections: set[str]) -> None:
         if not is_permanent_error(error):
-            self._logger.warning("heartbeat failed", extra={"error": describe(error)})
+            self._logger.warning(
+                "heartbeat failed", extra=self._fields(error=describe(error))
+            )
             return
         name = error_code(error) or type(error).__name__
         if name in logged_rejections:
@@ -359,5 +364,7 @@ class Heartbeats:
             "missing permission, for example, needs "
             "lambda:SendDurableExecutionCallbackHeartbeat in the MicroVM's "
             "execution role.",
-            extra={"error": describe(error), "handlerSettled": self._handler_settled},
+            extra=self._fields(
+                error=describe(error), handlerSettled=self._handler_settled
+            ),
         )

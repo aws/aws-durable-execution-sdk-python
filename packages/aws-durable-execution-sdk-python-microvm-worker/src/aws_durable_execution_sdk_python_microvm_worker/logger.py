@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Protocol
+
+from aws_durable_execution_sdk_python_microvm_worker._util import safe_text
 
 
 DEFAULT_LOGGER_NAME = "aws_durable_execution_sdk_python_microvm_worker"
@@ -96,14 +98,6 @@ def describe(value: object) -> object:
     if not isinstance(value, BaseException):
         return value
     return {
-        "name": _safe_text(lambda: type(value).__name__, "Exception") or "Exception",
-        "message": _safe_text(lambda: str(value), "unknown error"),
+        "name": safe_text(lambda: type(value).__name__, "Exception") or "Exception",
+        "message": safe_text(lambda: str(value), "unknown error"),
     }
-
-
-def _safe_text(read: Callable[[], object], fallback: str) -> str:
-    try:
-        text = read()
-    except Exception:  # noqa: BLE001
-        return fallback
-    return text if isinstance(text, str) else fallback
