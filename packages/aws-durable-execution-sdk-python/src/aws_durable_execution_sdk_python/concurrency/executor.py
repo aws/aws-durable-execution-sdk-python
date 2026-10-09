@@ -31,6 +31,7 @@ from aws_durable_execution_sdk_python.config import (
     NestingType,
 )
 from aws_durable_execution_sdk_python.exceptions import (
+    ChildContextError,
     DurableOperationError,
     ExecutionError,
     InvalidStateError,
@@ -86,6 +87,21 @@ def _branch_error_object(err: Exception) -> ErrorObject:
             stack_trace=err.stack_trace,
         )
     return ErrorObject.from_exception(err)
+
+
+def _failed_checkpoint_error_object(checkpoint: CheckpointedResult) -> ErrorObject:
+    """Return the error of a branch whose child context checkpoint FAILED.
+
+    The checkpoint error is optional. Without one, record the generic
+    ChildContextError that replaying the child context raises, so every
+    FAILED item carries an error.
+    """
+    if checkpoint.error is not None:
+        return checkpoint.error
+    try:
+        checkpoint.raise_operation_error(ChildContextError)
+    except ChildContextError as e:
+        return _branch_error_object(e)
 
 
 @dataclass
@@ -783,7 +799,9 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             return BatchItem(executable.index, BatchItemStatus.SUCCEEDED, result)
         if checkpoint.is_failed():
             return BatchItem(
-                executable.index, BatchItemStatus.FAILED, error=checkpoint.error
+                executable.index,
+                BatchItemStatus.FAILED,
+                error=_failed_checkpoint_error_object(checkpoint),
             )
         if self.nesting_type is NestingType.FLAT:
             try:
@@ -836,7 +854,7 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 )
 
             elif checkpoint.is_failed():
-                error = checkpoint.error
+                error = _failed_checkpoint_error_object(checkpoint)
                 status = BatchItemStatus.FAILED
             else:
                 status = BatchItemStatus.STARTED
