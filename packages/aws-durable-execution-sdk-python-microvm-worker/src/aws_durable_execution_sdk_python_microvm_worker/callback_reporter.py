@@ -467,6 +467,11 @@ class CallbackReporter:
         # `done`, which the future sets when it settles, and which a cancel
         # sets too. A call that settles after the bound settles a future that
         # nobody reads.
+        #
+        # The future is created here, not by an executor's submit(). Since
+        # Python 3.9, the interpreter joins executor threads at exit, so a
+        # stalled call would hold up the worker's exit. A daemon thread does
+        # not.
         future: Future[T] = Future()
         done = threading.Event()
         future.add_done_callback(lambda _future: done.set())
