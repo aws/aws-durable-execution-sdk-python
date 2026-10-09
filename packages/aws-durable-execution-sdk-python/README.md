@@ -145,6 +145,42 @@ core alone with OTel 1.0 isolates worker bindings, but does not add the newer
 Invocation-view fallback to that older plugin; upgrade both packages for it.
 Provider API version 1 and the independent registration API are unchanged.
 
+### Draft chained-invoke propagation
+
+A new invoke START collects synchronous plugin metadata after resolving its
+operation and target identity, before checkpointing. The SDK writes a non-blank
+`x_amzn_trace_id` contribution to the flat
+`ChainedInvokeOptions.XAmznTraceId` member. Function, tenant, payload, operation
+name and identity remain unchanged. The member is omitted without a contribution.
+Each invoke in a batch has its own metadata; this is not a request-wide header.
+
+The SDK-owned frozen `PropagationInput` carries `execution_arn`, `operation_id`,
+optional `parent_operation_id`, and `target_function_name`. Frozen
+`PropagationMetadata` has optional `x_amzn_trace_id`. Neither type depends on
+OpenTelemetry or generated service models. The optional synchronous plugin
+`provide_propagation_metadata(info)` hook defaults to no contribution.
+
+The collector keeps the first non-blank opaque value in configured order without
+trimming it. Equal values do not conflict; different later values log both plugin
+identities and a conflict count. Ordinary hook/getter/result/diagnostic failures
+are isolated; cancellation and other `BaseException` control signals keep their
+existing behavior. Replaying a checkpointed START, pending operation or terminal
+result does not call the hook. If a START was never committed, a later attempt
+can collect again; the callback is not exactly-once.
+
+This remains draft pending public Lambda model and backend publication. The SDK
+model and START path are implemented; the real botocore serialization tests
+intentionally fail while `ChainedInvokeOptions.XAmznTraceId` is absent from the
+installed model. No field removal, validation bypass or model-capability fallback
+is used to make those checks pass. Python has no `DistributedMapOptions` wrapper
+or distributed-map START API: its existing map/parallel operations use CONTEXT.
+The design's corresponding distributed-map field awaits that future modeled path.
+
+Release coordination still requires the compatible core/OTel minor versions.
+Existing valid core/plugin combinations retain prior tracing behavior; older
+cores without this optional contract contribute no new propagation metadata.
+Backend rollout and deployed downstream trace-topology validation remain pending.
+
 ## 🚀 Quick Start
 
 Install the execution SDK:

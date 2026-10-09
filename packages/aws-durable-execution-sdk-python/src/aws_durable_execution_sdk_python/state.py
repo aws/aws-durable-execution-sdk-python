@@ -38,6 +38,8 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.plugin import (
     PluginExecutor,
+    PropagationInput,
+    PropagationMetadata,
     UserFunctionOutcome,
 )
 from aws_durable_execution_sdk_python.threading import CompletionEvent
@@ -588,6 +590,19 @@ class ExecutionState:
             self._replayed_operation_hooks.add(operation.operation_id)
 
         self._plugin_executor.on_operation_replay(operation)
+
+    def provide_propagation_metadata(
+        self, identifier: OperationIdentifier, target_function_name: str
+    ) -> PropagationMetadata:
+        """Collect metadata for a new operation before its START is checkpointed."""
+        return self._plugin_executor.provide_propagation_metadata(
+            PropagationInput(
+                execution_arn=self.durable_execution_arn,
+                operation_id=identifier.operation_id,
+                parent_operation_id=identifier.parent_id,
+                target_function_name=target_function_name,
+            )
+        )
 
     def emit_child_context_end_hook(
         self,

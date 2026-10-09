@@ -4,6 +4,7 @@ import contextlib
 import contextvars
 import copy
 import datetime
+import inspect
 import logging
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -381,8 +382,40 @@ class InvocationEndInfo(InvocationInfo):
         )
 
 
+@dataclass(frozen=True)
+class PropagationInput:
+    """SDK-owned identity for a new chained-invoke START propagation request.
+
+    This contract does not contain generated service-model or telemetry types.
+    """
+
+    execution_arn: str
+    operation_id: str
+    target_function_name: str
+    parent_operation_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PropagationMetadata:
+    """Immutable plugin contribution; members are opaque to the core SDK."""
+
+    x_amzn_trace_id: str | None = None
+
+
 class DurableInstrumentationPlugin:
     """Base class for plugins. Override only the methods you need."""
+
+    def provide_propagation_metadata(
+        self,
+        info: PropagationInput,
+    ) -> PropagationMetadata | None:
+        """Synchronously provide metadata without performing a durable operation.
+
+        Called before checkpointing a new invoke START, never for its replay.
+        Existing plugins can inherit the no-op default. A failed, uncommitted
+        START may collect again on a later attempt.
+        """
+        return None
 
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         """Called when an invocation starts. This is called within the thread that runs user function handler.
@@ -470,6 +503,83 @@ class PluginExecutor:
         # work use its pre-hook snapshot. End still uses each hook's token owner.
         self._startup_context: contextvars.Context | None = None
         self._invocation_contexts: list[contextvars.Context | None] = []
+
+    def provide_propagation_metadata(
+        self, info: PropagationInput
+    ) -> PropagationMetadata:
+        """Collect opaque metadata synchronously in configured plugin order.
+
+        The first non-blank value wins. Ordinary plugin failures are isolated,
+        matching lifecycle dispatch; BaseException cancellation/control signals
+        retain the existing propagation policy. The caller attaches the result
+        to its operation model before checkpoint serialization.
+        """
+        value: str | None = None
+        owner: str | None = None
+        conflict_count = 0
+        for plugin in self._plugins:
+            # Read type identity without invoking instance attribute access.
+            identity = "unknown plugin"
+            try:
+                plugin_type = type(plugin)
+                identity = type.__getattribute__(plugin_type, "__qualname__")
+                module = type.__getattribute__(plugin_type, "__module__")
+                if type(module) is str:
+                    identity = ".".join((module, identity))
+            except Exception:
+                pass
+            try:
+                metadata = plugin.provide_propagation_metadata(info)
+                if metadata is None:
+                    continue
+                if inspect.iscoroutine(metadata):
+                    metadata.close()
+                    raise TypeError("propagation metadata hook must be synchronous")
+                if not isinstance(metadata, PropagationMetadata):
+                    raise TypeError("expected PropagationMetadata or None")
+                candidate = metadata.x_amzn_trace_id
+                if candidate is not None:
+                    if not isinstance(candidate, str):
+                        raise TypeError("x_amzn_trace_id must be a string or None")
+                    # Treat str subclasses as data, not executable comparison
+                    # hooks during first-value/conflict aggregation.
+                    candidate = str.__str__(candidate)
+            except Exception:
+                self._log_propagation_diagnostic(
+                    logging.ERROR,
+                    "Plugin %s propagation metadata failure ignored",
+                    identity,
+                    exc_info=True,
+                )
+                continue
+            if candidate is None or not candidate.strip():
+                continue
+            if value is None:
+                value, owner = candidate, identity
+            elif candidate != value:
+                conflict_count += 1
+                self._log_propagation_diagnostic(
+                    logging.WARNING,
+                    "Propagation metadata conflict between %s and %s for "
+                    "x_amzn_trace_id; keeping first value (conflict_count=%d)",
+                    owner,
+                    identity,
+                    conflict_count,
+                )
+        return PropagationMetadata(x_amzn_trace_id=value)
+
+    @staticmethod
+    def _log_propagation_diagnostic(
+        level: int,
+        message: str,
+        *args: object,
+        exc_info: bool = False,
+    ) -> None:
+        """Keep ordinary diagnostic failures from changing propagation collection."""
+        try:
+            logger.log(level, message, *args, exc_info=exc_info)
+        except Exception:
+            pass
 
     @contextlib.contextmanager
     def run(self):

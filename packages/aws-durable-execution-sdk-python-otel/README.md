@@ -388,6 +388,34 @@ context onto every emitted log record using these attributes:
 These attributes are only set when a valid span context is active, so any log
 formatter or schema must treat the fields as optional.
 
+## Draft chained-invoke propagation
+
+Both views supply the synchronous `provide_propagation_metadata` hook with
+SDK-owned types. It encodes canonical X-Ray `Root`, the calling operation's
+`Parent`, and resolved `Sampled=1` or `Sampled=0`, without creating an extra span.
+An existing operation's actual span ID is used; before span creation, its stable
+ID is derived from the execution ARN and operation ID. Unrelated ambient spans
+cannot replace execution ownership. Inactive/mismatched executions contribute
+nothing. Tracer, provider and resource ownership remain unchanged.
+
+The core now calls the collector only for a new invoke START and persists the
+contribution in flat `ChainedInvokeOptions.XAmznTraceId`. Pending and terminal
+replay do not recollect metadata; an uncommitted START can be retried. Separate
+invokes carry separate operation parents. Public invoke tests cover both views,
+sampled/unsampled context, parallel branches, preserved tenant/payload and replay.
+
+This PR stays draft for [#751](https://github.com/aws/aws-durable-execution-sdk-python/issues/751)
+until the public generated model and backend support are available. The normal
+botocore request tests intentionally expose the missing field; they do not bypass
+the serializer or hide the dependency failure. Python has no distributed-map
+model/START path; existing map/parallel APIs are CONTEXT operations.
+
+On older supported cores without the propagation contract, plugin loading and
+existing tracing continue, and the optional hook contributes no metadata. The
+new capability requires the coordinated core. Dependency floors and provider API
+version are unchanged; deployed downstream topology still needs validation after
+model/backend publication.
+
 ## Verification
 
 After deploying your function with the plugin configured:

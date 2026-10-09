@@ -453,19 +453,18 @@ class CallbackOptions:
 
 @dataclass(frozen=True)
 class ChainedInvokeOptions:
-    """
-    As of 2025/10/27:
-     - Chained invoke options only contains a function name
-    """
+    """Target and optional per-operation trace context for a chained invocation."""
 
     function_name: str
     tenant_id: str | None = None
+    x_amzn_trace_id: str | None = None
 
     @classmethod
     def from_dict(cls, data: MutableMapping[str, Any]) -> ChainedInvokeOptions:
         return cls(
             function_name=data["FunctionName"],
             tenant_id=data.get("TenantId"),
+            x_amzn_trace_id=data.get("XAmznTraceId"),
         )
 
     def to_dict(self) -> MutableMapping[str, Any]:
@@ -474,6 +473,8 @@ class ChainedInvokeOptions:
         }
         if self.tenant_id is not None:
             result["TenantId"] = self.tenant_id
+        if self.x_amzn_trace_id is not None:
+            result["XAmznTraceId"] = self.x_amzn_trace_id
 
         return result
 

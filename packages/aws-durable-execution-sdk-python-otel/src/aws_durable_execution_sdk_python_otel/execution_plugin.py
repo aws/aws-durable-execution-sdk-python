@@ -34,7 +34,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -96,6 +96,19 @@ from aws_durable_execution_sdk_python_otel.log_filter import (
     uninstall_log_filter,
 )
 from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
+from aws_durable_execution_sdk_python_otel.propagation import propagation_metadata
+
+
+if TYPE_CHECKING:
+    from aws_durable_execution_sdk_python.plugin import (
+        PropagationInput,
+        PropagationMetadata,
+    )
+else:
+    from aws_durable_execution_sdk_python import plugin as _core_plugin
+
+    PropagationInput = getattr(_core_plugin, "PropagationInput", Any)
+    PropagationMetadata = getattr(_core_plugin, "PropagationMetadata", Any)
 
 
 logger = logging.getLogger(__name__)
@@ -428,6 +441,33 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     # ------------------------------------------------------------------
     # Invocation lifecycle
     # ------------------------------------------------------------------
+    def provide_propagation_metadata(
+        self,
+        info: PropagationInput,
+    ) -> PropagationMetadata | None:
+        """Describe this operation as the downstream parent without starting a span."""
+        execution_context = self._execution_trace_context
+        if (
+            not self._tracing_enabled
+            or execution_context is None
+            or info.execution_arn != self._execution_arn
+            or not info.operation_id
+        ):
+            return None
+        operation_span = self._get_span(info.operation_id)
+        span_context = (
+            operation_span.get_span_context()
+            if operation_span is not None
+            else self._operation_span_context(info.operation_id)
+        )
+        if (
+            span_context is None
+            or not span_context.is_valid
+            or span_context.trace_id != execution_context.trace_id
+        ):
+            return None
+        return propagation_metadata(span_context)
+
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         logger.debug("Durable invocation started: %s", info)
         self._registration_accepted = True
