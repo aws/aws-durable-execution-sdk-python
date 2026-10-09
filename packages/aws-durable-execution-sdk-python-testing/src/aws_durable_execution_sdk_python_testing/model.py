@@ -3222,9 +3222,12 @@ class CheckpointDurableExecutionRequest:
 
 @dataclass(frozen=True)
 class CheckpointDurableExecutionResponse:
-    """Response from checkpointing a durable execution."""
+    """Response from checkpointing a durable execution.
 
-    checkpoint_token: str
+    ``checkpoint_token`` is None when this invocation may checkpoint no further
+    """
+
+    checkpoint_token: str | None
     new_execution_state: CheckpointUpdatedExecutionState | None = None
 
     @classmethod
@@ -3234,12 +3237,14 @@ class CheckpointDurableExecutionResponse:
             new_execution_state = CheckpointUpdatedExecutionState.from_dict(state_data)
 
         return cls(
-            checkpoint_token=data["CheckpointToken"],
+            checkpoint_token=data.get("CheckpointToken"),
             new_execution_state=new_execution_state,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"CheckpointToken": self.checkpoint_token}
+        result: dict[str, Any] = {}
+        if self.checkpoint_token is not None:
+            result["CheckpointToken"] = self.checkpoint_token
         if self.new_execution_state is not None:
             result["NewExecutionState"] = self.new_execution_state.to_dict()
         return result

@@ -279,6 +279,8 @@ def durable_execution(
             ),
         )
 
+        output: MutableMapping[str, Any] | None = None
+
         # Use ThreadPoolExecutor for concurrent execution of user code and background checkpoint processing
         with (
             ThreadPoolExecutor(
@@ -329,38 +331,62 @@ def durable_execution(
                     "%s exiting user-space...",
                     invocation_input.durable_execution_arn,
                 )
-                serialized_result = json.dumps(result)
-                # large response handling here. Remember if checkpointing to complete, NOT to include
-                # payload in response
-                if (
-                    serialized_result
-                    and len(serialized_result) > LAMBDA_RESPONSE_SIZE_LIMIT
-                ):
-                    logger.debug(
-                        "Response size (%s bytes) exceeds Lambda limit (%s) bytes). Checkpointing result.",
-                        len(serialized_result),
-                        LAMBDA_RESPONSE_SIZE_LIMIT,
-                    )
-                    success_operation = OperationUpdate.create_execution_succeed(
-                        payload=serialized_result
-                    )
-                    # Checkpoint large result with blocking (is_sync=True, default).
-                    # Must ensure the result is persisted before returning to Lambda.
-                    # Large results exceed Lambda response limits and must be stored durably
-                    # before the execution completes.
-                    try:
-                        execution_state.create_checkpoint(
-                            success_operation, is_sync=True
-                        )
-                    except CheckpointError as e:
-                        return handle_checkpoint_error(e).to_dict()
-                    return DurableExecutionInvocationOutput.create_succeeded(
-                        result=""
-                    ).to_dict()
 
-                return DurableExecutionInvocationOutput.create_succeeded(
-                    result=serialized_result
-                ).to_dict()
+                # The handler may finish while background checkpoint work is
+                # still running for async operations it did not await, such as
+                # early-completing map or parallel branches. If one of those
+                # checkpoint responses omitted the next checkpoint token, this
+                # invocation can no longer record anything else with the
+                # service, including the handler's final result.
+                #
+                # In that case, return PENDING instead of SUCCEEDED. The next
+                # invocation will replay from the last durable checkpoint and
+                # produce the result again. This check catches revocation
+                # already observed before we build the terminal response; the
+                # post-with check below catches revocation discovered during
+                # cleanup of in-flight checkpoint work.
+                if execution_state.is_checkpoint_token_revoked:
+                    logger.debug(
+                        "Checkpoint token revoked; ending invocation with "
+                        "PENDING instead of SUCCEEDED."
+                    )
+                    output = DurableExecutionInvocationOutput(
+                        status=InvocationStatus.PENDING
+                    ).to_dict()
+                else:
+                    serialized_result = json.dumps(result)
+                    # large response handling here. Remember if checkpointing to complete, NOT to include
+                    # payload in response
+                    if (
+                        serialized_result
+                        and len(serialized_result) > LAMBDA_RESPONSE_SIZE_LIMIT
+                    ):
+                        logger.debug(
+                            "Response size (%s bytes) exceeds Lambda limit (%s) bytes). Checkpointing result.",
+                            len(serialized_result),
+                            LAMBDA_RESPONSE_SIZE_LIMIT,
+                        )
+                        success_operation = OperationUpdate.create_execution_succeed(
+                            payload=serialized_result
+                        )
+                        # Checkpoint large result with blocking (is_sync=True, default).
+                        # Must ensure the result is persisted before returning to Lambda.
+                        # Large results exceed Lambda response limits and must be stored durably
+                        # before the execution completes.
+                        try:
+                            execution_state.create_checkpoint(
+                                success_operation, is_sync=True
+                            )
+                        except CheckpointError as e:
+                            output = handle_checkpoint_error(e).to_dict()
+                        else:
+                            output = DurableExecutionInvocationOutput.create_succeeded(
+                                result=""
+                            ).to_dict()
+                    else:
+                        output = DurableExecutionInvocationOutput.create_succeeded(
+                            result=serialized_result
+                        ).to_dict()
 
             except BackgroundThreadError as bg_error:
                 # Background checkpoint system failed - propagated through CompletionEvent
@@ -378,85 +404,138 @@ def durable_execution(
                             "without retry.",
                             extra=bg_error.source_exception.build_logger_extras(),
                         )
-                        return DurableExecutionInvocationOutput(
+                        output = DurableExecutionInvocationOutput(
                             status=InvocationStatus.FAILED,
                             error=ErrorObject.from_exception(bg_error.source_exception),
                         ).to_dict()
+                    else:
+                        raise bg_error.source_exception from bg_error
                 else:
                     logger.exception("Checkpoint processing failed")
-                raise bg_error.source_exception from bg_error
+                    raise bg_error.source_exception from bg_error
 
             except SuspendExecution:
                 # User code suspended - stop background checkpointing thread
                 logger.debug("Suspending execution...")
-                return DurableExecutionInvocationOutput(
+                output = DurableExecutionInvocationOutput(
                     status=InvocationStatus.PENDING
                 ).to_dict()
 
             except CheckpointError as e:
-                # Checkpoint system is broken - stop background thread and exit immediately
-                logger.exception(
-                    "Checkpoint system failed",
-                    extra=e.build_logger_extras(),
-                )
-                return handle_checkpoint_error(e).to_dict()
-            except InvocationError as e:
-                # Non-retryable Durable API errors (e.g., customer configuration issues,
-                # 4xx client errors) will never succeed on retry — fail the execution immediately.
-                if not e.is_retryable():
+                # Checkpoint system is broken - stop background thread and exit immediately.
+                if execution_state.is_checkpoint_token_revoked:
+                    output = DurableExecutionInvocationOutput.create_pending_for_revoked_checkpoint_token(
+                        e
+                    ).to_dict()
+                else:
                     logger.exception(
-                        "Non-retryable Durable API error. Must fail execution without retry.",
-                        extra=e.build_logger_extras(),  # type: ignore[attr-defined]
+                        "Checkpoint system failed",
+                        extra=e.build_logger_extras(),
                     )
-                    return DurableExecutionInvocationOutput(
+                    output = handle_checkpoint_error(e).to_dict()
+            except InvocationError as e:
+                if execution_state.is_checkpoint_token_revoked:
+                    output = DurableExecutionInvocationOutput.create_pending_for_revoked_checkpoint_token(
+                        e
+                    ).to_dict()
+                else:
+                    # Non-retryable Durable API errors (e.g., customer configuration issues,
+                    # 4xx client errors) will never succeed on retry — fail the execution immediately.
+                    if not e.is_retryable():
+                        logger.exception(
+                            "Non-retryable Durable API error. Must fail execution without retry.",
+                            extra=e.build_logger_extras(),  # type: ignore[attr-defined]
+                        )
+                        output = DurableExecutionInvocationOutput(
+                            status=InvocationStatus.FAILED,
+                            error=ErrorObject.from_exception(e),
+                        ).to_dict()
+                    else:
+                        logger.exception("Invocation error. Must terminate.")
+                        # Throw the error to trigger Lambda retry
+                        raise
+            except ExecutionError as e:
+                if execution_state.is_checkpoint_token_revoked:
+                    output = DurableExecutionInvocationOutput.create_pending_for_revoked_checkpoint_token(
+                        e
+                    ).to_dict()
+                else:
+                    logger.exception(
+                        "Execution error. Must fail execution without retry."
+                    )
+                    output = DurableExecutionInvocationOutput(
                         status=InvocationStatus.FAILED,
                         error=ErrorObject.from_exception(e),
                     ).to_dict()
-                logger.exception("Invocation error. Must terminate.")
-                # Throw the error to trigger Lambda retry
-                raise
-            except ExecutionError as e:
-                logger.exception("Execution error. Must fail execution without retry.")
-                return DurableExecutionInvocationOutput(
-                    status=InvocationStatus.FAILED,
-                    error=ErrorObject.from_exception(e),
-                ).to_dict()
             except Exception as e:
                 # all user-space errors go here
-                logger.exception("Execution failed")
+                if execution_state.is_checkpoint_token_revoked:
+                    output = DurableExecutionInvocationOutput.create_pending_for_revoked_checkpoint_token(
+                        e
+                    ).to_dict()
+                else:
+                    logger.exception("Execution failed")
 
-                result = DurableExecutionInvocationOutput(
-                    status=InvocationStatus.FAILED, error=ErrorObject.from_exception(e)
-                ).to_dict()
-
-                serialized_result = json.dumps(result)
-
-                if (
-                    serialized_result
-                    and len(serialized_result) > LAMBDA_RESPONSE_SIZE_LIMIT
-                ):
-                    logger.debug(
-                        "Response size (%s bytes) exceeds Lambda limit (%s) bytes). Checkpointing result.",
-                        len(serialized_result),
-                        LAMBDA_RESPONSE_SIZE_LIMIT,
-                    )
-                    failed_operation = OperationUpdate.create_execution_fail(
-                        error=ErrorObject.from_exception(e)
-                    )
-
-                    # Checkpoint large result with blocking (is_sync=True, default).
-                    # Must ensure the result is persisted before returning to Lambda.
-                    # Large results exceed Lambda response limits and must be stored durably
-                    # before the execution completes.
-                    try:
-                        execution_state.create_checkpoint_sync(failed_operation)
-                    except CheckpointError as e:
-                        return handle_checkpoint_error(e).to_dict()
-                    return DurableExecutionInvocationOutput(
-                        status=InvocationStatus.FAILED
+                    result = DurableExecutionInvocationOutput(
+                        status=InvocationStatus.FAILED,
+                        error=ErrorObject.from_exception(e),
                     ).to_dict()
 
-                return result
+                    serialized_result = json.dumps(result)
+
+                    if (
+                        serialized_result
+                        and len(serialized_result) > LAMBDA_RESPONSE_SIZE_LIMIT
+                    ):
+                        logger.debug(
+                            "Response size (%s bytes) exceeds Lambda limit (%s) bytes). Checkpointing result.",
+                            len(serialized_result),
+                            LAMBDA_RESPONSE_SIZE_LIMIT,
+                        )
+                        failed_operation = OperationUpdate.create_execution_fail(
+                            error=ErrorObject.from_exception(e)
+                        )
+
+                        # Checkpoint large result with blocking (is_sync=True, default).
+                        # Must ensure the result is persisted before returning to Lambda.
+                        # Large results exceed Lambda response limits and must be stored durably
+                        # before the execution completes.
+                        try:
+                            execution_state.create_checkpoint_sync(failed_operation)
+                        except SuspendExecution:
+                            if execution_state.is_checkpoint_token_revoked:
+                                output = DurableExecutionInvocationOutput.create_pending_for_revoked_checkpoint_token(
+                                    e
+                                ).to_dict()
+                            else:
+                                raise
+                        except CheckpointError as checkpoint_error:
+                            output = handle_checkpoint_error(checkpoint_error).to_dict()
+                        else:
+                            output = DurableExecutionInvocationOutput(
+                                status=InvocationStatus.FAILED
+                            ).to_dict()
+                    else:
+                        output = result
+
+        if output is None:
+            msg = "Durable execution wrapper exited without an invocation output."
+            raise RuntimeError(msg)
+
+        if (
+            output.get("Status")
+            in {InvocationStatus.SUCCEEDED.value, InvocationStatus.FAILED.value}
+            and execution_state.is_checkpoint_token_revoked
+        ):
+            logger.debug(
+                "Checkpoint token revoked during invocation cleanup; ending "
+                "invocation with PENDING instead of terminal status."
+            )
+            return DurableExecutionInvocationOutput(
+                status=InvocationStatus.PENDING
+            ).to_dict()
+
+        return output
 
     return wrapper
 

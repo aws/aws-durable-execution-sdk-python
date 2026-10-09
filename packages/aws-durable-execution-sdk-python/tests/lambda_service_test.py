@@ -24,9 +24,11 @@ from aws_durable_execution_sdk_python.lambda_service import (
     CheckpointUpdatedExecutionState,
     ContextDetails,
     ContextOptions,
+    DurableExecutionInvocationOutput,
     DurableServiceClient,
     ErrorObject,
     ExecutionDetails,
+    InvocationStatus,
     LambdaClient,
     Operation,
     OperationAction,
@@ -222,6 +224,20 @@ def test_error_object_from_message_empty():
     assert error.type is None
     assert error.data is None
     assert error.stack_trace is None
+
+
+def test_invocation_output_pending_for_revoked_checkpoint_token_is_bare_pending():
+    """A revoked token response does not put the handler error on the wire."""
+    output = (
+        DurableExecutionInvocationOutput.create_pending_for_revoked_checkpoint_token(
+            RuntimeError("handler failed")
+        )
+    )
+
+    assert output.status is InvocationStatus.PENDING
+    assert output.error is None
+    assert output.result is None
+    assert output.to_dict() == {"Status": "PENDING"}
 
 
 def test_error_object_to_dict():

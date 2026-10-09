@@ -1,5 +1,6 @@
 """Unit tests for CheckpointProcessor."""
 
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
 
@@ -32,6 +33,28 @@ from aws_durable_execution_sdk_python_testing.stores.memory import (
     InMemoryExecutionStore,
 )
 from aws_durable_execution_sdk_python_testing.token import CheckpointToken
+
+
+def _make_processor_with_started_execution() -> tuple[
+    CheckpointProcessor, InMemoryExecutionStore, Execution, str
+]:
+    store = InMemoryExecutionStore()
+    processor = CheckpointProcessor(store, Mock(spec=Scheduler))
+    execution = Execution.new(
+        StartDurableExecutionInput(
+            account_id="123456789012",
+            function_name="test-function",
+            function_qualifier="$LATEST",
+            execution_name="test-execution",
+            execution_timeout_seconds=300,
+            execution_retention_period_days=7,
+            invocation_id="test-inv-id",
+        )
+    )
+    execution.start()
+    store.save(execution)
+    token = execution.get_new_checkpoint_token()
+    return processor, store, execution, token
 
 
 def test_init():
@@ -408,3 +431,108 @@ def test_process_checkpoint_delivers_due_wait_completion() -> None:
         op for op in persisted.operations if op.operation_id == "wait-1"
     )
     assert persisted_wait.status is OperationStatus.SUCCEEDED
+
+
+def test_paused_checkpoint_returns_no_token() -> None:
+    processor, store, execution, token = _make_processor_with_started_execution()
+    execution.pause()
+    store.save(execution)
+
+    response = processor.process_checkpoint(token, [], "c1")
+
+    assert response.checkpoint_token is None
+
+
+def test_paused_checkpoint_persists_step_update_without_returning_state() -> None:
+    processor, store, execution, token = _make_processor_with_started_execution()
+    execution.pause()
+    store.save(execution)
+    update = OperationUpdate(
+        operation_id="step-A",
+        operation_type=OperationType.STEP,
+        action=OperationAction.START,
+        name="step-A",
+    )
+
+    response = processor.process_checkpoint(token, [update], "c1")
+
+    assert response.checkpoint_token is None
+    assert response.new_execution_state.operations == []
+    persisted = store.load(execution.durable_execution_arn)
+    assert persisted.handler_seen_seq == 0
+    assert [
+        op.operation_id
+        for op in persisted.get_navigable_operations()
+        if op.operation_type is OperationType.STEP
+    ] == ["step-A"]
+
+
+def test_empty_paused_checkpoint_advances_token_sequence_once() -> None:
+    processor, store, execution, token = _make_processor_with_started_execution()
+    previous_sequence = execution.token_sequence
+
+    execution.pause()
+    store.save(execution)
+    processor.process_checkpoint(token, [], "c1")
+
+    assert (
+        store.load(execution.durable_execution_arn).token_sequence
+        == previous_sequence + 1
+    )
+
+
+def test_paused_checkpoint_does_not_create_idempotency_record() -> None:
+    processor, store, execution, token = _make_processor_with_started_execution()
+    assert execution.last_checkpoint is None
+    execution.pause()
+    store.save(execution)
+
+    processor.process_checkpoint(token, [], "c1")
+
+    assert store.load(execution.durable_execution_arn).last_checkpoint is None
+
+
+@pytest.mark.parametrize("retry_client_token", ["c1", None, "different-client-token"])
+def test_paused_checkpoint_retry_is_rejected_while_paused(
+    retry_client_token: str | None,
+) -> None:
+    processor, store, execution, token = _make_processor_with_started_execution()
+    arn = execution.durable_execution_arn
+
+    execution.pause()
+    store.save(execution)
+    processor.process_checkpoint(token, [], "c1")
+
+    assert store.load(arn).is_paused is True
+
+    before_retry = deepcopy(store.load(arn).to_json_dict())
+
+    with pytest.raises(
+        InvalidParameterValueException, match="^Invalid checkpoint token$"
+    ):
+        processor.process_checkpoint(token, [], retry_client_token)
+    assert store.load(arn).to_json_dict() == before_retry
+
+
+@pytest.mark.parametrize("retry_client_token", ["c1", None, "different-client-token"])
+def test_paused_checkpoint_retry_is_rejected_even_after_resume(
+    retry_client_token: str | None,
+) -> None:
+    processor, store, execution, token = _make_processor_with_started_execution()
+    arn = execution.durable_execution_arn
+
+    execution.pause()
+    store.save(execution)
+    processor.process_checkpoint(token, [], "c1")
+    execution.resume()
+    store.save(execution)
+
+    assert store.load(arn).is_paused is False
+
+    before_retry = deepcopy(store.load(arn).to_json_dict())
+
+    with pytest.raises(
+        InvalidParameterValueException, match="^Invalid checkpoint token$"
+    ):
+        processor.process_checkpoint(token, [], retry_client_token)
+    assert store.load(arn).to_json_dict() == before_retry

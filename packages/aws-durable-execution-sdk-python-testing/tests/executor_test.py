@@ -173,6 +173,7 @@ def start_input():
 @pytest.fixture
 def mock_execution():
     execution = Mock(spec=Execution)
+    execution.is_paused = False
     execution.durable_execution_arn = "arn:aws:lambda:us-east-1:123456789012:function:test-function:execution:test-execution"
     execution.is_complete = False
     execution.consecutive_failed_invocation_attempts = 0
@@ -200,6 +201,7 @@ def test_start_execution(
     mock_execution_class, executor, start_input, mock_store, mock_scheduler
 ):
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution_class.new.return_value = mock_execution
     mock_event = Mock()
@@ -267,6 +269,7 @@ def test_start_execution_with_provided_invocation_id(
     )
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution_class.new.return_value = mock_execution
     mock_event = Mock()
@@ -284,6 +287,7 @@ def test_start_execution_with_provided_invocation_id(
     assert result.execution_arn == "test-arn"
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_store.load.return_value = mock_execution
 
     result = executor.get_execution("test-arn")
@@ -298,6 +302,7 @@ def test_should_complete_workflow_with_error_when_invocation_fails(
     """Test that failed invocation responses trigger workflow completion with error."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -380,6 +385,7 @@ def test_should_complete_workflow_with_result_when_invocation_succeeds(
     """Test that successful invocation responses trigger workflow completion with result."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -426,6 +432,8 @@ def test_should_handle_pending_status_when_operations_exist(
     """Test that pending invocation responses are handled when operations exist."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
+    mock_execution.has_deferred_invocation = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -469,6 +477,7 @@ def test_should_ignore_response_when_execution_already_complete(
     """Test that responses are ignored when execution is already complete."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = True  # Already complete
     mock_execution.start_input = start_input
@@ -510,6 +519,7 @@ def test_should_retry_when_response_has_no_status(
     """Test that invocation responses without status trigger retry logic."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -553,6 +563,7 @@ def test_should_retry_when_failed_response_has_result(
     """Test that failed responses with result trigger retry logic."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -598,6 +609,7 @@ def test_should_retry_when_success_response_has_error(
     """Test that successful responses with error trigger retry logic."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -644,6 +656,8 @@ def test_should_retry_when_pending_response_has_no_operations(
     """Test that pending responses without operations trigger retry logic."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
+    mock_execution.has_deferred_invocation = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -692,6 +706,8 @@ def test_pending_response_is_valid_when_an_operation_completed_after_the_handler
     invocation's input was built: PENDING is accepted and the execution
     is re-invoked instead of counted as a failed attempt."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
+    mock_execution.has_deferred_invocation = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -721,6 +737,7 @@ def test_pending_response_is_valid_when_an_operation_completed_after_the_handler
         handler = mock_scheduler.call_later.call_args_list[-1][0][0]
         asyncio.run(handler())
 
+        mock_execution.has_changes_after.assert_called_once_with(4)
         assert mock_execution.consecutive_failed_invocation_attempts == 0
         # timeout + initial invocation + the re-invoke, with no retry delay
         assert mock_scheduler.call_later.call_count == 3
@@ -771,7 +788,10 @@ def test_pending_response_with_only_input_time_state_is_still_an_error(
     assert execution.has_unseen_changes()
     baseline = execution.seq_counter
 
-    with pytest.raises(InvalidParameterValueException, match="no pending operations"):
+    with pytest.raises(
+        InvalidParameterValueException,
+        match="no pending operations",
+    ):
         executor._validate_invocation_response_and_store(  # noqa: SLF001
             execution.durable_execution_arn,
             DurableExecutionInvocationOutput(status=InvocationStatus.PENDING),
@@ -797,7 +817,10 @@ def test_pending_response_is_an_error_when_the_handler_saw_the_completion(
     execution.complete_chained_invoke("invoke-1", OperationStatus.SUCCEEDED, result="1")
     execution.handler_seen_seq = execution.seq_counter
 
-    with pytest.raises(InvalidParameterValueException, match="no pending operations"):
+    with pytest.raises(
+        InvalidParameterValueException,
+        match="no pending operations",
+    ):
         executor._validate_invocation_response_and_store(  # noqa: SLF001
             execution.durable_execution_arn,
             DurableExecutionInvocationOutput(status=InvocationStatus.PENDING),
@@ -812,6 +835,7 @@ def test_invoke_handler_success(
     """Test successful invocation through public API."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -863,6 +887,7 @@ def test_invoke_handler_execution_already_complete(
     """Test that completed executions are handled properly through public API."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = True
     mock_execution.start_input = start_input
@@ -894,6 +919,7 @@ def test_invoke_handler_execution_completed_during_invocation(
     """Test execution completing during invocation through public API."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -907,6 +933,7 @@ def test_invoke_handler_execution_completed_during_invocation(
 
     # Create a completed execution mock
     completed_execution = Mock()
+    completed_execution.is_paused = False
     completed_execution.durable_execution_arn = "test-arn"
     completed_execution.is_complete = True
     completed_execution.start_input = start_input
@@ -944,6 +971,7 @@ def test_invoke_handler_resource_not_found(
     """Test resource not found handling causes workflow failure through public API."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -988,6 +1016,7 @@ def test_invoke_handler_general_exception(
     """Test general exception handling triggers retry through public API."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1031,6 +1060,7 @@ def test_invoke_execution_through_start_execution(
         "aws_durable_execution_sdk_python_testing.executor.Execution"
     ) as mock_execution_class:
         mock_execution = Mock()
+        mock_execution.is_paused = False
         mock_execution.durable_execution_arn = "test-arn"
         mock_execution_class.new.return_value = mock_execution
 
@@ -1108,6 +1138,7 @@ def test_should_fail_execution_when_function_not_found(
     """Test that workflow fails when function is not found during invocation."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1151,6 +1182,7 @@ def test_should_fail_execution_when_retries_exhausted(
     """Test that workflow fails when maximum retry attempts are exhausted."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1194,6 +1226,7 @@ def test_should_prevent_multiple_workflow_failures_on_complete_execution(
     """Test that attempting to fail an already completed execution raises an exception."""
     # Arrange - execution starts incomplete but becomes complete during processing
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False  # Initially incomplete
     mock_execution.start_input = start_input
@@ -1201,6 +1234,7 @@ def test_should_prevent_multiple_workflow_failures_on_complete_execution(
 
     # Create a completed execution for the _fail_workflow call
     completed_execution = Mock()
+    completed_execution.is_paused = False
     completed_execution.is_complete = True
 
     # Mock invoker to raise ResourceNotFoundException (triggers _fail_workflow)
@@ -1233,6 +1267,7 @@ def test_should_retry_invocation_when_under_limit_through_public_api(
     """Test that invocation retries when under limit through public API with final outcome verification."""
     # Arrange - Set up execution that will trigger retry logic
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1304,6 +1339,7 @@ def test_should_fail_workflow_when_retry_limit_exceeded(
     """Test that workflow fails when retry limit is exceeded through public API."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1346,6 +1382,7 @@ def test_complete_events_through_complete_execution(
 ):
     """Test completion event behavior through public complete_execution method."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.result = "test result"
     mock_store.load.return_value = mock_execution
     mock_execution.parent_execution_arn = None  # top-level: no parent to notify
@@ -1380,6 +1417,7 @@ def test_complete_events_through_complete_execution(
 def test_complete_events_no_event_through_public_api(executor, mock_store):
     """Test that completing non-existent execution handles missing events gracefully."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.result = "test result"
     mock_store.load.return_value = mock_execution
     mock_execution.parent_execution_arn = None  # top-level: no parent to notify
@@ -1400,6 +1438,7 @@ def test_wait_until_complete_success(executor, mock_scheduler):
         "aws_durable_execution_sdk_python_testing.executor.Execution"
     ) as mock_execution_class:
         mock_execution = Mock()
+        mock_execution.is_paused = False
         mock_execution.durable_execution_arn = "test-arn"
         mock_execution_class.new.return_value = mock_execution
 
@@ -1424,6 +1463,7 @@ def test_wait_until_complete_timeout(executor, mock_scheduler):
         "aws_durable_execution_sdk_python_testing.executor.Execution"
     ) as mock_execution_class:
         mock_execution = Mock()
+        mock_execution.is_paused = False
         mock_execution.durable_execution_arn = "test-arn"
         mock_execution_class.new.return_value = mock_execution
 
@@ -1528,6 +1568,7 @@ def test_should_retry_when_response_has_unexpected_status(
     """Test that responses with unexpected status trigger retry logic."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1572,6 +1613,7 @@ def test_invoke_handler_execution_completed_during_invocation_async(
     """Test execution completing during invocation through public API."""
     # First call returns incomplete execution, second call returns completed execution
     incomplete_execution = Mock(spec=Execution)
+    incomplete_execution.is_paused = False
     incomplete_execution.is_complete = False
     incomplete_execution.start_input = start_input
     incomplete_execution.consecutive_failed_invocation_attempts = 0
@@ -1579,6 +1621,7 @@ def test_invoke_handler_execution_completed_during_invocation_async(
     incomplete_execution.seq_counter = 0
 
     completed_execution = Mock(spec=Execution)
+    completed_execution.is_paused = False
     completed_execution.is_complete = True
 
     # Never let the side_effect iterator exhaust (see the sync twin): an
@@ -1620,6 +1663,7 @@ def test_invoke_handler_resource_not_found_async(
     """Test resource not found handling causes workflow failure through public API (async version)."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1663,6 +1707,7 @@ def test_invoke_handler_general_exception_async(
     """Test general exception handling triggers retry through public API (async version)."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1716,6 +1761,7 @@ def test_invoke_execution_no_delay_through_start_execution(executor, mock_schedu
         "aws_durable_execution_sdk_python_testing.executor.Execution"
     ) as mock_execution_class:
         mock_execution = Mock()
+        mock_execution.is_paused = False
         mock_execution.durable_execution_arn = "test-arn"
         mock_execution_class.new.return_value = mock_execution
 
@@ -1882,6 +1928,7 @@ def test_list_executions_with_pagination(executor, mock_store):
     executions_page1 = []
     for i in range(2):
         execution = Mock()
+        execution.is_paused = False
         execution.durable_execution_arn = f"arn{i}"
         execution.start_input.execution_name = f"exec{i}"
         execution.start_input.function_name = "test-function"
@@ -1904,6 +1951,7 @@ def test_list_executions_with_pagination(executor, mock_store):
     executions_page2 = []
     for i in range(2, 4):
         execution = Mock()
+        execution.is_paused = False
         execution.durable_execution_arn = f"arn{i}"
         execution.start_input.execution_name = f"exec{i}"
         execution.start_input.function_name = "test-function"
@@ -1995,6 +2043,7 @@ def test_stop_execution(executor, mock_store):
 def test_stop_execution_already_complete(executor, mock_store):
     """Test stop_execution with already completed execution returns idempotent response."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.is_complete = True
     mock_execution.durable_execution_arn = "test-arn"
 
@@ -2171,6 +2220,7 @@ def test_get_execution_state_invalid_token(
 def test_get_execution_history(executor, mock_store):
     """Test get_execution_history method."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.operations = []  # Empty operations list
     mock_execution.updates = []
     mock_execution.update_timestamps = []
@@ -2202,6 +2252,7 @@ def test_get_execution_history_with_events(executor, mock_store):
         step_details=StepDetails(result="test_result"),
     )
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.operations = [op1]
     mock_execution.updates = []
     mock_execution.update_timestamps = []
@@ -2230,6 +2281,7 @@ def test_get_execution_history_reverse_order(executor, mock_store):
     )
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.operations = [op1]
     mock_execution.updates = []
     mock_execution.update_timestamps = []
@@ -2262,6 +2314,7 @@ def test_get_execution_history_pagination(executor, mock_store):
         operations.append(op)
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.operations = operations
     mock_execution.updates = []
     mock_execution.update_timestamps = []
@@ -2292,6 +2345,7 @@ def test_get_execution_history_pagination_with_marker(executor, mock_store):
         operations.append(op)
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.operations = operations
     mock_execution.updates = []
     mock_execution.update_timestamps = []
@@ -2311,6 +2365,7 @@ def test_get_execution_history_pagination_with_marker(executor, mock_store):
 def test_get_execution_history_invalid_marker(executor, mock_store):
     """Test get_execution_history with invalid marker."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.operations = []
     mock_execution.updates = []
     mock_execution.update_timestamps = []
@@ -2414,6 +2469,7 @@ def test_send_callback_success(executor, mock_store):
 
     # Create mock execution with callback operation
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_callback_operation.return_value = (0, Mock())
     mock_execution.complete_callback_success.return_value = Mock()
     mock_store.load.return_value = mock_execution
@@ -2453,6 +2509,7 @@ def test_send_callback_success_with_result(executor, mock_store):
 
     # Create mock execution with callback operation
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_callback_operation.return_value = (0, Mock())
     mock_execution.complete_callback_success.return_value = Mock()
     mock_store.load.return_value = mock_execution
@@ -2478,6 +2535,7 @@ def test_send_callback_failure(executor, mock_store):
 
     # Create mock execution with callback operation
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_callback_operation.return_value = (0, Mock())
     mock_execution.complete_callback_failure.return_value = Mock()
     mock_store.load.return_value = mock_execution
@@ -2512,6 +2570,7 @@ def test_send_callback_failure_with_error(executor, mock_store):
 
     # Create mock execution with callback operation
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_callback_operation.return_value = (0, Mock())
     mock_execution.complete_callback_failure.return_value = Mock()
     mock_store.load.return_value = mock_execution
@@ -2536,6 +2595,7 @@ def test_send_callback_heartbeat(executor, mock_store):
 
     # Create mock execution with callback operation
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_operation = Mock()
     mock_operation.status = OperationStatus.STARTED
     mock_execution.find_callback_operation.return_value = (0, mock_operation)
@@ -2569,6 +2629,7 @@ def test_send_callback_heartbeat_none_callback_id(executor):
 def test_complete_execution_no_result(mock_store, executor):
     """Test complete_execution when execution has no result after completion."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.result = None  # No result after completion
     mock_store.load.return_value = mock_execution
 
@@ -2580,6 +2641,7 @@ def test_complete_execution_no_result(mock_store, executor):
 def test_fail_execution_no_result(mock_store, executor):
     """Test fail_execution when execution has no result after failure."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.result = None  # No result after failure
     mock_store.load.return_value = mock_execution
     error = ErrorObject.from_message("test error")
@@ -2598,6 +2660,7 @@ def test_send_callback_heartbeat_inactive_callback(mock_store, executor):
 
     # Create mock execution with inactive callback operation
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_operation = Mock()
     mock_operation.status = OperationStatus.SUCCEEDED  # Not STARTED
     mock_execution.find_callback_operation.return_value = (0, mock_operation)
@@ -2684,6 +2747,7 @@ def test_callback_heartbeat_timeout_reset(executor, mock_store, mock_scheduler):
 
     # Create mock execution with callback options
     mock_execution = Mock()
+    mock_execution.is_paused = False
     callback_options = CallbackOptions(heartbeat_timeout_seconds=30)
     update = OperationUpdate(
         operation_id="op-123",
@@ -2716,6 +2780,7 @@ def test_callback_timeout_handlers(executor, mock_store):
 
     # Create mock execution
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.is_complete = False
     mock_store.load.return_value = mock_execution
 
@@ -2750,6 +2815,7 @@ def test_callback_timeout_completed_execution(executor, mock_store):
 
     # Create completed execution
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.is_complete = True
     mock_store.load.return_value = mock_execution
 
@@ -2774,6 +2840,7 @@ def test_schedule_callback_timeouts_no_callback_details(executor, mock_store):
     )
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_operation.return_value = (0, operation)
     mock_store.load.return_value = mock_execution
 
@@ -2797,6 +2864,7 @@ def test_schedule_callback_timeouts_no_callback_options(executor, mock_store):
     )
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_operation.return_value = (0, operation)
     mock_execution.updates = []
     mock_execution.update_timestamps = []  # No updates with callback options
@@ -2822,6 +2890,7 @@ def test_schedule_callback_timeouts_zero_timeouts(executor, mock_store, mock_sch
     )
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_operation.return_value = (0, operation)
 
     # Create update with zero timeouts (disabled)
@@ -3294,6 +3363,7 @@ def test_a_handler_response_that_lands_after_shutdown_is_not_recorded(
     import threading
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -3475,6 +3545,7 @@ def test_a_handler_error_that_lands_after_shutdown_is_not_retried(
     import threading
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input

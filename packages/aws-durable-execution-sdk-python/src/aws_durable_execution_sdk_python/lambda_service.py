@@ -181,6 +181,24 @@ class DurableExecutionInvocationOutput:
         """Create a failed invocation output."""
         return cls(status=InvocationStatus.RETRY, error=error)
 
+    @classmethod
+    def create_pending_for_revoked_checkpoint_token(
+        cls, error: BaseException
+    ) -> DurableExecutionInvocationOutput:
+        """Answer PENDING once the checkpoint token can no longer be used.
+
+        Called when a checkpoint response omits a token. This means this invocation must stop
+        checkpointing and answer PENDING; FAILED would only spend a token that cannot succeed,
+        instead of a clean PENDING exit. The response is bare PENDING with no
+        error, matching every other PENDING exit in the durable execution wrapper.
+        """
+        logger.debug(
+            "Checkpoint token revoked by the service; answering PENDING instead "
+            "of FAILED. Handler error is not reported, only recorded here: %r",
+            error,
+        )
+        return cls(status=InvocationStatus.PENDING)
+
 
 @dataclass(frozen=True)
 class ExecutionDetails:

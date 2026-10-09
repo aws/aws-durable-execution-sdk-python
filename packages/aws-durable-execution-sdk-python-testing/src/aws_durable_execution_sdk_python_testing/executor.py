@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, assert_never
@@ -1454,15 +1455,22 @@ class Executor(ExecutionObserver):
                 )
 
             case InvocationStatus.PENDING:
-                # An operation the handler waited on may complete between
-                # the handler's return and this check. A change the
-                # handler has not seen, after the invocation's input was
-                # built, earns a re-invoke, so PENDING is valid; only a
-                # handler that waited on nothing is in error.
-                if not execution.has_pending_operations(execution) and not (
-                    invocation_seq is not None
-                    and execution.has_changes_after(
-                        max(invocation_seq, execution.handler_seen_seq)
+                # A paused execution answers the running invocation's
+                # checkpoint without a token and defers its next invocation;
+                # that invocation must stop as PENDING even with nothing
+                # pending, and resume re-invokes it. Any other PENDING needs
+                # pending operations or a change the handler has not seen
+                # since its input was built. The unseen-change case happens
+                # when an operation completes after this invocation's input
+                # was built but before this response is validated.
+                if (
+                    not execution.has_deferred_invocation
+                    and not execution.has_pending_operations(execution)
+                    and not (
+                        invocation_seq is not None
+                        and execution.has_changes_after(
+                            max(invocation_seq, execution.handler_seen_seq)
+                        )
                     )
                 ):
                     msg_pending_ops: str = (
@@ -1517,6 +1525,15 @@ class Executor(ExecutionObserver):
             self._store.save(execution)
             logger.info(
                 "[%s] Handler already INVOKING; deferring re-invoke",
+                execution_arn,
+            )
+            return None
+
+        if execution.is_paused:
+            execution.defer_invocation()
+            self._store.save(execution)
+            logger.debug(
+                "[%s] Holding back scheduled invocation while paused",
                 execution_arn,
             )
             return None
@@ -1775,6 +1792,68 @@ class Executor(ExecutionObserver):
             delay=delay,
             completion_event=completion_event,
         )
+
+    def pause_execution(self, execution_arn: str) -> None:
+        """Make the local checkpoint server answer this execution's
+        checkpoints without a token, starting now.
+
+        Experimental; may change or be removed in a future release.
+
+        The invocation running now, if any, is answered without a token
+        on its next checkpoint. That checkpoint is accepted - its updates
+        stay durable - but the invocation reports PENDING, and no further
+        checkpoint of its is accepted. No new invocation starts until
+        resume_execution() is called.
+
+        Idempotent; a no-op once the execution has finished.
+        Resolves once no invocation of this execution is running.
+        """
+        self._validate_execution_arn(execution_arn)
+        self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._set_paused(execution_arn)),
+        ).result()
+        self._wait_until_idle(execution_arn)
+
+    def resume_execution(self, execution_arn: str) -> None:
+        """Make the local checkpoint server answer this execution's
+        checkpoints with a token again.
+
+        Experimental; may change or be removed in a future release.
+
+        Starts the invocation that pause_execution() held back, if any.
+
+        Idempotent; a no-op once the execution has finished or if it was
+        not paused.
+        """
+        self._validate_execution_arn(execution_arn)
+        self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._resume_execution(execution_arn)),
+        ).result()
+
+    def _set_paused(self, execution_arn: str) -> None:
+        execution = self._store.load(execution_arn)
+        if execution.is_complete or execution.is_paused:
+            return
+        execution.pause()
+        self._store.save(execution)
+
+    def _resume_execution(self, execution_arn: str) -> None:
+        execution = self._store.load(execution_arn)
+        if execution.is_complete or not execution.is_paused:
+            return
+
+        deferred = execution.resume()
+
+        self._store.save(execution)
+        if deferred:
+            self._invoke_execution(execution_arn)
+
+    def _wait_until_idle(self, execution_arn: str) -> None:
+        """Block until no invocation of ``execution_arn`` is running."""
+        while self._invocation_gate(execution_arn) is InvocationState.INVOKING:
+            time.sleep(0.005)
 
     def _complete_workflow(
         self, execution_arn: str, result: str | None, error: ErrorObject | None

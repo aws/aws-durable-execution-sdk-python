@@ -714,6 +714,10 @@ class DurableFunctionTestRunner:
         self._checkpoint_processor.set_chained_invoke_preflight(
             self._executor.preflight_chained_invoke
         )
+        # ARN of the most recent execution started by run_async(), including calls
+        # through run(). Used as the default target for pause_execution() and
+        # resume_execution() when no ARN is provided.
+        self._default_execution_arn: str | None = None
 
     def register_durable_function(
         self,
@@ -861,7 +865,58 @@ class DurableFunctionTestRunner:
         if output.execution_arn is None:
             msg_arn: str = "Execution ARN must exist to run test."
             raise DurableFunctionsTestError(msg_arn)
+        self._default_execution_arn = output.execution_arn
         return output.execution_arn
+
+    def pause_execution(self, execution_arn: str | None = None) -> None:
+        """Make the local checkpoint server answer this execution's
+        checkpoints without a token, starting now.
+
+        Experimental; may change or be removed in a future release.
+
+        Defaults to the execution run_async() last started. The
+        invocation running now, if any, is answered without a token on
+        its next checkpoint: that checkpoint is accepted, but the
+        invocation reports PENDING, and no new invocation starts until
+        resume_execution().
+
+        Idempotent; a no-op once the execution has finished.
+        Resolves once no invocation of this execution is running.
+
+        Raises:
+            DurableFunctionsTestError: If no execution is in progress
+                (run_async() has not been called).
+        """
+        self._executor.pause_execution(self._require_execution_arn(execution_arn))
+
+    def resume_execution(self, execution_arn: str | None = None) -> None:
+        """Make the local checkpoint server answer this execution's
+        checkpoints with a token again.
+
+        Experimental; may change or be removed in a future release.
+
+        Defaults to the execution run_async() last started. Starts the
+        invocation pause_execution() held back, if any.
+
+        Idempotent; a no-op once the execution has finished or if it was not paused.
+
+        Raises:
+            DurableFunctionsTestError: If no execution is in progress
+                (run_async() has not been called).
+        """
+        self._executor.resume_execution(self._require_execution_arn(execution_arn))
+
+    def _require_execution_arn(self, execution_arn: str | None) -> str:
+        arn = (
+            execution_arn if execution_arn is not None else self._default_execution_arn
+        )
+        if arn is None:
+            msg = (
+                "No execution in progress. Call run_async() or run() first, "
+                "or pass execution_arn explicitly."
+            )
+            raise DurableFunctionsTestError(msg)
+        return arn
 
     def wait_for_result(
         self, execution_arn: str, timeout: int = 60
