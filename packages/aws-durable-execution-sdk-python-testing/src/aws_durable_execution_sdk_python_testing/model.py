@@ -677,7 +677,8 @@ class EventError:
     @classmethod
     def from_dict(cls, data: dict) -> EventError:
         payload = None
-        if payload_data := data.get("Payload"):
+        payload_data = data.get("Payload")
+        if payload_data is not None:
             payload = ErrorObject.from_dict(payload_data)
 
         return cls(
@@ -2239,6 +2240,14 @@ class Event:
         event_error: EventError | None = (
             EventError.from_details(callback_details) if callback_details else None
         )
+        if (
+            context.include_execution_data
+            and callback_details is not None
+            and callback_details.error is None
+        ):
+            # Detailed service history retains an empty Error.Payload object.
+            # This projection must not turn the SDK-facing absent error into one.
+            event_error = EventError(payload=ErrorObject.from_dict({}), truncated=False)
         return cls(
             event_type=EventType.CALLBACK_FAILED.value,
             event_timestamp=context.end_timestamp,
@@ -2744,7 +2753,9 @@ def events_to_operations(events: list[Event]) -> list[Operation]:
                 callback_details=CallbackDetails(
                     callback_id=callback_id,
                     result=result,
-                    error=error,
+                    # History preserves a present empty Payload object, while
+                    # CallbackDetails uses None for an empty wire error.
+                    error=error if error is not None and error.to_dict() else None,
                 ),
             )
 

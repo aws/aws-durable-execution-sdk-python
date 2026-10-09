@@ -2282,3 +2282,135 @@ def test_invocation_hooks_bind_parent_and_restore_baggage(
     finally:
         otel_context.detach(token)
         provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("status", "error", "expected"),
+    [
+        (OperationStatus.SUCCEEDED, None, StatusCode.OK),
+        (OperationStatus.FAILED, None, StatusCode.UNSET),
+        (OperationStatus.CANCELLED, None, StatusCode.UNSET),
+        (OperationStatus.TIMED_OUT, None, StatusCode.UNSET),
+        (OperationStatus.STOPPED, None, StatusCode.UNSET),
+        (
+            OperationStatus.FAILED,
+            ErrorObject(message="failure", type="Example", data=None, stack_trace=None),
+            StatusCode.ERROR,
+        ),
+    ],
+)
+def test_deferred_end_retains_real_parent_and_status_mapping(
+    status: OperationStatus, error: ErrorObject | None, expected: StatusCode
+) -> None:
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    end = OperationEndInfo(
+        operation_id="child",
+        operation_type=OperationType.WAIT,
+        sub_type=None,
+        name="deferred-child",
+        parent_id="parent",
+        start_time=START_TIME,
+        is_replayed=False,
+        status=status,
+        end_time=END_TIME,
+        error=error,
+    )
+    plugin.on_operation_end(end)
+    assert not exporter.get_finished_spans()
+    assert plugin._pending_operation_ends == {"parent": [end]}
+    plugin.on_user_function_start(
+        _user_function_start_info("parent", operation_type=OperationType.CONTEXT)
+    )
+    parent = plugin._get_span("parent")
+    assert parent is not None
+    (child,) = exporter.get_finished_spans()
+    assert child.parent is not None and child.attributes is not None
+    assert child.parent.span_id == parent.get_span_context().span_id
+    assert child.status.status_code is expected
+    assert child.attributes["durable.operation.status"] == status.value
+    assert len(child.events) == (1 if error is not None else 0)
+    assert plugin._pending_operation_ends == {}
+    plugin.on_user_function_end(
+        _user_function_end_info("parent", operation_type=OperationType.CONTEXT)
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
+
+def test_deferred_descendants_drain_from_real_parent_completion_in_child_first_order() -> (
+    None
+):
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    for operation_id, parent_id, kind in [
+        ("child", "inner", OperationType.WAIT),
+        ("inner", "outer", OperationType.CONTEXT),
+    ]:
+        plugin.on_operation_end(
+            OperationEndInfo(
+                operation_id=operation_id,
+                operation_type=kind,
+                sub_type=None,
+                name=operation_id,
+                parent_id=parent_id,
+                start_time=START_TIME,
+                is_replayed=False,
+                status=OperationStatus.SUCCEEDED,
+                end_time=END_TIME,
+            )
+        )
+    assert not exporter.get_finished_spans()
+    plugin.on_user_function_start(
+        _user_function_start_info("outer", operation_type=OperationType.CONTEXT)
+    )
+    child, inner = exporter.get_finished_spans()
+    assert [child.name, inner.name] == ["child", "inner"]
+    assert child.parent is not None and inner.parent is not None
+    assert child.parent.span_id == inner.context.span_id
+    outer = plugin._get_span("outer")
+    assert outer is not None
+    assert inner.parent.span_id == outer.get_span_context().span_id
+    assert child.end_time is not None and inner.end_time is not None
+    assert child.end_time <= inner.end_time
+    assert plugin._pending_operation_ends == {}
+    plugin.on_user_function_end(
+        _user_function_end_info("outer", operation_type=OperationType.CONTEXT)
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
+
+def test_unresolved_parent_is_reported_after_cleanup_and_not_carried_into_reuse() -> (
+    None
+):
+    plugin, exporter = _create_plugin()
+    before = otel_context.get_current()
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id="missing-child",
+            operation_type=OperationType.WAIT,
+            sub_type=None,
+            name="missing-child",
+            parent_id="missing-parent",
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+        )
+    )
+    with pytest.raises(ValueError, match="No parent span found for deferred"):
+        plugin.on_invocation_end(_invocation_end_info())
+    assert otel_context.get_current() == before
+    assert plugin._operation_spans == {}
+    assert plugin._pending_operation_ends == {}
+    assert plugin._context_tokens == {}
+    assert {span.name for span in exporter.get_finished_spans()} == {
+        "Invocation",
+        "Workflow",
+    }
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_invocation_end(_invocation_end_info(InvocationStatus.PENDING))
+    assert not [
+        span for span in exporter.get_finished_spans() if span.name == "missing-child"
+    ]
+    assert plugin._pending_operation_ends == {}

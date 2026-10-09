@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
+from threading import Lock
 from typing import Any, Callable, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -470,9 +471,13 @@ class PluginExecutor:
         # work use its pre-hook snapshot. End still uses each hook's token owner.
         self._startup_context: contextvars.Context | None = None
         self._invocation_contexts: list[contextvars.Context | None] = []
+        self._reported_terminal_updates: set[tuple[str, OperationStatus]] = set()
+        self._terminal_updates_lock = Lock()
 
     @contextlib.contextmanager
     def run(self):
+        with self._terminal_updates_lock:
+            self._reported_terminal_updates.clear()
         if self._plugins:
             self._executor = ThreadPoolExecutor(
                 max_workers=1,
@@ -488,6 +493,8 @@ class PluginExecutor:
             # Shut down the thread pool, waiting for pending tasks to complete.
             if self._executor:
                 self._executor.shutdown(wait=True)
+            with self._terminal_updates_lock:
+                self._reported_terminal_updates.clear()
 
     @staticmethod
     def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> bool:
@@ -815,6 +822,15 @@ class PluginExecutor:
         )
         for operation in updated_operations:
             if self._is_terminal_status(operation.status):
+                # Replay delivery and checkpoint responses can report the same
+                # completion. Deduplicate actual notifications, not state that
+                # may have arrived without an UpdatedOperationIds notification.
+                if self._plugins:
+                    key = (operation.operation_id, operation.status)
+                    with self._terminal_updates_lock:
+                        if key in self._reported_terminal_updates:
+                            continue
+                        self._reported_terminal_updates.add(key)
                 self.execute_plugins(
                     OperationEndInfo(
                         operation_id=operation.operation_id,

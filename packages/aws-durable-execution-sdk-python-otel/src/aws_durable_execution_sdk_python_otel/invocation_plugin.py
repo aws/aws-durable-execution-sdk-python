@@ -156,6 +156,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._span_time_floor_ns: int | None = None
         # Maps operation ID (None for root) to the active span.
         self._operation_spans: dict[str | None, Span] = {}
+        # A sibling checkpoint can report completion before replay enters its
+        # parent context. Retain the real event until that parent span exists.
+        self._pending_operation_ends: dict[str, list[OperationEndInfo]] = {}
         # Replay state supplied by CONTEXT operation START hooks. Missing
         # entries identify checkpointless contexts such as FLAT branches.
         self._context_operation_replays: dict[str, bool] = {}
@@ -491,10 +494,19 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                     links=links,
                 )
             self._operation_spans[registry_key] = span
+            pending_ends = (
+                self._pending_operation_ends.pop(registry_key, [])
+                if registry_key is not None
+                else []
+            )
             if operation_id is None:
                 self._span_time_floor_ns = span_start_time
 
         logger.debug("Started OTel span: %s", span)
+        # Registration and dequeue share the lock, so an arriving completion
+        # either sees its parent or is drained here. Do not hold it in callbacks.
+        for pending_end in pending_ends:
+            self.on_operation_end(pending_end)
         return span
 
     def _end_span(
@@ -690,6 +702,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         with self._operation_spans_lock:
             operation_ids = list(reversed(self._operation_spans))
             incomplete_attempt_span_keys = set(self._incomplete_attempt_span_keys)
+            unresolved_parents = tuple(self._pending_operation_ends)
         for operation_id in operation_ids:
             if operation_id:
                 span = self._get_span(operation_id)
@@ -738,6 +751,12 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         # Flush before Lambda freeze
         if hasattr(self._provider, "force_flush"):
             self._provider.force_flush()
+        if unresolved_parents:
+            # Keep the previous missing-parent failure observable, but finish
+            # normal token/span cleanup and flushing before reporting it.
+            raise ValueError(
+                f"No parent span found for deferred operation ends: {unresolved_parents}"
+            )
 
     def _reset_state(self) -> None:
         """Clear per-invocation state for warm Lambda environment reuse."""
@@ -752,6 +771,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._span_time_floor_ns = None
         with self._operation_spans_lock:
             self._operation_spans = {}
+            self._pending_operation_ends = {}
             self._context_operation_replays = {}
             self._incomplete_attempt_span_keys = set()
         self._tracing_enabled = False
@@ -795,7 +815,15 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             # The operation started in a prior invocation. Create a new
             # correlated segment and link it to the deterministic logical
             # operation context shared across invocations.
-            parent_span = self._resolve_parent_span(info.parent_id)
+            with self._operation_spans_lock:
+                parent_span = self._operation_spans.get(info.parent_id)
+                if parent_span is None and info.parent_id is not None:
+                    self._pending_operation_ends.setdefault(info.parent_id, []).append(
+                        info
+                    )
+                    return
+            if parent_span is None:
+                parent_span = self._resolve_parent_span(info.parent_id)
             attributes = self._extract_attributes(info)
             span = self._start_span(
                 operation_id=info.operation_id,

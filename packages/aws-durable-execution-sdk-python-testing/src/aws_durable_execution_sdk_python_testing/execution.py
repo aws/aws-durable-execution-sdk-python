@@ -442,7 +442,8 @@ class Execution:
         delivers state in the invocation input. So the list is reset when
         that input is built, not when the invocation completes: an
         operation that completes while the handler is still running is
-        reported on the next invocation.
+        reported on the next invocation unless a checkpoint response has
+        already delivered it through ``advance_handler_seen``.
         """
         self.updated_operation_ids = []
 
@@ -647,6 +648,7 @@ class Execution:
                 end_timestamp=now if now is not None else real_now(),
                 callback_details=updated_callback_details,
             )
+            self._record_updated_operation(operation.operation_id)
             return self.operations[index]
 
     def complete_callback_failure(
@@ -663,8 +665,11 @@ class Execution:
             self.touch_operation(operation.operation_id)
             updated_callback_details = None
             if operation.callback_details:
+                # Match CallbackDetails.from_dict without depending on a store
+                # serialization round trip: an empty wire Error has no details.
                 updated_callback_details = replace(
-                    operation.callback_details, error=error
+                    operation.callback_details,
+                    error=error if error is not None and error.to_dict() else None,
                 )
 
             self.operations[index] = replace(
@@ -673,6 +678,7 @@ class Execution:
                 end_timestamp=now if now is not None else real_now(),
                 callback_details=updated_callback_details,
             )
+            self._record_updated_operation(operation.operation_id)
             return self.operations[index]
 
     def complete_callback_timeout(
@@ -699,6 +705,7 @@ class Execution:
                 end_timestamp=now if now is not None else real_now(),
                 callback_details=updated_callback_details,
             )
+            self._record_updated_operation(operation.operation_id)
             return self.operations[index]
 
     def complete_chained_invoke(
@@ -880,6 +887,13 @@ class OperationPaginatorState:
         smaller or equal values are ignored."""
         if seq > self.execution.handler_seen_seq:
             self.execution.handler_seen_seq = seq
+            # A checkpoint has delivered these updates to the running handler.
+            # Retain only changes newer than that response for the next input.
+            self.execution.updated_operation_ids = [
+                operation_id
+                for operation_id in self.execution.updated_operation_ids
+                if self.execution.operation_last_touched_seq.get(operation_id, 0) > seq
+            ]
 
     # --- internals -------------------------------------------------
 

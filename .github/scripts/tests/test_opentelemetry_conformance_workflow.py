@@ -1,7 +1,11 @@
+import re
 from pathlib import Path
 
 import yaml
 
+
+SHARED_WORKFLOW_REF = "bdb4f1cd0f9252c1aaa978bb8b341b71f2b9d9dc"
+CONFORMANCE_TEST_REF = "75987d46a915bc37409eed3ea9c3617a924c9756"
 
 WORKFLOW_PATH = (
     Path(__file__).parents[2] / "workflows" / "opentelemetry-conformance-tests.yml"
@@ -18,7 +22,10 @@ def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> No
         "uses: aws/aws-durable-execution-conformance-tests/.github/workflows/"
         "opentelemetry-orchestrator.yml@"
     )
-    assert orchestrator in workflow
+    pinned_ref = re.search(re.escape(orchestrator) + r"([0-9a-f]{40})", workflow)
+    assert pinned_ref is not None
+    assert pinned_ref.group(1) == SHARED_WORKFLOW_REF
+    assert f"default: {CONFORMANCE_TEST_REF}" in workflow
     assert "python-opentelemetry.yml@" not in workflow
     assert "\n      otlp_endpoint:" not in workflow
 
@@ -28,7 +35,7 @@ def test_opentelemetry_conformance_caller_uses_current_workflow_contract() -> No
         "resource_prefix: p",
         "sdk_repository: aws/aws-durable-execution-sdk-python",
         "sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}",
-        "conformance_test_ref: ${{ inputs.conformance_test_ref || 'main' }}",
+        f"conformance_test_ref: ${{{{ inputs.conformance_test_ref || '{CONFORMANCE_TEST_REF}' }}}}",
         "checkout_sdk: true",
         f"examples_dir: {EXAMPLES_DIR}",
         "adot_release_repository: aws-observability/aws-otel-python-instrumentation",
