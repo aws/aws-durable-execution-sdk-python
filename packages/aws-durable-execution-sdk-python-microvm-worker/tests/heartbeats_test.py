@@ -203,10 +203,9 @@ def test_handler_settled_after_the_callback_gone_returns_false(
 ):
     """The heartbeat thread decided first, so the caller must not report.
 
-    on_callback_gone is held open here. A handler_settled() call that arrives
-    while it runs is the interleaving the review found: before the fix, the
-    heartbeat thread read "not settled", then handler_settled() returned, then
-    on_callback_gone ran.
+    on_callback_gone is held open here, so handler_settled() arrives after
+    the decision is made. This checks that the decision is recorded before
+    on_callback_gone runs. The next test checks the lock itself.
     """
     entered = threading.Event()
     release = threading.Event()
@@ -226,10 +225,55 @@ def test_handler_settled_after_the_callback_gone_returns_false(
     heartbeats.stop()
 
 
+def test_handler_settled_waits_for_a_decision_in_progress(
+    fake_client, make_error, logger
+):
+    """The heartbeat thread reads "not settled", then pauses before it decides.
+
+    This is the interleaving the review found. handler_settled() must wait
+    for the decision and return False. Without the lock, it returns True,
+    and on_callback_gone still runs. The subclass pauses the heartbeat
+    thread inside the read of the private _handler_settled attribute.
+    """
+    read_not_settled = threading.Event()
+
+    class PausingHeartbeats(Heartbeats):
+        @property
+        def _handler_settled(self) -> bool:
+            value: bool = self.__dict__["_settled"]
+            if threading.current_thread() is self._thread and not value:
+                read_not_settled.set()
+                time.sleep(0.2)
+            return value
+
+        @_handler_settled.setter
+        def _handler_settled(self, value: bool) -> None:
+            self.__dict__["_settled"] = value
+
+    gone: list[BaseException] = []
+    client = fake_client(make_error("CallbackTimeoutException"))
+    heartbeats = PausingHeartbeats.start(
+        CallbackReporter("cb-1", client),
+        heartbeat_timeout_seconds=60,
+        on_callback_gone=gone.append,
+        heartbeat_interval_seconds=INTERVAL,
+        logger=logger,
+    )
+    assert read_not_settled.wait(5)
+    assert heartbeats.handler_settled() is False
+    wait_until(lambda: len(gone) == 1)
+    heartbeats.stop()
+
+
 def test_on_callback_gone_never_runs_after_handler_settled_returns_true(
     fake_client, make_error, logger
 ):
-    """Many races between the two threads. A True return always wins."""
+    """Many races between the two threads. A True return always wins.
+
+    A failure here needs a thread switch inside the few instructions between
+    the read and the decision. So this test rarely catches a missing lock.
+    The test above pauses inside that window instead.
+    """
     for _ in range(50):
         gone: list[BaseException] = []
         client = fake_client(make_error("CallbackTimeoutException"))

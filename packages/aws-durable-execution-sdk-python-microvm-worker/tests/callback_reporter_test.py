@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 import pytest
-from botocore.exceptions import NoCredentialsError
+from botocore.exceptions import BotoCoreError, NoCredentialsError
 from botocore.stub import Stubber
 
 from aws_durable_execution_sdk_python_microvm_worker import callback_reporter
@@ -346,7 +346,7 @@ def test_heartbeat_with_a_cancelled_scope_makes_no_call(fake_client):
     assert client.calls == []
 
 
-def test_wake_sets_the_waiter_on_cancel_and_releases_it_after():
+def test_wake_sets_the_waiter_on_cancel():
     scope = CancelScope()
     waiter = threading.Event()
     with scope.wake(waiter):
@@ -357,6 +357,15 @@ def test_wake_sets_the_waiter_on_cancel_and_releases_it_after():
         with scope.wake(later):
             pass
     assert not later.is_set()
+
+
+def test_wake_releases_the_waiter_when_the_block_ends():
+    scope = CancelScope()
+    waiter = threading.Event()
+    with scope.wake(waiter):
+        pass
+    scope.cancel()
+    assert not waiter.is_set()
 
 
 def test_bounded_call_returns_its_error(fake_client, make_error):
@@ -434,8 +443,8 @@ def test_reporter_closes_only_its_own_client(fake_client, monkeypatch):
 
 
 def test_create_raises_when_boto3_cannot_build_the_client(monkeypatch):
-    monkeypatch.setenv("AWS_PROFILE", "otelbb-no-such-profile")
-    with pytest.raises(Exception, match="otelbb-no-such-profile"):
+    monkeypatch.setenv("AWS_PROFILE", "no-such-profile")
+    with pytest.raises(BotoCoreError, match="no-such-profile"):
         CallbackReporter.create("cb-1", "us-east-1")
 
 

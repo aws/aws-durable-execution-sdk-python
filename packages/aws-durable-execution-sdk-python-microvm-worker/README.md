@@ -10,7 +10,7 @@ The package currently contains these parts:
 
 - `RunHookRequest.from_dict` and `MicrovmJobRequest.from_dict` validate the two documents that deliver a job: the `run` lifecycle hook body, and the body of an HTTP job request.
 - `CallbackReporter` sends heartbeats, and completes the callback with a result or an error.
-- `Heartbeats.start` sends a job's heartbeats on a schedule.
+- The `heartbeats` module sends a job's heartbeats on a schedule. The listener in a later change starts them for each job.
 
 The HTTP listener for the lifecycle hooks and the job routes comes in a later change.
 
@@ -60,7 +60,7 @@ An explicit `heartbeat_interval_seconds` must be above 0 and at most 900, and it
 
 ## Logging
 
-The worker logs to the standard library logger `aws_durable_execution_sdk_python_microvm_worker`, and passes its structured fields in `extra`. Every line about a job carries its `callbackId`. `CallbackReporter.create` and `Heartbeats.start` take the same `logger` argument. Configure `logging` in the image to see its INFO lines, for example with `logging.basicConfig(level=logging.INFO)`. Any object with the `logging.Logger` signatures for `info`, `warning`, and `error` can replace it. A logger that raises does not stop the worker: the line is dropped.
+The worker logs to the standard library logger `aws_durable_execution_sdk_python_microvm_worker`, and passes its structured fields in `extra`. Every line about a job carries its `callbackId`. `CallbackReporter.create` and the heartbeats take the same `logger` argument. Configure `logging` in the image to see its INFO lines, for example with `logging.basicConfig(level=logging.INFO)`. Any object with the `logging.Logger` signatures for `info`, `warning`, and `error` can replace it. A logger that raises does not stop the worker: the line is dropped.
 
 ## Permissions
 

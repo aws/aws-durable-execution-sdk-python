@@ -5,9 +5,10 @@
 
 This package is experimental. Its API can change in any release.
 
-The exports match the JavaScript worker's ``index.ts``. ``CancelScope`` and
-``CallCancelledError`` are extra, because the public ``heartbeat()``
-signature needs them, and Python has no ``AbortSignal``.
+The exports match the parts of the JavaScript worker's ``index.ts`` that
+this package has so far. The listener API comes in a later change.
+``CancelScope`` and ``CallCancelledError`` are extra, because the public
+``heartbeat()`` signature needs them, and Python has no ``AbortSignal``.
 """
 
 from aws_durable_execution_sdk_python_microvm_worker.__about__ import __version__
