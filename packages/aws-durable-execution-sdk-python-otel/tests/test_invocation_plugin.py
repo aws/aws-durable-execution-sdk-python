@@ -726,6 +726,7 @@ def test_operation_end_without_start_links_previous_logical_operation():
     assert (
         span.attributes["durable.operation.status"] == OperationStatus.SUCCEEDED.value
     )
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_continuation_span_uses_current_start_and_end_times():
@@ -757,6 +758,7 @@ def test_continuation_span_uses_current_start_and_end_times():
     )
     assert invocation_span.start_time <= span.start_time
     assert before_callback <= span.start_time <= span.end_time <= after_callback
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_resume_operation_timestamps_do_not_precede_current_invocation():
@@ -816,6 +818,7 @@ def test_resume_operation_timestamps_do_not_precede_current_invocation():
     assert invocation_span.start_time <= after_resume_span.start_time
     assert after_resume_span.parent is not None
     assert after_resume_span.parent.span_id == invocation_span.context.span_id
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_ordered_timestamps_are_thread_safe():
@@ -884,6 +887,7 @@ def test_retried_operation_uses_fresh_id_and_links_previous_logical_operation():
         derive_workflow_span_id(EXECUTION_ARN),
         operation_id_to_span_id(EXECUTION_ARN, operation_id),
     }
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_step_operation_span_parents_attempt_span():
@@ -1036,6 +1040,7 @@ def test_user_function_callbacks_emit_attempt_span_attributes():
         == UserFunctionOutcome.SUCCEEDED.value
     )
     assert "durable.operation.status" not in span.attributes
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_step_attempt_span_name_includes_attempt_number():
@@ -1080,6 +1085,7 @@ def test_step_attempt_span_name_includes_attempt_number():
         s for s in exporter.get_finished_spans() if s.name != "DurableExecutionRoot"
     )
     assert span.name == "fetch-user attempt 2"
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_step_attempt_span_name_defaults_to_first_attempt():
@@ -1124,6 +1130,7 @@ def test_step_attempt_span_name_defaults_to_first_attempt():
         s for s in exporter.get_finished_spans() if s.name != "DurableExecutionRoot"
     )
     assert span.name == "fetch-user attempt 1"
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 @pytest.mark.parametrize(
@@ -1227,6 +1234,7 @@ def test_context_span_waits_for_terminal_status_and_omits_attempt_attributes(
     assert "durable.attempt.number" not in span.attributes
     assert "durable.attempt.outcome" not in span.attributes
     assert span.status.status_code is expected_span_status
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_span_registry_helpers_can_be_called_from_multiple_threads():
@@ -1271,8 +1279,9 @@ def test_user_function_end_restores_enclosing_context():
     # After the step, the enclosing context is restored and no scope is left
     # behind. Log correlation resolves the invocation span from the registry.
     assert otel_context.get_current() == enclosing_context
-    assert plugin._context_tokens == {}
+    assert set(plugin._context_tokens) == {"__invocation_context__"}
     assert plugin.get_current_span_context().span_id == invocation_span_id
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_user_function_start_preserves_baggage_in_current_context():
@@ -1306,7 +1315,8 @@ def test_user_function_end_restores_enclosing_context_on_failure():
     )
 
     assert otel_context.get_current() == enclosing_context
-    assert plugin._context_tokens == {}
+    assert set(plugin._context_tokens) == {"__invocation_context__"}
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_user_function_end_restores_enclosing_context_across_multiple_steps():
@@ -1323,8 +1333,9 @@ def test_user_function_end_restores_enclosing_context_across_multiple_steps():
         # Between each step the context is back to where it started, and log
         # correlation still resolves the invocation span.
         assert otel_context.get_current() == enclosing_context
-        assert plugin._context_tokens == {}
+        assert set(plugin._context_tokens) == {"__invocation_context__"}
         assert plugin.get_current_span_context().span_id == invocation_span_id
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 # ----------------------------------------------------------------------
@@ -1346,6 +1357,7 @@ def test_get_current_span_context_returns_invocation_span_at_top_level():
     invocation_span = plugin._get_span(None)
     assert span_context is not None
     assert span_context.span_id == invocation_span.get_span_context().span_id
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_get_current_span_context_returns_operation_span_inside_step():
@@ -1377,6 +1389,7 @@ def test_get_current_span_context_returns_invocation_span_between_steps():
     invocation_span = plugin._get_span(None)
     assert span_context is not None
     assert span_context.span_id == invocation_span.get_span_context().span_id
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 # ----------------------------------------------------------------------
@@ -1455,11 +1468,12 @@ def test_top_level_step_end_falls_back_to_invocation_for_correlation():
     plugin.on_user_function_start(_user_function_start_info(operation_id))
     plugin.on_user_function_end(_user_function_end_info(operation_id))
 
-    # No durable span is attached at the top level, so the registry fallback
-    # supplies the invocation span for log correlation.
+    # The invocation Start binding is restored after the step, including
+    # between-step user instrumentation and log correlation.
     assert otel_context.get_current() == enclosing_context
-    assert not trace.get_current_span().get_span_context().is_valid
+    assert trace.get_current_span().get_span_context().span_id == invocation_span_id
     assert plugin.get_current_span_context().span_id == invocation_span_id
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_get_current_span_context_returns_context_span_between_nested_steps():
@@ -1725,6 +1739,7 @@ def test_replayed_context_span_links_previous_logical_operation():
         derive_workflow_span_id(EXECUTION_ARN),
         operation_id_to_span_id(EXECUTION_ARN, operation_id),
     }
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_checkpointed_context_first_span_uses_deterministic_id():
@@ -1883,7 +1898,8 @@ def test_child_context_end_restores_context_active_before_it():
     )
 
     assert otel_context.get_current() == enclosing_context
-    assert plugin._context_tokens == {}
+    assert set(plugin._context_tokens) == {"__invocation_context__"}
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_nested_scopes_are_released_without_accumulating():
@@ -1907,13 +1923,14 @@ def test_nested_scopes_are_released_without_accumulating():
     )
     # The inner step restored the child-context scope, not a copy of it.
     assert otel_context.get_current() == inside_context
-    assert set(plugin._context_tokens) == {context_id}
+    assert set(plugin._context_tokens) == {context_id, "__invocation_context__"}
 
     plugin.on_user_function_end(
         _user_function_end_info(context_id, operation_type=OperationType.CONTEXT)
     )
     assert otel_context.get_current() == before_context
-    assert plugin._context_tokens == {}
+    assert set(plugin._context_tokens) == {"__invocation_context__"}
+    plugin.on_invocation_end(_invocation_end_info())
 
 
 def test_invocation_end_releases_scope_of_suspended_user_function():
@@ -1997,7 +2014,7 @@ def test_detach_ignores_token_attached_on_another_thread():
 
     plugin._detach_context("step-1:attempt:1")
 
-    assert plugin._context_tokens == {}
+    assert set(plugin._context_tokens) == {"__invocation_context__"}
     assert otel_context.get_current() == before_context
 
     plugin.on_invocation_end(_invocation_end_info())
@@ -2088,7 +2105,7 @@ def test_reentered_step_attempt_releases_the_previous_scope():
     plugin.on_user_function_end(_user_function_end_info(operation_id))
 
     assert otel_context.get_current() == before_context
-    assert plugin._context_tokens == {}
+    assert set(plugin._context_tokens) == {"__invocation_context__"}
 
     plugin.on_invocation_end(_invocation_end_info())
 
@@ -2184,7 +2201,7 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
         )
     )
     assert otel_context.get_current() == before_context
-    assert plugin._context_tokens == {}
+    assert set(plugin._context_tokens) == {"__invocation_context__"}
     # Neither span is ended: both operations are still in flight.
     assert {s.name for s in exporter.get_finished_spans()} == {"DurableExecutionRoot"}
 
@@ -2217,6 +2234,69 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
         _user_function_end_info("ctx-outer", operation_type=OperationType.CONTEXT)
     )
     assert otel_context.get_current() == before_context
-    assert plugin._context_tokens == {}
+    assert set(plugin._context_tokens) == {"__invocation_context__"}
 
     plugin.on_invocation_end(_invocation_end_info())
+
+
+@pytest.mark.parametrize("ambient_kind", ["same", "unrelated", "absent"])
+@pytest.mark.parametrize("raises", [False, True])
+@pytest.mark.parametrize("sampler", [ALWAYS_ON, ALWAYS_OFF])
+def test_invocation_hooks_bind_parent_and_restore_baggage(
+    ambient_kind: str, raises: bool, sampler: Sampler
+) -> None:
+    provider = TracerProvider(sampler=sampler)
+    plugin = InvocationOtelPlugin(
+        OtelPluginConfig(
+            tracer_provider=provider,
+            context_extractor=lambda _: None,
+            enrich_logger=False,
+        )
+    )
+    caller = baggage.set_baggage("tenant", "hook-test", Context())
+    ambient = None
+    if ambient_kind != "absent":
+        ambient = SpanContext(
+            trace_id=_to_otel_trace_id(EXECUTION_ARN, START_TIME)
+            if ambient_kind == "same"
+            else 1,
+            span_id=0x42,
+            is_remote=False,
+            trace_flags=TraceFlags(1),
+        )
+        caller = trace.set_span_in_context(NonRecordingSpan(ambient), caller)
+    token = otel_context.attach(caller)
+    error = ValueError("handler error")
+    try:
+        plugin.on_invocation_start(_invocation_start_info())
+        expected = (
+            ambient if ambient_kind == "same" else plugin.get_current_span_context()
+        )
+
+        def body() -> None:
+            active = trace.get_current_span().get_span_context()
+            assert active == expected
+            assert active.is_valid
+            assert baggage.get_baggage("tenant") == "hook-test"
+            if raises:
+                raise error
+
+        try:
+            if raises:
+                with pytest.raises(ValueError) as caught:
+                    body()
+                assert caught.value is error
+            else:
+                body()
+        finally:
+            plugin.on_invocation_end(
+                _invocation_end_info(
+                    InvocationStatus.FAILED if raises else InvocationStatus.SUCCEEDED
+                )
+            )
+        assert plugin._context_tokens == {}
+        assert otel_context.get_current() is caller
+        assert baggage.get_baggage("tenant") == "hook-test"
+    finally:
+        otel_context.detach(token)
+        provider.shutdown()

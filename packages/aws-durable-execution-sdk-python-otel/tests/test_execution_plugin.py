@@ -28,6 +28,7 @@ from aws_durable_execution_sdk_python.plugin import (
 from opentelemetry import baggage, trace
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON, ALWAYS_OFF, Sampler
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import (
@@ -1628,3 +1629,66 @@ def test_nested_suspension_unwinds_scopes_in_reverse_order():
 
     plugin.on_invocation_end(_invocation_end_info())
     assert plugin._context_tokens == {}
+
+
+@pytest.mark.parametrize("ambient_kind", ["same", "unrelated", "absent"])
+@pytest.mark.parametrize("raises", [False, True])
+@pytest.mark.parametrize("sampler", [ALWAYS_ON, ALWAYS_OFF])
+def test_invocation_hooks_bind_parent_and_restore_baggage(
+    ambient_kind: str, raises: bool, sampler: Sampler
+) -> None:
+    provider = TracerProvider(sampler=sampler)
+    plugin = ExecutionOtelPlugin(
+        OtelPluginConfig(
+            tracer_provider=provider,
+            context_extractor=lambda _: None,
+            enrich_logger=False,
+        )
+    )
+    caller = baggage.set_baggage("tenant", "hook-test", Context())
+    ambient = None
+    if ambient_kind != "absent":
+        ambient = SpanContext(
+            trace_id=_to_otel_trace_id(EXECUTION_ARN, START_TIME)
+            if ambient_kind == "same"
+            else 1,
+            span_id=0x42,
+            is_remote=False,
+            trace_flags=TraceFlags(1),
+        )
+        caller = trace.set_span_in_context(NonRecordingSpan(ambient), caller)
+    token = otel_context.attach(caller)
+    error = ValueError("handler error")
+    try:
+        plugin.on_invocation_start(_invocation_start_info())
+        expected = trace.get_current_span().get_span_context()
+        assert expected.trace_id == _to_otel_trace_id(EXECUTION_ARN, START_TIME)
+        assert expected.span_id == derive_workflow_span_id(EXECUTION_ARN)
+
+        def body() -> None:
+            active = trace.get_current_span().get_span_context()
+            assert active == expected
+            assert active.is_valid
+            assert baggage.get_baggage("tenant") == "hook-test"
+            if raises:
+                raise error
+
+        try:
+            if raises:
+                with pytest.raises(ValueError) as caught:
+                    body()
+                assert caught.value is error
+            else:
+                body()
+        finally:
+            plugin.on_invocation_end(
+                _invocation_end_info(
+                    InvocationStatus.FAILED if raises else InvocationStatus.SUCCEEDED
+                )
+            )
+        assert plugin._context_tokens == {}
+        assert otel_context.get_current() is caller
+        assert baggage.get_baggage("tenant") == "hook-test"
+    finally:
+        otel_context.detach(token)
+        provider.shutdown()

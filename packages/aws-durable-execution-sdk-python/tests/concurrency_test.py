@@ -1,5 +1,6 @@
 """Tests for the concurrency module."""
 
+import contextvars
 import hashlib
 import json
 import queue
@@ -77,7 +78,10 @@ from aws_durable_execution_sdk_python.operation.map import MapExecutor
 from aws_durable_execution_sdk_python.operation.parallel import (
     ParallelExecutor,
 )
-from aws_durable_execution_sdk_python.plugin import PluginExecutor
+from aws_durable_execution_sdk_python.plugin import (
+    DurableInstrumentationPlugin,
+    PluginExecutor,
+)
 from aws_durable_execution_sdk_python.state import (
     CheckpointedResult,
     ExecutionState,
@@ -5275,3 +5279,44 @@ def test_executor_should_complete_with_failed_outcome():
 
 
 # endregion Custom completion predicate (should_complete) integration tests
+
+
+def test_instrumented_executor_isolates_bindings_on_a_reused_worker() -> None:
+    """Exercise actual admission/worker execution independently of durable I/O."""
+    binding = contextvars.ContextVar("executor-unit-binding", default="empty")
+    seen: list[tuple[str, int]] = []
+
+    class RecordingExecutor(ConcurrentExecutor[Callable[[], str], str]):
+        def _execute_item_in_child_context(
+            self,
+            executor_context: DurableContext,
+            executable: Executable[Callable[[], str]],
+        ) -> str:
+            seen.append((binding.get(), threading.get_ident()))
+            binding.set(f"branch-{executable.index}")
+            return executable.func()
+
+    executor = RecordingExecutor(
+        executables=[Executable(index, lambda: "ok") for index in range(2)],
+        max_concurrency=1,
+        completion_config=CompletionConfig(min_successful=2),
+        sub_type_top=OperationSubType.PARALLEL,
+        sub_type_iteration=OperationSubType.PARALLEL_BRANCH,
+        name_prefix="branch-",
+        serdes=None,
+        operation_id_namespace=_StubNamespace(),
+    )
+    state = Mock(spec=ExecutionState)
+    state._plugin_executor = PluginExecutor([DurableInstrumentationPlugin()])
+    token = binding.set("coordinator")
+    try:
+        result = executor.execute(state, Mock(spec=DurableContext))
+        assert result.get_results() == ["ok", "ok"]
+        assert binding.get() == "coordinator"
+        assert [value for value, _thread in seen] == ["coordinator", "coordinator"]
+        assert seen[0][1] == seen[1][1] != threading.get_ident()
+    finally:
+        for call in state.register_branch_pool.call_args_list:
+            call.args[0].shutdown(wait=True)
+        binding.reset(token)
+    assert binding.get() == "empty"
