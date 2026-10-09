@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import heapq
 import logging
 import queue
@@ -291,13 +292,25 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
 
         def submit(branch: Branch[CallableType, ResultType]) -> None:
             branch.start()
-            pool.submit(
-                self._branch_worker,
-                execution_state,
-                executor_context,
-                events,
-                branch.executable,
-            )
+            if execution_state._plugin_executor._plugins:  # noqa: SLF001
+                # Every admission/resume gets its own Context. Branch bindings
+                # cannot leak into siblings, the coordinator, or reused workers.
+                pool.submit(
+                    contextvars.copy_context().run,
+                    self._branch_worker,
+                    execution_state,
+                    executor_context,
+                    events,
+                    branch.executable,
+                )
+            else:
+                pool.submit(
+                    self._branch_worker,
+                    execution_state,
+                    executor_context,
+                    events,
+                    branch.executable,
+                )
 
         try:
             # Only rebuild the items snapshot after a terminal event changes

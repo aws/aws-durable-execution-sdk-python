@@ -200,7 +200,11 @@ Start hooks run in registration order. A later successful plugin that deliberate
 sets or clears the active span wins; OTel does not apply a second correction pass.
 Place OTel after a span-replacing plugin when OTel's view-specific context is
 desired. Baggage-only plugins that extend the current context can appear on either
-side. End hooks also retain registration order and reset tokens in their owning
+side. The SDK also copies the coordinator's current bindings for each `map` or
+`parallel` branch admission/resume when plugins are registered. Baggage and
+other successful bindings reach these SDK-managed callbacks, while a branch's
+changes cannot leak into siblings, the coordinator or a reused worker.
+End hooks also retain registration order and reset tokens in their owning
 Context; they do not promise a reverse-stack observation of other plugins' spans.
 Existing registration, factory lifetime and checkpoint formats are unchanged.
 
