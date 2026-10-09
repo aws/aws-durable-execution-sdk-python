@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from aws_durable_execution_sdk_python.plugin import PluginExecutor
 from aws_durable_execution_sdk_python.concurrency.executor import ConcurrentExecutor
 from aws_durable_execution_sdk_python.identifier import OperationIdNamespace
 
@@ -211,6 +212,8 @@ def test_parallel_handler():
     config = ParallelConfig(max_concurrency=2)
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -255,6 +258,8 @@ def test_parallel_handler_with_none_config():
     callables = [func1]
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -299,6 +304,8 @@ def test_parallel_handler_creates_executor_with_correct_config():
     config = ParallelConfig(max_concurrency=5)
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -351,6 +358,8 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
     callables = [func1]
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -466,6 +475,8 @@ def test_parallel_handler_with_serdes():
     callables = [func1]
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -513,6 +524,8 @@ def test_parallel_handler_with_summary_generator():
     config = ParallelConfig(summary_generator=mock_summary_generator)
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -556,6 +569,8 @@ def test_parallel_handler_default_summary_generator():
     callables = [func1, func2]
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -606,6 +621,8 @@ def test_parallel_handler_with_explicit_none_summary_generator():
     config = ParallelConfig(summary_generator=None)
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -654,6 +671,8 @@ def test_parallel_handler_replay_mechanism():
 
     # Mock execution state that indicates operation already succeeded
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -723,6 +742,8 @@ def test_parallel_handler_replay_with_replay_children():
 
     # Mock execution state that indicates operation succeeded but children need replay
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -824,6 +845,8 @@ def test_parallel_handler_first_execution_then_replay():
     execution_count = 0
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -1052,6 +1075,8 @@ def test_parallel_result_serialization_roundtrip():
     callables = [func1, func2, func3]
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -1474,6 +1499,8 @@ def test_parallel_handler_defaults_summary_generator_for_user_config():
     """A user config without a summary generator gets the default (JS parity)."""
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -1551,6 +1578,8 @@ def test_parallel_handler_with_should_complete_predicate():
     ) as mock_execute:
 
         class MockExecutionState:
+            _plugin_executor = PluginExecutor([])
+
             def register_branch_pool(self, pool):
                 pass
 
