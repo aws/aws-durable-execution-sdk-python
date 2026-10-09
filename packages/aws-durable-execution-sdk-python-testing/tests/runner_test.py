@@ -1209,6 +1209,40 @@ def test_cloud_runner_init(mock_boto3):
 
 
 @patch("aws_durable_execution_sdk_python_testing.runner.boto3")
+def test_cloud_runner_pause_execution_not_implemented(mock_boto3: Mock) -> None:
+    mock_client = Mock()
+    mock_boto3.client.return_value = mock_client
+    runner = DurableFunctionCloudTestRunner(function_name="test-function")
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        runner.pause_execution(
+            execution_arn="arn:aws:lambda:us-west-2:123456789012:function:test:execution:exec-1"
+        )
+
+    assert str(exc_info.value) == (
+        "pause_execution() is not implemented for DurableFunctionCloudTestRunner"
+    )
+    assert mock_client.mock_calls == []
+
+
+@patch("aws_durable_execution_sdk_python_testing.runner.boto3")
+def test_cloud_runner_resume_execution_not_implemented(mock_boto3: Mock) -> None:
+    mock_client = Mock()
+    mock_boto3.client.return_value = mock_client
+    runner = DurableFunctionCloudTestRunner(function_name="test-function")
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        runner.resume_execution(
+            execution_arn="arn:aws:lambda:us-west-2:123456789012:function:test:execution:exec-1"
+        )
+
+    assert str(exc_info.value) == (
+        "resume_execution() is not implemented for DurableFunctionCloudTestRunner"
+    )
+    assert mock_client.mock_calls == []
+
+
+@patch("aws_durable_execution_sdk_python_testing.runner.boto3")
 def test_cloud_runner_run_success(mock_boto3):
     """Test DurableFunctionCloudTestRunner.run with successful execution."""
     from aws_durable_execution_sdk_python.execution import InvocationStatus

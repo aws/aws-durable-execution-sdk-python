@@ -1319,6 +1319,28 @@ class DurableFunctionCloudTestRunner:
 
         return response.get("DurableExecutionArn")
 
+    def pause_execution(self, execution_arn: str | None = None) -> None:
+        """Cloud pause is not implemented; use DurableFunctionTestRunner instead.
+
+        Experimental; may change or be removed in a future release.
+
+        Raises:
+            NotImplementedError: Always. No service request is sent.
+        """
+        msg = "pause_execution() is not implemented for DurableFunctionCloudTestRunner"
+        raise NotImplementedError(msg)
+
+    def resume_execution(self, execution_arn: str | None = None) -> None:
+        """Cloud resume is not implemented; use DurableFunctionTestRunner instead.
+
+        Experimental; may change or be removed in a future release.
+
+        Raises:
+            NotImplementedError: Always. No service request is sent.
+        """
+        msg = "resume_execution() is not implemented for DurableFunctionCloudTestRunner"
+        raise NotImplementedError(msg)
+
     def send_callback_success(
         self, callback_id: str, result: bytes | None = None
     ) -> None:
