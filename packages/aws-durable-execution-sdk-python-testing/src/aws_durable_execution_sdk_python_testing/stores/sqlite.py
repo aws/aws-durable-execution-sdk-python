@@ -131,7 +131,7 @@ class SQLiteExecutionStore(ExecutionStore):
                 row: tuple[str] | None = cursor.fetchone()
 
             if not row:
-                raise ResourceNotFoundException(f"Execution {execution_arn} not found")
+                raise ResourceNotFoundException("Durable Execution does not exist")
 
             return Execution.from_json_dict(json.loads(row[0]))
         except sqlite3.Error as e:

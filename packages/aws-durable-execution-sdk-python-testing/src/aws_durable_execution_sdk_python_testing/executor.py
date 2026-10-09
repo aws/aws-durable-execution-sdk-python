@@ -352,7 +352,7 @@ class Executor(ExecutionObserver):
         try:
             return self._store.load(execution_arn)
         except KeyError as e:
-            msg: str = f"Execution {execution_arn} not found"
+            msg: str = "Durable Execution does not exist"
             raise ResourceNotFoundException(msg) from e
 
     def get_execution_details(self, execution_arn: str) -> GetDurableExecutionResponse:
@@ -1807,6 +1807,10 @@ class Executor(ExecutionObserver):
 
         Idempotent; a no-op once the execution has finished.
         Resolves once no invocation of this execution is running.
+
+        Raises:
+            InvalidParameterValueException: If the ARN is blank.
+            ResourceNotFoundException: If the execution does not exist.
         """
         self._validate_execution_arn(execution_arn)
         self._registry.submit(
@@ -1825,6 +1829,10 @@ class Executor(ExecutionObserver):
 
         Idempotent; a no-op once the execution has finished or if it was
         not paused.
+
+        Raises:
+            InvalidParameterValueException: If the ARN is blank.
+            ResourceNotFoundException: If the execution does not exist.
         """
         self._validate_execution_arn(execution_arn)
         self._registry.submit(
@@ -1833,14 +1841,14 @@ class Executor(ExecutionObserver):
         ).result()
 
     def _set_paused(self, execution_arn: str) -> None:
-        execution = self._store.load(execution_arn)
+        execution = self.get_execution(execution_arn)
         if execution.is_complete or execution.is_paused:
             return
         execution.pause()
         self._store.save(execution)
 
     def _resume_execution(self, execution_arn: str) -> None:
-        execution = self._store.load(execution_arn)
+        execution = self.get_execution(execution_arn)
         if execution.is_complete or not execution.is_paused:
             return
 

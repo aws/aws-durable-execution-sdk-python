@@ -23,6 +23,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
+    ResourceNotFoundException,
 )
 from aws_durable_execution_sdk_python_testing.execution import Execution, PauseState
 from aws_durable_execution_sdk_python_testing.executor import Executor, InvocationState
@@ -244,6 +245,7 @@ def test_pause_and_resume_are_idempotent():
     executor.resume_execution(execution.durable_execution_arn)
     executor.resume_execution(execution.durable_execution_arn)
     assert store.load(execution.durable_execution_arn).is_paused is False
+    # No invocation scheduled in between pause and resume, so the scheduler should receive no calls
     executor._scheduler.call_later.assert_not_called()  # noqa: SLF001
 
 
@@ -264,6 +266,25 @@ def test_resume_is_a_no_op_when_not_paused():
     reloaded = store.load(execution.durable_execution_arn)
     assert reloaded.is_paused is False
     assert reloaded.pause_state is PauseState.NOT_PAUSED
+
+
+def test_checkpoint_with_the_withheld_invocations_token_is_rejected():
+    executor, store, execution, token_0 = _make_executor_with_started_execution()
+    execution.pause()
+    store.save(execution)
+    executor.checkpoint_execution(
+        execution_arn=execution.durable_execution_arn,
+        checkpoint_token=token_0,
+        updates=[_step_start_update("step-A")],
+    )
+
+    with pytest.raises(InvalidParameterValueException) as exc_info:
+        executor.checkpoint_execution(
+            execution_arn=execution.durable_execution_arn,
+            checkpoint_token=token_0,
+            updates=[_step_start_update("step-B")],
+        )
+    assert str(exc_info.value) == "Invalid checkpoint token"
 
 
 @pytest.mark.parametrize("retry_client_token", ["c1", None, "different-client-token"])
@@ -349,6 +370,7 @@ def test_paused_pending_is_accepted_only_when_a_token_was_withheld():
         checkpoint_token=execution.get_new_checkpoint_token(),
         updates=[],
     )
+
     assert response.checkpoint_token is None
     assert execution.pause_state is PauseState.PAUSED_INVOCATION_DEFERRED
     executor._validate_invocation_response_and_store(  # noqa: SLF001
@@ -356,6 +378,7 @@ def test_paused_pending_is_accepted_only_when_a_token_was_withheld():
     )
 
     executor.resume_execution(execution.durable_execution_arn)
+
     with pytest.raises(InvalidParameterValueException, match="no pending operations"):
         executor._validate_invocation_response_and_store(  # noqa: SLF001
             execution.durable_execution_arn, pending, execution, execution.seq_counter
@@ -383,3 +406,13 @@ def test_resume_schedules_deferred_invocation_once_before_it_starts() -> None:
     assert store.load(arn).pause_state is PauseState.NOT_PAUSED
     assert executor._invocation_gate(arn) is InvocationState.PRE_INVOKE  # noqa: SLF001
     invoker.create_invocation_input.assert_not_called()
+
+
+def test_pause_and_resume_raise_for_an_unknown_execution() -> None:
+    executor, _, _, _ = _make_executor_with_started_execution()
+
+    for call in (executor.pause_execution, executor.resume_execution):
+        with pytest.raises(ResourceNotFoundException) as exc_info:
+            call("arn:unknown")
+        assert str(exc_info.value) == "Durable Execution does not exist"
+

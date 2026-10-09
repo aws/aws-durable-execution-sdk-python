@@ -1825,7 +1825,9 @@ def test_get_execution_details_not_found(executor, mock_store):
     """Test get_execution_details with non-existent execution."""
     mock_store.load.side_effect = KeyError("Execution not found")
 
-    with pytest.raises(ResourceNotFoundException, match="Execution test-arn not found"):
+    with pytest.raises(
+        ResourceNotFoundException, match="^Durable Execution does not exist$"
+    ):
         executor.get_execution_details("test-arn")
 
 
@@ -2089,7 +2091,9 @@ def test_stop_execution_with_custom_error(executor, mock_store):
 def test_get_execution_not_found(executor, mock_store):
     mock_store.load.side_effect = KeyError("not found")
 
-    with pytest.raises(ResourceNotFoundException):
+    with pytest.raises(
+        ResourceNotFoundException, match="^Durable Execution does not exist$"
+    ):
         executor.get_execution("test-arn")
 
 

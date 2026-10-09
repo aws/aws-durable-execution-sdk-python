@@ -23,6 +23,7 @@ from collections.abc import Callable
 from threading import Event as ThreadingEvent
 from typing import Any
 
+import pytest
 from aws_durable_execution_sdk_python.config import Duration, WaitForCallbackConfig
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
@@ -33,6 +34,9 @@ from aws_durable_execution_sdk_python.execution import (
     durable_execution,
 )
 
+from aws_durable_execution_sdk_python_testing.exceptions import (
+    ResourceNotFoundException,
+)
 from aws_durable_execution_sdk_python_testing.runner import (
     DurableFunctionTestResult,
     DurableFunctionTestRunner,
@@ -168,3 +172,28 @@ def test_wait_elapsing_while_paused_defers_invocation_until_resumed() -> None:
 
     assert result.status is InvocationStatus.SUCCEEDED
     assert result.result == json.dumps("done")
+
+def test_pause_execution_on_unknown_arn_raises_not_found() -> None:
+
+    def _handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
+        return "done"
+
+    with DurableFunctionTestRunner(
+        handler=durable_execution(_handler), execution_timeout=15
+    ) as runner:
+        with pytest.raises(ResourceNotFoundException) as exc_info:
+            runner.pause_execution("arn:aws:states:us-west-2:123456789012:express:unknown-fn:unknown-exec:0000")
+        assert exc_info.value.Message == "Durable Execution does not exist"
+
+
+def test_resume_execution_on_unknown_arn_raises_not_found() -> None:
+
+    def _handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
+        return "done"
+
+    with DurableFunctionTestRunner(
+        handler=durable_execution(_handler), execution_timeout=15
+    ) as runner:
+        with pytest.raises(ResourceNotFoundException) as exc_info:
+            runner.resume_execution("arn:aws:states:us-west-2:123456789012:express:unknown-fn:unknown-exec:0000")
+        assert exc_info.value.Message == "Durable Execution does not exist"
