@@ -78,16 +78,12 @@ class PauseState(Enum):
 
 @dataclass(frozen=True)
 class CheckpointIdempotencyRecord:
-    """Single-slot cache of the most recent accepted checkpoint response.
+    """Single-slot cache of the most recent accepted checkpoint response
+    with a checkpoint token.
 
-    Single-slot cache of the most recent accepted checkpoint response.
-    ``(client_token, inbound_checkpoint_token)`` pair is entitled to a
-    byte-identical response; this record is what we compare
-    against and replay from.
-
-    ``outbound_checkpoint_token`` is None when the response withheld the
-    token because the execution was paused, so the replay stays identical
-    after a resume.
+    A matching ``(client_token, inbound_checkpoint_token)`` pair replays
+    this response without applying updates again. Pause-interrupted
+    checkpoints leave this record unchanged so their retries are rejected.
     """
 
     client_token: str

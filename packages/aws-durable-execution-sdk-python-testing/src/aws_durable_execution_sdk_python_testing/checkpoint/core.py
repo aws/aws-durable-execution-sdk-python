@@ -91,8 +91,10 @@ class CheckpointCore:
 
         Advances ``token_sequence`` exactly once, returns the full set of
         operations the handler has not yet seen, advances
-        ``handler_seen_seq`` to cover them, and records the
-        idempotency entry for a byte-identical replay of a retried call.
+        ``handler_seen_seq`` to cover them, and records an idempotency
+        entry for a byte-identical replay of a retried call 
+        only when returning a checkpoint token.
+
         The caller is responsible for the invocation gate, locking,
         persistence, and applying the returned effects.
 
@@ -146,20 +148,21 @@ class CheckpointCore:
         # checkpoint no further, so it reports PENDING at its next checkpoint
         # rather than continuing, and owes a re-invoke once resumed.
         #
-        # The withheld token is recorded as the idempotency record's outbound
-        # token so a retry of this call replays the same tokenless response,
-        # even after a resume has moved the execution on.
+        # Checkpoints that were interrupted by a pause are not added to the
+        # idempotency record. A retry of this checkpoint will fail rather than be
+        # answered again.
+
         outbound_token: str | None = new_token
         if execution.is_paused:
             outbound_token = None
             execution.defer_invocation()
-
-        execution.last_checkpoint = CheckpointIdempotencyRecord(
-            client_token=client_token or "",
-            inbound_checkpoint_token=checkpoint_token,
-            outbound_checkpoint_token=outbound_token,
-            operations=list(response_ops),
-            next_marker=None,
-        )
+        else:
+            execution.last_checkpoint = CheckpointIdempotencyRecord(
+                client_token=client_token or "",
+                inbound_checkpoint_token=checkpoint_token,
+                outbound_checkpoint_token=outbound_token,
+                operations=list(response_ops),
+                next_marker=None,
+            )
 
         return CheckpointResult(outbound_token, response_ops, effects)

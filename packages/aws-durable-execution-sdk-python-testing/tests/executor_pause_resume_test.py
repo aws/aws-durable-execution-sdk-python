@@ -9,6 +9,7 @@ harness in ``executor_checkpoint_test.py``.
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from unittest.mock import Mock
 
 import pytest
@@ -120,7 +121,7 @@ def test_pause_state_transitions_round_trip(
         assert candidate.pause_state is PauseState.NOT_PAUSED
         assert candidate.is_paused is False
         assert candidate.has_deferred_invocation is False
-        
+
         assert candidate.resume() is False
 
         candidate.defer_invocation()
@@ -161,26 +162,35 @@ def test_pause_state_properties_are_read_only(attribute: str) -> None:
     assert execution.pause_state is PauseState.NOT_PAUSED
 
 
-def test_checkpoint_while_paused_omits_token_but_registers_update():
+@pytest.mark.parametrize("with_updates", [True, False])
+def test_checkpoint_while_paused_omits_token_but_registers_update(
+    with_updates: bool,
+) -> None:
     executor, store, execution, token_0 = _make_executor_with_started_execution()
+    previous_sequence = execution.token_sequence
     execution.pause()
     store.save(execution)
+    updates = [_step_start_update("step-A")] if with_updates else []
+    expected_operation_ids = ["step-A"] if with_updates else []
 
     response = executor.checkpoint_execution(
         execution_arn=execution.durable_execution_arn,
         checkpoint_token=token_0,
-        updates=[_step_start_update("step-A")],
+        updates=updates,
     )
 
     assert response.checkpoint_token is None
-    assert [op.operation_id for op in response.new_execution_state.operations] == [
-        "step-A"
-    ]
+    assert [
+        op.operation_id for op in response.new_execution_state.operations
+    ] == expected_operation_ids
 
     reloaded = store.load(execution.durable_execution_arn)
-    assert any(
-        op.operation_id == "step-A" for op in reloaded.get_navigable_operations()
-    )
+    assert reloaded.token_sequence == previous_sequence + 1
+    assert [
+        op.operation_id
+        for op in reloaded.get_navigable_operations()
+        if op.operation_type is OperationType.STEP
+    ] == expected_operation_ids
     assert reloaded.pause_state is PauseState.PAUSED_INVOCATION_DEFERRED
 
 
@@ -256,38 +266,56 @@ def test_resume_is_a_no_op_when_not_paused():
     assert reloaded.pause_state is PauseState.NOT_PAUSED
 
 
-def test_paused_checkpoint_retries_without_a_token_even_after_resume():
-    """A retry of a checkpoint answered while paused replays the same
-    tokenless response on the HTTP path, including after a resume."""
-    executor, store, execution, token_0 = _make_executor_with_started_execution()
+@pytest.mark.parametrize("retry_client_token", ["c1", None, "different-client-token"])
+def test_paused_checkpoint_retry_is_rejected_even_after_resume(
+    retry_client_token: str | None,
+) -> None:
+    executor, store, execution, inbound = _make_executor_with_started_execution()
+    arn = execution.durable_execution_arn
     execution.pause()
     store.save(execution)
 
     first = executor.checkpoint_execution(
-        execution_arn=execution.durable_execution_arn,
-        checkpoint_token=token_0,
-        updates=[_step_start_update("step-A")],
+        execution_arn=arn,
+        checkpoint_token=inbound,
+        updates=[],
         client_token="c1",
     )
     assert first.checkpoint_token is None
 
-    retry = executor.checkpoint_execution(
-        execution_arn=execution.durable_execution_arn,
-        checkpoint_token=token_0,
-        updates=[_step_start_update("step-A")],
+    executor.resume_execution(arn)
+    assert store.load(arn).is_paused is False
+    before_retry = deepcopy(store.load(arn).to_json_dict())
+
+    with pytest.raises(
+        InvalidParameterValueException, match="^Invalid checkpoint token$"
+    ):
+        executor.checkpoint_execution(
+            execution_arn=arn,
+            checkpoint_token=inbound,
+            updates=[],
+            client_token=retry_client_token,
+        )
+
+    assert store.load(arn).to_json_dict() == before_retry
+
+
+def test_paused_checkpoint_does_not_create_idempotency_record() -> None:
+    executor, store, execution, inbound = _make_executor_with_started_execution()
+    arn = execution.durable_execution_arn
+
+    assert execution.last_checkpoint is None
+
+    execution.pause()
+    store.save(execution)
+    executor.checkpoint_execution(
+        execution_arn=arn,
+        checkpoint_token=inbound,
+        updates=[],
         client_token="c1",
     )
-    assert retry.checkpoint_token is None
 
-    executor.resume_execution(execution.durable_execution_arn)
-
-    retry_after_resume = executor.checkpoint_execution(
-        execution_arn=execution.durable_execution_arn,
-        checkpoint_token=token_0,
-        updates=[_step_start_update("step-A")],
-        client_token="c1",
-    )
-    assert retry_after_resume.checkpoint_token is None
+    assert store.load(arn).last_checkpoint is None
 
 
 def test_invoke_execution_while_paused_still_schedules_with_its_delay():
