@@ -73,6 +73,7 @@ _TERMINAL_INVOCATION_STATUSES = frozenset(
     {InvocationStatus.SUCCEEDED, InvocationStatus.FAILED}
 )
 _TIMESTAMP_STEP_NANOS = 1_000
+_INVOCATION_CONTEXT_KEY = "__invocation_context__"
 
 _SpanAttributes = dict[str, str | bool | int]
 
@@ -299,12 +300,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
            context this is the active context span (attached in
            on_user_function_start). Unrelated ambient spans are ignored so logs
            stay correlated to the durable execution trace.
-        2. The invocation span from the plugin registry. This is the path used
-           for top-level handler code: the invocation span is never attached to
-           the worker thread's context, so the registry is the only way to
-           resolve it. It also covers code between top-level operations, where
-           detaching the operation scope restores a context with no durable
-           span.
+        2. The invocation span from the plugin registry, including lifecycle
+           phases where another plugin changed the active context.
 
         Returns:
             A valid SpanContext, or None if no span is active.
@@ -593,6 +590,17 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             attributes=self._extract_attributes(info),
         )
 
+        # Start and End share the invocation worker and token-owning Context.
+        # Retain a valid same-trace ambient parent; otherwise bind this invocation.
+        ambient = trace.get_current_span().get_span_context()
+        invocation_span = self._get_span(None)
+        if invocation_span is not None and (
+            not ambient.is_valid or ambient.trace_id != self._execution_trace_id
+        ):
+            self._attach_context(
+                _INVOCATION_CONTEXT_KEY, trace.set_span_in_context(invocation_span)
+            )
+
         # Cover handlers installed after construction as well.
         if self._enrich_logger:
             install_log_filter(self)
@@ -672,6 +680,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         if not self._tracing_enabled:
             self._reset_state()
             return
+
+        # User work and checkpoint cleanup have finished. Release Start bindings
+        # in the Context that created their tokens before closing the spans.
+        self._detach_remaining_contexts()
 
         # Spans are registered parent-first, so close pending spans in reverse
         # order to keep every child contained within its parent.

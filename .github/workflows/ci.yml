@@ -84,8 +84,6 @@ jobs:
       run: hatch run types:check
     - name: Run tests + coverage
       run: hatch run test:cov
-    - name: Verify supported legacy core compatibility
-      run: hatch run test-pypi-otel-legacy:test
     - name: Build distribution
       run: |
         for pkg in packages/*/; do
@@ -96,6 +94,10 @@ jobs:
             cd "$GITHUB_WORKSPACE"
           fi
         done
+    - name: Test installed core and OTel wheels
+      run: hatch run test-wheel-otel:test
+    - name: Test released OTel with the new core wheel
+      run: hatch run test-wheel-otel-legacy:test
     - name: Verify OTel wheel dependency contract
       run: |
         OTEL_WHEEL=$(find packages/aws-durable-execution-sdk-python-otel/dist \
