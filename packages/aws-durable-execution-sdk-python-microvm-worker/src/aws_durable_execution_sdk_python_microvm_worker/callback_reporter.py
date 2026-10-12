@@ -460,9 +460,12 @@ class CallbackReporter:
                     error
                 ) == CLOSED_CALLBACK_CODE:
                     self._logger.warning(
-                        "the callback is already complete or timed out. An "
-                        "earlier attempt whose answer never arrived probably "
-                        "reported the outcome.",
+                        "the callback is closed. The service gives the same "
+                        "answer for a callback that is already complete and "
+                        "for one that timed out. So either an earlier attempt "
+                        "whose answer never arrived reported the outcome, or "
+                        "the callback timed out first. The durable function "
+                        "no longer waits for this callback in either case.",
                         extra={"callbackId": self.callback_id, "attempt": attempt},
                     )
                     return

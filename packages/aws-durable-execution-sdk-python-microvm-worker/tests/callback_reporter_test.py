@@ -239,7 +239,8 @@ def test_closed_callback_after_uncertain_attempt_is_delivered(
     assert len(logger.lines) == 1
     level, message, extra = logger.lines[0]
     assert level == "warning"
-    assert "already complete or timed out" in message
+    assert "already complete" in message
+    assert "timed out first" in message
     assert extra["callbackId"] == "cb-1"
 
 
