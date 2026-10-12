@@ -276,6 +276,8 @@ def test_reports_system_exit_from_the_handler_as_a_failure(start: Any) -> None:
         ({1, 2}, "ResultSerializationError"),
         ("x" * (256 * 1024), "ResultTooLargeError"),
     ],
+    # The default test ID would hold the 256 KB result.
+    ids=["not-json", "over-256-kb"],
 )
 def test_reports_a_result_that_cannot_be_sent_as_a_failure(
     start: Any, logger: Any, result: Any, error_type: str
@@ -800,6 +802,18 @@ def test_accepts_a_chunked_body_with_extensions_and_trailers(start: Any) -> None
         (b"2\r\n{}\r\n", b'{"error":"invalid request"}'),
         (b"20000\r\n", b"request body exceeds 65536 bytes"),
     ],
+    # The default test IDs would hold the raw bytes, one of them 2,000 long.
+    ids=[
+        "not-hex",
+        "negative",
+        "hex-prefix",
+        "plus-sign",
+        "underscore",
+        "no-crlf-after-chunk",
+        "size-line-too-long",
+        "ends-early",
+        "over-the-limit",
+    ],
 )
 def test_answers_400_to_a_malformed_chunked_body(
     start: Any, chunks: bytes, expected: bytes
@@ -1174,9 +1188,26 @@ def test_raises_when_the_port_is_taken(start: Any) -> None:
         start_microvm_worker(handler=Held(), port=worker.port)
 
 
-def test_listens_on_ipv6_and_ipv4(start: Any) -> None:
+def _has_ipv6_loopback() -> bool:
+    """Whether this host can use ``::1``.
+
+    A host can support IPv6 sockets and still have no ``::1`` address. A
+    Docker container with IPv6 turned off is one example. A connection to
+    ``::1`` then fails with ``EADDRNOTAVAIL``.
+    """
     if not socket.has_dualstack_ipv6():
-        pytest.skip("this host has no dual-stack IPv6")
+        return False
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+def test_listens_on_ipv6_and_ipv4(start: Any) -> None:
+    if not _has_ipv6_loopback():
+        pytest.skip("this host has no IPv6 loopback address")
     worker, _ = start(Held())
 
     connection = http.client.HTTPConnection("::1", worker.port, timeout=WAIT)
