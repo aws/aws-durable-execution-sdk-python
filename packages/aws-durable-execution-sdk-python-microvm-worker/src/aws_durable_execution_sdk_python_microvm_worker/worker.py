@@ -18,6 +18,7 @@ import os
 import re
 import socket
 import socketserver
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -296,8 +297,13 @@ class MicrovmWorkerListener:
     def request_handler_class(self) -> type[BaseHTTPRequestHandler]:
         """A request handler class for ``http.server`` that serves this listener.
 
-        Pass it to a ``ThreadingHTTPServer``. The listener needs a thread per
-        request, because it answers each request before its job ends.
+        Pass it to a ``ThreadingHTTPServer``. A single-threaded server serves
+        one request at a time. So one slow client, which the listener waits
+        for up to 60 seconds per read, would hold back every other request,
+        including the ``run`` hook. Also set the server's
+        ``request_queue_size`` to 511, as :func:`start_microvm_worker` does.
+        A session can send many jobs at once, and the default backlog of 5
+        resets the connections beyond it.
         """
         listener = self
 
@@ -478,14 +484,19 @@ class MicrovmWorkerListener:
             duplicate = self._is_known(job.callback_id)
             if not duplicate:
                 self._jobs.add(job.callback_id)
-        exchange.respond(202, {})
         if duplicate:
+            exchange.respond(202, {})
             self._logger.warning(
                 "duplicate job ignored",
                 extra={"microvmId": microvm_id, "callbackId": job.callback_id},
             )
             return
+        # The thread starts before the answer. A thread that cannot start
+        # raises, and the caller gets HTTP 500, which the durable function
+        # retries. After a 202, the durable function does not deliver the job
+        # again.
         self._start_job(handler, job, request.region)
+        exchange.respond(202, {})
 
     def _reject(self, error: BaseException, exchange: _Exchange) -> None:
         """Answer 400 to a request that the worker could not accept.
@@ -877,7 +888,11 @@ class _Outcome:
             return cls(error=error)
         if inspect.isawaitable(value):
             if inspect.iscoroutine(value):
-                value.close()
+                # close() raises when the coroutine has started and ignores
+                # GeneratorExit, for example with an await in a finally
+                # block. The TypeError below must still be reported.
+                with contextlib.suppress(Exception):
+                    value.close()
             return cls(
                 error=TypeError(
                     "the job handler returned an awaitable. A job handler must "
@@ -922,6 +937,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
         # The base class writes every request to stderr. The worker logs what
         # matters through its own logger.
         return
+
+    def version_string(self) -> str:
+        # The base class names the exact Python version in the Server header.
+        # Every caller of the MicroVM endpoint would learn it, and no caller
+        # needs it.
+        return "aws-durable-execution-sdk-python-microvm-worker"
 
 
 class _Exchange:
@@ -1059,11 +1080,27 @@ class _Exchange:
         RFC 9112 defines a chunk size as one or more hex digits. ``int(x, 16)``
         also accepts a ``0x`` prefix, a sign, and underscores. So the size is
         matched against the RFC form first, as ``Content-Length`` is.
+
+        The size lines, their extensions, and the trailers do not count as
+        body data. Without a limit of their own, they could make the worker
+        read without bound. Node fixed the same issue in CVE-2024-22019. So
+        they get their own limit of ``max_bytes``, and the data limit keeps
+        its meaning.
         """
         chunks: list[bytes] = []
         size = 0
-        while True:
+        framing = 0
+
+        def read_framing_line() -> bytes:
+            nonlocal framing
             line = self._request.rfile.readline(_MAX_CHUNK_LINE_BYTES)
+            framing += len(line)
+            if framing > max_bytes:
+                raise self.too_large(max_bytes)
+            return line
+
+        while True:
+            line = read_framing_line()
             if not line.endswith(b"\n"):
                 raise _malformed_chunks() if line else _ended_early()
             token = line.split(b";", 1)[0].strip()
@@ -1071,7 +1108,9 @@ class _Exchange:
                 raise _malformed_chunks()
             chunk_size = int(token, 16)
             if chunk_size == 0:
-                self._skip_trailers()
+                # The trailer lines end at an empty line.
+                while read_framing_line() not in {b"\r\n", b"\n", b""}:
+                    pass
                 return b"".join(chunks)
             size += chunk_size
             if size > max_bytes:
@@ -1079,12 +1118,6 @@ class _Exchange:
             chunks.append(self._read_exactly(chunk_size))
             if self._read_exactly(2) != b"\r\n":
                 raise _malformed_chunks()
-
-    def _skip_trailers(self) -> None:
-        while True:
-            line = self._request.rfile.readline(_MAX_CHUNK_LINE_BYTES)
-            if line in {b"\r\n", b"\n", b""}:
-                return
 
     def _read_exactly(self, length: int) -> bytes:
         data = self._request.rfile.read(length)
@@ -1104,6 +1137,12 @@ def _ended_early() -> ConnectionError:
 class _Server(ThreadingHTTPServer):
     """The worker's HTTP server."""
 
+    # socketserver listens with a backlog of 5, and Node's server with 511.
+    # A session can send many jobs at once. A connection beyond the backlog
+    # waits for a SYN retransmit, or gets a TCP reset. So the worker uses
+    # Node's backlog. The kernel caps it at net.core.somaxconn.
+    request_queue_size = 511
+
     def server_bind(self) -> None:
         # HTTPServer.server_bind looks up the host's fully qualified name,
         # which can wait for DNS. The worker never uses the name. So the bind
@@ -1111,6 +1150,15 @@ class _Server(ThreadingHTTPServer):
         socketserver.TCPServer.server_bind(self)
         self.server_name = "localhost"
         self.server_port = int(self.server_address[1])
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # A client that resets the connection while it sends the request line
+        # or the headers ends here, before the listener gets the request. The
+        # base class prints a traceback to stderr. A client that went away
+        # needs none.
+        if isinstance(sys.exception(), ConnectionError):
+            return
+        super().handle_error(request, client_address)
 
 
 class _DualStackServer(_Server):
@@ -1125,8 +1173,12 @@ class _DualStackServer(_Server):
     address_family = socket.AF_INET6
 
     def server_bind(self) -> None:
-        with contextlib.suppress(OSError, AttributeError):
-            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        # _create_server uses this class only when has_dualstack_ipv6() is
+        # true. That check makes this same call on a new socket. So the call
+        # fails only on a fault, and the worker then fails to start. A
+        # suppressed failure would leave a server that refuses IPv4 on a host
+        # whose IPv6 sockets start IPv6-only.
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
         super().server_bind()
 
 

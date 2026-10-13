@@ -5,14 +5,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import inspect
 import io
 import json
 import socket
+import struct
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from http.server import ThreadingHTTPServer
 from typing import Any
 
@@ -679,23 +681,56 @@ def test_answers_100_continue_when_the_declared_size_is_not_over_a_limit(
     assert interim.startswith(b"HTTP/1.1 100 Continue")
 
 
+def _send_after_the_answer(
+    worker: MicrovmWorker, seconds: float
+) -> tuple[bytes, BaseException | None]:
+    """Get a 400 for an oversized body, then keep sending for ``seconds``.
+
+    The worker shuts down its side right after the answer. So the client
+    reads the answer and end of file at once. The worker keeps reading and
+    dropping input until its time limit, and then closes the socket. So a
+    write after the limit fails.
+
+    Returns:
+        The answer, and the error of the first failed write, or ``None``.
+    """
+    head = f"POST {RUN} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 999999\r\n\r\n"
+    with socket.create_connection(("127.0.0.1", worker.port), timeout=WAIT) as sock:
+        sock.sendall(head.encode() + b"x" * 100)
+        answer = b""
+        while chunk := sock.recv(65536):
+            answer += chunk
+        deadline = time.monotonic() + seconds
+        try:
+            while time.monotonic() < deadline:
+                sock.sendall(b"x" * 4096)
+                time.sleep(0.01)
+        except ConnectionError as error:
+            return answer, error
+    return answer, None
+
+
 def test_stops_discarding_a_rejected_body_after_the_time_limit(
     start: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(worker_module, "_DISCARD_SECONDS", 0.2)
     worker, _ = start(Held())
-    head = f"POST {RUN} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 999999\r\n\r\n"
 
-    with socket.create_connection(("127.0.0.1", worker.port), timeout=WAIT) as sock:
-        sock.sendall(head.encode() + b"x" * 100)
-        began = time.monotonic()
-        answer = b""
-        while chunk := sock.recv(65536):
-            answer += chunk
-        elapsed = time.monotonic() - began
+    answer, error = _send_after_the_answer(worker, 1.5)
 
     assert answer.startswith(b"HTTP/1.1 400")
-    assert elapsed < WAIT
+    assert isinstance(error, ConnectionError)
+
+
+def test_keeps_discarding_a_rejected_body_until_the_time_limit(start: Any) -> None:
+    # The default limit is 10 seconds. So writes during the first second must
+    # succeed. A limit that ended too early would fail them.
+    worker, _ = start(Held())
+
+    answer, error = _send_after_the_answer(worker, 1.0)
+
+    assert answer.startswith(b"HTTP/1.1 400")
+    assert error is None
 
 
 class _EndlessConnection:
@@ -801,6 +836,14 @@ def test_accepts_a_chunked_body_with_extensions_and_trailers(start: Any) -> None
         (b"2" * 2000, b"malformed chunked encoding"),
         (b"2\r\n{}\r\n", b'{"error":"invalid request"}'),
         (b"20000\r\n", b"request body exceeds 65536 bytes"),
+        (
+            b"0\r\n" + b"X: y\r\n" * 20_000 + b"\r\n",
+            b"request body exceeds 65536 bytes",
+        ),
+        (
+            b"".join(b"1;" + b"e" * 1000 + b"\r\nx\r\n" for _ in range(70)),
+            b"request body exceeds 65536 bytes",
+        ),
     ],
     # The default test IDs would hold the raw bytes, one of them 2,000 long.
     ids=[
@@ -813,6 +856,8 @@ def test_accepts_a_chunked_body_with_extensions_and_trailers(start: Any) -> None
         "size-line-too-long",
         "ends-early",
         "over-the-limit",
+        "trailers-over-the-limit",
+        "extensions-over-the-limit",
     ],
 )
 def test_answers_400_to_a_malformed_chunked_body(
@@ -999,6 +1044,109 @@ def test_runs_a_job_once_when_its_request_arrives_twice(
     )
 
 
+def test_accepts_a_burst_of_parallel_job_requests(start: Any) -> None:
+    # socketserver's default backlog of 5 reset 10 to 13 of these 50
+    # connections. The worker listens with Node's backlog of 511.
+    worker, _ = start(routes={"/build": lambda job_input, context: job_input})
+    barrier = threading.Barrier(50)
+    statuses: list[int] = []
+
+    def deliver(k: int) -> None:
+        barrier.wait(WAIT)
+        statuses.append(request(worker, "/build", job_body(callbackId=f"cb-{k}"))[0])
+
+    threads = [threading.Thread(target=deliver, args=(k,)) for k in range(50)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(WAIT)
+    assert worker.idle(WAIT)
+
+    assert statuses == [202] * 50
+
+
+def test_names_no_python_version_in_the_server_header(start: Any) -> None:
+    worker, _ = start(Held())
+
+    answer = raw_request(
+        worker,
+        f"POST {HOOK_PATH_PREFIX}ready HTTP/1.1\r\nHost: localhost\r\n"
+        "Content-Length: 2\r\n\r\n{}".encode(),
+    )
+
+    assert b"Server: aws-durable-execution-sdk-python-microvm-worker\r\n" in answer
+    assert b"Python/" not in answer
+
+
+def test_prints_no_traceback_for_a_client_that_resets_during_the_headers(
+    start: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    worker, _ = start(Held())
+
+    with socket.create_connection(("127.0.0.1", worker.port), timeout=WAIT) as sock:
+        sock.sendall(b"POST /aws/lambda-microvms/runtime/v1/run HTTP/1.1\r\nHo")
+        # The reset must arrive while the server waits for the rest of the
+        # headers. A probe printed the traceback only then.
+        time.sleep(0.1)
+        # A zero linger time makes close() send a TCP reset.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    # The request thread handles the reset after the close.
+    time.sleep(0.3)
+    assert request(worker, f"{HOOK_PATH_PREFIX}ready", {})[0] == 200
+
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_reports_other_server_errors_as_the_base_class_does(
+    start: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    worker, _ = start(Held())
+    server = worker._server  # noqa: SLF001
+
+    try:
+        msg = "unexpected"
+        raise ValueError(msg)
+    except ValueError:
+        server.handle_error(None, ("127.0.0.1", 0))
+
+    assert "ValueError: unexpected" in capsys.readouterr().err
+
+
+class _IPv6OnlyByDefault(socket.socket):
+    """Starts each new IPv6 socket IPv6-only.
+
+    Windows and the BSDs do this, and so does Linux with
+    ``net.ipv6.bindv6only=1``.
+    """
+
+    def __init__(
+        self,
+        family: int = -1,
+        type: int = -1,  # noqa: A002
+        proto: int = -1,
+        fileno: int | None = None,
+    ) -> None:
+        super().__init__(family, type, proto, fileno)
+        # accept() passes fileno for each connection. Only a new socket
+        # starts with the system default.
+        if fileno is None and self.family == socket.AF_INET6:
+            self.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+
+
+def test_listens_on_ipv4_when_ipv6_sockets_start_ipv6_only(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Linux starts an IPv6 socket dual-stack by default. So there the server
+    # accepts IPv4 without its IPV6_V6ONLY call, and the test above passes
+    # either way. Here every new IPv6 socket starts IPv6-only.
+    if not socket.has_dualstack_ipv6():
+        pytest.skip("this host has no dual-stack IPv6")
+    monkeypatch.setattr(socket, "socket", _IPv6OnlyByDefault)
+    worker, _ = start(Held())
+
+    assert request(worker, f"{HOOK_PATH_PREFIX}ready", {})[0] == 200
+
+
 def test_runs_a_job_once_when_parallel_requests_deliver_it(start: Any) -> None:
     handler = Held()
     handler.release.set()
@@ -1131,7 +1279,9 @@ def test_forgets_a_job_whose_thread_cannot_start(
         original(self)
 
     monkeypatch.setattr(threading.Thread, "start", flaky_start)
-    assert request(worker, "/build", job_body())[0] == 202
+    # The thread starts before the answer. So a thread that cannot start gets
+    # HTTP 500, which the durable function retries, and the retry runs the job.
+    assert request(worker, "/build", job_body())[0] == 500
     assert worker.idle(WAIT)
     assert request(worker, "/build", job_body())[0] == 202
     assert worker.idle(WAIT)
@@ -1266,8 +1416,8 @@ class _AsyncCallable:
 
 
 class _Awaitable:
-    def __await__(self) -> Iterator[None]:
-        yield None  # pragma: no cover
+    def __await__(self) -> Generator[None, None, None]:
+        yield None
 
 
 def test_fails_a_job_whose_handler_returns_a_coroutine_and_closes_it(
@@ -1294,6 +1444,33 @@ def test_fails_a_job_whose_handler_returns_another_awaitable(start: Any) -> None
     assert worker.idle(WAIT)
 
     assert completions(client)[0][1]["Error"]["ErrorType"] == "TypeError"
+
+
+async def _ignores_generator_exit() -> None:
+    try:
+        await _Awaitable()
+    finally:
+        await _Awaitable()
+
+
+def test_fails_a_job_whose_started_coroutine_cannot_be_closed(start: Any) -> None:
+    # The coroutine has started and awaits in a finally block. So close()
+    # raises RuntimeError: coroutine ignored GeneratorExit. The job must still
+    # report its TypeError.
+    coroutine = _ignores_generator_exit()
+    coroutine.send(None)
+    worker, client = start(lambda job_input, context: coroutine)
+
+    request(worker, RUN, run_body(run_payload()))
+    assert worker.idle(WAIT)
+
+    [(name, kwargs)] = completions(client)
+    assert name == "failure"
+    assert kwargs["Error"]["ErrorType"] == "TypeError"
+    # Run the finally block to its end, so the coroutine closes before the
+    # garbage collector meets it.
+    with contextlib.suppress(GeneratorExit, StopIteration):
+        coroutine.send(None)
 
 
 @pytest.mark.parametrize(

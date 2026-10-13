@@ -92,7 +92,7 @@ A document that does not match the contract gets HTTP 400 with the validation me
 
 ## Lower-level building blocks
 
-- `MicrovmWorkerListener.create(...)` takes the same arguments as `start_microvm_worker`, except `port`. Its `request_handler_class` serves the hooks and routes from your own `http.server.ThreadingHTTPServer`.
+- `MicrovmWorkerListener.create(...)` takes the same arguments as `start_microvm_worker`, except `port`. Its `request_handler_class` serves the hooks and routes from your own `http.server.ThreadingHTTPServer`. Set the server's `request_queue_size` to 511, as `start_microvm_worker` does. A session can send many jobs at once, and the default backlog of 5 resets the connections beyond it.
 - `RunHookRequest.from_dict` and `MicrovmJobRequest.from_dict` validate the two documents that deliver a job: the `run` lifecycle hook body, and the body of an HTTP job request.
 - `CallbackReporter` sends heartbeats, and completes the callback with a result or an error.
 
