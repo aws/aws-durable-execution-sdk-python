@@ -344,10 +344,12 @@ execution trace.
 
 ### Synthetic fallback anchor
 
-Each sampled fallback invocation exports `DurableExecutionRoot` at invocation
-start and flushes through the normal invocation-end lifecycle, including when
-it returns `PENDING` or `RETRY`. A suspended execution therefore already has an
-exported ancestor if it is later stopped or times out without resuming.
+Each sampled fallback invocation creates and ends `DurableExecutionRoot` at
+invocation start and attempts to flush it through the normal invocation-end
+lifecycle, including when it returns `PENDING` or `RETRY`. A successfully
+delivered copy supplies ancestry if the execution is later stopped or times out
+without resuming. Export and flush failures, or termination before flushing,
+do not provide a delivery guarantee.
 
 The anchor uses the existing execution-scoped span ID and the stable execution
 start timestamp for both its start and end. It carries no terminal outcome;
@@ -355,12 +357,17 @@ start timestamp for both its start and end. It carries no terminal outcome;
 of the first invocation and later invocations may re-export the same anchor to
 recover lost telemetry; export is not exactly once. Two executions sharing a
 propagated trace ID retain distinct ARN-scoped anchor IDs.
+The anchor is intentionally zero-duration, so its descendants end after it;
+trace viewers may flag that timing relationship even though the ancestry is valid.
 
-The anchor uses the same configured tracer, provider resource, processors and
-resolved sampling result as other durable spans. SDK-added IDs, timestamps and
-attributes are stable across recovery exports; provider resources, sampler
-metadata and custom processor enrichment can vary between execution environments.
-The SDK does not replace configured service identity or freeze detector fields.
+The anchor uses the same configured tracer, provider resource and processors as
+other durable spans, but carries only the resolved sampling decision. Its SDK
+attributes are `durable.execution.arn` and `durable.execution.synthetic_root`;
+sampler-added attributes and tracestate are omitted from this repeated identity.
+Ordinary durable spans retain the complete resolved sampler metadata. SDK-added
+IDs, timestamps and anchor attributes stay stable across recovery exports;
+provider resources and custom processor enrichment may vary. The SDK does not
+replace configured service identity or freeze detector fields.
 
 Complete remote parents are externally owned and are never materialized by the
 SDK. Unsampled invocations emit no anchor. Sampling remains resolved per
@@ -371,7 +378,10 @@ disable telemetry; no wall-clock timestamp is invented for the anchor.
 ### Sampling
 
 Sampling is resolved once per invocation and carried to every durable span in
-that invocation. Precedence is:
+that invocation. Each span consumes its private sampling intent before processors
+run. Processor-created spans use their own configured sampling policy and normal
+parent-context semantics, including when a processor forwards the supplied parent
+context. Precedence is:
 
 1. `Sampled=1` or `Sampled=0` from `_X_AMZN_TRACE_ID`
 2. a same-trace ambient span's recording/sampled state

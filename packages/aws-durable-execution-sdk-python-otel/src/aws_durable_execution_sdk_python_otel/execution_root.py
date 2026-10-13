@@ -16,6 +16,7 @@ from aws_durable_execution_sdk_python_otel.durable_sampling import (
     DurableSamplingIntent,
     store_sampling_intent,
 )
+from aws_durable_execution_sdk_python_otel.timestamps import to_otel_timestamp
 
 
 @dataclass(frozen=True)
@@ -23,8 +24,8 @@ class ExecutionRoot:
     """A zero-duration anchor, reproducible in any invocation of an execution.
 
     Re-exporting the same anchor permits recovery after a failed flush without
-    checkpointing telemetry state. Resources and sampler metadata remain owned
-    by the configured OpenTelemetry provider; SDK-added fields remain stable.
+    checkpointing telemetry state. The anchor carries stable SDK attributes;
+    configured provider resources and processor enrichment remain unchanged.
     """
 
     execution_arn: str
@@ -41,26 +42,18 @@ class ExecutionRoot:
         if self.ancestor.is_remote or not self.ancestor.trace_flags.sampled:
             return
 
-        # Reuse the invocation's resolved decision and sampler metadata without
-        # resampling. An empty parent context makes this an actual root, while
-        # the regular tracer preserves configured resources and processors.
+        # Reuse only the resolved decision without resampling. This same-ID
+        # anchor must not acquire variable sampler attributes or tracestate.
+        # The regular tracer preserves configured resources and processors.
         root_attributes: dict[str, str | bool] = {
             "durable.execution.arn": self.execution_arn,
             "durable.execution.synthetic_root": True,
         }
-        # Sampler attributes normally override span attributes. Give this root
-        # its own intent so SDK-owned identity reaches processors intact, while
-        # retaining all other metadata and the invocation's original result.
-        result = sampling_intent.result
         root_intent = DurableSamplingIntent(
-            SamplingResult(
-                result.decision,
-                attributes={**dict(result.attributes or {}), **root_attributes},
-                trace_state=result.trace_state,
-            )
+            SamplingResult(sampling_intent.result.decision)
         )
         root_context = store_sampling_intent(Context(), root_intent)
-        timestamp = int(self.start_time.timestamp() * 1_000_000_000)
+        timestamp = to_otel_timestamp(self.start_time)
         with id_generator._use_ids_for_span(
             trace_id=self.ancestor.trace_id,
             span_id=self.ancestor.span_id,

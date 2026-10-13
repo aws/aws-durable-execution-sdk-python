@@ -1,7 +1,7 @@
 """Fallback ancestry regressions against real OTel providers and exporters."""
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -82,12 +82,15 @@ def create_plugin(
 
 
 def start_info(
-    arn: str = ARN, first: bool = True, request: str = "request"
+    arn: str = ARN,
+    first: bool = True,
+    request: str = "request",
+    start_time: datetime = START,
 ) -> InvocationStartInfo:
     return InvocationStartInfo(
         request_id=request,
         execution_arn=arn,
-        execution_start_time=START,
+        execution_start_time=start_time,
         is_first_invocation=first,
     )
 
@@ -97,11 +100,12 @@ def end_info(
     arn: str = ARN,
     first: bool = True,
     request: str = "request",
+    start_time: datetime = START,
 ) -> InvocationEndInfo:
     return InvocationEndInfo(
         request_id=request,
         execution_arn=arn,
-        execution_start_time=START,
+        execution_start_time=start_time,
         is_first_invocation=first,
         status=status,
     )
@@ -297,6 +301,45 @@ def test_later_sampled_invocation_recovers_unsampled_first(
         provider.shutdown()
 
 
+def test_shared_trace_with_distinct_providers_and_start_times(
+    plugin_type: PluginType,
+) -> None:
+    roots = []
+    for index, arn in enumerate([ARN, ARN + "-other"]):
+        start = START + timedelta(seconds=index * 17)
+        resource = Resource({"service.name": f"provider-{index}"})
+        plugin, provider, exporter = create_plugin(
+            plugin_type,
+            ExtractedContext(TRACE, None, Sampling.SAMPLED),
+            resource=resource,
+        )
+        try:
+            plugin.on_invocation_start(start_info(arn=arn, start_time=start))
+            plugin.on_invocation_end(
+                end_info(InvocationStatus.SUCCEEDED, arn=arn, start_time=start)
+            )
+            root = next(
+                s
+                for s in exporter.get_finished_spans()
+                if s.name == "DurableExecutionRoot"
+            )
+            assert root.context is not None
+            assert root.context.trace_id == TRACE
+            assert root.context.span_id == derive_execution_root_span_id(arn)
+            assert (
+                root.start_time
+                == root.end_time
+                == int(start.timestamp() * 1_000_000_000)
+            )
+            assert root.resource == resource
+            roots.append(root)
+        finally:
+            provider.shutdown()
+    assert roots[0].context != roots[1].context
+    assert roots[0].start_time != roots[1].start_time
+    assert roots[0].resource != roots[1].resource
+
+
 class _CountingSampler(Sampler):
     def __init__(self, decision: Decision) -> None:
         self.calls = 0
@@ -343,9 +386,17 @@ def test_root_preserves_resolved_sampling_without_resampling(
             assert len(roots) == 1
             root = roots[0]
             assert root.attributes is not None
-            assert root.attributes["sampler.call"] == 1
+            assert root.attributes == {
+                "durable.execution.arn": ARN,
+                "durable.execution.synthetic_root": True,
+            }
             assert root.context is not None
-            assert root.context.trace_state == TraceState([("vendor", "1")])
+            assert root.context.trace_state == TraceState()
+            for span in exporter.get_finished_spans():
+                if span.name != "DurableExecutionRoot":
+                    assert span.attributes is not None and span.context is not None
+                    assert span.attributes["sampler.call"] == 1
+                    assert span.context.trace_state == TraceState([("vendor", "1")])
         else:
             assert not roots
     finally:
@@ -408,15 +459,126 @@ def test_root_identity_wins_over_sampler_attributes_before_processors(
             expected = {
                 "durable.execution.arn": ARN,
                 "durable.execution.synthetic_root": True,
-                "sampler.call": index,
             }
             assert recorder.attributes[index - 1] == root.attributes == expected
             assert root.context is not None
-            assert root.context.trace_state == TraceState([("vendor", str(index))])
+            assert root.context.trace_state == TraceState()
             # Protect only this anchor; do not mutate the invocation's result.
             attributes = sampler.results[index - 1].attributes
             assert attributes is not None
             assert attributes["durable.execution.arn"] == f"sampler-arn-{index}"
             assert attributes["durable.execution.synthetic_root"] is False
+            assert sampler.results[index - 1].trace_state == TraceState(
+                [("vendor", str(index))]
+            )
+    finally:
+        provider.shutdown()
+
+
+def test_reexported_anchor_has_no_variable_sampler_metadata(
+    plugin_type: PluginType,
+) -> None:
+    sampler = _CountingSampler(Decision.RECORD_AND_SAMPLE)
+    plugin, provider, exporter = create_plugin(plugin_type, sampler=sampler)
+    recorder = _RootAttributeRecorder()
+    provider.add_span_processor(recorder)
+    try:
+        for index, status in enumerate(
+            [
+                InvocationStatus.RETRY,
+                InvocationStatus.PENDING,
+                InvocationStatus.SUCCEEDED,
+            ]
+        ):
+            plugin.on_invocation_start(start_info(first=index < 2))
+            plugin.on_invocation_end(end_info(status, first=index < 2))
+        roots = [
+            s for s in exporter.get_finished_spans() if s.name == "DurableExecutionRoot"
+        ]
+        invocations = [
+            s for s in exporter.get_finished_spans() if s.name == "Invocation"
+        ]
+        assert len(roots) == len(invocations) == sampler.calls == 3
+        expected = {
+            "durable.execution.arn": ARN,
+            "durable.execution.synthetic_root": True,
+        }
+        assert recorder.attributes == [expected, expected, expected]
+        assert all(s.attributes == expected for s in roots)
+        assert all(
+            s.context is not None and s.context.trace_state == TraceState()
+            for s in roots
+        )
+        assert (
+            len({(s.context.trace_id, s.context.span_id) for s in roots if s.context})
+            == 1
+        )
+        for index, invocation in enumerate(invocations, start=1):
+            assert invocation.attributes is not None and invocation.context is not None
+            assert invocation.attributes["sampler.call"] == index
+            assert invocation.context.trace_state == TraceState(
+                [("vendor", str(index))]
+            )
+    finally:
+        provider.shutdown()
+
+
+class _ProcessorProbeSampler(_CountingSampler):
+    def __init__(self) -> None:
+        super().__init__(Decision.RECORD_AND_SAMPLE)
+        self.probe_calls = 0
+
+    def should_sample(
+        self, parent_context: Any, trace_id: int, name: str, *args: Any, **kwargs: Any
+    ) -> SamplingResult:
+        if name == "processor-probe":
+            self.probe_calls += 1
+            return SamplingResult(Decision.DROP)
+        return super().should_sample(parent_context, trace_id, name, *args, **kwargs)
+
+
+@pytest.mark.parametrize("forward_parent", [False, True])
+def test_processor_spans_use_their_own_sampling_policy(
+    plugin_type: PluginType,
+    forward_parent: bool,
+) -> None:
+    sampler = _ProcessorProbeSampler()
+    plugin, provider, exporter = create_plugin(plugin_type, sampler=sampler)
+    observations: list[tuple[str, bool, bool]] = []
+
+    class Processor(SpanProcessor):
+        def on_start(self, span: Span, parent_context: Any = None) -> None:
+            if span.name not in {"DurableExecutionRoot", "Invocation", "Workflow"}:
+                return
+            # A processor may deliberately forward the supplied context. That
+            # preserves ancestry, but must not replay private sampling metadata.
+            with plugin._tracer.start_as_current_span(
+                "processor-probe", context=parent_context if forward_parent else None
+            ) as probe:
+                observations.append(
+                    (
+                        span.name,
+                        probe.is_recording(),
+                        probe.get_span_context().trace_flags.sampled,
+                    )
+                )
+
+    provider.add_span_processor(Processor())
+    try:
+        plugin.on_invocation_start(start_info())
+        plugin.on_invocation_end(end_info(InvocationStatus.SUCCEEDED))
+        assert {name for name, _, _ in observations} == {
+            "DurableExecutionRoot",
+            "Invocation",
+            "Workflow",
+        }
+        assert len(observations) == sampler.probe_calls == 3
+        assert sampler.calls == 1
+        assert all(
+            not recording and not sampled for _, recording, sampled in observations
+        )
+        assert not [
+            s for s in exporter.get_finished_spans() if s.name == "processor-probe"
+        ]
     finally:
         provider.shutdown()
