@@ -65,7 +65,7 @@ jobs:
     - name: Setup Python
       # The runner image is Amazon Linux; actions/setup-python only ships Ubuntu
       # builds, so uv provides the interpreter and activates a venv.
-      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       with:
         python-version: ${{ matrix.python-version }}
         activate-environment: true
@@ -133,7 +133,9 @@ jobs:
           echo "Could not resolve the latest ADOT Python layer for $AWS_REGION"
           exit 1
         fi
-        aws lambda get-layer-version-by-arn \
+        # Parallel jobs can throttle this read; keep retries local to the lookup.
+        AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=8 \
+          aws lambda get-layer-version-by-arn \
           --arn "$ADOT_LAYER_ARN" \
           --region "$AWS_REGION" \
           --query LayerVersionArn \

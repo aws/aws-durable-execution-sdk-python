@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 # Mock the executor.execute method
+from aws_durable_execution_sdk_python.plugin import PluginExecutor
 from aws_durable_execution_sdk_python.concurrency.models import (
     BatchItem,
     BatchItemStatus,
@@ -184,6 +185,8 @@ def test_map_handler():
 
     # Create a minimal ExecutionState mock
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -222,6 +225,8 @@ def test_map_handler_with_none_config():
         return func("mock_context")
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -354,6 +359,8 @@ def test_map_handler_calls_executor_execute():
     ) as mock_execute:
 
         class MockExecutionState:
+            _plugin_executor = PluginExecutor([])
+
             def register_branch_pool(self, pool):
                 pass
 
@@ -407,6 +414,8 @@ def test_map_handler_with_none_config_creates_default():
         executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
         class MockExecutionState:
+            _plugin_executor = PluginExecutor([])
+
             def register_branch_pool(self, pool):
                 pass
 
@@ -461,6 +470,8 @@ def test_map_handler_with_serdes():
     executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -510,6 +521,8 @@ def test_map_handler_with_summary_generator():
     executor_context.create_child_context = Mock(return_value=_child_ctx)
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -550,6 +563,8 @@ def test_map_handler_default_summary_generator():
     executor_context.create_child_context = Mock(return_value=Mock())  # SLF001
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -589,6 +604,8 @@ def test_map_handler_with_explicit_none_summary_generator():
     config = MapConfig(summary_generator=None)
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -634,6 +651,8 @@ def test_map_handler_replay_mechanism():
 
     # Mock execution state that indicates operation already succeeded
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -703,6 +722,8 @@ def test_map_handler_replay_with_replay_children():
 
     # Mock execution state that indicates operation succeeded but children need replay
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -802,6 +823,8 @@ def test_map_handler_first_execution_then_replay_integration():
     execution_count = 0
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -1032,6 +1055,8 @@ def test_map_result_serialization_roundtrip():
         return {"item": item.upper(), "index": idx}
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -1481,6 +1506,8 @@ def test_map_handler_defaults_summary_generator_for_user_config():
     """
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -1556,6 +1583,8 @@ def test_map_handler_with_should_complete_predicate():
     ) as mock_execute:
 
         class MockExecutionState:
+            _plugin_executor = PluginExecutor([])
+
             def register_branch_pool(self, pool):
                 pass
 

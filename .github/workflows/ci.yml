@@ -33,7 +33,7 @@ jobs:
     - name: Set up Python
       # The runner image is Amazon Linux; actions/setup-python only ships Ubuntu
       # builds, so uv provides the interpreter and activates a venv.
-      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       with:
         python-version: "3.12"
         activate-environment: true
@@ -64,7 +64,7 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
     - name: Set up Python ${{ matrix.python-version }}
-      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       with:
         python-version: ${{ matrix.python-version }}
         activate-environment: true
@@ -84,8 +84,6 @@ jobs:
       run: hatch run types:check
     - name: Run tests + coverage
       run: hatch run test:cov
-    - name: Verify supported legacy core compatibility
-      run: hatch run test-pypi-otel-legacy:test
     - name: Build distribution
       run: |
         for pkg in packages/*/; do
@@ -96,6 +94,10 @@ jobs:
             cd "$GITHUB_WORKSPACE"
           fi
         done
+    - name: Test installed core and OTel wheels
+      run: hatch run test-wheel-otel:test
+    - name: Test released OTel with the new core wheel
+      run: hatch run test-wheel-otel-legacy:test
     - name: Verify OTel wheel dependency contract
       run: |
         OTEL_WHEEL=$(find packages/aws-durable-execution-sdk-python-otel/dist \

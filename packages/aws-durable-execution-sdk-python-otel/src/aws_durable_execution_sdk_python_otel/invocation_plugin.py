@@ -55,6 +55,7 @@ from aws_durable_execution_sdk_python_otel.durable_sampling import (
 from aws_durable_execution_sdk_python_otel.durable_parent_span import (
     DurableParentSpan,
 )
+from aws_durable_execution_sdk_python_otel.execution_root import ExecutionRoot
 from aws_durable_execution_sdk_python_otel.execution_trace_context import (
     ExecutionTraceContext,
     canonical_trace_id,
@@ -65,6 +66,7 @@ from aws_durable_execution_sdk_python_otel.log_filter import (
 )
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
+from aws_durable_execution_sdk_python_otel.timestamps import to_otel_timestamp
 
 
 logger = logging.getLogger(__name__)
@@ -73,6 +75,7 @@ _TERMINAL_INVOCATION_STATUSES = frozenset(
     {InvocationStatus.SUCCEEDED, InvocationStatus.FAILED}
 )
 _TIMESTAMP_STEP_NANOS = 1_000
+_INVOCATION_CONTEXT_KEY = "__invocation_context__"
 
 _SpanAttributes = dict[str, str | bool | int]
 
@@ -81,7 +84,7 @@ def _to_otel_timestamp(dt: datetime.datetime | None) -> int:
     """Convert a datetime to OTel timestamp (nanoseconds since epoch)."""
     if dt is None:
         dt = datetime.datetime.now(datetime.UTC)
-    return int(dt.timestamp() * 1_000_000_000)
+    return to_otel_timestamp(dt)
 
 
 class InvocationOtelPlugin(DurableInstrumentationPlugin):
@@ -299,12 +302,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
            context this is the active context span (attached in
            on_user_function_start). Unrelated ambient spans are ignored so logs
            stay correlated to the durable execution trace.
-        2. The invocation span from the plugin registry. This is the path used
-           for top-level handler code: the invocation span is never attached to
-           the worker thread's context, so the registry is the only way to
-           resolve it. It also covers code between top-level operations, where
-           detaching the operation scope restores a context with no durable
-           span.
+        2. The invocation span from the plugin registry, including lifecycle
+           phases where another plugin changed the active context.
 
         Returns:
             A valid SpanContext, or None if no span is active.
@@ -585,6 +584,14 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             root_sampled=lambda: is_sampled(sampling_result),
         )
 
+        # Materialize the fallback anchor before user code can suspend or fail.
+        # Repeated invocations retain the same SDK-owned identity and timing.
+        ExecutionRoot(
+            execution_arn=self._execution_arn,
+            ancestor=self._execution_trace_context.execution_ancestor,
+            start_time=info.execution_start_time,
+        ).export(self._tracer, self._id_generator, self._sampling_intent)
+
         self._start_workflow_span(info)
 
         self._start_span(
@@ -592,6 +599,17 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             name="Invocation",
             attributes=self._extract_attributes(info),
         )
+
+        # Start and End share the invocation worker and token-owning Context.
+        # Retain a valid same-trace ambient parent; otherwise bind this invocation.
+        ambient = trace.get_current_span().get_span_context()
+        invocation_span = self._get_span(None)
+        if invocation_span is not None and (
+            not ambient.is_valid or ambient.trace_id != self._execution_trace_id
+        ):
+            self._attach_context(
+                _INVOCATION_CONTEXT_KEY, trace.set_span_in_context(invocation_span)
+            )
 
         # Cover handlers installed after construction as well.
         if self._enrich_logger:
@@ -672,6 +690,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         if not self._tracing_enabled:
             self._reset_state()
             return
+
+        # User work and checkpoint cleanup have finished. Release Start bindings
+        # in the Context that created their tokens before closing the spans.
+        self._detach_remaining_contexts()
 
         # Spans are registered parent-first, so close pending spans in reverse
         # order to keep every child contained within its parent.

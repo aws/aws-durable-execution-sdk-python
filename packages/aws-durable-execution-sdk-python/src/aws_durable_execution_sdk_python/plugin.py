@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import copy
 import datetime
-import functools
 import logging
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, MutableMapping, cast
+from typing import Any, Callable, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -466,6 +466,10 @@ class PluginExecutor:
         self._executor: ThreadPoolExecutor | None = None
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
+        # Non-None only after a Start hook fails: later setup and invocation
+        # work use its pre-hook snapshot. End still uses each hook's token owner.
+        self._startup_context: contextvars.Context | None = None
+        self._invocation_contexts: list[contextvars.Context | None] = []
 
     @contextlib.contextmanager
     def run(self):
@@ -479,12 +483,14 @@ class PluginExecutor:
         finally:
             self._invocation_status = None
             self._operations_provider = None
+            self._startup_context = None
+            self._invocation_contexts.clear()
             # Shut down the thread pool, waiting for pending tasks to complete.
             if self._executor:
                 self._executor.shutdown(wait=True)
 
     @staticmethod
-    def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> None:
+    def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> bool:
         """Invoke the appropriate plugin callback. Runs inside the thread pool."""
         try:
             match info:
@@ -507,17 +513,53 @@ class PluginExecutor:
         except Exception:
             # log and ignore the exception
             logger.exception("Plugin %s exception ignored", plugin.__class__.__name__)
+            return False
+        return True
 
     def execute_plugins(self, info, sync):
         if not self._executor:
             return
-        for plugin in self._plugins:
-            if sync:
-                # this is called synchronously, so plugins will be able to manipulate thread local objects
-                self._dispatch_plugin(plugin, info)
+        if sync and isinstance(info, InvocationStartInfo):
+            self._startup_context = None
+            self._invocation_contexts.clear()
+        for index, plugin in enumerate(self._plugins):
+            if sync and isinstance(info, InvocationStartInfo):
+                owner = self._startup_context
+                before = (
+                    owner.copy() if owner is not None else contextvars.copy_context()
+                )
+                self._invocation_contexts.append(owner)
+                succeeded = (
+                    owner.run(self._dispatch_plugin, plugin, info)
+                    if owner is not None
+                    else self._dispatch_plugin(plugin, info)
+                )
+                if not succeeded:
+                    # A failing hook may have left new bindings with no reset token.
+                    # Continue setup and the handler in the pre-hook snapshot.
+                    self._startup_context = before
+            elif sync:
+                # End hooks must reset tokens in the Context that created them,
+                # even when a failed start hook moved later setup to a snapshot.
+                owner = (
+                    self._invocation_contexts[index]
+                    if isinstance(info, InvocationEndInfo)
+                    and index < len(self._invocation_contexts)
+                    else None
+                )
+                if owner is not None:
+                    owner.run(self._dispatch_plugin, plugin, info)
+                else:
+                    self._dispatch_plugin(plugin, info)
             else:
                 # this is called asynchronously, so plugins cannot manipulate thread local objects
                 self._executor.submit(self._dispatch_plugin, plugin, info)
+
+    def _run_in_invocation_context(self, invoke: Callable[[], Any]) -> Any:
+        """Continue in the pre-hook Context only after a failed Start hook."""
+        if self._startup_context is not None:
+            return self._startup_context.run(invoke)
+        return invoke()
 
     def _snapshot_operation_infos(
         self,
@@ -836,28 +878,3 @@ class PluginExecutor:
             OperationStatus.CANCELLED,
             OperationStatus.STOPPED,
         ]
-
-    @property
-    def handle_durable_output(self):
-        def decorator(func: Callable[[Any, LambdaContext], MutableMapping[str, Any]]):
-            @functools.wraps(func)
-            def wrapper(event: Any, context: LambdaContext):
-                with self.run():
-                    try:
-                        output = func(event, context)
-
-                        self.on_invocation_end(
-                            output=DurableExecutionInvocationOutput.from_dict(output),
-                        )
-                        return output
-                    except Exception as e:
-                        self.on_invocation_end(
-                            output=DurableExecutionInvocationOutput.create_retry(
-                                ErrorObject.from_exception(e)
-                            ),
-                        )
-                        raise
-
-            return wrapper
-
-        return decorator

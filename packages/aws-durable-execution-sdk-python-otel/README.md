@@ -55,9 +55,11 @@ DURABLE_EXECUTION_PLUGINS=otel-execution
 cold start, so the handler does not need to import or explicitly register the
 plugin.
 
-Automatic mutual-exclusion validation requires core SDK 2.1.0 or later together
-with OTel 1.1.0 or later. OTel 1.1 remains compatible with core 2.0.x for existing
-valid registrations; those older cores do not enforce the new group metadata.
+OTel 1.1.0 requires core SDK 2.1.0 or later for the invocation-worker lifecycle
+and automatic mutual-exclusion validation. Publish the redesigned core first,
+then the plugin. Core 2.0.x runs invocation hooks on the caller and cannot provide
+the new plugin's handler propagation and host-context isolation; that version
+pair is not supported by OTel 1.1.0.
 Configure only one OTel view on every core version. `InvocationOtelPlugin`
 shows work within each Lambda invocation; `ExecutionOtelPlugin` shows logical
 operations across the whole execution. They emit overlapping telemetry and
@@ -180,6 +182,38 @@ lambda_.Function(
 )
 ```
 
+### Handler context propagation
+
+The core runs the existing Start hooks, handler, output preparation, resource
+cleanup and End hooks on one invocation worker. Start finishes before checkpoint
+processing begins. End follows registered-branch joins and checkpoint shutdown,
+and output serialization or checkpoint errors retain their normal classification.
+There is no separate handler-context plugin API.
+
+During Start, Invocation view preserves a valid active span on the canonical
+execution trace; when it is absent or unrelated, it attaches the Invocation span.
+Execution view attaches the Workflow span, including when an incoming span is on
+the same trace. The Invocation span's own ambient parenting is separate from the
+active context supplied to handler instrumentation. Both views preserve baggage.
+
+Start hooks run in registration order. A later successful plugin that deliberately
+sets or clears the active span wins; OTel does not apply a second correction pass.
+Place OTel after a span-replacing plugin when OTel's view-specific context is
+desired. Baggage-only plugins that extend the current context can appear on either
+side. The SDK also copies the coordinator's current bindings for each `map` or
+`parallel` branch admission/resume when plugins are registered. Baggage and
+other successful bindings reach these SDK-managed callbacks, while a branch's
+changes cannot leak into siblings, the coordinator or a reused worker.
+End hooks also retain registration order and reset tokens in their owning
+Context; they do not promise a reverse-stack observation of other plugins' spans.
+Existing registration, factory lifetime and checkpoint formats are unchanged.
+
+Upgrade both core to 2.1+ and OTel to 1.1+ for these guarantees. The released
+OTel 1.0 plugin can run on the new core with worker/host isolation, but its
+Invocation view does not attach the new fallback; a core-only upgrade does not
+supply that plugin behavior. CI tests the new pair as installed wheels and tests
+the actual released plugin separately, including before core 2.1 is on PyPI.
+
 ### 3. In your Lambda handler (index.py)
 
 ```python
@@ -278,8 +312,8 @@ Both bundled plugins use the same execution ancestor:
 
 - a propagated backend parent when `_X_AMZN_TRACE_ID` contains a valid `Root`
   and `Parent`
-- otherwise a deterministic, non-recording synthetic root derived from the
-  durable execution ARN
+- otherwise a deterministic `DurableExecutionRoot` span derived from the
+  durable execution ARN, with `durable.execution.synthetic_root=true`
 
 `InvocationOtelPlugin` keeps durable operation spans under the Invocation span
 and links operations to Workflow:
@@ -308,10 +342,46 @@ Invocation span uses that ambient span as its parent. Ambient spans on a
 different trace are ignored for durable parenting so Invocation remains on the
 execution trace.
 
+### Synthetic fallback anchor
+
+Each sampled fallback invocation creates and ends `DurableExecutionRoot` at
+invocation start and attempts to flush it through the normal invocation-end
+lifecycle, including when it returns `PENDING` or `RETRY`. A successfully
+delivered copy supplies ancestry if the execution is later stopped or times out
+without resuming. Export and flush failures, or termination before flushing,
+do not provide a delivery guarantee.
+
+The anchor uses the existing execution-scoped span ID and the stable execution
+start timestamp for both its start and end. It carries no terminal outcome;
+`Workflow` remains the span for execution duration and success/failure. Retries
+of the first invocation and later invocations may re-export the same anchor to
+recover lost telemetry; export is not exactly once. Two executions sharing a
+propagated trace ID retain distinct ARN-scoped anchor IDs.
+The anchor is intentionally zero-duration, so its descendants end after it;
+trace viewers may flag that timing relationship even though the ancestry is valid.
+
+The anchor uses the same configured tracer, provider resource and processors as
+other durable spans, but carries only the resolved sampling decision. Its SDK
+attributes are `durable.execution.arn` and `durable.execution.synthetic_root`;
+sampler-added attributes and tracestate are omitted from this repeated identity.
+Ordinary durable spans retain the complete resolved sampler metadata. SDK-added
+IDs, timestamps and anchor attributes stay stable across recovery exports;
+provider resources and custom processor enrichment may vary. The SDK does not
+replace configured service identity or freeze detector fields.
+
+Complete remote parents are externally owned and are never materialized by the
+SDK. Unsampled invocations emit no anchor. Sampling remains resolved per
+invocation: a later sampled fallback invocation also emits the anchor even if
+an earlier invocation was unsampled. Missing execution start time continues to
+disable telemetry; no wall-clock timestamp is invented for the anchor.
+
 ### Sampling
 
 Sampling is resolved once per invocation and carried to every durable span in
-that invocation. Precedence is:
+that invocation. Each span consumes its private sampling intent before processors
+run. Processor-created spans use their own configured sampling policy and normal
+parent-context semantics, including when a processor forwards the supplied parent
+context. Precedence is:
 
 1. `Sampled=1` or `Sampled=0` from `_X_AMZN_TRACE_ID`
 2. a same-trace ambient span's recording/sampled state
@@ -329,6 +399,17 @@ OTel `OK` only for `SUCCEEDED`, `ERROR` when error details are delivered, and
 `UNSET` for other outcomes without error details, including `FAILED`,
 `CANCELLED`, `TIMED_OUT`, and `STOPPED`. The original durable operation status
 remains in `durable.operation.status`.
+
+### Invocation context isolation
+
+With core 2.1+, invocation hooks and the handler run on one worker in an
+invocation-local Context initialized from the host's bindings. Successful Start
+bindings are visible to later hooks, the handler and resource cleanup. The host's
+bindings remain unchanged after return, even if a plugin fails during Start or
+End. A failed Start's bindings are discarded for subsequent work, while End runs
+in that Start's original Context to preserve token ownership. This isolates
+context-variable bindings; it does not undo mutations to shared objects or
+external side effects. The isolation applies when plugins are registered.
 
 ### Log Correlation
 
@@ -401,6 +482,11 @@ them to Invocation.
 
 A custom OpenTelemetry `IdGenerator` that produces reproducible trace and span IDs from execution metadata. Exported for advanced use cases.
 
+`use_ids` retains its existing scope-wide trace override by default. The
+synthetic-root implementation uses a separate internal one-span override,
+preventing processor-created roots from inheriting that internal ID. Existing
+`use_ids` signatures and default behavior remain unchanged.
+
 ### `xray_context_extractor`
 
 Default context extractor. Reads the `_X_AMZN_TRACE_ID` environment variable and
@@ -430,7 +516,7 @@ setups.
 ## Requirements
 
 - Python >= 3.11
-- `aws-durable-execution-sdk-python` >= 2.0.0 (core >= 2.1.0 with OTel >= 1.1.0 for automatic view-exclusivity validation)
+- `aws-durable-execution-sdk-python` >= 2.1.0 (release the redesigned core before OTel 1.1.0)
 - An ADOT/community OpenTelemetry Lambda layer, or the `standalone` extra
 
 ## License
