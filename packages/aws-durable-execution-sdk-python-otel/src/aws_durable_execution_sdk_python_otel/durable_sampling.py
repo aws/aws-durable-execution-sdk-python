@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import inspect
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
 from opentelemetry import context as otel_context
@@ -29,6 +30,20 @@ class DurableSamplingIntent:
     """Sampling result to apply to each durable span in one invocation."""
 
     result: SamplingResult
+
+
+class _SamplingIntentDelivery:
+    """Give one sampler call the intent, even if its context is forwarded."""
+
+    def __init__(self, intent: DurableSamplingIntent) -> None:
+        self._intent: DurableSamplingIntent | None = intent
+        self._lock = Lock()
+
+    def consume(self) -> DurableSamplingIntent | None:
+        with self._lock:
+            intent = self._intent
+            self._intent = None
+            return intent
 
 
 class DurableSampler(Sampler):
@@ -56,8 +71,13 @@ class DurableSampler(Sampler):
         links: Any = None,
         trace_state: Any = None,
     ) -> SamplingResult:
-        intent = otel_context.get_value(_DURABLE_SAMPLING_INTENT_KEY, parent_context)
-        if isinstance(intent, DurableSamplingIntent):
+        delivery = otel_context.get_value(_DURABLE_SAMPLING_INTENT_KEY, parent_context)
+        intent = (
+            delivery.consume()
+            if isinstance(delivery, _SamplingIntentDelivery)
+            else None
+        )
+        if intent is not None:
             merged_attributes = dict(attributes or {})
             merged_attributes.update(dict(intent.result.attributes or {}))
             return SamplingResult(
@@ -84,10 +104,17 @@ def store_sampling_intent(
     parent_context: Context,
     intent: DurableSamplingIntent | None,
 ) -> Context:
-    """Attach a durable sampling intent to a span parent context."""
+    """Attach a fresh single-use delivery of the invocation's sampling result.
+
+    The sampler consumes it before processors run. A processor forwarding this
+    context therefore uses its own sampling policy; another durable span gets a
+    new delivery without changing the reusable invocation-level intent.
+    """
     if intent is None:
         return parent_context
-    return otel_context.set_value(_DURABLE_SAMPLING_INTENT_KEY, intent, parent_context)
+    return otel_context.set_value(
+        _DURABLE_SAMPLING_INTENT_KEY, _SamplingIntentDelivery(intent), parent_context
+    )
 
 
 def resolve_sampling_result(

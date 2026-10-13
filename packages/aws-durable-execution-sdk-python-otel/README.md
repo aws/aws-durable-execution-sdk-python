@@ -312,8 +312,8 @@ Both bundled plugins use the same execution ancestor:
 
 - a propagated backend parent when `_X_AMZN_TRACE_ID` contains a valid `Root`
   and `Parent`
-- otherwise a deterministic, non-recording synthetic root derived from the
-  durable execution ARN
+- otherwise a deterministic `DurableExecutionRoot` span derived from the
+  durable execution ARN, with `durable.execution.synthetic_root=true`
 
 `InvocationOtelPlugin` keeps durable operation spans under the Invocation span
 and links operations to Workflow:
@@ -342,10 +342,46 @@ Invocation span uses that ambient span as its parent. Ambient spans on a
 different trace are ignored for durable parenting so Invocation remains on the
 execution trace.
 
+### Synthetic fallback anchor
+
+Each sampled fallback invocation creates and ends `DurableExecutionRoot` at
+invocation start and attempts to flush it through the normal invocation-end
+lifecycle, including when it returns `PENDING` or `RETRY`. A successfully
+delivered copy supplies ancestry if the execution is later stopped or times out
+without resuming. Export and flush failures, or termination before flushing,
+do not provide a delivery guarantee.
+
+The anchor uses the existing execution-scoped span ID and the stable execution
+start timestamp for both its start and end. It carries no terminal outcome;
+`Workflow` remains the span for execution duration and success/failure. Retries
+of the first invocation and later invocations may re-export the same anchor to
+recover lost telemetry; export is not exactly once. Two executions sharing a
+propagated trace ID retain distinct ARN-scoped anchor IDs.
+The anchor is intentionally zero-duration, so its descendants end after it;
+trace viewers may flag that timing relationship even though the ancestry is valid.
+
+The anchor uses the same configured tracer, provider resource and processors as
+other durable spans, but carries only the resolved sampling decision. Its SDK
+attributes are `durable.execution.arn` and `durable.execution.synthetic_root`;
+sampler-added attributes and tracestate are omitted from this repeated identity.
+Ordinary durable spans retain the complete resolved sampler metadata. SDK-added
+IDs, timestamps and anchor attributes stay stable across recovery exports;
+provider resources and custom processor enrichment may vary. The SDK does not
+replace configured service identity or freeze detector fields.
+
+Complete remote parents are externally owned and are never materialized by the
+SDK. Unsampled invocations emit no anchor. Sampling remains resolved per
+invocation: a later sampled fallback invocation also emits the anchor even if
+an earlier invocation was unsampled. Missing execution start time continues to
+disable telemetry; no wall-clock timestamp is invented for the anchor.
+
 ### Sampling
 
 Sampling is resolved once per invocation and carried to every durable span in
-that invocation. Precedence is:
+that invocation. Each span consumes its private sampling intent before processors
+run. Processor-created spans use their own configured sampling policy and normal
+parent-context semantics, including when a processor forwards the supplied parent
+context. Precedence is:
 
 1. `Sampled=1` or `Sampled=0` from `_X_AMZN_TRACE_ID`
 2. a same-trace ambient span's recording/sampled state
@@ -445,6 +481,11 @@ them to Invocation.
 ### `DeterministicIdGenerator`
 
 A custom OpenTelemetry `IdGenerator` that produces reproducible trace and span IDs from execution metadata. Exported for advanced use cases.
+
+`use_ids` retains its existing scope-wide trace override by default. The
+synthetic-root implementation uses a separate internal one-span override,
+preventing processor-created roots from inheriting that internal ID. Existing
+`use_ids` signatures and default behavior remain unchanged.
 
 ### `xray_context_extractor`
 
