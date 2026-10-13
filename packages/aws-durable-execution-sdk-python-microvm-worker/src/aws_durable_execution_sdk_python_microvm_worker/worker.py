@@ -300,10 +300,16 @@ class MicrovmWorkerListener:
         Pass it to a ``ThreadingHTTPServer``. A single-threaded server serves
         one request at a time. So one slow client, which the listener waits
         for up to 60 seconds per read, would hold back every other request,
-        including the ``run`` hook. Also set the server's
-        ``request_queue_size`` to 511, as :func:`start_microvm_worker` does.
-        A session can send many jobs at once, and the default backlog of 5
-        resets the connections beyond it.
+        including the ``run`` hook.
+
+        Also give the server a backlog of 511, as :func:`start_microvm_worker`
+        does. A session can send many jobs at once, and the default backlog
+        of 5 resets the connections beyond it. The server's constructor
+        already listens, so setting ``request_queue_size`` on a server object
+        changes nothing. Set it as a class attribute of a subclass instead::
+
+            class Server(ThreadingHTTPServer):
+                request_queue_size = 511
         """
         listener = self
 
@@ -440,9 +446,33 @@ class MicrovmWorkerListener:
                 new_job.callback_id,
                 payload.region,
             )
-        exchange.respond(200, {})
+        start_error: Exception | None = None
         if payload is not None and new_job is not None and self._handler is not None:
-            self._start_job(self._handler, new_job, payload.region)
+            # The thread starts before the answer, so that idle() covers the
+            # job once the caller has the answer.
+            try:
+                self._start_job(self._handler, new_job, payload.region)
+            except Exception as error:  # noqa: BLE001
+                start_error = error
+                with self._lock:
+                    self._reports += 1
+        exchange.respond(200, {})
+        if payload is not None and new_job is not None and start_error is not None:
+            # Lambda sends the run hook once. So no later delivery comes, and
+            # the job would wait for its heartbeat timeout or its timeout. A
+            # new thread cannot start either. So this request thread, whose
+            # answer has gone out, fails the callback itself.
+            self._logger.error(
+                "could not start the run hook job",
+                extra={
+                    "microvmId": microvm_id,
+                    "callbackId": new_job.callback_id,
+                    "error": describe(start_error),
+                },
+            )
+            self._send_failure(start_error, new_job.callback_id, payload.region)
+            return
+        if new_job is not None:
             return
 
         if later:
@@ -542,7 +572,10 @@ class MicrovmWorkerListener:
         try:
             thread.start()
         except BaseException:
-            # The job never ran. So a later delivery may run it.
+            # The job never ran. A job request then answers 500, so the
+            # durable function delivers the job again, and the retry may run
+            # it. The run hook fails the callback instead, because Lambda
+            # sends it only once.
             with self._changed:
                 self._jobs.discard(job.callback_id)
                 self._changed.notify_all()
@@ -994,11 +1027,16 @@ class _Exchange:
             msg = "request body is not valid JSON"
             raise InvalidRunHookPayloadError(msg) from error
 
-    def too_large(self, max_bytes: int) -> InvalidRunHookPayloadError:
-        """Return the error for a body over ``max_bytes``, and remember that
-        the worker answers before it reads the rest of the body."""
+    def too_large(
+        self, max_bytes: int, part: str = "request body"
+    ) -> InvalidRunHookPayloadError:
+        """Return the error for a request part over ``max_bytes``.
+
+        The worker answers such a request before it reads the rest of the
+        body. So this method also marks the body unread.
+        """
         self._body_unread = True
-        return InvalidRunHookPayloadError(f"request body exceeds {max_bytes} bytes")
+        return InvalidRunHookPayloadError(f"{part} exceeds {max_bytes} bytes")
 
     def respond(self, status: int, body: Mapping[str, object]) -> None:
         """Send the answer. A client that has gone away is logged."""
@@ -1026,8 +1064,7 @@ class _Exchange:
         2. The connection then closes with unread bytes in its receive
            buffer. So the kernel sends a TCP reset instead of a normal close.
         3. A client that is still sending gets the reset before it reads the
-           answer. A probe showed this in 20 of 20 tries, so no client saw
-           the 400.
+           answer. So the client never sees the 400.
         4. The durable function fails at once on a 400, and retries a reset.
            So the reset turns a clear rejection into retries.
 
@@ -1096,7 +1133,9 @@ class _Exchange:
             line = self._request.rfile.readline(_MAX_CHUNK_LINE_BYTES)
             framing += len(line)
             if framing > max_bytes:
-                raise self.too_large(max_bytes)
+                raise self.too_large(
+                    max_bytes, "the chunked framing of the request body"
+                )
             return line
 
         while True:

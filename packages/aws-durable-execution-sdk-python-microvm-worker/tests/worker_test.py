@@ -824,6 +824,9 @@ def test_accepts_a_chunked_body_with_extensions_and_trailers(start: Any) -> None
     assert completions(client)[0][1]["Result"] == b'{"repo":"org/app"}'
 
 
+_FRAMING_TOO_LARGE = b"the chunked framing of the request body exceeds 65536 bytes"
+
+
 @pytest.mark.parametrize(
     ("chunks", "expected"),
     [
@@ -838,11 +841,11 @@ def test_accepts_a_chunked_body_with_extensions_and_trailers(start: Any) -> None
         (b"20000\r\n", b"request body exceeds 65536 bytes"),
         (
             b"0\r\n" + b"X: y\r\n" * 20_000 + b"\r\n",
-            b"request body exceeds 65536 bytes",
+            _FRAMING_TOO_LARGE,
         ),
         (
             b"".join(b"1;" + b"e" * 1000 + b"\r\nx\r\n" for _ in range(70)),
-            b"request body exceeds 65536 bytes",
+            _FRAMING_TOO_LARGE,
         ),
     ],
     # The default test IDs would hold the raw bytes, one of them 2,000 long.
@@ -1045,7 +1048,7 @@ def test_runs_a_job_once_when_its_request_arrives_twice(
 
 
 def test_accepts_a_burst_of_parallel_job_requests(start: Any) -> None:
-    # socketserver's default backlog of 5 reset 10 to 13 of these 50
+    # On Linux, socketserver's default backlog of 5 resets some of these
     # connections. The worker listens with Node's backlog of 511.
     worker, _ = start(routes={"/build": lambda job_input, context: job_input})
     barrier = threading.Barrier(50)
@@ -1287,6 +1290,33 @@ def test_forgets_a_job_whose_thread_cannot_start(
     assert worker.idle(WAIT)
 
     assert len(handler.inputs) == 1
+
+
+def test_fails_a_run_hook_job_whose_thread_cannot_start(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker, client = start(Held())
+    original = threading.Thread.start
+
+    def failing_start(self: threading.Thread) -> None:
+        if self.name.startswith("microvm-job-"):
+            msg = "can't start new thread"
+            raise RuntimeError(msg)
+        original(self)
+
+    monkeypatch.setattr(threading.Thread, "start", failing_start)
+    # Lambda sends the run hook once. So the worker answers 200, and fails
+    # the callback, instead of leaving the job to its heartbeat timeout.
+    assert request(worker, RUN, run_body(run_payload())) == (200, {})
+    assert worker.idle(WAIT)
+
+    [(name, kwargs)] = completions(client)
+    assert name == "failure"
+    assert kwargs["Error"] == {
+        "ErrorType": "RuntimeError",
+        "ErrorMessage": "can't start new thread",
+    }
+    assert "could not start the run hook job" in logger.messages("error")
 
 
 def test_counts_no_report_whose_thread_cannot_start(
