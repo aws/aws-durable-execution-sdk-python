@@ -633,7 +633,12 @@ def test_get_checkpoint_result_operation_not_found():
                 sub_type=OperationSubType.WAIT,
                 name="current-name",
             ),
-            OperationIdentifier("op1", OperationSubType.STEP, name="current-name"),
+            OperationIdentifier(
+                "op1",
+                OperationSubType.STEP,
+                name="current-name",
+                operation_type=OperationType.STEP,
+            ),
             "type",
         ),
         (
@@ -644,7 +649,12 @@ def test_get_checkpoint_result_operation_not_found():
                 sub_type=OperationSubType.WAIT_FOR_CONDITION,
                 name="current-name",
             ),
-            OperationIdentifier("op1", OperationSubType.STEP, name="current-name"),
+            OperationIdentifier(
+                "op1",
+                OperationSubType.STEP,
+                name="current-name",
+                operation_type=OperationType.STEP,
+            ),
             "subtype",
         ),
         (
@@ -655,7 +665,12 @@ def test_get_checkpoint_result_operation_not_found():
                 sub_type=OperationSubType.STEP,
                 name="checkpoint-name",
             ),
-            OperationIdentifier("op1", OperationSubType.STEP, name="current-name"),
+            OperationIdentifier(
+                "op1",
+                OperationSubType.STEP,
+                name="current-name",
+                operation_type=OperationType.STEP,
+            ),
             "name",
         ),
         (
@@ -672,6 +687,7 @@ def test_get_checkpoint_result_operation_not_found():
                 OperationSubType.STEP,
                 parent_id="current-parent",
                 name="current-name",
+                operation_type=OperationType.STEP,
             ),
             "parent_id",
         ),
@@ -721,9 +737,9 @@ def test_operation_identifier_normalizes_empty_name_to_wire_identity():
     )
 
     result = state.get_checkpoint_result("op1")
-    OperationIdentifier("op1", OperationSubType.STEP, name="").validate_checkpoint(
-        result.operation
-    )
+    OperationIdentifier(
+        "op1", OperationSubType.STEP, name="", operation_type=OperationType.STEP
+    ).validate_checkpoint(result.operation)
 
     assert result.operation is operation
 
@@ -4090,7 +4106,13 @@ def test_create_checkpoint_sync_success():
 
     try:
         operation_update = OperationUpdate.create_step_start(
-            OperationIdentifier("test-op", OperationSubType.STEP, None, "test-step")
+            OperationIdentifier(
+                "test-op",
+                OperationSubType.STEP,
+                None,
+                "test-step",
+                operation_type=OperationType.STEP,
+            )
         )
 
         # Should work normally without error
@@ -4125,7 +4147,13 @@ def test_create_checkpoint_sync_unwraps_background_thread_error():
 
     try:
         operation_update = OperationUpdate.create_step_start(
-            OperationIdentifier("test-op", OperationSubType.STEP, None, "test-step")
+            OperationIdentifier(
+                "test-op",
+                OperationSubType.STEP,
+                None,
+                "test-step",
+                operation_type=OperationType.STEP,
+            )
         )
 
         # Should raise the original RuntimeError, not BackgroundThreadError
@@ -4159,7 +4187,13 @@ def test_create_checkpoint_sync_always_synchronous():
 
     try:
         operation_update = OperationUpdate.create_step_start(
-            OperationIdentifier("test-op", OperationSubType.STEP, None, "test-step")
+            OperationIdentifier(
+                "test-op",
+                OperationSubType.STEP,
+                None,
+                "test-step",
+                operation_type=OperationType.STEP,
+            )
         )
 
         # Should block until completion (synchronous behavior)
@@ -4665,6 +4699,7 @@ def test_async_operation_start_precedes_user_function_start():
             operation_id=operation_id,
             sub_type=OperationSubType.STEP,
             name="my-step",
+            operation_type=OperationType.STEP,
         )
         state.create_checkpoint(
             OperationUpdate.create_step_start(operation_identifier),
@@ -5094,7 +5129,10 @@ def test_wrap_user_function_suspend_fires_incomplete_end_hook():
             raise TimedSuspendExecution.from_delay("waiting", 5)
 
         op_id = OperationIdentifier(
-            operation_id="op-1", sub_type=OperationSubType.STEP, name="step"
+            operation_id="op-1",
+            sub_type=OperationSubType.STEP,
+            name="step",
+            operation_type=OperationType.STEP,
         )
         wrapped = state.wrap_user_function(suspends, op_id, attempt=1)
 
@@ -5878,6 +5916,7 @@ def _wrapped(state: ExecutionState, user_function):
             operation_id="step-1",
             sub_type=OperationSubType.STEP,
             name="fetch-user",
+            operation_type=OperationType.STEP,
         ),
         attempt=1,
     )

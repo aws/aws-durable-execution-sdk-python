@@ -121,6 +121,9 @@ def _create_plugin(
         ) from error
 
     if type(plugin) is not provider.plugin_type:
+        # A wrong-type result may already own constructor resources, but it is
+        # never appended to the accepted list cleaned up by the outer boundary.
+        _notify_registration_result([plugin], registered=False)
         raise PluginLoadError(
             f"Durable instrumentation plugin provider '{plugin_name}' returned "
             f"{_qualified_type_name(plugin)}; expected "
@@ -128,6 +131,101 @@ def _create_plugin(
         )
 
     return plugin
+
+
+def _registration_api_owner(plugin_type: type[object]) -> type[object] | None:
+    """Find the first explicit marker in the MRO without metaclass descriptors.
+
+    A subclass inherits its declaring class's registration contract. Its legacy
+    same-named fields/helpers are not part of that contract unless it repeats
+    the marker. An explicit unsupported marker shadows any inherited opt-in.
+    """
+    mro: tuple[type[object], ...] = type.__dict__["__mro__"].__get__(
+        plugin_type, type(plugin_type)
+    )
+    for declaring_type in mro:
+        namespace = type.__dict__["__dict__"].__get__(
+            declaring_type, type(declaring_type)
+        )
+        if "__durable_registration_api__" in namespace:
+            version = namespace["__durable_registration_api__"]
+            return declaring_type if type(version) is int and version == 1 else None
+    return None
+
+
+def _registration_result_callback(
+    plugin: DurableInstrumentationPlugin, owner: type[object]
+) -> object | None:
+    """Bind the opted-in contract without calling a legacy subclass helper."""
+    if owner is type(plugin):
+        return getattr(plugin, "on_registration_result", None)
+    mro: tuple[type[object], ...] = type.__dict__["__mro__"].__get__(owner, type(owner))
+    for declaring_type in mro:
+        namespace = type.__dict__["__dict__"].__get__(
+            declaring_type, type(declaring_type)
+        )
+        if "on_registration_result" in namespace:
+            callback = namespace["on_registration_result"]
+            bind = getattr(callback, "__get__", None)
+            return bind(plugin, type(plugin)) if bind is not None else callback
+    return None
+
+
+def _exclusive_groups(plugin_type: type[DurableInstrumentationPlugin]) -> list[str]:
+    """Accumulate opted-in MRO contracts without interpreting legacy fields."""
+    mro: tuple[type[object], ...] = type.__dict__["__mro__"].__get__(
+        plugin_type, type(plugin_type)
+    )
+    groups: list[str] = []
+    for declaring_type in mro:
+        namespace = type.__dict__["__dict__"].__get__(
+            declaring_type, type(declaring_type)
+        )
+        version = namespace.get("__durable_registration_api__")
+        if type(version) is not int or version != 1:
+            continue
+        try:
+            group = getattr(declaring_type, "exclusive_group", None)
+        except Exception as error:
+            raise PluginLoadError(
+                f"Cannot read exclusive_group for {_qualified_class_name(plugin_type)}."
+            ) from error
+        if group is None:
+            continue
+        if type(group) is not str or not group.strip():
+            raise PluginLoadError(
+                f"Durable instrumentation plugin {_qualified_class_name(plugin_type)} "
+                "must declare exclusive_group as None or a non-empty string."
+            )
+        # Repeating a marker or a group does not register this one plugin twice.
+        if group not in groups:
+            groups.append(group)
+    return groups
+
+
+def _validate_exclusive_groups(
+    plugin_types: Sequence[type[DurableInstrumentationPlugin]],
+) -> None:
+    """Reject competing instrumentation before any lifecycle hooks run."""
+    groups: dict[str, type[DurableInstrumentationPlugin]] = {}
+    for plugin_type in plugin_types:
+        if _registration_api_owner(plugin_type) is None:
+            continue
+        for group in _exclusive_groups(plugin_type):
+            if (previous := groups.get(group)) is not None:
+                if previous is plugin_type:
+                    raise PluginLoadError(
+                        f"Durable instrumentation plugin {_qualified_class_name(plugin_type)} "
+                        f"is registered more than once in exclusive group '{group}'. "
+                        "Register this plugin only once in plugins."
+                    )
+                raise PluginLoadError(
+                    f"Durable instrumentation plugins {_qualified_class_name(previous)} "
+                    f"and {_qualified_class_name(plugin_type)} are mutually exclusive "
+                    f"(group '{group}'). Keep only one plugin from this group in "
+                    "plugins and DURABLE_EXECUTION_PLUGINS."
+                )
+            groups[group] = plugin_type
 
 
 def load_configured_plugins(
@@ -144,9 +242,45 @@ def load_configured_plugins(
     """
 
     resolved_plugins = list(explicit_plugins or [])
+    try:
+        result = _resolve_configured_plugins(resolved_plugins, environment=environment)
+    except PluginLoadError:
+        _notify_registration_result(resolved_plugins, registered=False)
+        raise
+    _notify_registration_result(result, registered=True)
+    return result
+
+
+def _notify_registration_result(
+    plugins: Sequence[DurableInstrumentationPlugin],
+    *,
+    registered: bool,
+) -> None:
+    """Let a plugin release rejected constructor resources without failing loading."""
+    for plugin in plugins:
+        owner = _registration_api_owner(type(plugin))
+        if owner is None:
+            continue
+        try:
+            callback = _registration_result_callback(plugin, owner)
+            if callable(callback):
+                callback(registered)
+        except Exception:
+            try:
+                logger.exception("Plugin registration-result callback failed")
+            except Exception:
+                pass
+
+
+def _resolve_configured_plugins(
+    resolved_plugins: list[DurableInstrumentationPlugin],
+    *,
+    environment: Mapping[str, str] | None,
+) -> list[DurableInstrumentationPlugin]:
     resolved_environment = os.environ if environment is None else environment
     plugin_names = _parse_configured_plugin_names(resolved_environment)
     if not plugin_names:
+        _validate_exclusive_groups([type(plugin) for plugin in resolved_plugins])
         return resolved_plugins
 
     try:
@@ -167,6 +301,9 @@ def load_configured_plugins(
         type(plugin): "the decorator's plugins argument" for plugin in resolved_plugins
     }
 
+    selected_providers: list[
+        tuple[str, metadata.EntryPoint, DurableInstrumentationPluginProvider]
+    ] = []
     for plugin_name in plugin_names:
         matching_entry_points = entry_points_by_name.get(plugin_name, [])
         if not matching_entry_points:
@@ -202,8 +339,15 @@ def load_configured_plugins(
             )
             continue
 
-        plugin = _create_plugin(plugin_name, entry_point, provider)
-        resolved_plugins.append(plugin)
+        selected_providers.append((plugin_name, entry_point, provider))
         registered_types[provider.plugin_type] = f"dynamic provider '{plugin_name}'"
 
+    # Factories can install instrumentation globally. Validate every selected
+    # type first so a rejected configuration leaves no discarded plugin behind.
+    _validate_exclusive_groups(
+        [type(plugin) for plugin in resolved_plugins]
+        + [provider.plugin_type for _, _, provider in selected_providers]
+    )
+    for plugin_name, entry_point, provider in selected_providers:
+        resolved_plugins.append(_create_plugin(plugin_name, entry_point, provider))
     return resolved_plugins

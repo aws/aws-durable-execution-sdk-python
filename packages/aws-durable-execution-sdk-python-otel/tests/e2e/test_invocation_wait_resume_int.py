@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -25,12 +26,16 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     StepDetails,
 )
+from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     derive_workflow_span_id,
 )
 from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
 from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
+from opentelemetry import context as otel_context
+from opentelemetry import trace
+from opentelemetry.propagators.aws.aws_xray_propagator import AwsXRayPropagator
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -253,3 +258,242 @@ def test_otel_wait_resume_spans_share_default_xray_execution_trace(
     assert completed_wait_span.end_time is not None
     assert after_resume.start_time is not None
     assert completed_wait_span.end_time <= after_resume.start_time
+
+
+class InheritedInvocationPlugin(InvocationOtelPlugin):
+    pass
+
+
+class InheritedExecutionPlugin(ExecutionOtelPlugin):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("plugin_type", "extra_context_plugin"),
+    [
+        (view, extra)
+        for view in (InvocationOtelPlugin, ExecutionOtelPlugin)
+        for extra in (False, True, "same", "unrelated", "absent")
+    ]
+    + [(InheritedInvocationPlugin, False), (InheritedExecutionPlugin, "absent")],
+)
+@pytest.mark.parametrize("reverse_plugins", [False, True])
+@pytest.mark.parametrize("fail_after_resume", [False, True])
+@pytest.mark.parametrize("ambient_kind", ["same", "unrelated", "absent"])
+def test_handler_user_spans_inherit_context_across_resume_and_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_type: type[InvocationOtelPlugin] | type[ExecutionOtelPlugin],
+    fail_after_resume: bool,
+    ambient_kind: str,
+    extra_context_plugin: bool | str,
+    reverse_plugins: bool,
+) -> None:
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    monkeypatch.setenv("_X_AMZN_TRACE_ID", XRAY_TRACE_HEADER)
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    plugin = plugin_type(
+        OtelPluginConfig(tracer_provider=provider, enrich_logger=False)
+    )
+    tracer = provider.get_tracer("customer")
+    before_context = otel_context.get_current()
+    calls: list[str] = []
+
+    def user_span(name: str) -> None:
+        # Ordinary instrumentation: the SDK/caller supplies the active parent.
+        span = tracer.start_span(name)
+        span.end()
+
+    def step_body(_step_context: Any) -> str:
+        calls.append("step")
+        user_span("step-user")
+        return "saved"
+
+    def handler_body(_event: Any, context: DurableContext) -> str:
+        if extra_context_plugin:
+            assert baggage.get_baggage("customer") == "present"
+        user_span("handler-entry")
+        saved = context.step(step_body, name="before-wait")
+        user_span("handler-after-step")
+        context.wait(Duration.from_seconds(1), name="context-wait")
+        user_span("handler-after-resume")
+        if fail_after_resume:
+            raise ValueError("handler failed after resume")
+        return saved
+
+    # Start hooks share the invocation worker, in registration order. A later
+    # successful plugin may deliberately replace or clear the active span.
+    from opentelemetry import baggage
+
+    class BaggagePlugin(DurableInstrumentationPlugin):
+        token: Any = None
+
+        def on_invocation_start(self, _info: Any) -> None:
+            current = baggage.set_baggage("customer", "present")
+            if isinstance(extra_context_plugin, str):
+                # A real third-party invocation hook can bind or clear a span.
+                # User functions below still use ordinary implicit parenting.
+                parent = trace.SpanContext(
+                    trace_id=(XRAY_TRACE_ID if extra_context_plugin == "same" else 1),
+                    span_id=0xCAFE,
+                    is_remote=False,
+                    trace_flags=trace.TraceFlags(1),
+                )
+                current = trace.set_span_in_context(
+                    trace.INVALID_SPAN
+                    if extra_context_plugin == "absent"
+                    else trace.NonRecordingSpan(parent),
+                    current,
+                )
+            self.token = otel_context.attach(current)
+
+        def on_invocation_end(self, _info: Any) -> None:
+            otel_context.detach(self.token)
+            self.token = None
+
+    plugins: list[DurableInstrumentationPlugin] = [plugin]
+    if extra_context_plugin:
+        plugins.append(BaggagePlugin())
+    if reverse_plugins:
+        plugins.reverse()
+    handler = durable_execution(handler_body, plugins=plugins)
+    remote = AwsXRayPropagator().extract({"X-Amzn-Trace-Id": XRAY_TRACE_HEADER})
+    assert trace.get_current_span(remote).get_span_context().trace_id == XRAY_TRACE_ID
+    initial_operations = [_execution_operation()]
+    checkpoint, operations = _checkpoint_store(initial_operations)
+    ambient_ids: list[int] = []
+    host_context = remote if ambient_kind == "same" else otel_context.Context()
+    try:
+        with patch(
+            "aws_durable_execution_sdk_python.execution.LambdaClient"
+        ) as client_class:
+            client = Mock()
+            client.checkpoint = checkpoint
+            client_class.initialize_client.return_value = client
+            # Standard host instrumentation supplies a same-trace Lambda span.
+            host_scope = (
+                tracer.start_as_current_span("lambda-first", context=host_context)
+                if ambient_kind != "absent"
+                else nullcontext()
+            )
+            with host_scope:
+                host = trace.get_current_span()
+                ambient_ids.append(host.get_span_context().span_id)
+                first = handler(_event(initial_operations), _lambda_context())
+                assert (
+                    trace.get_current_span().get_span_context()
+                    == host.get_span_context()
+                )
+        assert first["Status"] == InvocationStatus.PENDING.value
+        assert otel_context.get_current() == before_context
+        resumed_operations = [
+            replace(
+                operation,
+                status=OperationStatus.SUCCEEDED,
+                end_timestamp=datetime.now(UTC),
+            )
+            if operation.name == "context-wait"
+            else operation
+            for operation in operations.values()
+        ]
+        wait_id = next(
+            operation.operation_id
+            for operation in resumed_operations
+            if operation.name == "context-wait"
+        )
+        checkpoint, _ = _checkpoint_store(resumed_operations)
+        with patch(
+            "aws_durable_execution_sdk_python.execution.LambdaClient"
+        ) as client_class:
+            client = Mock()
+            client.checkpoint = checkpoint
+            client_class.initialize_client.return_value = client
+            host_scope = (
+                tracer.start_as_current_span("lambda-resume", context=host_context)
+                if ambient_kind != "absent"
+                else nullcontext()
+            )
+            with host_scope:
+                host = trace.get_current_span()
+                ambient_ids.append(host.get_span_context().span_id)
+                resumed = handler(
+                    _event(resumed_operations, updated_operation_ids=[wait_id]),
+                    _lambda_context(),
+                )
+                assert (
+                    trace.get_current_span().get_span_context()
+                    == host.get_span_context()
+                )
+        assert resumed["Status"] == (
+            InvocationStatus.FAILED.value
+            if fail_after_resume
+            else InvocationStatus.SUCCEEDED.value
+        )
+        assert calls == ["step"]
+        assert otel_context.get_current() == before_context
+        spans = exporter.get_finished_spans()
+        expected_parents: list[int | None]
+        if isinstance(extra_context_plugin, str) and not reverse_plugins:
+            # No second OTel correction pass: the later successful Start wins.
+            expected_parents = [
+                None if extra_context_plugin == "absent" else 0xCAFE
+            ] * 2
+            expected_trace_id = {"same": XRAY_TRACE_ID, "unrelated": 1, "absent": None}[
+                extra_context_plugin
+            ]
+        elif issubclass(plugin_type, ExecutionOtelPlugin):
+            expected_parents = [derive_workflow_span_id(EXECUTION_ARN)] * 2
+            expected_trace_id = XRAY_TRACE_ID
+        elif reverse_plugins and isinstance(extra_context_plugin, str):
+            expected_parents = (
+                [0xCAFE] * 2
+                if extra_context_plugin == "same"
+                else [
+                    span.context.span_id
+                    for span in spans
+                    if span.name == "Invocation" and span.context is not None
+                ]
+            )
+            expected_trace_id = XRAY_TRACE_ID
+        else:
+            expected_parents = (
+                [*ambient_ids]
+                if ambient_kind == "same"
+                else [
+                    span.context.span_id
+                    for span in spans
+                    if span.name == "Invocation" and span.context is not None
+                ]
+            )
+            expected_trace_id = XRAY_TRACE_ID
+        for name in ("handler-entry", "handler-after-step"):
+            users = [span for span in spans if span.name == name]
+            assert len(users) == 2
+            assert [span.parent.span_id if span.parent else None for span in users] == (
+                expected_parents
+            )
+            assert all(span.context is not None for span in users)
+            if expected_trace_id is None:
+                assert all(
+                    span.parent is None and span.context.trace_id != XRAY_TRACE_ID
+                    for span in users
+                )
+            else:
+                assert all(span.context.trace_id == expected_trace_id for span in users)
+        after_resume = next(
+            span for span in spans if span.name == "handler-after-resume"
+        )
+        assert (
+            after_resume.parent.span_id if after_resume.parent else None
+        ) == expected_parents[1]
+        step_user = next(span for span in spans if span.name == "step-user")
+        assert step_user.parent is not None
+        assert any(
+            span.name == "before-wait attempt 1"
+            and span.context is not None
+            and span.context.span_id == step_user.parent.span_id
+            for span in spans
+        )
+    finally:
+        provider.shutdown()

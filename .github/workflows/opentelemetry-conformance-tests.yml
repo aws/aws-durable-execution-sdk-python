@@ -48,6 +48,13 @@ on:
         default: main
         type: string
 
+# Backend stacks are shared across PRs. Queue whole runs so reusable
+# backend jobs do not displace another PR from their pending slots.
+concurrency:
+  group: otel-conformance-tests
+  cancel-in-progress: false
+  queue: max
+
 permissions: {}
 
 jobs:
@@ -59,12 +66,10 @@ jobs:
       actions: write
       contents: read
       id-token: write
-    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@3542852f918f515d7c6a53af1eb0d5aa83d1eb1e
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@e48ac54502d3c14e2e3fa216c5e200dbb4c14ac2
     with:
-      # CodeBuild-hosted runner in the Python testing account; the label must
-      # match the CodeBuild project name.
-      runs_on: codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
       language: python
+      runs_on: codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
       resource_prefix: p
       sdk_repository: aws/aws-durable-execution-sdk-python
       sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}

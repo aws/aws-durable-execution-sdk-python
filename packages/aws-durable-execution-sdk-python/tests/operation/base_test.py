@@ -64,7 +64,10 @@ def test_get_checkpoint_result_validates_operation_identity():
     executor = ConcreteOperationExecutor()
     executor.state = Mock(spec=ExecutionState)
     executor.operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.STEP, name="current-step"
+        "test_op",
+        OperationSubType.STEP,
+        name="current-step",
+        operation_type=OperationType.STEP,
     )
     checkpoint = Operation(
         operation_id="test_op",

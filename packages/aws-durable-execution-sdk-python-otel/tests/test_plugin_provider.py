@@ -1,3 +1,5 @@
+import pytest
+
 from aws_durable_execution_sdk_python.plugin import (
     DURABLE_INSTRUMENTATION_PLUGIN_API_VERSION,
 )
@@ -42,15 +44,21 @@ def test_execution_otel_plugin_provider_creates_execution_plugin() -> None:
     assert isinstance(EXECUTION_OTEL_PLUGIN_PROVIDER.factory(), ExecutionOtelPlugin)
 
 
-def test_installed_otel_entry_points_load_both_plugin_types() -> None:
+@pytest.mark.parametrize(
+    ("name", "plugin_type"),
+    [
+        ("otel-invocation", InvocationOtelPlugin),
+        ("otel-execution", ExecutionOtelPlugin),
+    ],
+)
+def test_installed_otel_entry_point_loads_selected_view(
+    name: str, plugin_type: type[ExecutionOtelPlugin] | type[InvocationOtelPlugin]
+) -> None:
     plugins = load_configured_plugins(
         None,
         environment={
-            PLUGIN_ENVIRONMENT_VARIABLE: "otel-invocation,otel-execution",
+            PLUGIN_ENVIRONMENT_VARIABLE: name,
         },
     )
 
-    assert [type(plugin) for plugin in plugins] == [
-        InvocationOtelPlugin,
-        ExecutionOtelPlugin,
-    ]
+    assert [type(plugin) for plugin in plugins] == [plugin_type]

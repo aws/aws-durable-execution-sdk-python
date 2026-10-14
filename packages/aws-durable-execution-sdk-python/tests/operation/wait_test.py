@@ -40,7 +40,9 @@ def test_wait_handler_already_completed():
     wait_handler(
         seconds=10,
         state=mock_state,
-        operation_identifier=OperationIdentifier("wait1", OperationSubType.WAIT, None),
+        operation_identifier=OperationIdentifier(
+            "wait1", OperationSubType.WAIT, None, operation_type=OperationType.WAIT
+        ),
     )
 
     mock_state.get_checkpoint_result.assert_called_once_with("wait1")
@@ -68,7 +70,10 @@ def test_wait_handler_not_completed():
             seconds=30,
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "wait2", OperationSubType.WAIT, None
+                "wait2",
+                OperationSubType.WAIT,
+                None,
+                operation_type=OperationType.WAIT,
             ),
         )
 
@@ -108,7 +113,10 @@ def test_wait_handler_with_none_name():
         wait_handler(
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "wait3", OperationSubType.WAIT, None
+                "wait3",
+                OperationSubType.WAIT,
+                None,
+                operation_type=OperationType.WAIT,
             ),
             seconds=5,
         )
@@ -141,7 +149,10 @@ def test_wait_handler_with_existent():
         wait_handler(
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "wait4", OperationSubType.WAIT, None
+                "wait4",
+                OperationSubType.WAIT,
+                None,
+                operation_type=OperationType.WAIT,
             ),
             seconds=5,
         )
@@ -180,7 +191,11 @@ def test_wait_status_evaluation_after_checkpoint():
         seconds=30,
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "wait_eval", OperationSubType.WAIT, None, "test_wait"
+            "wait_eval",
+            OperationSubType.WAIT,
+            None,
+            "test_wait",
+            operation_type=OperationType.WAIT,
         ),
     )
 
@@ -231,7 +246,11 @@ def test_wait_immediate_success_handling():
         seconds=5,
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "wait_immediate", OperationSubType.WAIT, None, "immediate_wait"
+            "wait_immediate",
+            OperationSubType.WAIT,
+            None,
+            "immediate_wait",
+            operation_type=OperationType.WAIT,
         ),
     )
 
@@ -273,7 +292,10 @@ def test_wait_no_immediate_response_suspends():
         seconds=60,
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "wait_suspend", OperationSubType.WAIT, None
+            "wait_suspend",
+            OperationSubType.WAIT,
+            None,
+            operation_type=OperationType.WAIT,
         ),
     )
 
@@ -310,7 +332,11 @@ def test_wait_already_completed_no_checkpoint():
         seconds=10,
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "wait_replay", OperationSubType.WAIT, None, "completed_wait"
+            "wait_replay",
+            OperationSubType.WAIT,
+            None,
+            "completed_wait",
+            operation_type=OperationType.WAIT,
         ),
     )
 
@@ -351,7 +377,10 @@ def test_wait_with_various_durations():
             seconds=seconds,
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                f"wait_duration_{seconds}", OperationSubType.WAIT, None
+                f"wait_duration_{seconds}",
+                OperationSubType.WAIT,
+                None,
+                operation_type=OperationType.WAIT,
             ),
         )
 
@@ -393,7 +422,11 @@ def test_wait_suspends_when_second_check_returns_started():
         seconds=5,
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "wait-1", OperationSubType.WAIT, None, "test_wait"
+            "wait-1",
+            OperationSubType.WAIT,
+            None,
+            "test_wait",
+            operation_type=OperationType.WAIT,
         ),
     )
 
@@ -429,7 +462,11 @@ def test_wait_suspends_when_second_check_returns_started_duplicate():
         seconds=5,
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "wait-1", OperationSubType.WAIT, None, "test_wait"
+            "wait-1",
+            OperationSubType.WAIT,
+            None,
+            "test_wait",
+            operation_type=OperationType.WAIT,
         ),
     )
 
