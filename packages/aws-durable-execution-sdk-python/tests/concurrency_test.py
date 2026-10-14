@@ -61,6 +61,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     SuspendExecution,
     TimedSuspendExecution,
 )
+from aws_durable_execution_sdk_python.serdes import ExtendedTypeSerDes
 from aws_durable_execution_sdk_python.lambda_service import (
     DurableServiceClient,
     ErrorObject,
@@ -613,7 +614,15 @@ def test_executable_creation():
 
 
 def test_batch_result_failed_with_none_error():
-    """Test BatchResult failed method selects FAILED items by status alone."""
+    """FAILED items without an error normalize to ChildContextError.
+
+    Construction and deserialization both fill the same generic error the
+    executor records for a FAILED child-context checkpoint with no
+    ErrorObject, so get_errors() never returns None.
+    """
+    child_context_type = (
+        "aws_durable_execution_sdk_python.exceptions.ChildContextError"
+    )
     items = [
         BatchItem(0, BatchItemStatus.FAILED, error=None),
         BatchItem(
@@ -624,6 +633,55 @@ def test_batch_result_failed_with_none_error():
 
     failed = result.failed()
     assert len(failed) == result.failure_count == 2
+    assert failed[0].error is not None
+    assert failed[0].error.type == child_context_type
+    assert failed[0].error.message == (
+        "Unknown error. No ErrorObject exists on the Checkpoint Operation."
+    )
+
+    errors = result.get_errors()
+    assert len(errors) == 2
+    assert errors[0].type == child_context_type
+    assert errors[1].type == "Error"
+
+    # Wire payload may still omit error; from_dict must normalize too.
+    wire = {
+        "all": [
+            {"index": 0, "status": "FAILED", "result": None, "error": None},
+            {
+                "index": 1,
+                "status": "FAILED",
+                "result": None,
+                "error": ErrorObject("msg", "Error", None, None).to_dict(),
+            },
+        ],
+        "completionReason": "ALL_COMPLETED",
+    }
+    round_tripped = BatchResult.from_dict(wire)
+    round_trip_errors = round_tripped.get_errors()
+    assert len(round_trip_errors) == 2
+    assert round_trip_errors[0].type == child_context_type
+    assert all(error is not None for error in round_trip_errors)
+    assert round_trip_errors[0].type is not None
+    # Accessing error.type must not raise after deserialization.
+    assert [error.type for error in round_trip_errors] == [
+        child_context_type,
+        "Error",
+    ]
+
+    # Same gap after ExtendedTypeSerDes round-trip of a wire payload with
+    # error=null (the path that previously yielded AttributeError on .type).
+    serdes_payload = (
+        '{"t":"br","v":{"all":{"t":"l","v":[{"t":"m","v":{"index":{"t":"i","v":0},'
+        '"status":{"t":"s","v":"FAILED"},"result":{"t":"n","v":null},'
+        '"error":{"t":"n","v":null}}}]},"completionReason":{"t":"s","v":"ALL_COMPLETED"}}}'
+    )
+    serdes_result = ExtendedTypeSerDes().deserialize(serdes_payload)
+    assert isinstance(serdes_result, BatchResult)
+    serdes_errors = serdes_result.get_errors()
+    assert len(serdes_errors) == 1
+    assert serdes_errors[0].type == child_context_type
+
 
 
 def test_concurrent_executor_nesting_type_parameter():

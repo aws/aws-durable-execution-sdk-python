@@ -42,6 +42,26 @@ ResultType = TypeVar("ResultType")
 
 # region Result models
 
+_MISSING_FAILED_ITEM_ERROR_MESSAGE = (
+    "Unknown error. No ErrorObject exists on the Checkpoint Operation."
+)
+
+
+def _generic_failed_item_error() -> ErrorObject:
+    """ErrorObject for a FAILED batch item that carried no checkpoint error.
+
+    Matches ``_failed_checkpoint_error_object`` when the child-context
+    checkpoint has no ErrorObject: the same generic ChildContextError
+    replaying that child would raise.
+    """
+    err = ChildContextError(message=_MISSING_FAILED_ITEM_ERROR_MESSAGE)
+    return ErrorObject(
+        message=err.message,
+        type=err.error_type,
+        data=err.data,
+        stack_trace=err.stack_trace,
+    )
+
 
 class CompletionReason(Enum):
     ALL_COMPLETED = "ALL_COMPLETED"
@@ -401,6 +421,10 @@ class BatchItem(Generic[R]):
     result: R | None = None
     error: ErrorObject | None = None
 
+    def __post_init__(self) -> None:
+        if self.status is BatchItemStatus.FAILED and self.error is None:
+            object.__setattr__(self, "error", _generic_failed_item_error())
+
     def to_dict(self) -> dict:
         return {
             "index": self.index,
@@ -529,7 +553,10 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
         return [cast("R", item.result) for item in self.succeeded()]
 
     def get_errors(self) -> list[ErrorObject]:
-        return [cast("ErrorObject", item.error) for item in self.failed()]
+        return [
+            item.error if item.error is not None else _generic_failed_item_error()
+            for item in self.failed()
+        ]
 
     @property
     def success_count(self) -> int:
