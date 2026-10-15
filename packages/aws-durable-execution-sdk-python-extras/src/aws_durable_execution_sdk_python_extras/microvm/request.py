@@ -10,6 +10,7 @@ step attempt. The step retry strategy is the second tier.
 from __future__ import annotations
 
 import functools
+import math
 import http.client
 import threading
 import time
@@ -251,7 +252,8 @@ def require_time_for_call(remaining_seconds: Callable[[], float | None]) -> None
     needed = INVOCATION_RESERVE_SECONDS + MIN_CALL_SECONDS
     if remaining is not None and remaining < needed:
         msg = (
-            f"The request step had {remaining:.1f} seconds left in the Lambda "
+            f"The request step had {math.floor(remaining * 10) / 10:.1f} seconds "
+            "left in the Lambda "
             f"invocation, and it needs at least {needed:.0f} seconds to send "
             "the job. Raise the function timeout."
         )
@@ -272,11 +274,13 @@ def send_job(options: SendJobOptions) -> int:
        at once.
 
     The function does not follow a redirect. The JavaScript SDK's ``fetch``
-    follows one, and it differs in three ways. A 301, 302, or 303 turns the
+    follows one, and it differs in two ways. A 301, 302, or 303 turns the
     POST into a GET without the job, and the GET's 2xx counts as accepted.
     So the job never starts, and the operation waits until its timeout. A
     307 or 308 to another host receives the auth token. So a redirect fails
-    the delivery at once, with the ``Location`` in the message.
+    the delivery at once, with the ``Location`` in the message. The headers
+    are added as unredirected headers, so an opener that follows a redirect
+    does not send the auth token on either.
 
     The delay starts at 250 milliseconds and doubles up to 4 seconds. The
     tier ends at the retry window, or 10 seconds before the invocation times
@@ -531,8 +535,12 @@ def _post(
     each socket operation, so :func:`_post_within` bounds the whole request.
     """
     request = urllib.request.Request(  # noqa: S310 - the URL is https or the endpoint's own
-        url, data=body, headers=dict(headers), method="POST"
+        url, data=body, method="POST"
     )
+    # urllib does not copy these headers to a redirected request. So an
+    # opener that follows a redirect does not send the auth token on.
+    for name, value in headers.items():
+        request.add_unredirected_header(name, value)
     try:
         with opener.open(request, timeout=timeout) as response:
             # An opener that follows redirects reports the URL it reached.

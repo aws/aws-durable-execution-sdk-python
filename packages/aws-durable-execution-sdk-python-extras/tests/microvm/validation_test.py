@@ -98,6 +98,40 @@ def config(**fields: Any) -> MicrovmConfig:
         ),
         (
             "build",
+            {"request": MicrovmRequestConfig(path="/jobs/../build")},
+            'must not have a "." or ".." segment',
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/jobs/./build")},
+            'must not have a "." or ".." segment',
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/jobs/..")},
+            'must not have a "." or ".." segment',
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/jobs/%2e/build")},
+            'must not have a "." or ".." segment',
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/jobs/%2E%2e/build")},
+            'must not have a "." or ".." segment',
+        ),
+        (
+            "build",
+            {
+                "request": MicrovmRequestConfig(
+                    path="/jobs/../aws/lambda-microvms/runtime/v1/run"
+                )
+            },
+            'must not have a "." or ".." segment',
+        ),
+        (
+            "build",
             {"request": MicrovmRequestConfig(port=0)},
             "the request port must be an integer between 1 and 65535",
         ),
@@ -222,3 +256,13 @@ def test_reads_the_remaining_time_or_reports_no_deadline(
     context: Any = type("Context", (), {"lambda_context": lambda_context})()
 
     assert operation._remaining_seconds(context)() == expected  # noqa: SLF001
+
+
+@pytest.mark.parametrize("path", ["/.well-known/job", "/.../job", "/a.b/c..d", "/"])
+def test_accepts_dots_that_are_not_a_dot_segment(path: str) -> None:
+    # Dots next to other characters, and three dots, are not dot segments.
+    # fetch and urllib leave such a path unchanged.
+    assert (
+        operation._validate_request("build", MicrovmRequestConfig(path=path))  # noqa: SLF001
+        == 60
+    )

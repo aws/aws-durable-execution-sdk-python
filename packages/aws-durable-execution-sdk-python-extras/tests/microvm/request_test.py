@@ -209,9 +209,12 @@ def test_ends_the_tier_before_the_invocation_reserve(
     assert sleeps == [0.25, 0.5, 1.0, 2.0]
 
 
-@pytest.mark.parametrize("remaining", [0.5, 2.9, 10.9])
+@pytest.mark.parametrize(
+    ("remaining", "shown"),
+    [(0.5, "0.5"), (2.9, "2.9"), (10.9, "10.9"), (10.96, "10.9")],
+)
 def test_names_the_function_timeout_when_too_little_time_is_left(
-    fake_client: Any, fake_endpoint: Any, remaining: float
+    fake_client: Any, fake_endpoint: Any, remaining: float, shown: str
 ) -> None:
     # The Lambda default timeout is 3 seconds. Such a function can never
     # send a job over HTTP.
@@ -222,7 +225,7 @@ def test_names_the_function_timeout_when_too_little_time_is_left(
         send_job(options(client, endpoint.url, [], remaining_seconds=lambda: remaining))
 
     assert str(raised.value) == (
-        f"The request step had {remaining:.1f} seconds left in the Lambda "
+        f"The request step had {shown} seconds left in the Lambda "
         "invocation, and it needs at least 11 seconds to send the job. Raise "
         "the function timeout."
     )
@@ -549,3 +552,25 @@ def test_counts_the_window_from_the_given_start(
                 window_started_at=time.monotonic() - 59.9,
             )
         )
+
+
+def test_sends_no_auth_token_on_a_redirect_that_the_callers_opener_follows(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    # The opener follows a 302 to another host. That host must not receive
+    # the token, because urllib does not copy an unredirected header.
+    other_host = fake_endpoint()
+    endpoint = fake_endpoint([302], location=f"{other_host.url}/moved")
+
+    with pytest.raises(MicrovmRequestRejectedError):
+        send_job(
+            options(
+                fake_client(), endpoint.url, [], opener=urllib.request.build_opener()
+            )
+        )
+
+    assert endpoint.requests[0]["headers"]["x-test-token"] == "token-1"
+    [followed] = other_host.requests
+    assert followed["method"] == "GET"
+    assert "x-test-token" not in followed["headers"]
+    assert "content-type" not in followed["headers"]
