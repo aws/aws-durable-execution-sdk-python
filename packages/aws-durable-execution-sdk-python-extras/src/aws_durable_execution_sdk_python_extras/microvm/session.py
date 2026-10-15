@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
+    InvocationError,
     ValidationError,
 )
 
@@ -282,6 +283,10 @@ class MicrovmSession:
             )
             try:
                 return callback.result()
+            except InvocationError:
+                # An SDK invocation error is not a job outcome. A retryable
+                # one makes Lambda run the invocation again.
+                raise
             except Exception as error:
                 # SuspendExecution is a BaseException, so a wait for the
                 # callback passes through here.
@@ -362,6 +367,17 @@ class _SessionScope(_MicrovmScope):
             raise unknown_delivery_error(self.name, launched)
         try:
             result = handler(MicrovmSession(self, launched), child)
+        except InvocationError as error:
+            # A retryable InvocationError, such as RetryableSerDesError, makes
+            # Lambda run the invocation again. The child context records no
+            # outcome for it, and the handler replays on the same MicroVM.
+            # A terminate step recorded now would take the position of the
+            # handler's next operation, and the replay would fail with
+            # NonDeterministicExecutionError. So the session terminates only
+            # for an error that ends the session.
+            if not error.is_retryable():
+                self.terminate(child, launched.microvm_id)
+            raise
         except Exception:
             # SuspendExecution is a BaseException. A handler that waits, for
             # a job or a durable wait, passes through here without

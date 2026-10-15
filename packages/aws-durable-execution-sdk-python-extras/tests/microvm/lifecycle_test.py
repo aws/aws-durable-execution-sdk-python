@@ -211,3 +211,14 @@ def test_stops_a_stalled_get_microvm_at_the_reserve(fake_client: Any) -> None:
             run_with(client, remaining=lambda: INVOCATION_RESERVE_SECONDS + 1.2)
     finally:
         release.set()
+
+
+def test_raises_the_state_error_when_the_microvm_is_removed_before_the_resume(
+    fake_client: Any, make_error: Any
+) -> None:
+    client = fake_client(
+        states=["SUSPENDED"], resumes=[make_error("ResourceNotFoundException", 404)]
+    )
+
+    with pytest.raises(MicrovmStateError, match="no longer exists"):
+        run_with(client)

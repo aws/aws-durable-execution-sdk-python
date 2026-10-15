@@ -156,8 +156,12 @@ The MicroVM execution role (`execution_role_arn`) needs `lambda:SendDurableExecu
 `microvm_session` launches one MicroVM and runs a handler that sends jobs to it. The jobs share the MicroVM's files and processes. So a later job can use what an earlier job wrote. The MicroVM is terminated when the handler returns or raises.
 
 ```python
+import os
 from typing import Any
 
+from aws_durable_execution_sdk_python.config import Duration
+from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.execution import durable_execution
 from aws_durable_execution_sdk_python_extras.microvm import (
     MicrovmInvokeOptions,
     MicrovmSession,

@@ -26,6 +26,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     CallbackError,
     CallbackTimeoutError,
     ChildContextError,
+    InvocationError,
     StepError,
     ValidationError,
 )
@@ -712,6 +713,13 @@ class _OperationScope(_MicrovmScope):
 
         try:
             result = callback.result()
+        except InvocationError as error:
+            # An SDK invocation error is not a job outcome. A retryable one
+            # makes Lambda run the invocation again, and the replay waits for
+            # the same MicroVM. So the MicroVM stays up for it.
+            if not error.is_retryable():
+                self.terminate(child, microvm_id)
+            raise
         except Exception as error:
             # SuspendExecution is a BaseException, so a wait for the callback
             # passes through here without terminating the MicroVM.

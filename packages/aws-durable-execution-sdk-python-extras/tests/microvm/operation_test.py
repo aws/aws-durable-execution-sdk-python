@@ -9,6 +9,7 @@ import datetime
 import hashlib
 import json
 import threading
+import time
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -16,8 +17,11 @@ from typing import Any
 import boto3
 import pytest
 from aws_durable_execution_sdk_python.config import Duration
-from aws_durable_execution_sdk_python.context import DurableContext
-from aws_durable_execution_sdk_python.exceptions import ChildContextError
+from aws_durable_execution_sdk_python.context import Callback, DurableContext
+from aws_durable_execution_sdk_python.exceptions import (
+    ChildContextError,
+    InvocationError,
+)
 from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
     durable_execution,
@@ -1028,3 +1032,57 @@ def test_replay_keeps_the_http_delivery_of_the_launch(
         "/job",
         "/durable-execution/v1/job",
     ]
+
+
+@pytest.mark.parametrize("retryable", [True, False])
+def test_passes_an_invocation_error_of_the_wait_through(
+    fake_client: Any, monkeypatch: pytest.MonkeyPatch, retryable: bool
+) -> None:
+    # An SDK invocation error is not a job outcome. A retryable one makes
+    # Lambda run the invocation again, and the replay waits for the same
+    # MicroVM. So only an error that is not retryable terminates it.
+    class Interrupted(InvocationError):
+        def is_retryable(self) -> bool:
+            return retryable
+
+    original = Callback.result
+    raised = threading.Event()
+
+    def result_once(self: Any) -> Any:
+        if not raised.is_set():
+            raised.set()
+            msg = "interrupted"
+            raise Interrupted(msg)
+        return original(self)
+
+    monkeypatch.setattr(Callback, "result", result_once)
+    order: list[str] = []
+    client = fake_client(terminates=[lambda request: order.append("terminate")])
+    runner = DurableFunctionTestRunner(
+        handler=catching(config_with(client)), poll_interval=0.05
+    )
+    try:
+        arn = runner.run_async(input="{}", execution_timeout=WAIT)
+        if retryable:
+            callback_id = runner.wait_for_callback(
+                arn, name="build.callback", timeout=WAIT
+            )
+            # A terminate for the error would run at once after the raise,
+            # in the same thread. So 0.5 seconds after it, the order shows
+            # whether one ran.
+            assert raised.wait(WAIT)
+            time.sleep(0.5)
+            order.append("complete")
+            runner.send_callback_success(callback_id, b'"done"')
+        result = runner.wait_for_result(arn, timeout=WAIT)
+    finally:
+        runner.close()
+
+    # An error that is not retryable is recorded as the operation's failure.
+    # It is not a MicroVM error type, so it becomes a plain MicrovmError.
+    assert outcome(result) == (
+        {"result": "done"}
+        if retryable
+        else {"error": "MicrovmError", "message": 'MicroVM "build": interrupted'}
+    )
+    assert order == (["complete", "terminate"] if retryable else ["terminate"])

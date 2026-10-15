@@ -13,10 +13,12 @@ from typing import Any
 
 import boto3
 import pytest
-from aws_durable_execution_sdk_python.config import Duration
-from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.config import Duration, StepConfig
+from aws_durable_execution_sdk_python.context import Callback, DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
+    InvocationError,
+    RetryableSerDesError,
     ValidationError,
 )
 from aws_durable_execution_sdk_python.execution import (
@@ -25,6 +27,7 @@ from aws_durable_execution_sdk_python.execution import (
 )
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from aws_durable_execution_sdk_python.retries import RetryDecision
+from aws_durable_execution_sdk_python.serdes import SerDes
 from aws_durable_execution_sdk_python_testing.runner import (
     DurableFunctionTestResult,
     DurableFunctionTestRunner,
@@ -803,3 +806,173 @@ def test_terminates_and_fails_for_a_launch_checkpoint_of_another_delivery(
         '"smoke-signal", which this release does not support',
     }
     assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
+
+
+class FlakySerDes(SerDes[Any]):
+    """A serdes whose store fails once, for a reason that a retry can fix."""
+
+    def __init__(self) -> None:
+        self.failed = False
+
+    def serialize(self, value: Any, serdes_context: Any) -> str:
+        if not self.failed:
+            self.failed = True
+            msg = "store throttled"
+            raise RetryableSerDesError(msg)
+        return json.dumps(value)
+
+    def deserialize(self, data: str, serdes_context: Any) -> Any:
+        return json.loads(data)
+
+
+def test_keeps_the_microvm_when_the_handler_raises_a_retryable_invocation_error(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    # A retryable InvocationError makes Lambda run the invocation again. A
+    # terminate step recorded for it would take the position of the next
+    # job, and the replay would fail with NonDeterministicExecutionError.
+    client = fake_client(endpoint=fake_endpoint().url)
+    serdes = FlakySerDes()
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        fetched = ctx.step(
+            lambda _: {"n": 1}, name="fetch", config=StepConfig(serdes=serdes)
+        )
+        return vm.invoke(ctx, "build", job_input=fetched, options=job())
+
+    result = run(
+        session_handler(session_config(client), body),
+        None,
+        [("build", succeed_with("built"))],
+    )
+
+    assert outcome(result) == {"result": "built"}
+    assert serdes.failed
+    assert [name for name, _ in client.calls] == [
+        "run_microvm",
+        "create_microvm_auth_token",
+        "terminate_microvm",
+    ]
+
+
+def test_passes_a_retryable_invocation_error_of_a_job_wait_through(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The SDK error is not a job outcome. So the job does not fail with it,
+    # and the next invocation waits for the same job.
+    original = Callback.result
+    raised: list[bool] = []
+
+    def result_once(self: Any) -> Any:
+        if not raised:
+            raised.append(True)
+            msg = "store throttled"
+            raise RetryableSerDesError(msg)
+        return original(self)
+
+    monkeypatch.setattr(Callback, "result", result_once)
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
+
+    result = run(
+        session_handler(
+            session_config(client),
+            lambda vm, ctx, event: vm.invoke(ctx, "build", job_input=1, options=job()),
+        ),
+        None,
+        [("build", succeed_with("built"))],
+    )
+
+    assert outcome(result) == {"result": "built"}
+    assert raised == [True]
+    assert len(endpoint.requests) == 1
+    assert len(client.requests("terminate_microvm")) == 1
+
+
+def test_terminates_for_an_invocation_error_that_is_not_retryable(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    client = fake_client(endpoint=fake_endpoint().url)
+
+    class Fatal(InvocationError):
+        def is_retryable(self) -> bool:
+            return False
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        msg = "checkpoint rejected"
+        raise Fatal(msg)
+
+    result = run(session_handler(session_config(client), body))
+
+    # The SDK records the error as the session's failure.
+    assert outcome(result) == {
+        "error": "ChildContextError",
+        "message": "checkpoint rejected",
+    }
+    assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
+
+
+def test_runs_jobs_in_parallel_branches(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        return ctx.parallel(
+            [
+                lambda branch: vm.invoke(branch, "lint", job_input="a", options=job()),
+                lambda branch: vm.invoke(branch, "unit", job_input="b", options=job()),
+            ],
+            name="checks",
+        ).get_results()
+
+    result = run(
+        session_handler(session_config(client, auto_suspend_on_idle=True), body),
+        None,
+        [("lint", succeed_with("A")), ("unit", succeed_with("B"))],
+    )
+
+    assert outcome(result) == {"result": ["A", "B"]}
+    assert len(client.requests("run_microvm")) == 1
+    assert sorted(request["body"]["input"] for request in endpoint.requests) == [
+        "a",
+        "b",
+    ]
+    assert len(client.requests("get_microvm")) == 2
+    assert len(client.requests("terminate_microvm")) == 1
+
+
+def test_resumes_once_when_two_items_find_the_microvm_suspended(
+    run: Any, fake_client: Any, fake_endpoint: Any, make_error: Any
+) -> None:
+    # Both items find the MicroVM SUSPENDED and call ResumeMicrovm. The
+    # second call finds the resume in progress.
+    endpoint = fake_endpoint()
+    client = fake_client(
+        endpoint=endpoint.url,
+        states=["SUSPENDED"] * 4,
+        resumes=[None, make_error("ConflictException", 409)],
+    )
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        return ctx.map(
+            ["a", "b"],
+            lambda item_context, item, index, items: vm.invoke(
+                item_context, f"shard-{item}", job_input=item, options=job()
+            ),
+            name="shards",
+        ).get_results()
+
+    result = run(
+        session_handler(session_config(client, auto_suspend_on_idle=True), body),
+        None,
+        [("shard-a", succeed_with("A")), ("shard-b", succeed_with("B"))],
+    )
+
+    assert outcome(result) == {"result": ["A", "B"]}
+    assert len(client.requests("resume_microvm")) == 2
+    assert len(endpoint.requests) == 2

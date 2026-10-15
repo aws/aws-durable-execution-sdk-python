@@ -130,17 +130,20 @@ def ensure_running(options: EnsureRunningOptions) -> str | None:
             unavailable,
         )
 
+    def not_found() -> MicrovmStateError:
+        msg = (
+            f"MicroVM {microvm_id} no longer exists. A session MicroVM lives at "
+            "most its session timeout plus 5 minutes, and never longer than 8 "
+            "hours."
+        )
+        return MicrovmStateError(msg)
+
     while True:
         try:
             current = get_microvm()
         except ClientError as error:
             if _code(error) == "ResourceNotFoundException":
-                msg = (
-                    f"MicroVM {microvm_id} no longer exists. A session MicroVM "
-                    "lives at most its session timeout plus 5 minutes, and never "
-                    "longer than 8 hours."
-                )
-                raise MicrovmStateError(msg) from error
+                raise not_found() from error
             raise
         state = current.get("state")
         last_state = state
@@ -161,8 +164,12 @@ def ensure_running(options: EnsureRunningOptions) -> str | None:
             except ClientError as error:
                 # ConflictException means that a transition is already in
                 # progress, for example an auto-resume. Polling continues
-                # either way.
-                if _code(error) != "ConflictException":
+                # either way. ResourceNotFoundException means that the
+                # MicroVM was removed after the state check.
+                code = _code(error)
+                if code == "ResourceNotFoundException":
+                    raise not_found() from error
+                if code != "ConflictException":
                     raise
             resume_sent = True
             options.logger.info("resuming MicroVM", extra={"state": state})
