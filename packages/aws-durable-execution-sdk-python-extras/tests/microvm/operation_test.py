@@ -545,7 +545,7 @@ def test_fails_a_launch_without_an_endpoint_for_http(
 def test_fails_the_request_for_a_launch_checkpoint_without_an_endpoint(
     run: Any, fake_client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original = operation._OperationScope._launch  # noqa: SLF001
+    original = operation._MicrovmScope._launch_call  # noqa: SLF001
 
     def without_endpoint(self: Any, *args: Any) -> Any:
         launched = original(self, *args)
@@ -553,7 +553,7 @@ def test_fails_the_request_for_a_launch_checkpoint_without_an_endpoint(
             microvm_id=launched.microvm_id, delivery=launched.delivery
         )
 
-    monkeypatch.setattr(operation._OperationScope, "_launch", without_endpoint)  # noqa: SLF001
+    monkeypatch.setattr(operation._MicrovmScope, "_launch_call", without_endpoint)  # noqa: SLF001
     client = fake_client()
     config = config_with(client, request=MicrovmRequestConfig(path="/job"))
 
@@ -789,7 +789,7 @@ def test_terminates_and_fails_for_a_delivery_that_it_does_not_know(
 ) -> None:
     # A launch checkpoint from another release, for example after a rollback.
 
-    original = operation._OperationScope._launch  # noqa: SLF001
+    original = operation._MicrovmScope._launch_call  # noqa: SLF001
 
     def launch_for_another(self: Any, *args: Any) -> Any:
         launched = original(self, *args)
@@ -797,7 +797,7 @@ def test_terminates_and_fails_for_a_delivery_that_it_does_not_know(
             microvm_id=launched.microvm_id, delivery="smoke-signal"
         )
 
-    monkeypatch.setattr(operation._OperationScope, "_launch", launch_for_another)  # noqa: SLF001
+    monkeypatch.setattr(operation._MicrovmScope, "_launch_call", launch_for_another)  # noqa: SLF001
     client = fake_client()
 
     result = run(catching(config_with(client)), {})

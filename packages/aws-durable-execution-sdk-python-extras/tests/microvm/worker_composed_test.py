@@ -42,8 +42,12 @@ from aws_durable_execution_sdk_python_extras.microvm import (
     MAX_RUN_HOOK_PAYLOAD_LENGTH,
     MicrovmConfig,
     MicrovmError,
+    MicrovmInvokeOptions,
     MicrovmRequestConfig,
+    MicrovmSession,
+    MicrovmSessionConfig,
     microvm,
+    microvm_session,
 )
 
 
@@ -223,3 +227,60 @@ def test_runs_a_job_on_a_route_of_the_worker(composed: Any) -> None:
     )
 
     assert outcome == {"result": {"route": {"n": 1}}}
+
+
+def test_runs_two_session_jobs_in_one_worker(fake_client: Any, tmp_path: Any) -> None:
+    """The second job reads what the first job wrote in the same MicroVM."""
+
+    def job(job_input: Any, context: MicrovmJobContext) -> Any:
+        state = tmp_path / "artifact.txt"
+        if job_input == "build":
+            state.write_text(f"built in {context.microvm_id}")
+            return "built"
+        return state.read_text()
+
+    holder: dict[str, MicrovmSessionConfig] = {}
+
+    def pipeline(vm: MicrovmSession, ctx: DurableContext) -> Any:
+        options = MicrovmInvokeOptions(timeout=Duration.from_minutes(1))
+        return [
+            vm.invoke(ctx, "build", job_input="build", options=options),
+            vm.invoke(ctx, "test", job_input="test", options=options),
+        ]
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        return microvm_session(
+            context, "pipeline", config=holder["config"], handler=pipeline
+        )
+
+    runner = DurableFunctionTestRunner(handler=handler, poll_interval=0.05)
+    callbacks = RunnerCallbacks(runner)
+    worker = start_microvm_worker(
+        handler=job,
+        create_client=lambda region: callbacks,  # type: ignore[arg-type, return-value]
+        port=0,
+    )
+    try:
+        client = fake_client(
+            launches=[run_hook_to(worker)],
+            endpoint=f"http://127.0.0.1:{worker.port}",
+        )
+        holder["config"] = MicrovmSessionConfig(
+            image_identifier="img",
+            execution_role_arn="role",
+            timeout=Duration.from_minutes(5),
+            client=client,
+        )
+        arn = runner.run_async(input="null", execution_timeout=WAIT)
+        result = runner.wait_for_result(arn, timeout=WAIT)
+        assert worker.idle(WAIT)
+    finally:
+        worker.close()
+        runner.close()
+
+    assert result.status is InvocationStatus.SUCCEEDED, result.error
+    assert json.loads(result.result or "null") == ["built", "built in mvm-1"]
+    assert len(client.requests("run_microvm")) == 1
+    assert len(client.requests("create_microvm_auth_token")) == 2
+    assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]

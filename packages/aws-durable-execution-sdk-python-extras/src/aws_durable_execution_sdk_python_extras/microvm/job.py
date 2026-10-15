@@ -117,13 +117,21 @@ class JobRequest:
         )
 
 
-def run_hook_payload_without_job(region: str) -> str:
-    """The ``runHookPayload`` of a launch whose job goes over HTTP.
+def run_hook_payload_without_job(
+    region: str, auto_suspend_idle_seconds: int | None = None
+) -> str:
+    """The ``runHookPayload`` of a launch whose jobs go over HTTP.
 
     The worker rejects a ``run`` hook payload without ``version`` and
     ``region``. So the payload keeps those two fields, and omits the job.
+
+    A session that suspends when idle adds ``autoSuspendIdleSeconds``. The
+    worker then suspends its own MicroVM when no job has run for that long.
     """
-    return dumps({"version": PAYLOAD_VERSION, "region": region})
+    document: dict[str, Any] = {"version": PAYLOAD_VERSION, "region": region}
+    if auto_suspend_idle_seconds is not None:
+        document["autoSuspendIdleSeconds"] = auto_suspend_idle_seconds
+    return dumps(document)
 
 
 def dumps(document: Any) -> str:

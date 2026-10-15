@@ -138,3 +138,15 @@ def test_the_worker_reads_a_run_hook_payload_without_a_job() -> None:
     assert payload == '{"version":1,"region":"us-east-1"}'
     assert request.payload is not None
     assert request.payload.job is None
+
+
+def test_the_worker_reads_the_idle_time_of_a_session() -> None:
+    payload = run_hook_payload_without_job("us-east-1", 60)
+
+    request = RunHookRequest.from_dict(
+        {"microvmId": "mvm-1", "runHookPayload": payload}
+    )
+
+    assert payload == '{"version":1,"region":"us-east-1","autoSuspendIdleSeconds":60}'
+    assert request.payload is not None
+    assert request.payload.auto_suspend_idle_seconds == 60
