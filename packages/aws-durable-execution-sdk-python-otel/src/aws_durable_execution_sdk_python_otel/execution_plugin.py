@@ -884,10 +884,10 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             if info.operation_id in self._ended_operation_ids:
                 return
             self._ended_operation_ids.add(info.operation_id)
-        # An open operation is held as a non-recording placeholder; drop it and
-        # create the single recording span for the operation now.
+        # Keep the parent context registered while materializing its span.
+        # _start_span replaces the placeholder atomically under the registry lock,
+        # so a concurrent child end cannot be stranded by a temporary absence.
         placeholder = self._get_span(info.operation_id)
-        self._pop_span(info.operation_id)
         parent = self._resolve_parent(info.parent_id)
         start_time = info.start_time
         end_time = info.end_time

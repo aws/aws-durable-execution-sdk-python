@@ -1,6 +1,8 @@
 """Missing parent metadata is deferred rather than guessed or reparented."""
 
 import contextvars
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -354,3 +356,95 @@ def test_completed_parent_refs_cover_later_updates_without_guessing():
         )
         == []
     )
+
+
+def test_parent_registration_survives_concurrent_terminal_materialization(monkeypatch):
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    plugin = ExecutionOtelPlugin(
+        OtelPluginConfig(
+            tracer_provider=provider,
+            context_extractor=lambda _: None,
+            enrich_logger=False,
+        )
+    )
+    now = datetime.now(UTC)
+    invocation = dict(
+        request_id="atomic-parent",
+        execution_arn="execution/atomic-parent",
+        is_first_invocation=True,
+        execution_start_time=now,
+    )
+    parent_entered, allow_parent = threading.Event(), threading.Event()
+    original_start = plugin._start_span
+
+    def start_span(**kwargs):
+        if kwargs["operation_id"] == "parent":
+            parent_entered.set()
+            assert allow_parent.wait(5)
+        return original_start(**kwargs)
+
+    monkeypatch.setattr(plugin, "_start_span", start_span)
+
+    def invoke():
+        before = otel_context.get_current()
+        plugin.on_invocation_start(InvocationStartInfo(**invocation))
+        parent_fields = dict(
+            operation_id="parent",
+            operation_type=OperationType.CONTEXT,
+            name="parent",
+            parent_id=None,
+            status=OperationStatus.STARTED,
+            end_time=None,
+        )
+        plugin.on_operation_start(_info(OperationStartInfo, now, **parent_fields))
+        start = _info(UserFunctionStartInfo, now, **parent_fields)
+        plugin.on_user_function_start(start)
+        plugin.on_user_function_end(UserFunctionEndInfo.from_start_info(start, None))
+        parent_fields.update(
+            status=OperationStatus.SUCCEEDED, end_time=now + timedelta(seconds=2)
+        )
+        parent_context, child_context = (
+            contextvars.copy_context(),
+            contextvars.copy_context(),
+        )
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            parent = pool.submit(
+                parent_context.run,
+                plugin.on_operation_end,
+                _info(OperationEndInfo, now, **parent_fields),
+            )
+            try:
+                assert parent_entered.wait(5)
+                child = pool.submit(
+                    child_context.run,
+                    plugin.on_operation_end,
+                    _info(OperationEndInfo, now),
+                )
+                child.result(timeout=5)
+            finally:
+                allow_parent.set()
+            parent.result(timeout=5)
+        close_error = None
+        try:
+            plugin.on_invocation_end(
+                InvocationEndInfo(**invocation, status=InvocationStatus.SUCCEEDED)
+            )
+        except ValueError as exc:
+            close_error = exc
+        spans = exporter.get_finished_spans()
+        parents = [
+            s for s in spans if s.attributes.get("durable.operation.id") == "parent"
+        ]
+        children = [s for s in spans if s.attributes.get("durable.operation.id") == "b"]
+        assert len(parents) == len(children) == 1
+        assert children[0].parent.span_id == parents[0].context.span_id
+        assert children[0].context.trace_id == parents[0].context.trace_id
+        assert close_error is None
+        assert plugin._operation_spans == {} and otel_context.get_current() == before
+
+    try:
+        contextvars.Context().run(invoke)
+    finally:
+        provider.shutdown()
