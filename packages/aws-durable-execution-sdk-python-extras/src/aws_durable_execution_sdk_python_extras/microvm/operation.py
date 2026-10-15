@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
+import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -103,6 +103,13 @@ _HOOK_PATH_PREFIX = "/aws/lambda-microvms/"
 """Lambda sends the lifecycle hooks to paths under this prefix."""
 
 _MAX_PORT = 65_535
+
+_ROUTE_PATH = re.compile(r"(?:/(?:[A-Za-z0-9\-._~!$&'()*+,;=:@]|%[0-9A-Fa-f]{2})*)+")
+"""An RFC 3986 path, section 3.3: segments of pchar characters and %XX escapes.
+
+The operation sends the path as written. Both workers match the raw request
+path, so the config and the route use the same string.
+"""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -458,6 +465,7 @@ class _OperationScope:
                     retry_window_seconds=self.retry_window_seconds,
                     remaining_seconds=remaining_seconds,
                     logger=step_context.logger,
+                    opener=self.config.opener,
                 )
             )
 
@@ -686,9 +694,13 @@ def _validate_request(name: str, request: MicrovmRequestConfig) -> int:
         ValidationError: When a setting is not valid.
     """
     path = request.path
-    if path is not None and (not isinstance(path, str) or not path.startswith("/")):
+    if path is not None and (
+        not isinstance(path, str) or not _ROUTE_PATH.fullmatch(path)
+    ):
         msg = (
-            f'MicroVM "{name}": the request path must be a string that starts with "/"'
+            f'MicroVM "{name}": the request path must be an RFC 3986 path that '
+            'starts with "/". Percent-encode any other character, for example a '
+            "space as %20."
         )
         raise ValidationError(msg)
     if path is not None and path.startswith(_HOOK_PATH_PREFIX):
@@ -723,29 +735,16 @@ def _validate_request(name: str, request: MicrovmRequestConfig) -> int:
 def _remaining_seconds(context: DurableContext) -> Callable[[], float | None]:
     """Return a reader of the invocation's remaining time, in seconds.
 
-    The first retry tier uses it to stop before the invocation times out. The
-    Lambda context has ``get_remaining_time_in_millis()``. Another compute's
-    context may lack it, or the method may raise or return no finite number.
-    The reader returns ``None`` in each of these cases. So the request step
-    falls back to its retry window, and nothing fails.
+    The first retry tier uses it to stop before the invocation times out.
+    ``None`` means that the compute reports no deadline. The core passes the
+    Lambda handler's context, whose ``get_remaining_time_in_millis()``
+    returns an ``int``. A failure of that call raises, so the reserve is
+    never turned off without a sign.
     """
     lambda_context = context.lambda_context
-    read = getattr(lambda_context, "get_remaining_time_in_millis", None)
-    if not callable(read):
+    if lambda_context is None:
         return lambda: None
-
-    def remaining() -> float | None:
-        try:
-            value = read()
-        except Exception:  # noqa: BLE001 - any failure means no deadline
-            return None
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        if not math.isfinite(value):
-            return None
-        return value / 1000
-
-    return remaining
+    return lambda: lambda_context.get_remaining_time_in_millis() / 1000
 
 
 def _detail(error: StepError) -> str:

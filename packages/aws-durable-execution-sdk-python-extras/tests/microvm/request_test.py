@@ -9,6 +9,7 @@ import logging
 import socket
 import threading
 import time
+import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
@@ -208,14 +209,44 @@ def test_ends_the_tier_before_the_invocation_reserve(
     assert sleeps == [0.25, 0.5, 1.0, 2.0]
 
 
-def test_starts_no_call_within_1_second_of_the_reserve(
-    fake_client: Any, fake_endpoint: Any
+@pytest.mark.parametrize("remaining", [0.5, 2.9, 10.9])
+def test_names_the_function_timeout_when_too_little_time_is_left(
+    fake_client: Any, fake_endpoint: Any, remaining: float
 ) -> None:
+    # The Lambda default timeout is 3 seconds. Such a function can never
+    # send a job over HTTP.
     client = fake_client()
     endpoint = fake_endpoint()
 
+    with pytest.raises(MicrovmEndpointUnavailableError) as raised:
+        send_job(options(client, endpoint.url, [], remaining_seconds=lambda: remaining))
+
+    assert str(raised.value) == (
+        f"The request step had {remaining:.1f} seconds left in the Lambda "
+        "invocation, and it needs at least 11 seconds to send the job. Raise "
+        "the function timeout."
+    )
+    assert client.calls == []
+    assert endpoint.requests == []
+
+
+def test_starts_no_call_within_1_second_of_the_reserve(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    # The time left falls below the minimum after the first check.
+    client = fake_client()
+    endpoint = fake_endpoint()
+    readings = iter([12.0])
+
     with pytest.raises(MicrovmEndpointUnavailableError, match="after 0 attempts"):
-        send_job(options(client, endpoint.url, [], remaining_seconds=lambda: 10.5))
+        send_job(
+            options(
+                client,
+                endpoint.url,
+                [],
+                remaining_seconds=lambda: next(readings, 10.5),
+            )
+        )
 
     assert client.calls == []
     assert endpoint.requests == []
@@ -226,7 +257,7 @@ def test_bounds_the_request_timeout_by_the_reserve(
 ) -> None:
     timeouts: list[float] = []
 
-    def post(url: str, body: bytes, headers: Any, timeout: float) -> Any:
+    def post(url: str, body: bytes, headers: Any, timeout: float, opener: Any) -> Any:
         timeouts.append(timeout)
         return request._Answer(202)  # noqa: SLF001
 
@@ -329,7 +360,7 @@ def test_bounds_the_whole_request_and_not_each_socket_operation(
     started = time.monotonic()
 
     answer = request._post_within(  # noqa: SLF001
-        f"{trickle_server}/job", BODY, {}, 1.0
+        f"{trickle_server}/job", BODY, {}, 1.0, request.default_opener()
     )
 
     assert time.monotonic() - started < 2
@@ -357,23 +388,66 @@ def test_rejects_a_redirect_without_following_it(
 
 
 @pytest.mark.parametrize(
-    ("path", "sent"),
-    [
-        ("/clone build", "/clone%20build"),
-        ("/café", "/caf%C3%A9"),
-        ("/already%20encoded", "/already%20encoded"),
-        ("/a/b-c_d.e~f!$&'()*+,;=:@[]|^", "/a/b-c_d.e~f!$&'()*+,;=:@[]|^"),
-        ('/q"<>`{}', "/q%22%3C%3E%60%7B%7D"),
-    ],
+    "path", ["/clone%20build", "/caf%C3%A9", "/a/b-c_d.e~f!$&'()*+,;=:@", "/a/"]
 )
-def test_percent_encodes_the_path_as_fetch_does(
-    fake_client: Any, fake_endpoint: Any, path: str, sent: str
+def test_sends_the_path_as_written(
+    fake_client: Any, fake_endpoint: Any, path: str
 ) -> None:
+    # The workers match the raw request path. So the config and the route
+    # use the same string only when the path is sent unchanged.
     endpoint = fake_endpoint()
 
     send_job(options(fake_client(), endpoint.url, [], path=path))
 
-    assert endpoint.requests[0]["path"] == sent
+    assert endpoint.requests[0]["path"] == path
+
+
+def test_uses_the_opener_that_the_caller_passes(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint()
+    opened: list[str] = []
+
+    class Recording(urllib.request.BaseHandler):
+        def http_request(self, req: urllib.request.Request) -> urllib.request.Request:
+            opened.append(req.full_url)
+            return req
+
+    opener = urllib.request.build_opener(Recording())
+
+    assert send_job(options(fake_client(), endpoint.url, [], opener=opener)) == 202
+    assert opened == [f"{endpoint.url}/durable-execution/v1/job"]
+
+
+@pytest.mark.parametrize("status", [301, 302, 303])
+def test_rejects_a_redirect_that_the_callers_opener_followed(
+    fake_client: Any, fake_endpoint: Any, status: int
+) -> None:
+    # The default urllib opener follows the redirect with a GET, and the GET
+    # gets 200. The route never received the job.
+    endpoint = fake_endpoint([status])
+
+    with pytest.raises(MicrovmRequestRejectedError) as raised:
+        send_job(
+            options(
+                fake_client(), endpoint.url, [], opener=urllib.request.build_opener()
+            )
+        )
+
+    assert str(raised.value) == (
+        "The MicroVM answered the job at /durable-execution/v1/job with a "
+        f"redirect to {endpoint.url}/moved, and the opener followed it. The "
+        "operation does not follow redirects, so set the path that the route "
+        "serves."
+    )
+    assert [r["path"] for r in endpoint.requests] == [
+        "/durable-execution/v1/job",
+        "/moved",
+    ]
+
+
+def test_builds_the_default_opener_once() -> None:
+    assert request.default_opener() is request.default_opener()
 
 
 def test_ignores_proxy_settings_in_the_environment(

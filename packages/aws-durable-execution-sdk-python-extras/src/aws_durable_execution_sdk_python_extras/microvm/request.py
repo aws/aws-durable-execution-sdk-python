@@ -9,11 +9,11 @@ step attempt. The step retry strategy is the second tier.
 
 from __future__ import annotations
 
+import functools
 import http.client
 import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -210,6 +210,8 @@ class SendJobOptions:
     """The remaining invocation time. ``None`` means that the compute reports
     no deadline, and only the retry window applies."""
     logger: LoggerInterface
+    opener: urllib.request.OpenerDirector | None = None
+    """The urllib opener for the POST. ``None`` uses :func:`default_opener`."""
     sleep: Callable[[float], None] = time.sleep
 
 
@@ -256,10 +258,19 @@ def send_job(options: SendJobOptions) -> int:
     The endpoint can accept a request before Lambda has sent the ``run``
     hook. So the body carries the MicroVM ID too.
 
-    A request can reach the MicroVM while its response is lost. The next
-    request then delivers the same job again. The worker ignores a second
-    request for a callback ID that runs or recently ended, so the job still
-    runs once.
+    The same job can reach the route more than once:
+
+    1. A request reaches the route, and its answer is lost.
+    2. The function stops waiting for a request, but the request keeps
+       running in its thread and reaches the route. The next attempt sends
+       the job again.
+    3. The invocation ends after the route accepted the job, and before the
+       request step checkpointed its success. The step then runs again in
+       the next invocation.
+
+    The worker package ignores a second request for a callback ID that runs
+    or recently ended. A route served without the worker package must ignore
+    it too.
 
     Returns:
         The status that accepted the job.
@@ -270,6 +281,21 @@ def send_job(options: SendJobOptions) -> int:
         MicrovmEndpointUnavailableError: When the tier ends.
         Exception: When ``CreateMicrovmAuthToken`` fails.
     """
+    # A step that starts too close to the end of the invocation cannot make
+    # one call before the reserve. Say so, instead of reporting that the
+    # MicroVM did not accept the job. The error stays retryable: a step
+    # retry runs early in a new invocation, with more time left. A function
+    # timeout under the needed time fails every attempt, and the final error
+    # names the fix.
+    remaining = options.remaining_seconds()
+    needed = INVOCATION_RESERVE_SECONDS + MIN_CALL_SECONDS
+    if remaining is not None and remaining < needed:
+        msg = (
+            f"The request step had {remaining:.1f} seconds left in the Lambda "
+            f"invocation, and it needs at least {needed:.0f} seconds to send "
+            "the job. Raise the function timeout."
+        )
+        raise MicrovmEndpointUnavailableError(msg)
     started = time.monotonic()
     window_ends = started + options.retry_window_seconds
     attempt = 0
@@ -310,8 +336,20 @@ def send_job(options: SendJobOptions) -> int:
         headers = {"content-type": "application/json", **token}
         if options.port != DEFAULT_MICROVM_PORT:
             headers[_PORT_HEADER] = str(options.port)
-        answer = _post_within(url, options.body, headers, timeout)
+        answer = _post_within(
+            url, options.body, headers, timeout, options.opener or default_opener()
+        )
         status = answer.status
+        if answer.followed_redirect:
+            # A caller's opener followed a redirect. The route never received
+            # the job: a 301, 302, or 303 turns the POST into a GET.
+            msg = (
+                f"The MicroVM answered the job at {options.path} with a "
+                f"redirect to {answer.location}, and the opener followed it. "
+                "The operation does not follow redirects, so set the path that "
+                "the route serves."
+            )
+            raise MicrovmRequestRejectedError(msg, status or 0)
 
         if status is not None and 200 <= status < 300:
             options.logger.info(
@@ -383,9 +421,19 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-# Proxy settings from the environment do not apply. The request goes to the
-# MicroVM endpoint directly, as the JavaScript SDK's fetch sends it.
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+@functools.cache
+def default_opener() -> urllib.request.OpenerDirector:
+    """The urllib opener that the POST uses when the config sets none.
+
+    1. It ignores the proxy settings in the environment. The request goes to
+       the MicroVM endpoint directly, as the JavaScript SDK's ``fetch`` sends
+       it.
+    2. It follows no redirect.
+
+    It is built on first use. Building it loads the CA certificates, so a
+    function whose jobs all go in the ``run`` hook does not pay for it.
+    """
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
 
 @dataclass(frozen=True)
@@ -397,11 +445,18 @@ class _Answer:
     failure: str = ""
     """Why no answer arrived."""
     location: str | None = None
-    """The ``Location`` header of a redirect."""
+    """The ``Location`` header of a redirect, or the URL that a followed
+    redirect reached."""
+    followed_redirect: bool = False
+    """Whether the opener followed a redirect."""
 
 
 def _post_within(
-    url: str, body: bytes, headers: Mapping[str, str], timeout: float
+    url: str,
+    body: bytes,
+    headers: Mapping[str, str],
+    timeout: float,
+    opener: urllib.request.OpenerDirector,
 ) -> _Answer:
     """POST ``body``, and wait for the answer at most ``timeout`` seconds.
 
@@ -410,14 +465,20 @@ def _post_within(
     failed attempt, like a refused connection.
     """
     finished, answer = _run_with_limit(
-        lambda: _post(url, body, headers, timeout), timeout
+        lambda: _post(url, body, headers, timeout, opener), timeout
     )
     if not finished:
         return _Answer(None, f"TimeoutError: no answer in {timeout:.1f} s")
     return cast("_Answer", answer)
 
 
-def _post(url: str, body: bytes, headers: Mapping[str, str], timeout: float) -> _Answer:
+def _post(
+    url: str,
+    body: bytes,
+    headers: Mapping[str, str],
+    timeout: float,
+    opener: urllib.request.OpenerDirector,
+) -> _Answer:
     """POST ``body``, and return the status, or the failure.
 
     The body of the response is not used. So the function reads no body, and
@@ -428,7 +489,12 @@ def _post(url: str, body: bytes, headers: Mapping[str, str], timeout: float) -> 
         url, data=body, headers=dict(headers), method="POST"
     )
     try:
-        with _OPENER.open(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
+            # An opener that follows redirects reports the URL it reached.
+            if response.geturl() != url:
+                return _Answer(
+                    response.status, location=response.geturl(), followed_redirect=True
+                )
             return _Answer(response.status)
     except urllib.error.HTTPError as error:
         location = error.headers.get("Location") if error.headers else None
@@ -440,19 +506,8 @@ def _post(url: str, body: bytes, headers: Mapping[str, str], timeout: float) -> 
         return _Answer(None, f"{type(error).__name__}: {error}")
 
 
-_PATH_SAFE = "/%!$&'()*+,;=:@-._~?#[]|^"
-"""The characters that stay as they are in the path.
-
-The WHATWG URL parser, which the JavaScript SDK's ``fetch`` uses,
-percent-encodes a space, ``"``, ``<``, ``>``, a backtick, ``{``, ``}``, the
-control characters, and every non-ASCII character in a path, as UTF-8.
-``urllib.parse.quote`` encodes those too, and leaves this set as it is. A
-``%`` stays, so a path that is already encoded is not encoded twice.
-"""
-
-
 def _endpoint_url(endpoint: str, path: str) -> str:
-    """Join the endpoint and the percent-encoded path.
+    """Join the endpoint and the path, as the caller wrote the path.
 
     ``RunMicrovm`` returns the endpoint as a host name without a scheme.
     """
@@ -461,4 +516,4 @@ def _endpoint_url(endpoint: str, path: str) -> str:
         if endpoint.startswith(("https://", "http://"))
         else (f"https://{endpoint}")
     )
-    return f"{base.rstrip('/')}{urllib.parse.quote(path, safe=_PATH_SAFE)}"
+    return f"{base.rstrip('/')}{path}"

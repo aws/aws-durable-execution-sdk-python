@@ -63,12 +63,33 @@ def config(**fields: Any) -> MicrovmConfig:
         (
             "build",
             {"request": MicrovmRequestConfig(path="job")},
-            'the request path must be a string that starts with "/"',
+            "the request path must be an RFC 3986 path",
         ),
         (
             "build",
             {"request": MicrovmRequestConfig(path=7)},  # type: ignore[arg-type]
-            'the request path must be a string that starts with "/"',
+            "the request path must be an RFC 3986 path",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/clone build")},
+            'starts with "/". Percent-encode any other character, for example a '
+            "space as %20.",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/café")},
+            "the request path must be an RFC 3986 path",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/job?x=1")},
+            "the request path must be an RFC 3986 path",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/bad%zz")},
+            "the request path must be an RFC 3986 path",
         ),
         (
             "build",
@@ -188,29 +209,12 @@ def test_takes_the_input_and_the_config_by_keyword_only() -> None:
 
 
 class LambdaContext:
-    def __init__(self, read: Any) -> None:
-        self.get_remaining_time_in_millis = read
-
-
-def boom() -> int:
-    msg = "no deadline here"
-    raise RuntimeError(msg)
+    def get_remaining_time_in_millis(self) -> int:
+        return 12_500
 
 
 @pytest.mark.parametrize(
-    ("lambda_context", "expected"),
-    [
-        (LambdaContext(lambda: 12_500), 12.5),
-        (LambdaContext(lambda: 2.5), 0.0025),
-        (None, None),
-        (object(), None),
-        (LambdaContext("not callable"), None),
-        (LambdaContext(boom), None),
-        (LambdaContext(lambda: math.inf), None),
-        (LambdaContext(lambda: math.nan), None),
-        (LambdaContext(lambda: "12"), None),
-        (LambdaContext(lambda: True), None),
-    ],
+    ("lambda_context", "expected"), [(LambdaContext(), 12.5), (None, None)]
 )
 def test_reads_the_remaining_time_or_reports_no_deadline(
     lambda_context: Any, expected: float | None

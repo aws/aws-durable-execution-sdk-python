@@ -59,6 +59,14 @@ microvm(context, "build", job_input=job_input, config=config)
 
 A `path` sends every job over HTTP, whatever its size. The route must answer with a 2xx status at once and run the job in the background. `port` names a port other than 8080. `retry_window` sets how long the request step retries inside one attempt, 60 seconds by default.
 
+The same job can arrive again, also after it ended, so ignore a second request for a callback ID that you already ran. The worker package does this. A route served without it must do it itself. A job arrives again in these cases:
+
+1. A request reaches the route, and its answer is lost.
+2. The request step stops waiting for a request after at most 10 seconds, but the request keeps running in its thread and reaches the route. The next attempt sends the job again.
+3. The invocation ends after the route accepted the job, and before the request step checkpointed its success. The step then runs again in the next invocation.
+
+The path must be an RFC 3986 path, and the operation sends it exactly as written. Percent-encode any other character, for example a space as `%20`. The workers match the raw request path, so register the same string as the worker's route. An invalid path raises `ValidationError` before any durable operation starts.
+
 ### What it does
 
 The operation runs its durable operations in one child context named after the second argument:
@@ -117,7 +125,7 @@ A step retry costs one durable operation and one more Lambda invocation. Most fa
 
 A route that answers another 4xx status fails the operation without a retry, with `MicrovmDeliveryError`. So does a redirect, 3xx. The operation does not follow redirects, and the message names the `Location`. Set the path that the route serves, for example with its trailing slash. The JavaScript operation follows redirects.
 
-The path is percent-encoded as the JavaScript SDK's `fetch` encodes it. A space becomes `%20`, and a non-ASCII character becomes its UTF-8 bytes. A `%` stays, so an encoded path is sent as it is.
+The POST ignores the proxy settings in the environment, as the JavaScript SDK's `fetch` does. boto3 reads `HTTPS_PROXY`. So in a network that reaches the MicroVM endpoint only through a proxy, the launch succeeds and every POST fails. Pass an `opener` in the config for that network, for example `urllib.request.build_opener(urllib.request.ProxyHandler({"https": "http://proxy.internal:3128"}))`. When an opener follows a redirect, the delivery still fails at once with `MicrovmDeliveryError`.
 
 The 10-second reserve keeps time for the step to record its failure. A Lambda timeout during a step attempt records no outcome for the attempt. So every call of the first tier must end before the reserve. boto3 cannot cancel a call, so a `CreateMicrovmAuthToken` call runs in a separate thread, and the step stops waiting for it at the reserve. Each POST runs in a separate thread too, and the step waits for it at most 10 seconds, or until the reserve. A socket timeout alone would not bound it, because each byte received starts the socket timeout again.
 
@@ -127,6 +135,7 @@ The 10-second reserve keeps time for the step to record its failure. A Lambda ti
 - `job_input` is sent as JSON. So the MicroVM receives what `json.dumps` writes: a tuple arrives as a list, and a dict key that is not a string arrives as a string.
 - The MicroVM gets the `INTERNET_EGRESS` connector, because it needs egress to reach the Lambda callback APIs. For ingress, it gets `NO_INGRESS` with `run` hook delivery and `ALL_INGRESS` with HTTP delivery. If you set `ingress_network_connectors`, allow ingress whenever an input can exceed the `run` hook limit. An empty tuple sends no connector.
 - `heartbeat_timeout` starts when the callback is created, before the launch. The worker sends its first heartbeat when the job arrives. So the first period must cover the launch, the boot, and, for HTTP delivery, the request step, each with its retries. A throttled launch can take several minutes, and the request step retries for up to `retry_window` in each attempt. With a shorter heartbeat timeout, the operation fails with `MicrovmTimeoutError` before the MicroVM sends its first heartbeat.
+- HTTP delivery needs a function timeout of at least 11 seconds. The request step keeps a 10-second reserve before the invocation times out, and it starts a call only with at least 1 second left before the reserve. With less time, every attempt fails with `MicrovmEndpointUnavailableError`, and the message names the function timeout. The Lambda default timeout is 3 seconds. A function with that timeout runs small jobs in the `run` hook, and fails every job too large for it.
 - The Region comes from the durable execution ARN, or from `AWS_REGION`.
 - Without a `client`, the operation creates one `lambda-microvms` client per Region, on first use. It has a 5-second connect timeout, a 30-second read timeout, and 3 attempts in botocore's standard retry mode. So one launch or terminate attempt takes at most about 2 minutes. A call that runs past the function's timeout records no outcome for its step attempt, and the step runs again. The launch is idempotent through its client token, so it is repeated, not doubled.
 

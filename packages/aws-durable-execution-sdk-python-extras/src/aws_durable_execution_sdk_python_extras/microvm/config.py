@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -31,10 +32,20 @@ class MicrovmRequestConfig:
     An HTTP delivery POSTs the job document to a route of the application in
     the MicroVM. The route must answer with a 2xx status at once, and run the
     job in the background.
+
+    The same job can arrive again, also after it ended. So a route must
+    ignore a second request for a callback ID that it already ran. The
+    worker package does this. A route served without the worker package must
+    do it itself.
     """
 
     path: str | None = None
-    """The route path, for example ``/clone-build``. It must start with ``/``.
+    """The route path, for example ``/clone-build``.
+
+    It must be an RFC 3986 path that starts with ``/``. The operation sends
+    it exactly as written. Percent-encode any other character, for example
+    a space as ``%20``. Register the same string as the worker's route, because
+    the worker matches the raw request path.
 
     ``None`` sends the job to :data:`DEFAULT_MICROVM_JOB_PATH`. The worker
     package serves that path with its ``handler``. A path sends the job to one
@@ -158,6 +169,26 @@ class MicrovmConfig:
     It is the second retry tier. The first tier retries inside one step
     attempt: the boto3 client retries each call, and the request step retries
     the POST. Defaults to :func:`default_microvm_retry_strategy`.
+    """
+
+    opener: urllib.request.OpenerDirector | None = None
+    """The urllib opener that POSTs the job for HTTP delivery.
+
+    ``None`` uses an opener that ignores the proxy settings in the
+    environment and follows no redirect. boto3 reads ``HTTPS_PROXY``, so in
+    a network that reaches the MicroVM endpoint only through a proxy, pass
+    an opener with that proxy:
+
+    .. code-block:: python
+
+        urllib.request.build_opener(
+            urllib.request.ProxyHandler({"https": "http://proxy.internal:3128"})
+        )
+
+    The operation does not follow redirects. When an opener follows one, the
+    delivery fails at once with ``MicrovmRequestRejectedError``. A followed
+    redirect to another host also receives the auth token, so prefer an
+    opener that follows no redirect.
     """
 
     client: LambdaMicrovmsClient | None = None
