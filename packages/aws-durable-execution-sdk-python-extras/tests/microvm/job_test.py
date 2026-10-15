@@ -9,12 +9,17 @@ import json
 import math
 
 import pytest
-from aws_durable_execution_sdk_python_microvm_worker import RunHookRequest
+from aws_durable_execution_sdk_python_microvm_worker import (
+    MicrovmJobRequest,
+    RunHookRequest,
+)
 
 from aws_durable_execution_sdk_python_extras.microvm.job import (
     MAX_RUN_HOOK_PAYLOAD_LENGTH,
+    JobRequest,
     RunHookPayload,
     fits_run_hook,
+    run_hook_payload_without_job,
 )
 
 
@@ -93,3 +98,43 @@ def test_the_worker_reads_the_payload() -> None:
         {"n": 1},
         30.0,
     )
+
+
+def test_writes_the_job_request_with_the_job_fields_at_the_top_level() -> None:
+    body = JobRequest(
+        region="us-east-1",
+        microvm_id="mvm-1",
+        callback_id="cb-1",
+        job_input={"n": "日"},
+        heartbeat_timeout_seconds=30,
+    ).to_json()
+
+    assert body == (
+        '{"version":1,"region":"us-east-1","microvmId":"mvm-1",'
+        '"callbackId":"cb-1","heartbeatTimeoutSeconds":30,"input":{"n":"日"}}'
+    )
+
+
+def test_the_worker_reads_the_job_request() -> None:
+    body = JobRequest(
+        region="us-east-1", microvm_id="mvm-1", callback_id="cb-1", job_input=[1]
+    ).to_json()
+
+    request = MicrovmJobRequest.from_dict(json.loads(body))
+
+    assert request.microvm_id == "mvm-1"
+    assert request.region == "us-east-1"
+    assert (request.job.callback_id, request.job.input) == ("cb-1", [1])
+    assert request.job.heartbeat_timeout_seconds is None
+
+
+def test_the_worker_reads_a_run_hook_payload_without_a_job() -> None:
+    payload = run_hook_payload_without_job("us-east-1")
+
+    request = RunHookRequest.from_dict(
+        {"microvmId": "mvm-1", "runHookPayload": payload}
+    )
+
+    assert payload == '{"version":1,"region":"us-east-1"}'
+    assert request.payload is not None
+    assert request.payload.job is None
