@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from aws_durable_execution_sdk_python.exceptions import (
@@ -112,10 +112,13 @@ def microvm_session(
     error that leaves the handler ends the session, and the MicroVM is
     terminated:
 
-    1. A MicroVM error, such as :class:`MicrovmJobFailedError`, reaches the
-       caller with its own class.
+    1. A MicroVM error, such as :class:`MicrovmJobFailedError`, that the
+       handler raises itself reaches the caller with its own class.
     2. Any other error reaches the caller as ``ChildContextError``, as from
-       ``run_in_child_context``.
+       ``run_in_child_context``. This includes a MicroVM error that leaves
+       a child context that the handler created: that child context records
+       ``ChildContextError`` as its error type. The caller then gets the
+       MicroVM error's message, but not its class.
 
     The session's value is the handler's return value, checkpointed as the
     child context result. So it must be serializable by the SDK's default
@@ -234,7 +237,8 @@ class MicrovmSession:
             ``SendDurableExecutionCallbackSuccess``, parsed as JSON.
 
         Raises:
-            TypeError: When ``context`` is not a durable context, or
+            TypeError: When ``context`` is not a durable context, or is the
+                context that ``microvm_session`` was called with, or
                 ``job_input`` is not JSON-serializable.
             ValidationError: When ``name`` or ``options`` is not valid.
             MicrovmNotRunningError: When the session's MicroVM has ended, and
@@ -253,6 +257,19 @@ class MicrovmSession:
             msg = (
                 f'MicroVM session "{scope.name}": invoke requires the durable '
                 "context to create the job in, as its first argument"
+            )
+            raise TypeError(msg)
+        # The caller's own context is often in scope in the handler's
+        # closure. A job created in it lands outside the session's child
+        # context. The core SDK does not refuse that, and the next replay
+        # fails with NonDeterministicExecutionError after the job has run.
+        # So the most likely wrong context is refused here. A full ancestry
+        # check would need support in the core SDK.
+        if context is scope.outer_context:
+            msg = (
+                f'MicroVM session "{scope.name}": invoke received the context '
+                "that microvm_session was called with. Pass the context that "
+                "the handler receives, or a context nested in it."
             )
             raise TypeError(msg)
         if not isinstance(name, str) or not name:
@@ -304,6 +321,9 @@ class _SessionScope(_MicrovmScope):
 
     auto_suspend_idle_seconds: int | None
     idle_policy: Mapping[str, Any] | None
+    outer_context: DurableContext = field(compare=False, repr=False)
+    """The context that ``microvm_session`` was called with. A job created
+    in it would be outside the session's child context."""
 
     @property
     def resume_before_delivery(self) -> bool:
@@ -340,6 +360,7 @@ class _SessionScope(_MicrovmScope):
             retry_strategy=config.retry_strategy or default_microvm_retry_strategy,
             auto_suspend_idle_seconds=auto_suspend_idle_seconds,
             idle_policy=config.idle_policy,
+            outer_context=context,
         )
 
     def run_session(

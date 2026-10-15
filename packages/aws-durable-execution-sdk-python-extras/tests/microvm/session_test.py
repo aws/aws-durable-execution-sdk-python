@@ -976,3 +976,80 @@ def test_resumes_once_when_two_items_find_the_microvm_suspended(
     assert outcome(result) == {"result": ["A", "B"]}
     assert len(client.requests("resume_microvm")) == 2
     assert len(endpoint.requests) == 2
+
+
+def test_rejects_the_outer_context_before_the_job_starts(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    # A job created in the outer context lands outside the session's child
+    # context. The core SDK does not refuse it, and the next replay fails
+    # with NonDeterministicExecutionError after the job has run.
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
+    config = session_config(client)
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        def body(vm: MicrovmSession, ctx: DurableContext) -> Any:
+            try:
+                vm.invoke(context, "build", job_input=1, options=job())
+            except TypeError as error:
+                return str(error)
+            return None
+
+        return microvm_session(context, "pipeline", config=config, handler=body)
+
+    result = run(handler)
+
+    assert outcome(result) == (
+        'MicroVM session "pipeline": invoke received the context that '
+        "microvm_session was called with. Pass the context that the handler "
+        "receives, or a context nested in it."
+    )
+    assert endpoint.requests == []
+    session = result.get_context("pipeline")
+    assert [operation.name for operation in session.child_operations] == [
+        "pipeline.session",
+        "pipeline.launch",
+        "pipeline.terminate",
+    ]
+
+
+def test_wraps_a_job_error_that_leaves_a_child_context_of_the_handler(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    # Only an error that the handler raises itself keeps its MicroVM class.
+    # The SDK records one error type per child context. So an error from the
+    # handler's own child context reaches the caller as ChildContextError,
+    # with the MicroVM error's message. Inside the handler, the
+    # ChildContextError's __cause__ is still the MicroVM class.
+    client = fake_client(endpoint=fake_endpoint().url)
+    config = session_config(client)
+    inside: list[str] = []
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        def body(vm: MicrovmSession, ctx: DurableContext) -> Any:
+            try:
+                return ctx.run_in_child_context(
+                    lambda stage: vm.invoke(stage, "build", job_input=1, options=job()),
+                    name="stage",
+                )
+            except ChildContextError as error:
+                inside.append(type(error.__cause__).__name__)
+                raise
+
+        try:
+            microvm_session(context, "pipeline", config=config, handler=body)
+        except ChildContextError as error:
+            return [type(error.__cause__).__name__, error.message]
+        return None
+
+    result = run(handler, None, [("build", fail_with("BuildError", "failed"))])
+
+    assert outcome(result) == [
+        "ChildContextError",
+        'MicroVM "build": the job failed (BuildError): failed',
+    ]
+    assert "MicrovmJobFailedError" in inside
+    assert len(client.requests("terminate_microvm")) == 1

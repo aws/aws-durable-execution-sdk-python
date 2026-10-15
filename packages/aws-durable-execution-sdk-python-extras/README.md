@@ -220,13 +220,13 @@ pipeline                       child context
 - The client token of the launch is the SHA-256 hex digest of the session ID. The session ID is random, and it is checkpointed. So a retried or replayed launch returns the same MicroVM.
 - Every job goes over HTTP. The MicroVM gets the `ALL_INGRESS` connector. A job without a `path` goes to the worker's `handler`.
 - The first job is sent right after the launch. The MicroVM endpoint refuses requests until the `run` hook returns, and the request step retries a refused request inside its attempt. So the session needs no separate readiness wait.
-- `vm.invoke` takes the context that the call runs in, as `microvm` does. Inside a `map` or `parallel` item, pass the item's context.
+- `vm.invoke` takes the context that the call runs in, as `microvm` does. Inside a `map` or `parallel` item, pass the item's context. A job must be created inside the session's child context. A job created in the context that `microvm_session` was called with runs, and the next replay then fails the execution with `NonDeterministicExecutionError`. So `vm.invoke` raises `TypeError` for that context. The core SDK does not check other contexts outside the session.
 - `config.timeout` bounds the MicroVM's lifetime: it ends at `timeout` plus 5 minutes, at most 8 hours. Each job waits for its own `timeout`. So set a `heartbeat_timeout` on every job. A job still running when the MicroVM ends then fails at its heartbeat timeout.
 
 A failed `vm.invoke` raises its MicroVM error inside the handler. The handler can catch it and send another job to the same MicroVM. An error that leaves the handler ends the session:
 
-1. A MicroVM error reaches the caller with its own class, such as `MicrovmJobFailedError`.
-2. Any other error reaches the caller as the SDK's `ChildContextError`, as from `run_in_child_context`.
+1. A MicroVM error that the handler raises itself reaches the caller with its own class, such as `MicrovmJobFailedError`.
+2. Any other error reaches the caller as the SDK's `ChildContextError`, as from `run_in_child_context`. This includes a MicroVM error that leaves a child context that the handler created: that child context records `ChildContextError` as its error type. The caller then gets the MicroVM error's message, but not its class. Inside the handler, the `ChildContextError` of that child context has the MicroVM error as its `__cause__`. The JavaScript operation behaves the same way.
 
 An invalid job raises `ValidationError` or `TypeError` from `vm.invoke`, before the job's durable operations start. The handler can catch it too.
 
