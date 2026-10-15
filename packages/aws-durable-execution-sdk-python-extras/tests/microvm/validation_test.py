@@ -12,7 +12,11 @@ import pytest
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.exceptions import ValidationError
 
-from aws_durable_execution_sdk_python_extras.microvm import MicrovmConfig, microvm
+from aws_durable_execution_sdk_python_extras.microvm import (
+    MicrovmConfig,
+    MicrovmRequestConfig,
+    microvm,
+)
 from aws_durable_execution_sdk_python_extras.microvm import operation
 
 
@@ -55,6 +59,106 @@ def config(**fields: Any) -> MicrovmConfig:
             "build",
             {"heartbeat_timeout": Duration(0)},
             "heartbeat_timeout must be at least 1 second",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="job")},
+            "the request path must be an RFC 3986 path",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path=7)},  # type: ignore[arg-type]
+            "the request path must be an RFC 3986 path",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/clone build")},
+            'starts with "/". Percent-encode any other character, for example a '
+            "space as %20.",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/café")},
+            "the request path must be an RFC 3986 path",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/job?x=1")},
+            "the request path must be an RFC 3986 path",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/bad%zz")},
+            "the request path must be an RFC 3986 path",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/aws/lambda-microvms/run")},
+            "must not use the lifecycle hook prefix /aws/lambda-microvms/",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/jobs/../build")},
+            'must not have a "." or ".." segment',
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/jobs/./build")},
+            'must not have a "." or ".." segment',
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/jobs/..")},
+            'must not have a "." or ".." segment',
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/jobs/%2e/build")},
+            'must not have a "." or ".." segment',
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(path="/jobs/%2E%2e/build")},
+            'must not have a "." or ".." segment',
+        ),
+        (
+            "build",
+            {
+                "request": MicrovmRequestConfig(
+                    path="/jobs/../aws/lambda-microvms/runtime/v1/run"
+                )
+            },
+            'must not have a "." or ".." segment',
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(port=0)},
+            "the request port must be an integer between 1 and 65535",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(port=65_536)},
+            "the request port must be an integer between 1 and 65535",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(port=True)},
+            "the request port must be an integer between 1 and 65535",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(port=8080.0)},  # type: ignore[arg-type]
+            "the request port must be an integer between 1 and 65535",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(retry_window=Duration(0))},
+            "the request retry_window must be between 1 second and 10 minutes",
+        ),
+        (
+            "build",
+            {"request": MicrovmRequestConfig(retry_window=Duration.from_seconds(601))},
+            "the request retry_window must be between 1 second and 10 minutes",
         ),
     ],
 )
@@ -136,3 +240,29 @@ def test_creates_one_default_client_per_region(
 def test_takes_the_input_and_the_config_by_keyword_only() -> None:
     with pytest.raises(TypeError, match="positional argument"):
         microvm(NoOperations(), "build", {}, config())  # type: ignore[arg-type, misc]
+
+
+class LambdaContext:
+    def get_remaining_time_in_millis(self) -> int:
+        return 12_500
+
+
+@pytest.mark.parametrize(
+    ("lambda_context", "expected"), [(LambdaContext(), 12.5), (None, None)]
+)
+def test_reads_the_remaining_time_or_reports_no_deadline(
+    lambda_context: Any, expected: float | None
+) -> None:
+    context: Any = type("Context", (), {"lambda_context": lambda_context})()
+
+    assert operation._remaining_seconds(context)() == expected  # noqa: SLF001
+
+
+@pytest.mark.parametrize("path", ["/.well-known/job", "/.../job", "/a.b/c..d", "/"])
+def test_accepts_dots_that_are_not_a_dot_segment(path: str) -> None:
+    # Dots next to other characters, and three dots, are not dot segments.
+    # fetch and urllib leave such a path unchanged.
+    assert (
+        operation._validate_request("build", MicrovmRequestConfig(path=path))  # noqa: SLF001
+        == 60
+    )
