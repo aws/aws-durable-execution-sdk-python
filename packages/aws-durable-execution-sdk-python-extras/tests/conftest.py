@@ -117,10 +117,13 @@ class FakeEndpoint:
 
     It records each request, and answers from ``statuses`` in order. After
     the list ends, it answers 202. A status of ``None`` closes the connection
-    without an answer. A redirect status gets ``Location: /moved``.
+    without an answer. A redirect status gets ``Location: <location>``,
+    ``/moved`` by default.
     """
 
-    def __init__(self, statuses: list[int | None] | None = None) -> None:
+    def __init__(
+        self, statuses: list[int | None] | None = None, location: str = "/moved"
+    ) -> None:
         self.requests: list[dict[str, Any]] = []
         self._statuses = list(statuses or [])
         self._lock = threading.Lock()
@@ -134,7 +137,7 @@ class FakeEndpoint:
                         {
                             "method": "GET",
                             "path": self.path,
-                            "headers": {},
+                            "headers": {k.lower(): v for k, v in self.headers.items()},
                             "body": None,
                         }
                     )
@@ -160,7 +163,7 @@ class FakeEndpoint:
                     return
                 self.send_response(status)
                 if 300 <= status < 400:  # noqa: PLR2004
-                    self.send_header("location", "/moved")
+                    self.send_header("location", location)
                 self.send_header("content-length", "0")
                 self.end_headers()
 
@@ -184,8 +187,10 @@ class FakeEndpoint:
 def fake_endpoint() -> Iterator[Callable[..., FakeEndpoint]]:
     endpoints: list[FakeEndpoint] = []
 
-    def _create(statuses: list[int | None] | None = None) -> FakeEndpoint:
-        endpoint = FakeEndpoint(statuses)
+    def _create(
+        statuses: list[int | None] | None = None, location: str = "/moved"
+    ) -> FakeEndpoint:
+        endpoint = FakeEndpoint(statuses, location)
         endpoints.append(endpoint)
         return endpoint
 

@@ -42,8 +42,8 @@ class MicrovmRequestConfig:
     path: str | None = None
     """The route path, for example ``/clone-build``.
 
-    It must be an RFC 3986 path that starts with ``/``. The operation sends
-    it exactly as written. Percent-encode any other character, for example
+    It must be an RFC 3986 path that starts with ``/``, without a ``.`` or
+    ``..`` segment. The operation sends it exactly as written. Percent-encode any other character, for example
     a space as ``%20``. Register the same string as the worker's route, because
     the worker matches the raw request path.
 
@@ -186,9 +186,9 @@ class MicrovmConfig:
         )
 
     The operation does not follow redirects. When an opener follows one, the
-    delivery fails at once with ``MicrovmRequestRejectedError``. A followed
-    redirect to another host also receives the auth token, so prefer an
-    opener that follows no redirect.
+    delivery fails at once with ``MicrovmRequestRejectedError``. The followed
+    request carries no auth token, because the operation adds its headers as
+    unredirected headers.
     """
 
     client: LambdaMicrovmsClient | None = None

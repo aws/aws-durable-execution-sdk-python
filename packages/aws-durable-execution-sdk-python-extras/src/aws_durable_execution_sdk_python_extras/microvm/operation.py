@@ -111,6 +111,13 @@ The operation sends the path as written. Both workers match the raw request
 path, so the config and the route use the same string.
 """
 
+_DOT_SEGMENT = re.compile(r"/(?:\.|%2e){1,2}(?=/|$)", re.IGNORECASE)
+"""A ``.`` or ``..`` segment, also with ``%2e`` for a dot.
+
+A segment with other characters next to its dots, such as ``/.well-known``,
+and a segment of three dots are not dot segments.
+"""
+
 
 @dataclass(frozen=True, kw_only=True)
 class LaunchResult:
@@ -701,6 +708,18 @@ def _validate_request(name: str, request: MicrovmRequestConfig) -> int:
             f'MicroVM "{name}": the request path must be an RFC 3986 path that '
             'starts with "/". Percent-encode any other character, for example a '
             "space as %20."
+        )
+        raise ValidationError(msg)
+    # The JavaScript SDK's fetch resolves a dot segment before it sends the
+    # request, so the JavaScript operation rejects such a path. urllib sends
+    # the path unchanged, but a proxy or server in front of the worker can
+    # resolve it too. So both SDKs accept the same paths, and each path
+    # reaches the worker as written.
+    if path is not None and _DOT_SEGMENT.search(path):
+        msg = (
+            f'MicroVM "{name}": the request path must not have a "." or ".." '
+            "segment, because an HTTP client or server can resolve it before "
+            "the route sees it."
         )
         raise ValidationError(msg)
     if path is not None and path.startswith(_HOOK_PATH_PREFIX):
