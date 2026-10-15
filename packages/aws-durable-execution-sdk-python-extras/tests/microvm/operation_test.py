@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import threading
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -34,6 +35,8 @@ from aws_durable_execution_sdk_python_extras.microvm import (
     MicrovmConfig,
     MicrovmError,
     MicrovmJobFailedError,
+    MicrovmRequestConfig,
+    default_microvm_retry_strategy,
     microvm,
     operation,
 )
@@ -358,44 +361,208 @@ def test_fails_a_launch_without_a_microvm_id(run: Any, fake_client: Any) -> None
     assert "RunMicrovm returned no microvmId" in error["message"]
 
 
-def test_fails_a_job_too_large_for_the_run_hook_before_the_launch(
-    run: Any, fake_client: Any
+def test_sends_a_job_too_large_for_the_run_hook_over_http(
+    run: Any, fake_client: Any, fake_endpoint: Any
 ) -> None:
-    client = fake_client()
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
+    job_input = "x" * MAX_RUN_HOOK_PAYLOAD_LENGTH
+    config = config_with(client, heartbeat_timeout=Duration.from_seconds(60))
 
-    result = run(catching(config_with(client)), "x" * MAX_RUN_HOOK_PAYLOAD_LENGTH)
+    result = run(catching(config), job_input, succeed_with("done"))
 
-    error = outcome(result)
-    assert error["error"] == "MicrovmDeliveryError"
-    assert "the job is at least " in error["message"]
-    assert "the run hook accepts at most 4096" in error["message"]
-    assert client.calls == []
-    # The job does not fit even without the callback ID. So no callback is
-    # left open until its timeout.
-    assert result.get_context("build").child_operations == []
+    assert outcome(result) == {"result": "done"}
+    [launch] = client.requests("run_microvm")
+    # The worker rejects a run hook payload without a version and a Region.
+    assert json.loads(launch["runHookPayload"]) == {
+        "version": 1,
+        "region": "us-west-2",
+    }
+    connector = "arn:aws:lambda:us-west-2:aws:network-connector:aws-network-connector"
+    assert launch["ingressNetworkConnectors"] == [f"{connector}:ALL_INGRESS"]
+    assert launch["egressNetworkConnectors"] == [f"{connector}:INTERNET_EGRESS"]
+    [posted] = endpoint.requests
+    callback_id = posted["body"]["callbackId"]
+    assert posted["path"] == "/durable-execution/v1/job"
+    assert posted["headers"]["x-test-token"] == "token-1"
+    assert posted["body"] == {
+        "version": 1,
+        "region": "us-west-2",
+        "microvmId": "mvm-1",
+        "callbackId": callback_id,
+        "heartbeatTimeoutSeconds": 60,
+        "input": job_input,
+    }
+    assert launch["clientToken"] == hashlib.sha256(callback_id.encode()).hexdigest()
+    assert client.requests("create_microvm_auth_token") == [
+        {
+            "microvmIdentifier": "mvm-1",
+            "expirationInMinutes": 5,
+            "allowedPorts": [{"port": 8080}],
+        }
+    ]
+    assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
+    context = result.get_context("build")
+    assert [operation.name for operation in context.child_operations] == [
+        "build.callback",
+        "build.launch",
+        "build.request",
+        "build.terminate",
+    ]
+    launch_step = context.get_step("build.launch")
+    assert launch_step.result is not None
+    assert json.loads(launch_step.result) == {
+        "microvmId": "mvm-1",
+        "endpoint": endpoint.url,
+        "delivery": "http",
+    }
 
 
-def test_fails_a_job_that_fits_only_without_the_callback_id(
-    run: Any, fake_client: Any
+def test_picks_the_delivery_by_the_payload_with_the_callback_id(
+    run: Any, fake_client: Any, fake_endpoint: Any
 ) -> None:
-    client = fake_client()
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
     empty = RunHookPayload(
         region="us-west-2",
         callback_id="",
         job_input="",
         heartbeat_timeout_seconds=None,
     ).to_json()
+    # The payload fits only without the callback ID.
     job_input = "x" * (MAX_RUN_HOOK_PAYLOAD_LENGTH - len(empty))
 
-    result = run(catching(config_with(client)), job_input)
+    result = run(catching(config_with(client)), job_input, succeed_with("done"))
+
+    assert outcome(result) == {"result": "done"}
+    assert len(endpoint.requests) == 1
+    assert "job" not in json.loads(client.requests("run_microvm")[0]["runHookPayload"])
+
+
+def test_sends_every_job_over_http_to_a_configured_route(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
+    config = config_with(
+        client, request=MicrovmRequestConfig(path="/clone-build", port=3000)
+    )
+
+    result = run(catching(config), {"repo": "org/app"}, succeed_with("done"))
+
+    assert outcome(result) == {"result": "done"}
+    [posted] = endpoint.requests
+    assert posted["path"] == "/clone-build"
+    assert posted["headers"]["x-aws-proxy-port"] == "3000"
+    assert posted["body"]["input"] == {"repo": "org/app"}
+    assert client.requests("create_microvm_auth_token")[0]["allowedPorts"] == [
+        {"port": 3000}
+    ]
+
+
+def test_keeps_the_configured_ingress_for_http(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
+    config = config_with(
+        client,
+        ingress_network_connectors=("arn:ingress",),
+        request=MicrovmRequestConfig(path="/job"),
+    )
+
+    run(catching(config), {}, succeed_with(None))
+
+    assert client.requests("run_microvm")[0]["ingressNetworkConnectors"] == [
+        "arn:ingress"
+    ]
+
+
+def test_fails_with_a_delivery_error_when_the_route_rejects_the_job(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint([404])
+    client = fake_client(endpoint=endpoint.url)
+    config = config_with(client, request=MicrovmRequestConfig(path="/missing"))
+
+    result = run(catching(config), {})
+
+    assert outcome(result) == {
+        "error": "MicrovmDeliveryError",
+        "message": 'MicroVM "build": the job could not be delivered: The MicroVM '
+        "rejected the job at /missing with HTTP 404",
+    }
+    # The default strategy does not retry a rejected job.
+    assert len(endpoint.requests) == 1
+    assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
+
+
+def test_retries_the_request_step_after_the_first_tier_ends(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    # In a 1-second window, the requests start at 0, 0.25, and 0.75 seconds.
+    # The next delay of 1 second ends past the window. So the first step
+    # attempt sends 3 requests and fails.
+    endpoint = fake_endpoint([503, 503, 503])
+    client = fake_client(endpoint=endpoint.url)
+    failures: list[str] = []
+
+    def once(error: Exception, attempt: int) -> RetryDecision:
+        failures.append(type(error).__name__)
+        if attempt < 2 and default_microvm_retry_strategy(error, attempt).should_retry:
+            return RetryDecision.retry(Duration.from_seconds(1))
+        return RetryDecision.no_retry()
+
+    config = config_with(
+        client,
+        retry_strategy=once,
+        request=MicrovmRequestConfig(
+            path="/job", retry_window=Duration.from_seconds(1)
+        ),
+    )
+
+    result = run(catching(config), {}, succeed_with("done"))
+
+    assert outcome(result) == {"result": "done"}
+    assert failures == ["MicrovmEndpointUnavailableError"]
+    assert len(endpoint.requests) == 4
+    assert len(client.requests("run_microvm")) == 1
+
+
+def test_fails_a_launch_without_an_endpoint_for_http(
+    run: Any, fake_client: Any
+) -> None:
+    client = fake_client(endpoint=None)
+    config = config_with(client, request=MicrovmRequestConfig(path="/job"))
+
+    result = run(catching(config), {})
+
+    error = outcome(result)
+    assert error["error"] == "MicrovmLaunchError"
+    assert "RunMicrovm returned no endpoint" in error["message"]
+
+
+def test_fails_the_request_for_a_launch_checkpoint_without_an_endpoint(
+    run: Any, fake_client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = operation._OperationScope._launch  # noqa: SLF001
+
+    def without_endpoint(self: Any, *args: Any) -> Any:
+        launched = original(self, *args)
+        return operation.LaunchResult(
+            microvm_id=launched.microvm_id, delivery=launched.delivery
+        )
+
+    monkeypatch.setattr(operation._OperationScope, "_launch", without_endpoint)  # noqa: SLF001
+    client = fake_client()
+    config = config_with(client, request=MicrovmRequestConfig(path="/job"))
+
+    result = run(catching(config), {})
 
     error = outcome(result)
     assert error["error"] == "MicrovmDeliveryError"
-    assert "the job is at least " not in error["message"]
-    assert "the run hook accepts at most 4096" in error["message"]
-    assert client.calls == []
-    [callback] = result.get_context("build").child_operations
-    assert callback.name == "build.callback"
+    assert "the launch recorded no endpoint for MicroVM mvm-1" in error["message"]
+    assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
 
 
 def test_raises_the_same_class_after_the_handler_stops_catching(
@@ -508,6 +675,55 @@ def test_requests_match_the_lambda_microvms_api_model(run: Any) -> None:
     assert outcome(result) == {"result": "done"}
 
 
+def test_http_requests_match_the_lambda_microvms_api_model(
+    run: Any, fake_endpoint: Any
+) -> None:
+    """botocore validates the RunMicrovm and CreateMicrovmAuthToken requests."""
+
+    endpoint = fake_endpoint()
+    client = boto3.session.Session().client("lambda-microvms", region_name="us-west-2")
+    config = config_with(client, request=MicrovmRequestConfig(path="/job"))
+    with Stubber(client) as stub:
+        stub.add_response(
+            "run_microvm",
+            {
+                "microvmId": "mvm-1",
+                "state": "PENDING",
+                "endpoint": endpoint.url,
+                "imageArn": config.image_identifier,
+                "imageVersion": "1",
+                "maximumDurationInSeconds": 600,
+                "startedAt": datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
+            },
+            {
+                "imageIdentifier": config.image_identifier,
+                "executionRoleArn": config.execution_role_arn,
+                "clientToken": ANY,
+                "ingressNetworkConnectors": ANY,
+                "egressNetworkConnectors": ANY,
+                "maximumDurationInSeconds": 600,
+                "runHookPayload": ANY,
+            },
+        )
+        stub.add_response(
+            "create_microvm_auth_token",
+            {"authToken": {"x-amz-microvm-token": "t"}},
+            {
+                "microvmIdentifier": "mvm-1",
+                "expirationInMinutes": 5,
+                "allowedPorts": [{"port": 8080}],
+            },
+        )
+        stub.add_response("terminate_microvm", {}, {"microvmIdentifier": "mvm-1"})
+
+        result = run(catching(config), {"n": 1}, succeed_with("done"))
+
+        stub.assert_no_pending_responses()
+    client.close()
+    assert outcome(result) == {"result": "done"}
+    assert endpoint.requests[0]["headers"]["x-amz-microvm-token"] == "t"
+
+
 def test_keeps_the_class_inside_the_callers_child_context(
     run: Any, fake_client: Any
 ) -> None:
@@ -575,19 +791,21 @@ def test_terminates_and_fails_for_a_delivery_that_it_does_not_know(
 
     original = operation._OperationScope._launch  # noqa: SLF001
 
-    def launch_for_http(self: Any, callback_id: str, payload: str) -> Any:
-        launched = original(self, callback_id, payload)
-        return operation.LaunchResult(microvm_id=launched.microvm_id, delivery="http")
+    def launch_for_another(self: Any, *args: Any) -> Any:
+        launched = original(self, *args)
+        return operation.LaunchResult(
+            microvm_id=launched.microvm_id, delivery="smoke-signal"
+        )
 
-    monkeypatch.setattr(operation._OperationScope, "_launch", launch_for_http)  # noqa: SLF001
+    monkeypatch.setattr(operation._OperationScope, "_launch", launch_for_another)  # noqa: SLF001
     client = fake_client()
 
     result = run(catching(config_with(client)), {})
 
     assert outcome(result) == {
         "error": "MicrovmDeliveryError",
-        "message": 'MicroVM "build": the launch prepared the delivery "http", '
-        "which this release does not support",
+        "message": 'MicroVM "build": the launch prepared the delivery '
+        '"smoke-signal", which this release does not support',
     }
     assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
 
@@ -692,3 +910,121 @@ def test_terminates_only_after_the_wait_for_the_result_ends(
 
     assert outcome(result) == "MicrovmTimeoutError"
     assert terminated_in == [2]
+
+
+def test_posts_the_job_once_across_invocations(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    # The first invocation suspends on the callback, and the replay times it
+    # out. The request step is checkpointed, so the replay sends no second
+    # POST.
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
+    invocations: list[int] = []
+    config = config_with(
+        client,
+        timeout=Duration.from_seconds(2),
+        request=MicrovmRequestConfig(path="/job"),
+    )
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        invocations.append(1)
+        try:
+            return microvm(context, "build", job_input=event, config=config)
+        except MicrovmError as error:
+            return type(error).__name__
+
+    result = run(handler, {})
+
+    assert outcome(result) == "MicrovmTimeoutError"
+    assert len(invocations) >= 2
+    assert len(endpoint.requests) == 1
+    assert len(client.requests("create_microvm_auth_token")) == 1
+    assert len(client.requests("run_microvm")) == 1
+
+
+def test_replay_keeps_the_run_hook_delivery_of_the_launch(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    # The launch uses the run hook. A deploy before the replay sets a path,
+    # which would select HTTP. The replay must follow the checkpoint.
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
+    first = config_with(client)
+    second = config_with(client, request=MicrovmRequestConfig(path="/job"))
+    invocations: list[int] = []
+    first_ended = threading.Event()
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        invocations.append(1)
+        config = first if len(invocations) == 1 else second
+        try:
+            return {"result": microvm(context, "build", job_input=event, config=config)}
+        except MicrovmError as error:
+            return {"error": type(error).__name__, "message": error.message}
+        finally:
+            first_ended.set()
+
+    def complete(runner: DurableFunctionTestRunner, callback_id: str) -> None:
+        # The first invocation suspends on the callback before it completes.
+        # So the result arrives in a replay.
+        assert first_ended.wait(WAIT)
+        runner.send_callback_success(callback_id, json.dumps("done").encode())
+
+    result = run(handler, {}, complete)
+
+    assert outcome(result) == {"result": "done"}
+    assert len(invocations) == 2
+    assert endpoint.requests == []
+    assert client.requests("create_microvm_auth_token") == []
+
+
+def test_replay_keeps_the_http_delivery_of_the_launch(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    # The launch uses HTTP, and the first request step attempt fails. A
+    # deploy before the replay removes the path, which would select the run
+    # hook for this small input. The replay must still deliver over HTTP.
+    endpoint = fake_endpoint([503, 503, 503])
+    client = fake_client(endpoint=endpoint.url)
+
+    def once(error: Exception, attempt: int) -> RetryDecision:
+        if attempt < 2 and default_microvm_retry_strategy(error, attempt).should_retry:
+            return RetryDecision.retry(Duration.from_seconds(1))
+        return RetryDecision.no_retry()
+
+    window = Duration.from_seconds(1)
+    first = config_with(
+        client,
+        retry_strategy=once,
+        request=MicrovmRequestConfig(path="/job", retry_window=window),
+    )
+    second = config_with(
+        client, retry_strategy=once, request=MicrovmRequestConfig(retry_window=window)
+    )
+    invocations: list[int] = []
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        invocations.append(1)
+        config = first if len(invocations) == 1 else second
+        try:
+            return {"result": microvm(context, "build", job_input=event, config=config)}
+        except MicrovmError as error:
+            return {"error": type(error).__name__, "message": error.message}
+
+    result = run(handler, {}, succeed_with("done"))
+
+    assert outcome(result) == {"result": "done"}
+    assert len(invocations) >= 2
+    # 3 requests in the first attempt, and 1 in the replay. The delivery
+    # comes from the checkpoint. The route comes from the current config, as
+    # in the JavaScript operation, which checkpoints no route either.
+    assert [r["path"] for r in endpoint.requests] == [
+        "/job",
+        "/job",
+        "/job",
+        "/durable-execution/v1/job",
+    ]

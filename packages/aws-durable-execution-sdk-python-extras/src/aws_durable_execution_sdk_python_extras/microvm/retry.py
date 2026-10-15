@@ -10,6 +10,11 @@ from aws_durable_execution_sdk_python.retries import RetryDecision
 from botocore.exceptions import ClientError, HTTPClientError
 from botocore.exceptions import ConnectionError as BotocoreConnectionError
 
+from aws_durable_execution_sdk_python_extras.microvm.request import (
+    MicrovmEndpointUnavailableError,
+    MicrovmRequestUnauthorizedError,
+)
+
 
 MAX_ATTEMPTS = 5
 """Attempts of one step, the first one included."""
@@ -52,15 +57,20 @@ _RETRYABLE_ERROR_TYPES: tuple[type[Exception], ...] = (
     # retry mode treats the same two bases as transient.
     BotocoreConnectionError,
     HTTPClientError,
+    # The request step's first retry tier ended. A later attempt runs after
+    # a longer delay, outside the invocation.
+    MicrovmEndpointUnavailableError,
+    MicrovmRequestUnauthorizedError,
 )
 
 
 def default_microvm_retry_strategy(error: Exception, attempt: int) -> RetryDecision:
     """Retry a step that failed for a reason that a later attempt can fix.
 
-    The launch and terminate steps use this strategy unless the config sets
-    ``retry_strategy``. It is the second retry tier: the boto3 client already
-    retried throttling and server errors inside the attempt.
+    The launch, request, and terminate steps use this strategy unless the
+    config sets ``retry_strategy``. It is the second retry tier. Inside each
+    attempt, the boto3 client already retried throttling and server errors,
+    and the request step already retried the POST.
 
     An error is retryable when it is one of these:
 
@@ -70,6 +80,13 @@ def default_microvm_retry_strategy(error: Exception, attempt: int) -> RetryDecis
        ``InsufficientCapacityException``.
     3. A connection failure or a timeout, including botocore's
        ``HTTPClientError`` family.
+    4. The end of the request step's first retry tier:
+       ``MicrovmEndpointUnavailableError``, or
+       ``MicrovmRequestUnauthorizedError`` after a refused new token.
+
+    ``MicrovmRequestRejectedError`` is not retried. The route rejected the
+    job with a 4xx status or a redirect, and the same job gets the same
+    answer.
 
     Every other error fails the step at once. A ``ValidationException``, for
     example, fails the same way on every attempt.
