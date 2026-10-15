@@ -43,9 +43,10 @@ class MicrovmRequestConfig:
     """The route path, for example ``/clone-build``.
 
     It must be an RFC 3986 path that starts with ``/``, without a ``.`` or
-    ``..`` segment. The operation sends it exactly as written. Percent-encode any other character, for example
-    a space as ``%20``. Register the same string as the worker's route, because
-    the worker matches the raw request path.
+    ``..`` segment. The operation sends it exactly as written. Percent-encode
+    any other character, for example a space as ``%20``. Register the same
+    string as the worker's route, because the worker matches the raw request
+    path.
 
     ``None`` sends the job to :data:`DEFAULT_MICROVM_JOB_PATH`. The worker
     package serves that path with its ``handler``. A path sends the job to one
