@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from aws_durable_execution_sdk_python_extras.microvm.config import (
     MAX_MICROVM_DURATION_SECONDS,
     LambdaMicrovmsClient,
     MicrovmConfig,
+    MicrovmRequestConfig,
 )
 from aws_durable_execution_sdk_python_extras.microvm.errors import (
     MicrovmDeliveryError,
@@ -44,9 +46,18 @@ from aws_durable_execution_sdk_python_extras.microvm.errors import (
     MicrovmTimeoutError,
 )
 from aws_durable_execution_sdk_python_extras.microvm.job import (
-    MAX_RUN_HOOK_PAYLOAD_LENGTH,
+    JobRequest,
     RunHookPayload,
     fits_run_hook,
+    run_hook_payload_without_job,
+)
+from aws_durable_execution_sdk_python_extras.microvm.request import (
+    DEFAULT_MICROVM_JOB_PATH,
+    DEFAULT_MICROVM_PORT,
+    DEFAULT_REQUEST_RETRY_WINDOW_SECONDS,
+    MAX_REQUEST_RETRY_WINDOW_SECONDS,
+    SendJobOptions,
+    send_job,
 )
 from aws_durable_execution_sdk_python_extras.microvm.retry import (
     default_microvm_retry_strategy,
@@ -55,6 +66,7 @@ from aws_durable_execution_sdk_python_extras.microvm.retry import (
 
 if TYPE_CHECKING:
     from aws_durable_execution_sdk_python.context import Callback, DurableContext
+    from aws_durable_execution_sdk_python.types import StepContext
 
 
 LAUNCH_MARGIN_SECONDS = 300
@@ -83,27 +95,61 @@ so an attempt that ran out of time is repeated, not doubled.
 RUN_HOOK_DELIVERY = "run-hook"
 """The delivery in which the job goes in the ``runHookPayload`` of the launch."""
 
+HTTP_DELIVERY = "http"
+"""The delivery in which a request step POSTs the job to the MicroVM's
+endpoint after the launch."""
+
+_HOOK_PATH_PREFIX = "/aws/lambda-microvms/"
+"""Lambda sends the lifecycle hooks to paths under this prefix."""
+
+_MAX_PORT = 65_535
+
+_ROUTE_PATH = re.compile(r"(?:/(?:[A-Za-z0-9\-._~!$&'()*+,;=:@]|%[0-9A-Fa-f]{2})*)+")
+"""An RFC 3986 path, section 3.3: segments of pchar characters and %XX escapes.
+
+The operation sends the path as written. Both workers match the raw request
+path, so the config and the route use the same string.
+"""
+
+_DOT_SEGMENT = re.compile(r"/(?:\.|%2e){1,2}(?=/|$)", re.IGNORECASE)
+"""A ``.`` or ``..`` segment, also with ``%2e`` for a dot.
+
+A segment with other characters next to its dots, such as ``/.well-known``,
+and a segment of three dots are not dot segments.
+"""
+
 
 @dataclass(frozen=True, kw_only=True)
 class LaunchResult:
     """What the launch step checkpoints.
 
-    Wire names: ``microvmId`` and ``delivery``.
+    Wire names: ``microvmId``, ``endpoint``, and ``delivery``. The JavaScript
+    operation checkpoints the same document.
     """
 
     microvm_id: str
     delivery: str
     """How the job reaches the MicroVM. Replay reads it from the checkpoint,
     so every replay follows the delivery that the launch prepared for."""
+    endpoint: str | None = None
+    """The MicroVM's endpoint. Present only for HTTP delivery."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LaunchResult:
         # A checkpoint without a delivery gets an empty one. The operation
         # then terminates the MicroVM as for any delivery it does not know.
-        return cls(microvm_id=data["microvmId"], delivery=data.get("delivery", ""))
+        return cls(
+            microvm_id=data["microvmId"],
+            delivery=data.get("delivery", ""),
+            endpoint=data.get("endpoint"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"microvmId": self.microvm_id, "delivery": self.delivery}
+        data: dict[str, Any] = {"microvmId": self.microvm_id}
+        if self.endpoint is not None:
+            data["endpoint"] = self.endpoint
+        data["delivery"] = self.delivery
+        return data
 
 
 def microvm(
@@ -121,16 +167,26 @@ def microvm(
     1. ``<name>.callback`` creates a durable callback. The service generates
        the callback ID, and the SDK checkpoints it. So the ID is unique to this
        call and stays the same on every replay.
-    2. ``<name>.launch`` calls ``RunMicrovm``. The job goes in the
-       ``runHookPayload``, and Lambda passes it to the worker's ``run`` hook.
-       The client token is the SHA-256 hex digest of the callback ID. So a
-       retried or replayed launch returns the same MicroVM instead of starting
-       a second one.
-    3. The child context waits on the callback. The invocation ends during the
+    2. ``<name>.launch`` calls ``RunMicrovm``. The client token is the
+       SHA-256 hex digest of the callback ID. So a retried or replayed launch
+       returns the same MicroVM instead of starting a second one. With
+       ``run`` hook delivery, the job goes in the ``runHookPayload``, and
+       Lambda passes it to the worker's ``run`` hook.
+    3. With HTTP delivery, ``<name>.request`` creates an auth token and POSTs
+       the job to the MicroVM's endpoint.
+    4. The child context waits on the callback. The invocation ends during the
        wait, so no Lambda compute is billed. The worker in the MicroVM
        completes the callback with the job's result or failure.
-    4. ``<name>.terminate`` calls ``TerminateMicrovm``. It runs after success,
-       failure, and timeout alike.
+    5. ``<name>.terminate`` calls ``TerminateMicrovm``. It runs after success,
+       failure, and timeout alike, and after a failed delivery.
+
+    The operation picks the delivery:
+
+    1. A job whose ``run`` hook payload fits in
+       :data:`MAX_RUN_HOOK_PAYLOAD_LENGTH` code points goes in the ``run``
+       hook. The MicroVM then gets no ingress.
+    2. A larger job, or any job when ``config.request.path`` is set, goes
+       over HTTP. The MicroVM then gets the ``ALL_INGRESS`` connector.
 
     A terminate failure does not fail the operation. The job's outcome is
     already recorded when terminate runs, and the MicroVM's maximum duration
@@ -165,7 +221,8 @@ def microvm(
         TypeError: When ``job_input`` is not JSON-serializable. No durable
             operation starts.
         MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
-        MicrovmDeliveryError: When the job is too large for the ``run`` hook.
+        MicrovmDeliveryError: When the HTTP delivery fails after all retries,
+            or the route answers a 4xx status such as 404, or a redirect.
         MicrovmJobFailedError: When the MicroVM reports a failure, or sends a
             result that is not valid JSON.
         MicrovmTimeoutError: When no result or heartbeat arrives in time.
@@ -191,6 +248,8 @@ class _OperationScope:
     region: str
     timeout_seconds: int
     heartbeat_timeout_seconds: int | None
+    request: MicrovmRequestConfig
+    retry_window_seconds: int
     retry_strategy: Callable[[Exception, int], RetryDecision]
 
     @classmethod
@@ -233,6 +292,8 @@ class _OperationScope:
         if heartbeat_timeout_seconds is not None and heartbeat_timeout_seconds < 1:
             msg = f'MicroVM "{name}": heartbeat_timeout must be at least 1 second'
             raise ValidationError(msg)
+        request = config.request or MicrovmRequestConfig()
+        retry_window_seconds = _validate_request(name, request)
         try:
             json.dumps(job_input, allow_nan=False)
         except (TypeError, ValueError) as error:
@@ -256,16 +317,14 @@ class _OperationScope:
             region=region,
             timeout_seconds=timeout_seconds,
             heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            request=request,
+            retry_window_seconds=retry_window_seconds,
             retry_strategy=config.retry_strategy or default_microvm_retry_strategy,
         )
 
     def run_job(self, child: DurableContext, job_input: Any) -> Any:
         """Run the operation's durable operations in its child context."""
         name = self.name
-        # The payload without the callback ID is shorter than the full one.
-        # So a job that does not fit without the ID fails before the callback
-        # exists, and no callback is left open until its timeout.
-        self._require_run_hook(self._payload("", job_input), with_callback_id=False)
         callback: Callback = child.create_callback(
             name=f"{name}.callback",
             config=CallbackConfig(
@@ -278,17 +337,36 @@ class _OperationScope:
                 serdes=JsonSerDes(),
             ),
         )
-        payload = self._payload(callback.callback_id, job_input)
-        # The full payload contains the callback ID, so its size is known only
+        # The operation picks the delivery:
+        #
+        # 1. The run hook is preferred. It opens no ingress, and it needs no
+        #    extra durable step.
+        # 2. A config with a request path goes over HTTP. The worker runs a
+        #    run hook job with its handler, not with a route.
+        # 3. A payload larger than the run hook limit goes over HTTP.
+        #    RunMicrovm rejects it with ValidationException, which the
+        #    default retry strategy does not retry.
+        #
+        # The payload contains the callback ID, so the size is known only
         # after the callback exists. The ID comes from the checkpoint on
-        # replay, and the input must not change. So every replay reaches the
-        # same decision.
-        self._require_run_hook(payload, with_callback_id=True)
+        # replay, and the input must not change. So every replay picks the
+        # same delivery as the first attempt.
+        with_job = RunHookPayload(
+            region=self.region,
+            callback_id=callback.callback_id,
+            job_input=job_input,
+            heartbeat_timeout_seconds=self.heartbeat_timeout_seconds,
+        ).to_json()
+        over_http = self.request.path is not None or not fits_run_hook(with_job)
+        delivery = HTTP_DELIVERY if over_http else RUN_HOOK_DELIVERY
+        payload = run_hook_payload_without_job(self.region) if over_http else with_job
 
         try:
             launched = LaunchResult.from_dict(
                 child.step(
-                    lambda _: self._launch(callback.callback_id, payload).to_dict(),
+                    lambda _: self._launch(
+                        callback.callback_id, payload, delivery
+                    ).to_dict(),
                     name=f"{name}.launch",
                     config=StepConfig(
                         retry_strategy=self.retry_strategy,
@@ -301,15 +379,17 @@ class _OperationScope:
                 )
             )
         except StepError as error:
-            # An exception without a message checkpoints none. Its type is
-            # then the only detail. DurableOperationError always sets a type.
-            detail = error.message or error.error_type
-            msg = f'MicroVM "{name}": the launch failed: {detail}'
+            msg = f'MicroVM "{name}": the launch failed: {_detail(error)}'
             raise MicrovmLaunchError(
                 message=msg, data=error.data, stack_trace=error.stack_trace
             ) from error
         microvm_id = launched.microvm_id
-        if launched.delivery != RUN_HOOK_DELIVERY:
+        # Replay computes the delivery again from the current input and
+        # config. A deploy between the launch and a replay can change both.
+        # The launch result comes from the checkpoint on replay, and it
+        # records the delivery that the launch prepared for. So the operation
+        # follows the launch's delivery, not the new computation.
+        if launched.delivery not in {RUN_HOOK_DELIVERY, HTTP_DELIVERY}:
             # The launch checkpoint comes from a release with a delivery that
             # this release does not know, for example after a rollback. This
             # release cannot deliver the job. So it terminates the MicroVM and
@@ -321,6 +401,16 @@ class _OperationScope:
             )
             raise MicrovmDeliveryError(msg)
 
+        if launched.delivery == HTTP_DELIVERY:
+            try:
+                self._deliver(child, launched, callback.callback_id, job_input)
+            except StepError as error:
+                self._terminate(child, microvm_id)
+                msg = f'MicroVM "{name}": the job could not be delivered: {_detail(error)}'
+                raise MicrovmDeliveryError(
+                    message=msg, data=error.data, stack_trace=error.stack_trace
+                ) from error
+
         try:
             result = callback.result()
         except Exception as error:
@@ -331,29 +421,70 @@ class _OperationScope:
         self._terminate(child, microvm_id)
         return result
 
-    def _payload(self, callback_id: str, job_input: Any) -> str:
-        return RunHookPayload(
-            region=self.region,
-            callback_id=callback_id,
-            job_input=job_input,
-            heartbeat_timeout_seconds=self.heartbeat_timeout_seconds,
-        ).to_json()
+    def _deliver(
+        self,
+        child: DurableContext,
+        launched: LaunchResult,
+        callback_id: str,
+        job_input: Any,
+    ) -> None:
+        """Run the request step: POST the job to the MicroVM's endpoint.
 
-    def _require_run_hook(self, payload: str, *, with_callback_id: bool) -> None:
-        """Raise ``MicrovmDeliveryError`` when ``payload`` is too large."""
-        if fits_run_hook(payload):
-            return
-        size = f"{len(payload)}" if with_callback_id else f"at least {len(payload)}"
-        msg = (
-            f'MicroVM "{self.name}": the job is {size} code points in the run '
-            f"hook payload, and the run hook accepts at most "
-            f"{MAX_RUN_HOOK_PAYLOAD_LENGTH}. Delivery over HTTP for larger jobs "
-            "is not available yet."
+        The step retries inside each attempt with :func:`send_job`, the first
+        tier. The step retry strategy is the second tier.
+        """
+        body = (
+            JobRequest(
+                region=self.region,
+                microvm_id=launched.microvm_id,
+                callback_id=callback_id,
+                job_input=job_input,
+                heartbeat_timeout_seconds=self.heartbeat_timeout_seconds,
+            )
+            .to_json()
+            .encode()
         )
-        raise MicrovmDeliveryError(msg)
+        request = self.request
+        remaining_seconds = _remaining_seconds(child)
 
-    def _launch(self, callback_id: str, payload: str) -> LaunchResult:
+        def attempt(step_context: StepContext) -> None:
+            # The launch records an endpoint for every HTTP delivery. So a
+            # missing endpoint is a defect, not a transient failure. The
+            # default retry strategy does not retry RuntimeError.
+            if launched.endpoint is None:
+                msg = (
+                    f"the launch recorded no endpoint for MicroVM "
+                    f"{launched.microvm_id}, so the job cannot be sent over HTTP"
+                )
+                raise RuntimeError(msg)
+            send_job(
+                SendJobOptions(
+                    client=self._client(),
+                    microvm_id=launched.microvm_id,
+                    endpoint=launched.endpoint,
+                    path=(
+                        DEFAULT_MICROVM_JOB_PATH
+                        if request.path is None
+                        else request.path
+                    ),
+                    port=DEFAULT_MICROVM_PORT if request.port is None else request.port,
+                    body=body,
+                    retry_window_seconds=self.retry_window_seconds,
+                    remaining_seconds=remaining_seconds,
+                    logger=step_context.logger,
+                    opener=self.config.opener,
+                )
+            )
+
+        child.step(
+            attempt,
+            name=f"{self.name}.request",
+            config=StepConfig(retry_strategy=self.retry_strategy),
+        )
+
+    def _launch(self, callback_id: str, payload: str, delivery: str) -> LaunchResult:
         """Call ``RunMicrovm``, and return what the launch step checkpoints."""
+        over_http = delivery == HTTP_DELIVERY
         config = self.config
         request: dict[str, Any] = {
             "imageIdentifier": config.image_identifier,
@@ -363,8 +494,10 @@ class _OperationScope:
             "clientToken": hashlib.sha256(callback_id.encode()).hexdigest(),
             # An explicit empty tuple stays empty. The service accepts 0 to
             # 10 connectors, and only None gets the default.
+            # An HTTP delivery must reach the MicroVM's endpoint, and a run
+            # hook delivery needs no inbound connection.
             "ingressNetworkConnectors": list(
-                (self._connector_arn("NO_INGRESS"),)
+                (self._connector_arn("ALL_INGRESS" if over_http else "NO_INGRESS"),)
                 if config.ingress_network_connectors is None
                 else config.ingress_network_connectors
             ),
@@ -388,7 +521,15 @@ class _OperationScope:
         if not microvm_id:
             msg = "RunMicrovm returned no microvmId"
             raise RuntimeError(msg)
-        return LaunchResult(microvm_id=microvm_id, delivery=RUN_HOOK_DELIVERY)
+        endpoint = response.get("endpoint")
+        if over_http and not endpoint:
+            msg = "RunMicrovm returned no endpoint"
+            raise RuntimeError(msg)
+        return LaunchResult(
+            microvm_id=microvm_id,
+            delivery=delivery,
+            endpoint=endpoint if over_http else None,
+        )
 
     def _terminate(self, child: DurableContext, microvm_id: str) -> None:
         """Run the terminate step, and log a final failure instead of raising.
@@ -548,3 +689,84 @@ def _partition_and_region(arn: str) -> tuple[str, str]:
     if len(parts) > 3 and parts[0] == "arn" and parts[1] and parts[3]:
         return parts[1], parts[3]
     return "aws", os.environ.get("AWS_REGION", "")
+
+
+def _validate_request(name: str, request: MicrovmRequestConfig) -> int:
+    """Validate the HTTP delivery settings.
+
+    Returns:
+        The retry window in seconds.
+
+    Raises:
+        ValidationError: When a setting is not valid.
+    """
+    path = request.path
+    if path is not None and (
+        not isinstance(path, str) or not _ROUTE_PATH.fullmatch(path)
+    ):
+        msg = (
+            f'MicroVM "{name}": the request path must be an RFC 3986 path that '
+            'starts with "/". Percent-encode any other character, for example a '
+            "space as %20."
+        )
+        raise ValidationError(msg)
+    # The JavaScript SDK's fetch resolves a dot segment before it sends the
+    # request, so the JavaScript operation rejects such a path. urllib sends
+    # the path unchanged, but a proxy or server in front of the worker can
+    # resolve it too. So both SDKs accept the same paths, and each path
+    # reaches the worker as written.
+    if path is not None and _DOT_SEGMENT.search(path):
+        msg = (
+            f'MicroVM "{name}": the request path must not have a "." or ".." '
+            "segment, because an HTTP client or server can resolve it before "
+            "the route sees it."
+        )
+        raise ValidationError(msg)
+    if path is not None and path.startswith(_HOOK_PATH_PREFIX):
+        msg = (
+            f'MicroVM "{name}": the request path must not use the lifecycle hook '
+            f"prefix {_HOOK_PATH_PREFIX}"
+        )
+        raise ValidationError(msg)
+    port = request.port
+    # bool is an int subclass, and True would pass as port 1.
+    if port is not None and (
+        isinstance(port, bool)
+        or not isinstance(port, int)
+        or not 1 <= port <= _MAX_PORT
+    ):
+        msg = f'MicroVM "{name}": the request port must be an integer between 1 and {_MAX_PORT}'
+        raise ValidationError(msg)
+    if request.retry_window is None:
+        return DEFAULT_REQUEST_RETRY_WINDOW_SECONDS
+    seconds = request.retry_window.to_seconds()
+    # A window over 10 minutes would outlive the auth token and its one
+    # refresh.
+    if not 1 <= seconds <= MAX_REQUEST_RETRY_WINDOW_SECONDS:
+        msg = (
+            f'MicroVM "{name}": the request retry_window must be between 1 second '
+            f"and {MAX_REQUEST_RETRY_WINDOW_SECONDS // 60} minutes"
+        )
+        raise ValidationError(msg)
+    return seconds
+
+
+def _remaining_seconds(context: DurableContext) -> Callable[[], float | None]:
+    """Return a reader of the invocation's remaining time, in seconds.
+
+    The first retry tier uses it to stop before the invocation times out.
+    ``None`` means that the compute reports no deadline. The core passes the
+    Lambda handler's context, whose ``get_remaining_time_in_millis()``
+    returns an ``int``. A failure of that call raises, so the reserve is
+    never turned off without a sign.
+    """
+    lambda_context = context.lambda_context
+    if lambda_context is None:
+        return lambda: None
+    return lambda: lambda_context.get_remaining_time_in_millis() / 1000
+
+
+def _detail(error: StepError) -> str:
+    # An exception without a message checkpoints none. Its type is then the
+    # only detail. DurableOperationError always sets a type.
+    return error.message or error.error_type

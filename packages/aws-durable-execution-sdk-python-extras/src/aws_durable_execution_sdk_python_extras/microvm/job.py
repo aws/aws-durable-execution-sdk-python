@@ -36,6 +36,10 @@ class RunHookPayload:
 
     Wire names: ``version``, ``region``, and ``job``, whose fields are
     ``callbackId``, ``heartbeatTimeoutSeconds``, and ``input``.
+
+    A job that goes over HTTP needs a ``runHookPayload`` too, because the
+    worker rejects a payload without ``version`` and ``region``. See
+    :func:`run_hook_payload_without_job`.
     """
 
     region: str
@@ -64,17 +68,91 @@ class RunHookPayload:
             TypeError: When the input is not JSON-serializable.
             ValueError: When the input holds ``nan`` or an infinite float.
         """
-        job: dict[str, Any] = {"callbackId": self.callback_id}
-        if self.heartbeat_timeout_seconds is not None:
-            job["heartbeatTimeoutSeconds"] = self.heartbeat_timeout_seconds
-        job["input"] = self.job_input
-        document = {"version": PAYLOAD_VERSION, "region": self.region, "job": job}
-        text = json.dumps(
-            document, allow_nan=False, ensure_ascii=False, separators=(",", ":")
+        job = _job_fields(
+            self.callback_id, self.job_input, self.heartbeat_timeout_seconds
         )
-        # A surrogate appears only inside a JSON string. So the escape is
-        # valid JSON, and it decodes to the same surrogate.
-        return _SURROGATE.sub(lambda match: f"\\u{ord(match.group()):04x}", text)
+        return dumps({"version": PAYLOAD_VERSION, "region": self.region, "job": job})
+
+
+@dataclass(frozen=True, kw_only=True)
+class JobRequest:
+    """The body of the HTTP request that delivers one job to a route.
+
+    Wire names: ``version``, ``region``, ``microvmId``, ``callbackId``,
+    ``heartbeatTimeoutSeconds``, and ``input``. The job fields sit at the top
+    level, next to ``version``, ``region``, and ``microvmId``.
+
+    The endpoint can accept a request before Lambda has sent the ``run``
+    hook. The worker learns the MicroVM ID from the ``run`` hook. So the
+    request carries the MicroVM ID too.
+    """
+
+    region: str
+    """The Region of the durable function, for the callback API calls."""
+    microvm_id: str
+    """The MicroVM that runs the job."""
+    callback_id: str
+    """The callback that the worker completes with the job's outcome."""
+    job_input: Any
+    """The caller's input. It must be JSON-serializable."""
+    heartbeat_timeout_seconds: int | None = None
+    """The heartbeat timeout, when the caller set one."""
+
+    def to_json(self) -> str:
+        """Serialize the request as compact JSON, as :meth:`RunHookPayload.to_json` does.
+
+        Raises:
+            TypeError: When the input is not JSON-serializable.
+            ValueError: When the input holds ``nan`` or an infinite float.
+        """
+        return dumps(
+            {
+                "version": PAYLOAD_VERSION,
+                "region": self.region,
+                "microvmId": self.microvm_id,
+                **_job_fields(
+                    self.callback_id, self.job_input, self.heartbeat_timeout_seconds
+                ),
+            }
+        )
+
+
+def run_hook_payload_without_job(region: str) -> str:
+    """The ``runHookPayload`` of a launch whose job goes over HTTP.
+
+    The worker rejects a ``run`` hook payload without ``version`` and
+    ``region``. So the payload keeps those two fields, and omits the job.
+    """
+    return dumps({"version": PAYLOAD_VERSION, "region": region})
+
+
+def dumps(document: Any) -> str:
+    """Serialize ``document`` as compact JSON, as ``JSON.stringify`` writes it.
+
+    1. Non-ASCII text stays as it is.
+    2. A lone surrogate is written as a ``\\uXXXX`` escape.
+    3. ``nan`` and infinite floats are rejected.
+
+    Raises:
+        TypeError: When the document is not JSON-serializable.
+        ValueError: When the document holds ``nan`` or an infinite float.
+    """
+    text = json.dumps(
+        document, allow_nan=False, ensure_ascii=False, separators=(",", ":")
+    )
+    # A surrogate appears only inside a JSON string. So the escape is valid
+    # JSON, and it decodes to the same surrogate.
+    return _SURROGATE.sub(lambda match: f"\\u{ord(match.group()):04x}", text)
+
+
+def _job_fields(
+    callback_id: str, job_input: Any, heartbeat_timeout_seconds: int | None
+) -> dict[str, Any]:
+    job: dict[str, Any] = {"callbackId": callback_id}
+    if heartbeat_timeout_seconds is not None:
+        job["heartbeatTimeoutSeconds"] = heartbeat_timeout_seconds
+    job["input"] = job_input
+    return job
 
 
 _SURROGATE = re.compile("[\ud800-\udfff]")
