@@ -101,7 +101,9 @@ _SERVER_POLL_SECONDS = 0.1
 
 _UNKNOWN_MICROVM_ID = "unknown"
 
-_CONTENT_LENGTH = re.compile(r"[0-9]+")
+# At most 19 digits, so that int() stays under Python's limit on digits, and
+# any declared length still exceeds every body limit.
+_CONTENT_LENGTH = re.compile(r"[0-9]{1,19}")
 
 _CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]+")
 
@@ -624,13 +626,24 @@ class MicrovmWorkerListener:
                 gone.append(error)
                 cancelled.set()
 
-            heartbeats = Heartbeats.start(
-                reporter,
-                heartbeat_timeout_seconds=job.heartbeat_timeout_seconds,
-                on_callback_gone=on_callback_gone,
-                heartbeat_interval_seconds=self._heartbeat_interval_seconds,
-                logger=self._logger,
-            )
+            try:
+                heartbeats = Heartbeats.start(
+                    reporter,
+                    heartbeat_timeout_seconds=job.heartbeat_timeout_seconds,
+                    on_callback_gone=on_callback_gone,
+                    heartbeat_interval_seconds=self._heartbeat_interval_seconds,
+                    logger=self._logger,
+                )
+            except Exception as error:  # noqa: BLE001
+                # The job has its answer, so no later delivery runs it. Fail
+                # the callback, instead of leaving the job to its heartbeat
+                # timeout.
+                self._logger.error(
+                    "could not start the job's heartbeats",
+                    extra={**fields, "error": describe(error)},
+                )
+                self._report(reporter, _Outcome(error=error), fields)
+                return
             try:
                 self._logger.info("job started", extra=fields)
                 context = MicrovmJobContext(
