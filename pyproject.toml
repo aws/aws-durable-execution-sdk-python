@@ -4,6 +4,8 @@ version = "0.0.0"
 requires-python = ">=3.11"
 
 [tool.hatch.envs.default]
+# The root coordinates workspace packages; it is not an installable distribution.
+skip-install = true
 workspace.members = ["packages/*"]
 
 [tool.hatch.envs.test]
@@ -24,6 +26,22 @@ dependencies = [
 all = "pytest {args}"
 cov = "pytest --cov-report=term-missing --cov {args}"
 examples-integration = "pytest --runner-mode=cloud -m example packages/aws-durable-execution-sdk-python-examples/test/ -v {args}"
+
+[tool.hatch.envs.lmi]
+detached = true
+python = "3.14"
+workspace.members = [
+  "packages/aws-durable-execution-sdk-python",
+  "packages/aws-durable-execution-sdk-python-testing",
+]
+dependencies = ["boto3>=1.43.0", "pytest", "ruff", "build"]
+
+[tool.hatch.envs.lmi.scripts]
+unit = "pytest lmi_tests/tests/unit {args}"
+cloud = "pytest lmi_tests/tests/e2e --lmi-cloud {args}"
+regressions = "pytest lmi_tests/tests/regressions --run-lmi-regressions {args}"
+lint = "ruff check lmi_tests && ruff format --check lmi_tests"
+build = "python -m lmi_tests.deploy build {args}"
 
 [tool.pytest.ini_options]
 # Declare custom markers to avoid warnings with --strict-markers
