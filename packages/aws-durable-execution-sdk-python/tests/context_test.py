@@ -2345,6 +2345,7 @@ def test_from_lambda_context_creates_execution_context():
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = expected_arn
     mock_lambda_context = Mock()
+    mock_lambda_context.get_remaining_time_in_millis.return_value = 900000
 
     context = DurableContext.from_lambda_context(
         state=mock_state, lambda_context=mock_lambda_context

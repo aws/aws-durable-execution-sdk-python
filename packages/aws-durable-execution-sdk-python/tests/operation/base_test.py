@@ -30,6 +30,10 @@ class ConcreteOperationExecutor(OperationExecutor[str]):
     """Concrete implementation for testing the abstract base class."""
 
     def __init__(self):
+        self.state = Mock(spec=ExecutionState)
+        self.operation_identifier = OperationIdentifier(
+            "test_op", OperationSubType.STEP, operation_type=OperationType.STEP
+        )
         self.check_result_status_called = 0
         self.execute_called = 0
         self.check_result_to_return = None

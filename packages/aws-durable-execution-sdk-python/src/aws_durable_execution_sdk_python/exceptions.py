@@ -104,6 +104,10 @@ class InvocationError(UnrecoverableError):
         return True
 
 
+class InvocationDeadlineExceeded(InvocationError):
+    """The invocation must retry after its cooperative time budget expires."""
+
+
 class DurableApiErrorCategory(Enum):
     INVOCATION = "INVOCATION"
     EXECUTION = "EXECUTION"

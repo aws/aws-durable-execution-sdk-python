@@ -39,6 +39,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 def _create_lambda_context():
     """Create a mock Lambda context."""
     ctx = Mock()
+    ctx.get_remaining_time_in_millis.return_value = 900000
     ctx.aws_request_id = "test-request-id"
     ctx.client_context = None
     ctx.identity = None

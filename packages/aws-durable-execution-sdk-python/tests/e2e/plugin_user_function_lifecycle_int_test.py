@@ -68,6 +68,7 @@ class _LifecycleRecordingPlugin(DurableInstrumentationPlugin):
 
 def _lambda_context() -> Mock:
     context = Mock()
+    context.get_remaining_time_in_millis.return_value = 900000
     context.aws_request_id = "test-request-id"
     context.client_context = None
     context.identity = None

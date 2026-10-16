@@ -400,6 +400,7 @@ def test_durable_execution_client_selection_env_normal_result():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -452,6 +453,7 @@ def test_durable_execution_client_selection_env_large_result():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -500,6 +502,7 @@ def test_durable_execution_with_injected_client_success_normal_result():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -547,6 +550,7 @@ def test_durable_execution_with_injected_client_success_large_result():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -602,6 +606,7 @@ def test_durable_execution_with_injected_client_failure():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -648,6 +653,7 @@ def test_durable_execution_with_large_error_payload():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -695,6 +701,7 @@ def test_durable_execution_fatal_error_handling():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -733,6 +740,7 @@ def test_durable_execution_execution_error_handling():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -791,6 +799,7 @@ def test_durable_execution_client_selection_default():
         }
 
         lambda_context = Mock()
+        lambda_context.get_remaining_time_in_millis.return_value = 900000
         lambda_context.aws_request_id = "test-request"
         lambda_context.client_context = None
         lambda_context.identity = None
@@ -830,6 +839,7 @@ def test_durable_handler_empty_input_payload():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -869,6 +879,7 @@ def test_durable_handler_whitespace_input_payload():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -908,6 +919,7 @@ def test_durable_handler_invalid_json_input_payload():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -951,6 +963,7 @@ def test_durable_handler_background_thread_failure():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -991,6 +1004,7 @@ def test_durable_execution_suspend_execution():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1041,6 +1055,7 @@ def test_durable_execution_checkpoint_error_in_background_thread():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1093,6 +1108,7 @@ def test_durable_execution_checkpoint_execution_error_stops_background():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1144,6 +1160,7 @@ def test_durable_execution_checkpoint_invocation_error_retries():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1194,6 +1211,7 @@ def test_durable_execution_background_thread_execution_error_returns_failed():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1241,6 +1259,7 @@ def test_durable_execution_background_thread_invocation_error_retries():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1285,6 +1304,7 @@ def test_durable_execution_final_success_checkpoint_execution_error_returns_fail
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1334,6 +1354,7 @@ def test_durable_execution_final_success_checkpoint_invocation_error_retries():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1380,6 +1401,7 @@ def test_durable_execution_final_failure_checkpoint_execution_error_returns_fail
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1430,6 +1452,7 @@ def test_durable_execution_final_failure_checkpoint_invocation_error_retries():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1496,6 +1519,7 @@ def test_durable_handler_background_thread_failure_on_succeed_checkpoint():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1586,6 +1610,7 @@ def test_durable_handler_background_thread_failure_on_start_checkpoint():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1669,6 +1694,7 @@ def test_durable_handler_background_thread_failure_on_large_result_checkpoint():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1739,6 +1765,7 @@ def test_durable_handler_background_thread_failure_on_error_checkpoint():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1794,6 +1821,7 @@ def test_durable_execution_logs_checkpoint_error_extras_from_background_thread()
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1857,6 +1885,7 @@ def test_durable_execution_logs_boto_client_error_extras_from_background_thread(
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1914,6 +1943,7 @@ def test_durable_execution_logs_checkpoint_error_extras_from_user_code():
     )
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1971,6 +2001,7 @@ def test_durable_execution_with_boto3_client_parameter():
     }
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -1998,6 +2029,7 @@ def test_durable_execution_with_non_durable_payload_raises_error():
     regular_event = {"key": "value", "data": "test"}
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -2029,6 +2061,7 @@ def test_durable_execution_with_non_dict_event_raises_error():
     non_dict_event = "not a dict"
 
     lambda_context = Mock()
+    lambda_context.get_remaining_time_in_millis.return_value = 900000
     lambda_context.aws_request_id = "test-request"
     lambda_context.client_context = None
     lambda_context.identity = None
@@ -2731,6 +2764,7 @@ def _make_invocation_input(mock_client, next_marker="", input_payload="{}"):
 def _make_lambda_context():
     """Helper to create a standard mock Lambda context."""
     ctx = Mock()
+    ctx.get_remaining_time_in_millis.return_value = 900000
     ctx.aws_request_id = "test-request"
     ctx.client_context = None
     ctx.identity = None
