@@ -98,6 +98,27 @@ class MicrovmDeliveryError(MicrovmError):
     """The job could not be delivered to the MicroVM."""
 
 
+class MicrovmNotRunningError(MicrovmDeliveryError):
+    """The session's MicroVM can no longer run a job.
+
+    The MicroVM is terminating, terminated, or removed. A session MicroVM
+    lives at most its session ``timeout`` plus 5 minutes, and never longer
+    than 8 hours, running or suspended. A ``TerminateMicrovm`` call from
+    outside the session ends it too. It is a :class:`MicrovmDeliveryError`,
+    so code that catches delivery failures also catches it.
+
+    Only a session that checks the MicroVM state before each job raises it.
+    It checks when ``auto_suspend_on_idle`` is ``True``, or when an
+    ``idle_policy`` is set. A later attempt finds the same state, so the job
+    is not retried. To continue, start a new session.
+
+    Without the check, the session makes no ``GetMicrovm`` call. The endpoint
+    of a terminated MicroVM answers 502, and the request step retries a 502
+    as a MicroVM that is still starting. So the job fails with a plain
+    :class:`MicrovmDeliveryError`, after the retries of both tiers.
+    """
+
+
 class MicrovmJobFailedError(MicrovmError):
     """The job handler in the MicroVM failed.
 
@@ -124,6 +145,7 @@ for _error_class in (
     MicrovmError,
     MicrovmLaunchError,
     MicrovmDeliveryError,
+    MicrovmNotRunningError,
     MicrovmJobFailedError,
     MicrovmTimeoutError,
 ):
