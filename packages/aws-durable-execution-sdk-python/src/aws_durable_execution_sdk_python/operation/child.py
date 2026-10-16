@@ -10,11 +10,13 @@ from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
     ExecutionError,
     InvocationError,
+    NonDeterministicExecutionError,
     SuspendExecution,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
     ContextOptions,
     ErrorObject,
+    Operation,
     OperationStatus,
     OperationSubType,
     OperationUpdate,
@@ -71,6 +73,28 @@ class ChildOperationExecutor(OperationExecutor[T]):
         self.is_virtual: bool = config.is_virtual
         self.sub_type = config.sub_type or OperationSubType.RUN_IN_CHILD_CONTEXT
 
+    @staticmethod
+    def validate_virtual_checkpoint(
+        operation_identifier: OperationIdentifier,
+        checkpoint: Operation | None,
+    ) -> None:
+        """Reject a checkpoint at the operation id of a virtual child context.
+
+        A virtual child never checkpoints itself, so a checkpoint at its id was
+        written by a non-virtual child in an earlier invocation. Consuming it
+        would skip the virtual body and leave its inner operations unvalidated.
+        """
+        if not isinstance(checkpoint, Operation):
+            return
+        msg = (
+            "Non-deterministic child context at "
+            f"id={operation_identifier.operation_id!r}: checkpoint contains a "
+            "non-virtual child context but current child context is virtual"
+        )
+        raise NonDeterministicExecutionError(
+            msg, step_id=operation_identifier.operation_id
+        )
+
     def check_result_status(self) -> CheckResult[T]:
         """Check operation status and create START checkpoint if needed.
 
@@ -82,8 +106,14 @@ class ChildOperationExecutor(OperationExecutor[T]):
 
         Raises:
             ChildContextError: For FAILED operations
+            NonDeterministicExecutionError: For a virtual child whose operation
+                id already has a checkpoint
         """
         checkpointed_result = self._get_checkpoint_result()
+        if self.is_virtual:
+            self.validate_virtual_checkpoint(
+                self.operation_identifier, checkpointed_result.operation
+            )
 
         # Terminal success without replay_children - deserialize and return
         if (
