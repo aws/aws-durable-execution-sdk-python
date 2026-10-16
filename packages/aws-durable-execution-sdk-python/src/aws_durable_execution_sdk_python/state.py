@@ -776,11 +776,15 @@ class ExecutionState:
         )
 
         if operation_update is not None:
+            # Read the one entry under the lock. self.operations would copy the
+            # whole map on every checkpoint to look up a single operation.
+            with self._operations_lock:
+                previous_operation = self._operations.get(operation_update.operation_id)
             # Dispatch before queueing so START strictly precedes any user
             # function attempt, regardless of checkpoint synchronization mode.
             self._plugin_executor.on_operation_action(
                 operation_update,
-                previous_operation=self.operations.get(operation_update.operation_id),
+                previous_operation=previous_operation,
             )
 
         # Create wrapper object for queue
@@ -1036,7 +1040,11 @@ class ExecutionState:
                             "checkpoint."
                         )
 
-                    previous_operations = self.operations
+                    # Each read of self.operations copies the whole map, and only
+                    # plugins use these copies. So take the snapshots, and call
+                    # the hook, only when a plugin is registered.
+                    has_plugins = self._plugin_executor.has_plugins
+                    previous_operations = self.operations if has_plugins else None
 
                     # Fetch new operations from the API before unblocking sync
                     # waiters. On completion the token is consumed, so skip
@@ -1052,11 +1060,12 @@ class ExecutionState:
                         current_checkpoint_token,
                         fetch_marker,
                     )
-                    self._plugin_executor.on_operation_update(
-                        updated_operations,
-                        self.operations,
-                        previous_operations,
-                    )
+                    if has_plugins:
+                        self._plugin_executor.on_operation_update(
+                            updated_operations,
+                            self.operations,
+                            previous_operations,
+                        )
 
                     # Signal completion for any synchronous operations
                     for queued_op in batch:
