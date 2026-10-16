@@ -1,0 +1,1 @@
+{"finding_digest":"b26773204805c0ea1044fea0a73a151c5494892d2c85320f0955a83c709a84c6","finding_id":"arf_v1_wjtxgiciaxaouece72qkooqvdr","identity_key":"testing/executor.py::_fail_after_invalid_output::invocation-request-id-preservation","pull_request_number":777,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
