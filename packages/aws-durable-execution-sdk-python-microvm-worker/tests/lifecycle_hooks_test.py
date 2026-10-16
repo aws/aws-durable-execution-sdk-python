@@ -9,6 +9,7 @@ after a suspend run on a fake clock, which each test advances.
 
 from __future__ import annotations
 
+import functools
 import http.client
 import json
 import socket
@@ -43,6 +44,39 @@ FORWARDED_HEADERS = {
     "Host": "7ed0892b.lambda-microvm.us-east-1.on.aws",
     "x-amzn-requestid": "6f1c0e0a-0000-4000-8000-000000000000",
 }
+
+
+@functools.cache
+def _has_ipv6_loopback() -> bool:
+    """Whether this host can use ``::1``.
+
+    A host can support IPv6 sockets and still have no ``::1`` address. A
+    Docker container with IPv6 turned off is one example. A connection to
+    ``::1`` then fails with ``EADDRNOTAVAIL``.
+    """
+    if not socket.has_dualstack_ipv6():
+        return False
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+def host_of(worker: MicrovmWorker) -> str:
+    """The loopback address on which a test reaches ``worker``.
+
+    A dual-stack worker binds ``[::]`` with ``SO_REUSEADDR``. On macOS, that
+    bind succeeds on a port that another process holds on ``127.0.0.1``. A
+    connection to ``127.0.0.1`` then reaches the other process, and the test
+    fails with its answer. So the tests connect to ``::1`` when the worker
+    is dual-stack. Linux refuses such a bind, so a MicroVM is not affected.
+    """
+    server = worker._server  # noqa: SLF001
+    if server.address_family == socket.AF_INET6 and _has_ipv6_loopback():
+        return "::1"
+    return "127.0.0.1"
 
 
 def eventually(condition: Callable[[], bool]) -> bool:
@@ -274,7 +308,7 @@ class Harness:
 
     def post(self, path: str, body: Any, headers: dict[str, str] | None = None) -> int:
         connection = http.client.HTTPConnection(
-            "127.0.0.1", self.worker.port, timeout=WAIT
+            host_of(self.worker), self.worker.port, timeout=WAIT
         )
         try:
             connection.request(
@@ -340,6 +374,11 @@ class Harness:
         """Release a job, and wait until it has ended."""
         self.jobs.release(callback_id)
         assert eventually(lambda: callback_id not in self.listener._jobs)  # noqa: SLF001
+        # The job's thread removes the job and starts the idle time in one
+        # locked block. The check above reads without the lock, so it can see
+        # the removal first. Taking the lock waits for the rest of the block.
+        with self.listener._lock:  # noqa: SLF001
+            pass
 
     def settle(self) -> None:
         """Wait until no SuspendMicrovm call runs."""
@@ -425,7 +464,7 @@ class SlowCall:
         data = json.dumps(body).encode()
         half = len(data) // 2
         self._socket = socket.create_connection(
-            ("127.0.0.1", harness.worker.port), timeout=WAIT
+            (host_of(harness.worker), harness.worker.port), timeout=WAIT
         )
         head = (
             f"POST {path} HTTP/1.1\r\nHost: localhost:8080\r\n"
@@ -1351,7 +1390,9 @@ def test_ignores_a_terminate_hook_without_a_host_header(start: Any) -> None:
     h.job("cb-1")
     assert eventually(lambda: h.started("cb-1"))
 
-    connection = http.client.HTTPConnection("127.0.0.1", h.worker.port, timeout=WAIT)
+    connection = http.client.HTTPConnection(
+        host_of(h.worker), h.worker.port, timeout=WAIT
+    )
     try:
         connection.putrequest("POST", f"{HOOK_PATH_PREFIX}terminate", skip_host=True)
         connection.putheader("Content-Length", "2")

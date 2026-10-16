@@ -221,6 +221,23 @@ def test_starts_no_attempt_after_the_deadline(
                 retries={"mode": "standard", "total_max_attempts": 5},
             ),
         )
+        # Runs after the deadline handler, so it records only the attempts
+        # that the handler let through.
+        sent: list[float] = []
+        client.meta.events.register(
+            "before-send.lambda-microvms.SuspendMicrovm",
+            lambda **_: sent.append(time.monotonic()),
+        )
+        call = client.suspend_microvm
+        ended = threading.Event()
+
+        def tracked(**kwargs: Any) -> Any:
+            try:
+                return call(**kwargs)
+            finally:
+                ended.set()
+
+        client.suspend_microvm = tracked  # type: ignore[method-assign]
         started = time.monotonic()
 
         # The call ends with the wait's TimeoutError, or with
@@ -228,14 +245,21 @@ def test_starts_no_attempt_after_the_deadline(
         with pytest.raises(TimeoutError):
             suspend_microvm(client, "mvm-1", 0.5)
 
-        # The attempt in flight at the deadline ends at its read timeout,
-        # and botocore then meets the deadline handler.
-        time.sleep(2.0)
-        assert service.attempts
-        assert all(at - started < 0.5 for at in service.attempts)
-        # The handler is gone once the call has ended.
+        # The attempt in flight at the deadline ends at its read timeout.
+        # botocore then waits its backoff, up to a few seconds, and meets
+        # the deadline handler, which ends the call.
+        assert ended.wait(15)
         handlers = client.meta.events._emitter._unique_id_handlers  # type: ignore[attr-defined]  # noqa: SLF001
-        assert not [key for key in handlers if "microvm-worker-deadline" in key]
+        # The call's thread removes the handler right after the call ends.
+        deadline = time.monotonic() + 5
+        while [key for key in handlers if "microvm-worker-deadline" in key]:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert service.attempts
+        assert sent
+        # The handler and this recorder run back to back. The margin covers
+        # a thread switch between them on a loaded machine.
+        assert all(at - started < 0.55 for at in sent)
         client.close()
     finally:
         service.close()

@@ -17,8 +17,10 @@ packages.
 
 from __future__ import annotations
 
+import functools
 import http.client
 import json
+import socket
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -55,6 +57,49 @@ from aws_durable_execution_sdk_python_extras.microvm import (
 
 
 WAIT = 30
+
+
+@functools.cache
+def _has_ipv6_loopback() -> bool:
+    """Whether this host can use ``::1``.
+
+    A host can support IPv6 sockets and still have no ``::1`` address. A
+    Docker container with IPv6 turned off is one example. A connection to
+    ``::1`` then fails with ``EADDRNOTAVAIL``.
+    """
+    if not socket.has_dualstack_ipv6():
+        return False
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+def host_of(worker: MicrovmWorker) -> str:
+    """The loopback address on which a test reaches ``worker``.
+
+    A dual-stack worker binds ``[::]`` with ``SO_REUSEADDR``. On macOS, that
+    bind succeeds on a port that another process holds on ``127.0.0.1``. A
+    connection to ``127.0.0.1`` then reaches the other process, and the test
+    fails with its answer. So the tests connect to ``::1`` when the worker
+    is dual-stack. Linux refuses such a bind, so a MicroVM is not affected.
+    """
+    server = worker._server  # noqa: SLF001
+    if server.address_family == socket.AF_INET6 and _has_ipv6_loopback():
+        return "::1"
+    return "127.0.0.1"
+
+
+def url_of(worker: MicrovmWorker) -> str:
+    """The worker's endpoint URL for the durable function."""
+    host = host_of(worker)
+    return (
+        f"http://[{host}]:{worker.port}"
+        if ":" in host
+        else f"http://{host}:{worker.port}"
+    )
 
 
 class RunnerCallbacks:
@@ -97,7 +142,9 @@ def run_hook_to(worker: MicrovmWorker) -> Callable[[dict[str, Any]], None]:
     """A RunMicrovm answer that sends the run hook to ``worker``."""
 
     def deliver(request: dict[str, Any]) -> None:
-        connection = http.client.HTTPConnection("127.0.0.1", worker.port, timeout=WAIT)
+        connection = http.client.HTTPConnection(
+            host_of(worker), worker.port, timeout=WAIT
+        )
         try:
             body = {"microvmId": "mvm-1", "runHookPayload": request["runHookPayload"]}
             connection.request("POST", f"{HOOK_PATH_PREFIX}run", body=json.dumps(body))
@@ -145,7 +192,7 @@ def composed(fake_client: Any) -> Iterator[Callable[..., Any]]:
         closers.append(worker.close)
         client = fake_client(
             launches=[run_hook_to(worker)],
-            endpoint=f"http://127.0.0.1:{worker.port}",
+            endpoint=url_of(worker),
         )
         holder["config"] = MicrovmConfig(
             image_identifier="img",
@@ -267,7 +314,7 @@ def test_runs_two_session_jobs_in_one_worker(fake_client: Any, tmp_path: Any) ->
     try:
         client = fake_client(
             launches=[run_hook_to(worker)],
-            endpoint=f"http://127.0.0.1:{worker.port}",
+            endpoint=url_of(worker),
         )
         holder["config"] = MicrovmSessionConfig(
             image_identifier="img",
@@ -291,7 +338,7 @@ def test_runs_two_session_jobs_in_one_worker(fake_client: Any, tmp_path: Any) ->
 
 def post_hook(worker: MicrovmWorker, hook: str) -> None:
     """Send a lifecycle hook as Lambda does, with a local Host."""
-    connection = http.client.HTTPConnection("127.0.0.1", worker.port, timeout=WAIT)
+    connection = http.client.HTTPConnection(host_of(worker), worker.port, timeout=WAIT)
     try:
         connection.request(
             "POST",
@@ -423,7 +470,7 @@ def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
     try:
         client = StatefulMicrovms(
             launches=[run_hook_to(worker)],
-            endpoint=f"http://127.0.0.1:{worker.port}",
+            endpoint=url_of(worker),
         )
         holder["config"] = MicrovmSessionConfig(
             image_identifier="img",
