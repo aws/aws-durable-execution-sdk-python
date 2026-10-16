@@ -58,7 +58,27 @@ def save(path, data):
     path.write_text(json.dumps(scrub(data), indent=2, default=str) + "\n")
 
 
+def clear_run_artifacts() -> None:
+    """Invalidate prior run evidence before fallible build/deployment work.
+
+    Keep the build manifest, which deploy needs to verify the packaged wheel.
+    Remove the run manifest first: even if a later local deletion fails, an exit
+    trap cannot use that prior run's identity to collect, release, or stop work.
+    """
+    if not ARTIFACTS.exists():
+        return
+    (ARTIFACTS / "manifest.json").unlink(missing_ok=True)
+    for path in ARTIFACTS.iterdir():
+        if path.name == "build.json":
+            continue
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+
 def build():
+    clear_run_artifacts()
     directory = ROOT / "lmi_tests/build"
     if directory.exists():
         shutil.rmtree(directory)
@@ -291,6 +311,7 @@ def verify(config, scaling, manifest, key):
 
 
 def deploy(args):
+    clear_run_artifacts()
     if not args.run_id or not re.fullmatch(r"[a-z0-9-]{1,24}", args.run_id):
         raise ProvisioningError(
             "run-id must be 1-24 lowercase letters, digits or hyphens"

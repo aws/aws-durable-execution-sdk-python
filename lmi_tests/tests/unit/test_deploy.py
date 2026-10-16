@@ -1,5 +1,6 @@
 import copy
 import json
+from pathlib import Path
 
 from botocore.exceptions import ClientError
 from unittest.mock import Mock
@@ -313,3 +314,132 @@ def test_cleanup_releases_only_current_run_and_keeps_infrastructure(
     lam.delete_function.assert_not_called()
     s3.delete_objects.assert_not_called()
     assert json.loads((tmp_path / "cleanup.json").read_text())["status"] == "RETAINED"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["run-id", "stack-name", "environment", "account", "capacity", "build", "digest"],
+)
+def test_failed_preflight_cannot_reuse_prior_run_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+) -> None:
+    """An EXIT trap after any preflight error must not target the previous run."""
+    import hashlib
+    from types import SimpleNamespace
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    package = tmp_path / "lmi_tests/build"
+    package.mkdir(parents=True)
+    data = b"current-build"
+    (package / "function.zip").write_bytes(data)
+    build = {"commit": "current", "sha256": hashlib.sha256(data).hexdigest()}
+    if failure == "digest":
+        build["sha256"] = "wrong"
+    deploy.save(artifacts / "build.json", build)
+    build_bytes = (artifacts / "build.json").read_bytes()
+    deploy.save(artifacts / "manifest.json", {"run": "previous", "owned": True})
+    deploy.save(artifacts / "cleanup.json", {"run": "previous", "status": "RETAINED"})
+    deploy.save(artifacts / "configuration/c1.json", {"run": "previous"})
+    (artifacts / "cloud.xml").write_text(
+        '<testsuite><testcase name="old-case"/></testsuite>'
+    )
+    clients = {name: Mock() for name in ("sts", "lambda", "s3")}
+    clients["sts"].get_caller_identity.return_value = {"Account": "123456789012"}
+    clients["lambda"].get_capacity_provider.return_value = {
+        "CapacityProvider": {"CapacityProviderScalingConfig": {"MaxVCpuCount": 2}}
+    }
+    monkeypatch.setattr(deploy, "ROOT", tmp_path)
+    monkeypatch.setattr(deploy, "ARTIFACTS", artifacts)
+    monkeypatch.setattr(deploy, "client", clients.__getitem__)
+    deploy_stack = Mock()
+    monkeypatch.setattr(deploy, "deploy_stack", deploy_stack)
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+    monkeypatch.setenv("TEST_ACCOUNT_ID", "123456789012")
+    monkeypatch.setenv(
+        "CAPACITY_PROVIDER_ARN",
+        "arn:aws:lambda:us-west-2:123456789012:capacity-provider/test",
+    )
+    monkeypatch.setenv("TEST_LAMBDA_EXECUTION_ROLE_ARN", "test-role")
+    args = SimpleNamespace(
+        run_id="current", stack_name="python-lmi-e2e", runtime="python3.14"
+    )
+    if failure == "run-id":
+        args.run_id = "INVALID"
+    elif failure == "stack-name":
+        args.stack_name = "INVALID"
+    elif failure == "environment":
+        monkeypatch.delenv("CAPACITY_PROVIDER_ARN")
+    elif failure == "account":
+        clients["sts"].get_caller_identity.return_value = {"Account": "other"}
+    elif failure == "capacity":
+        clients["lambda"].get_capacity_provider.side_effect = RuntimeError(
+            "capacity unavailable"
+        )
+    elif failure == "build":
+        (package / "function.zip").unlink()
+    with pytest.raises((ProvisioningError, KeyError, RuntimeError, FileNotFoundError)):
+        deploy.deploy(args)
+    assert (artifacts / "build.json").read_bytes() == build_bytes
+    assert not (artifacts / "manifest.json").exists()
+    assert not (artifacts / "cleanup.json").exists()
+    assert not (artifacts / "cloud.xml").exists()
+    assert not (artifacts / "configuration").exists()
+    deploy_stack.assert_not_called()
+    for command in ("collect", "cleanup"):
+        monkeypatch.setattr(deploy.sys, "argv", ["deploy", command])
+        with pytest.raises(FileNotFoundError):
+            deploy.main()
+    clients["s3"].put_object.assert_not_called()
+    from lmi_tests.summary import summarize
+
+    summary = summarize(artifacts)
+    assert "old-case" not in summary
+    assert "Cloud scenarios did not run" in summary
+    assert "Run cleanup not confirmed" in summary
+
+
+def test_failed_build_clears_prior_run_before_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifacts = tmp_path / "lmi_tests/artifacts"
+    deploy.save(artifacts / "manifest.json", {"run": "previous", "owned": True})
+    deploy.save(artifacts / "cleanup.json", {"run": "previous"})
+    monkeypatch.setattr(deploy, "ROOT", tmp_path)
+    monkeypatch.setattr(deploy, "ARTIFACTS", artifacts)
+    monkeypatch.setattr(
+        deploy.subprocess, "run", Mock(side_effect=RuntimeError("build failed"))
+    )
+    with pytest.raises(RuntimeError, match="build failed"):
+        deploy.build()
+    assert not (artifacts / "manifest.json").exists()
+    assert not (artifacts / "cleanup.json").exists()
+
+
+def test_artifact_cleanup_does_not_follow_symlinks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "evidence.json").write_text("keep")
+    (artifacts / "old-output").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(deploy, "ARTIFACTS", artifacts)
+    deploy.clear_run_artifacts()
+    assert (outside / "evidence.json").read_text() == "keep"
+    assert not (artifacts / "old-output").exists()
+
+
+def test_manifest_is_invalidated_even_if_later_artifact_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    deploy.save(tmp_path / "manifest.json", {"run": "previous", "owned": True})
+    deploy.save(tmp_path / "configuration/c1.json", {"run": "previous"})
+    monkeypatch.setattr(deploy, "ARTIFACTS", tmp_path)
+    monkeypatch.setattr(
+        deploy.shutil, "rmtree", Mock(side_effect=PermissionError("blocked"))
+    )
+    with pytest.raises(PermissionError, match="blocked"):
+        deploy.clear_run_artifacts()
+    assert not (tmp_path / "manifest.json").exists()

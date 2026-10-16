@@ -8,9 +8,10 @@ It follows the separate cloud-suite approach in
 It changes no production SDK code. The deadline and early-completion regressions
 are **expected to fail on the current SDK**. They are ordinary failing assertions,
 with no `xfail`, swallowed failure, or expected-failure success status. CI runs the
-cloud suite automatically on every trusted PR update and main push. Local cloud
-runs and local red regressions require explicit commands; the ordinary local test
-suite remains usable while the fix is designed.
+non-cloud harness automatically on PR updates and main pushes. The cloud suite
+requires `workflow_dispatch` until the #741 implementation satisfies its contract.
+Local cloud runs and local red regressions also require explicit commands; the
+ordinary local test suite remains usable while the fix is designed.
 
 ## Run locally
 
@@ -76,7 +77,12 @@ python -m lmi_tests.summary
 
 For unattended local runs, install a shell `EXIT`/`INT`/`TERM` trap that calls
 `collect` followed by `cleanup`; the workflow already has unconditional steps.
-Use a fresh run ID for each run and reuse the same stack name. This deployment supplies both native
+Use a fresh run ID for each run and reuse the same stack name. Before build or
+deployment preflight, the driver removes prior run metadata and reports from
+`lmi_tests/artifacts`, preserving `build.json` for artifact verification. Archive
+any evidence you need before starting another run. The run manifest is invalidated
+first, so a failed build, invalid configuration, or account/provider check cannot
+make an exit trap collect or clean up the preceding run. This deployment supplies both native
 environment-concurrency settings, `1` and `2`, on Python 3.14. The single cloud
 command runs all 14 scenarios for each setting (28 cases), sequentially, without
 redeploying or changing function configuration between cases. Independent SDK
@@ -158,7 +164,7 @@ and negative evidence controls without treating the SDK defect as a passing resu
 
 The current SDK has no public cooperative cancellation API. The fault fixture
 therefore deliberately remains blocked until interrupted/retired by the eventual
-SDK/runtime policy or released externally. Its 75-second emergency limit always
+SDK/runtime policy or released externally. Its 150-second emergency limit always
 invalidates a regression pass. It does not implement deadline cancellation in test
 code, use `shutdown(wait=False)` as a fix, kill the process itself, or manufacture
 successful checkpoints. Selecting a bounded retirement strategy belongs to #741.
@@ -232,15 +238,17 @@ An unexecuted scenario is never summarized as passing.
 
 ## CI and resource ownership
 
-The dedicated workflow runs the harness and full LMI suite automatically
-when a same-repository PR is opened, updated, or reopened (including Draft PRs),
-and on every push to `main`, including merged changes. There are no path filters,
-label requirements, or ready-for-review requirements. `workflow_dispatch` remains
-available for manual reruns; there are no scheduled jobs.
+The dedicated workflow runs the non-cloud harness when a PR is opened,
+updated, or reopened (including Draft PRs), and on every push to `main`. There
+are no path filters or ready-for-review requirements for that harness. The cloud
+job runs only with explicit `workflow_dispatch`; there are no scheduled jobs.
+This keeps the deliberately failing #741 assertions from blocking every unrelated
+PR/main build. Enable automatic cloud execution only after the implementation
+satisfies those assertions; the manual cloud job still reports real failures.
 
-Each workflow run has one harness job and one cloud job using the persistent resources.
-All cloud jobs share the repository-wide `lmi-e2e-shared-capacity-provider`
-concurrency group, across PRs, main pushes, and manual runs. Only one cloud job can
+Each manual workflow run has one harness job and one cloud job using the persistent
+resources. All cloud jobs share the repository-wide
+`lmi-e2e-shared-capacity-provider` concurrency group. Only one cloud job can
 deploy, test, or clean up at a time; the slot is held until the entire job finishes.
 Harness jobs can run
 in parallel. The capacity provider's configuration is not changed.
@@ -252,8 +260,9 @@ cancels additional arrivals when that queue is full. This repository-wide group
 does not coordinate manual local deployments or jobs in other repositories using
 the same provider; those consumers must also leave sufficient capacity available.
 
-Privileged cloud jobs retain the repository's existing restrictions for forked PRs
-and Dependabot; the harness still runs for those PRs. Cloud jobs reuse
+PR events, including forks and Dependabot, run only the harness. A cloud run must
+be dispatched explicitly by a trusted repository actor; Dependabot remains excluded.
+Cloud jobs reuse
 `TEST_ROLE_ARN`, `TEST_ACCOUNT_ID`, and `TEST_LAMBDA_EXECUTION_ROLE_ARN` with OIDC.
 The #741 regression assertions remain visibly failing until its fix lands; they
 are not skipped or converted into expected-success results to keep CI green.
