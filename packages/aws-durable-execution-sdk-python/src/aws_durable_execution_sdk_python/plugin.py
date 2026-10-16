@@ -476,6 +476,11 @@ class PluginExecutor:
         self._reported_terminal_updates: set[tuple[str, OperationStatus]] = set()
         self._terminal_updates_lock = Lock()
 
+    @property
+    def has_plugins(self) -> bool:
+        """Return True when at least one plugin is registered."""
+        return bool(self._plugins)
+
     @contextlib.contextmanager
     def run(self):
         with self._terminal_updates_lock:
@@ -856,7 +861,9 @@ class PluginExecutor:
             operations: full operation map after the update, when available.
             previous_operations: operation map before the update, when available.
         """
-        if operation_or_operations is None:
+        # Only plugins read the info built below, and the change info converts
+        # every operation. So without a plugin, return before building any of it.
+        if operation_or_operations is None or not self.has_plugins:
             return
 
         updated_operations: list[Operation] = (

@@ -12,7 +12,7 @@ import threading
 import time
 import unittest.mock
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import Mock, call, create_autospec, patch
+from unittest.mock import Mock, PropertyMock, call, create_autospec, patch
 
 import pytest
 
@@ -4765,6 +4765,60 @@ def test_existing_operation_start_is_reported_as_replayed():
     assert plugin.operation_starts[0].is_replayed is True
 
 
+@pytest.mark.parametrize(
+    ("operations", "expected_is_replayed"),
+    [
+        pytest.param({}, False, id="new-operation"),
+        pytest.param(
+            {
+                "step-1": Operation(
+                    operation_id="step-1",
+                    operation_type=OperationType.STEP,
+                    status=OperationStatus.READY,
+                )
+            },
+            True,
+            id="existing-operation",
+        ),
+    ],
+)
+def test_create_checkpoint_reads_previous_operation_without_copying_map(
+    operations: dict[str, Operation], expected_is_replayed: bool
+) -> None:
+    """START replay detection reads one entry instead of copying the map."""
+    plugin = _RecordingPlugin()
+    plugin_executor = PluginExecutor(plugins=[plugin])
+    with (
+        plugin_executor.run(),
+        patch.object(
+            ExecutionState, "operations", new_callable=PropertyMock
+        ) as operations_property,
+    ):
+        state = ExecutionState(
+            durable_execution_arn="test_arn",
+            initial_checkpoint_token="token123",  # noqa: S106
+            operations=operations,
+            service_client=create_autospec(LambdaClient),
+            plugin_executor=plugin_executor,
+        )
+        # An async checkpoint dispatches START before it returns, so the test
+        # needs no background thread.
+        state.create_checkpoint(
+            OperationUpdate(
+                operation_id="step-1",
+                operation_type=OperationType.STEP,
+                action=OperationAction.START,
+                name="my-step",
+            ),
+            is_sync=False,
+        )
+
+    operations_property.assert_not_called()
+    assert [info.is_replayed for info in plugin.operation_starts] == [
+        expected_is_replayed
+    ]
+
+
 def test_plugin_executor_on_operation_update_called_for_terminal_operations():
     """Test that plugin_executor.on_operation_update is called for terminal operations."""
     mock_client = create_autospec(LambdaClient)
@@ -5006,6 +5060,62 @@ def test_plugin_executor_on_operation_change_called_for_status_changes():
 
     assert "operation_change:step-1" in plugin.calls
     assert "operation_change:wait-1" not in plugin.calls
+
+
+def test_checkpoint_loop_without_plugins_skips_operation_snapshots() -> None:
+    """Without plugins, a sync checkpoint copies no map and skips the hook."""
+    mock_client = create_autospec(spec=LambdaClient)
+    step_op = Operation(
+        operation_id="step-1",
+        operation_type=OperationType.STEP,
+        status=OperationStatus.SUCCEEDED,
+        step_details=StepDetails(attempt=1, result='"done"'),
+    )
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(
+            operations=[step_op],
+            next_marker=None,
+        ),
+    )
+    plugin_executor = PluginExecutor(plugins=None)
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_client,
+        plugin_executor=plugin_executor,
+    )
+
+    with (
+        patch.object(
+            ExecutionState, "operations", new_callable=PropertyMock
+        ) as operations_property,
+        patch.object(plugin_executor, "on_operation_update") as on_operation_update,
+    ):
+        executor = ThreadPoolExecutor(max_workers=1)
+        executor.submit(state.checkpoint_batches_forever)
+        try:
+            # Returns only after the loop has processed the batch, so the
+            # assertions below see the whole round trip.
+            state.create_checkpoint(
+                OperationUpdate(
+                    operation_id="step-1",
+                    operation_type=OperationType.STEP,
+                    action=OperationAction.SUCCEED,
+                    name="my-step",
+                    payload='"done"',
+                ),
+                is_sync=True,
+            )
+        finally:
+            state.stop_checkpointing()
+            executor.shutdown(wait=True)
+
+    operations_property.assert_not_called()
+    on_operation_update.assert_not_called()
+    # The loop still stores the operations from the response.
+    assert state.operations == {"step-1": step_op}
 
 
 def test_operation_start_plugin_hook_fires_before_checkpoint_failure():
