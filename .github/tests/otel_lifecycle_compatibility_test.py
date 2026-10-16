@@ -115,6 +115,7 @@ def test_installed_pair_preserves_context_and_documents_legacy_fallback(
             },
         }
         lambda_context = SimpleNamespace(
+            get_remaining_time_in_millis=lambda: 900000,
             aws_request_id="installed",
             client_context=None,
             identity=None,
