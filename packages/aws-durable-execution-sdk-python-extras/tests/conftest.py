@@ -31,14 +31,18 @@ Answer = BaseException | Callable[[dict[str, Any]], Any] | None
 class FakeMicrovmsClient:
     """Records Lambda MicroVMs API calls, and answers from scripted lists.
 
-    ``launches``, ``tokens``, and ``terminates`` hold the answers of
-    ``run_microvm``, ``create_microvm_auth_token``, and ``terminate_microvm``,
-    in order. Each answer is an exception to raise, a function that receives
-    the request, or ``None`` for success. After a list ends, every call
-    succeeds.
+    ``launches``, ``tokens``, ``terminates``, and ``resumes`` hold the
+    answers of ``run_microvm``, ``create_microvm_auth_token``,
+    ``terminate_microvm``, and ``resume_microvm``, in order. Each answer is an
+    exception to raise, a function that receives the request, or ``None`` for
+    success. After a list ends, every call succeeds.
 
-    ``run_microvm`` returns ``endpoint``. The Nth auth token is
-    ``{"x-test-token": "token-N"}``.
+    ``states`` holds the answers of ``get_microvm``: a state such as
+    ``"SUSPENDED"``, or an exception to raise. After the list ends, the state
+    is ``RUNNING``.
+
+    ``run_microvm`` and ``get_microvm`` return ``endpoint``. The Nth auth
+    token is ``{"x-test-token": "token-N"}``.
     """
 
     def __init__(
@@ -47,6 +51,8 @@ class FakeMicrovmsClient:
         launches: list[Answer] | None = None,
         tokens: list[Answer] | None = None,
         terminates: list[Answer] | None = None,
+        resumes: list[Answer] | None = None,
+        states: list[str | BaseException] | None = None,
         endpoint: str | None = "mvm-1.microvm.example",
     ) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -55,7 +61,9 @@ class FakeMicrovmsClient:
             "run_microvm": list(launches or []),
             "create_microvm_auth_token": list(tokens or []),
             "terminate_microvm": list(terminates or []),
+            "resume_microvm": list(resumes or []),
         }
+        self._states = list(states or [])
         self._lock = threading.Lock()
 
     def requests(self, name: str) -> list[dict[str, Any]]:
@@ -88,6 +96,21 @@ class FakeMicrovmsClient:
     def terminate_microvm(self, **request: Any) -> dict[str, Any]:
         self._answer("terminate_microvm", request)
         return {}
+
+    def resume_microvm(self, **request: Any) -> dict[str, Any]:
+        self._answer("resume_microvm", request)
+        return {}
+
+    def get_microvm(self, **request: Any) -> dict[str, Any]:
+        with self._lock:
+            self.calls.append(("get_microvm", request))
+            state = self._states.pop(0) if self._states else "RUNNING"
+        if isinstance(state, BaseException):
+            raise state
+        response: dict[str, Any] = {"microvmId": "mvm-1", "state": state}
+        if self.endpoint is not None:
+            response["endpoint"] = self.endpoint
+        return response
 
 
 # The fakes are fixtures, not imports. Several packages in this repository
