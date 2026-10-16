@@ -53,8 +53,9 @@ from aws_durable_execution_sdk_python_microvm_worker.payload import (
 from aws_durable_execution_sdk_python_microvm_worker.self_suspend import (
     SUSPEND_CALL_TIMEOUT_SECONDS,
     SUSPEND_GRACE_SECONDS,
+    SuspendOutcome,
+    classify_suspend_error,
     create_microvms_client,
-    is_rejected_call,
     suspend_microvm,
 )
 
@@ -294,10 +295,15 @@ class MicrovmWorkerListener:
     6. A call that the service rejected on its first attempt, for example
        for a missing permission, ends the refusal at once. The MicroVM keeps
        running, and the listener does not retry the call until a job ends.
-    7. A call whose outcome is unknown, such as a timeout, a throttle, a
-       conflict, a server error, or a rejection after a retried attempt, is
-       handled like a successful call. The service may have suspended the
-       MicroVM anyway.
+    7. A call that the service refused for now on its first attempt, such
+       as a throttle, expired credentials, or a clock offset, ends the
+       refusal at once too. The idle time then starts again, so the listener
+       tries the call again.
+    8. A call whose outcome is unknown, such as a timeout, a conflict, a
+       server error, or an error after a retried attempt, is handled like a
+       successful call. The service may have suspended the MicroVM anyway.
+       The listener waits for the call for at most 10 seconds, and no
+       attempt starts after that.
 
     When the image enables the ``suspend`` and ``terminate`` hooks, the
     listener acts on them:
@@ -557,8 +563,10 @@ class MicrovmWorkerListener:
     def idle(self, timeout: float | None = None) -> bool:
         """Wait until every job started so far has ended.
 
-        The wait also covers the failure reports of invalid requests, and a
-        running SuspendMicrovm call. That call takes at most 10 seconds.
+        The wait also covers the failure reports of invalid requests, and the
+        worker's wait for its own SuspendMicrovm call. That wait takes at most
+        10 seconds, and no attempt of the call starts after it. An attempt
+        already in flight then can run until its read timeout.
 
         Args:
             timeout: The longest wait in seconds. ``None`` waits until the
@@ -1350,31 +1358,41 @@ class MicrovmWorkerListener:
         try:
             suspend_microvm(client, target, SUSPEND_CALL_TIMEOUT_SECONDS)
         except Exception as error:  # noqa: BLE001
-            if is_rejected_call(error):
-                self._logger.warning(
-                    "could not suspend the idle MicroVM, because the service "
-                    "rejected the call. It keeps running. A missing permission "
-                    "needs lambda:SuspendMicrovm on the MicroVM image in its "
-                    "execution role.",
-                    extra={**fields, "error": describe(error)},
-                )
-                # The service did nothing. So jobs can run again at once. The
-                # idle time does not start again, so a missing permission is
-                # not retried. A suspend hook that arrived during the call
-                # means that the MicroVM is suspending anyway, so its refusal
-                # stays.
-                with self._lock:
-                    deferred = (
-                        self._stop_refusing()
-                        if self._suspend_hooks == hooks_before
-                        else []
+            outcome = classify_suspend_error(error)
+            if outcome is not SuspendOutcome.UNKNOWN:
+                if outcome is SuspendOutcome.REJECTED:
+                    self._logger.warning(
+                        "could not suspend the idle MicroVM, because the "
+                        "service rejected the call. It keeps running. A "
+                        "missing permission needs lambda:SuspendMicrovm on the "
+                        "MicroVM image in its execution role.",
+                        extra={**fields, "error": describe(error)},
                     )
+                else:
+                    self._logger.warning(
+                        "could not suspend the idle MicroVM, because the "
+                        "service refused the call for now. It keeps running, "
+                        "and the worker tries again after the next idle time.",
+                        extra={**fields, "error": describe(error)},
+                    )
+                # The service did nothing. So jobs can run again at once. A
+                # suspend hook that arrived during the call means that the
+                # MicroVM is suspending anyway, so its refusal stays.
+                with self._lock:
+                    deferred = []
+                    if self._suspend_hooks == hooks_before:
+                        deferred = self._stop_refusing()
+                        # A rejection, such as a missing permission, is not
+                        # retried until a job ends. A refusal for now is
+                        # retried after the next idle time.
+                        if outcome is SuspendOutcome.REFUSED_FOR_NOW:
+                            self._start_idle_time()
                 self._launch_deferred(deferred)
                 return
-            # A timeout, a throttle, a conflict, a server error, or a
-            # rejection after a retried attempt does not show whether the
-            # service suspended the MicroVM. So the refusal continues, as
-            # after a successful call.
+            # A timeout, a conflict, a server error, or an error after a
+            # retried attempt does not show whether the service suspended
+            # the MicroVM. So the refusal continues, as after a successful
+            # call.
             self._logger.warning(
                 "the suspend call for the idle MicroVM had an unknown outcome. "
                 "The worker refuses jobs until the MicroVM resumes, or for 30 "
@@ -1525,8 +1543,8 @@ class MicrovmWorker:
         return int(self._server.server_address[1])
 
     def idle(self, timeout: float | None = None) -> bool:
-        """Wait until every job started so far has ended, and a running
-        SuspendMicrovm call has returned.
+        """Wait until every job started so far has ended, and the wait for a
+        running SuspendMicrovm call has ended.
 
         Returns:
             ``True`` when no job runs. ``False`` when the timeout ended first.

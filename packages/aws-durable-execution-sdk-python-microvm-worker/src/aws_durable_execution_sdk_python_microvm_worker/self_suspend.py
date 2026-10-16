@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import Future
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import boto3
@@ -31,7 +33,8 @@ else:
 SUSPEND_CALL_TIMEOUT_SECONDS = 10.0
 """The longest time the worker waits for its own SuspendMicrovm call.
 
-The call measured 75 to 94 milliseconds from inside a MicroVM in us-east-1.
+No attempt of the call starts after this time. The call measured 75 to 94
+milliseconds from inside a MicroVM in us-east-1.
 """
 
 SUSPEND_GRACE_SECONDS = 30.0
@@ -57,13 +60,34 @@ _CLIENT_ATTEMPTS = 3
 The JavaScript worker's default client makes 3 attempts too.
 """
 
+_BEFORE_SEND = "before-send.lambda-microvms.SuspendMicrovm"
+
 # Error codes that show that the service did nothing.
 _REJECTION_CODES = frozenset(
     {"AccessDeniedException", "ValidationException", "ResourceNotFoundException"}
 )
 
-# 4xx error codes that leave open whether the service suspended the MicroVM.
-_OPEN_OUTCOME_CODES = TRANSIENT_4XX_CODES | {"ConflictException"}
+
+class SuspendOutcome(Enum):
+    """What a failed SuspendMicrovm call shows about the MicroVM."""
+
+    REJECTED = "rejected"
+    """The service did nothing, and a later call would most likely fail the
+    same way, for example for a missing permission."""
+    REFUSED_FOR_NOW = "refused_for_now"
+    """The service did nothing, and a later call can succeed: a throttle,
+    expired credentials, or a clock offset."""
+    UNKNOWN = "unknown"
+    """The service may have suspended the MicroVM."""
+
+
+class SuspendDeadlineError(TimeoutError):
+    """The SuspendMicrovm deadline passed before an attempt could start.
+
+    botocore retries only its own connection and HTTP client errors. So it
+    does not retry this one. The call can end with it just before the wait
+    ends, so it is a ``TimeoutError`` too.
+    """
 
 
 def create_microvms_client(region: str) -> LambdaMicrovmsClient:
@@ -94,15 +118,38 @@ def suspend_microvm(
 
     botocore has no deadline for a whole call. Its read timeout limits one
     socket read, and it covers neither credential resolution nor its own
-    retries. So the call runs in a daemon thread, and this function waits
-    for the thread. A call that ends after the bound is ignored. The caller
-    closes a client that it created, which releases the call's connection.
+    retries. So the call needs two limits:
+
+    1. The call runs in a daemon thread, and this function waits for the
+       thread for at most ``timeout``.
+    2. A ``before-send`` handler on the client raises
+       :class:`SuspendDeadlineError` when an attempt would start after
+       ``timeout``. botocore does not retry that error. So no attempt starts
+       after this function has stopped waiting. Without the handler, botocore
+       went on retrying in the thread, and an attempt started 22.5 seconds
+       after the first one.
+
+    An attempt that is already in flight at the deadline still runs until
+    its read timeout. The service receives its request before the deadline.
+    The handler is removed when the call ends. So a client from the caller
+    keeps no handler.
 
     Raises:
         TimeoutError: When the call takes longer than ``timeout``.
         Exception: The call's own error.
     """
     future: Future[None] = Future()
+    deadline = time.monotonic() + timeout
+    unique_id = f"aws-durable-execution-microvm-worker-deadline-{id(future)}"
+    events = safe_get(lambda: client.meta.events)
+
+    def stop_after_deadline(**_: object) -> None:
+        if time.monotonic() >= deadline:
+            msg = f"the SuspendMicrovm deadline of {timeout} seconds has passed"
+            raise SuspendDeadlineError(msg)
+
+    if events is not None:
+        events.register_first(_BEFORE_SEND, stop_after_deadline, unique_id=unique_id)
 
     def run() -> None:
         try:
@@ -110,6 +157,9 @@ def suspend_microvm(
             future.set_result(None)
         except BaseException as error:  # noqa: BLE001
             future.set_exception(error)
+        finally:
+            if events is not None:
+                events.unregister(_BEFORE_SEND, unique_id=unique_id)
 
     threading.Thread(target=run, name="microvm-suspend-call", daemon=True).start()
     try:
@@ -121,38 +171,45 @@ def suspend_microvm(
         raise TimeoutError(msg) from error
 
 
-def is_rejected_call(error: BaseException) -> bool:
-    """Whether a failed SuspendMicrovm call shows that the service did nothing.
+def classify_suspend_error(error: BaseException) -> SuspendOutcome:
+    """What a failed SuspendMicrovm call shows about the MicroVM.
 
     1. A botocore retry inside the call means that an earlier attempt may
        have suspended the MicroVM before its answer was lost. So any error
-       after a retry leaves the outcome open.
-    2. Missing credentials stop the call before any request.
-    3. A known rejection code shows that the service did nothing.
-    4. A throttle, a conflict, expired credentials, and a clock offset leave
-       the outcome open, whatever their status. Some services answer a
-       throttle with HTTP 400.
-    5. Any other 4xx answer except 408, 409, and 429 shows that the service
-       did nothing.
-    6. Any other error, such as a timeout, a dropped connection, or a server
-       error, leaves the outcome open.
+       after a retry is :attr:`SuspendOutcome.UNKNOWN`.
+    2. Missing credentials stop the call before any request. They are
+       :attr:`SuspendOutcome.REJECTED`, as in the JavaScript worker.
+    3. A known rejection code is :attr:`SuspendOutcome.REJECTED`.
+    4. A conflict is :attr:`SuspendOutcome.UNKNOWN`, whatever its status. It
+       can mean that the MicroVM is already suspending.
+    5. A throttle, expired credentials, or a clock offset on the first
+       attempt is :attr:`SuspendOutcome.REFUSED_FOR_NOW`, whatever its
+       status. The service answers them before it acts, and a later call can
+       succeed. Some services answer a throttle with HTTP 400.
+    6. Any other 4xx answer except 408, 409, and 429 is
+       :attr:`SuspendOutcome.REJECTED`. A 429 is
+       :attr:`SuspendOutcome.REFUSED_FOR_NOW`.
+    7. Any other error, such as a timeout, a dropped connection, a 408, or a
+       server error, is :attr:`SuspendOutcome.UNKNOWN`.
     """
     if isinstance(error, NoCredentialsError):
-        return True
+        return SuspendOutcome.REJECTED
     if not isinstance(error, ClientError):
-        return False
+        return SuspendOutcome.UNKNOWN
     metadata = safe_get(lambda: error.response.get("ResponseMetadata", {})) or {}
     retries = safe_get(lambda: metadata.get("RetryAttempts"))
     if isinstance(retries, int) and retries > 0:
-        return False
+        return SuspendOutcome.UNKNOWN
     code = error_code(error)
     if code in _REJECTION_CODES:
-        return True
-    if code in _OPEN_OUTCOME_CODES:
-        return False
+        return SuspendOutcome.REJECTED
+    if code == "ConflictException":
+        return SuspendOutcome.UNKNOWN
+    if code in TRANSIENT_4XX_CODES:
+        return SuspendOutcome.REFUSED_FOR_NOW
     status = safe_get(lambda: metadata.get("HTTPStatusCode"))
-    return (
-        isinstance(status, int)
-        and 400 <= status < 500
-        and status not in {408, 409, 429}
-    )
+    if status == 429:
+        return SuspendOutcome.REFUSED_FOR_NOW
+    if isinstance(status, int) and 400 <= status < 500 and status not in {408, 409}:
+        return SuspendOutcome.REJECTED
+    return SuspendOutcome.UNKNOWN

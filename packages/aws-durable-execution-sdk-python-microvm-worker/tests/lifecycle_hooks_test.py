@@ -779,24 +779,24 @@ def test_retries_the_suspend_one_idle_time_after_a_job_that_follows_a_rejection(
     "failure",
     [
         TimeoutError("timed out"),
-        suspend_error("ThrottlingException", 429),
-        suspend_error("ThrottlingException", 400),
         suspend_error("ConflictException", 409),
         suspend_error("InternalServerException", 500),
         suspend_error("RequestTimeoutException", 408),
         # The client retried a 5xx. The first attempt may have suspended the
         # MicroVM, and the retry then fails validation.
         suspend_error("ValidationException", 400, retries=1),
+        # botocore retries a throttle. An earlier attempt may have reached
+        # the service.
+        suspend_error("ThrottlingException", 429, retries=2),
         ConnectionResetError("reset"),
     ],
     ids=[
         "timeout",
-        "throttle",
-        "throttle-400",
         "conflict",
         "server-error",
         "request-timeout",
         "retried-rejection",
+        "retried-throttle",
         "connection-error",
     ],
 )
@@ -830,6 +830,66 @@ def test_accepts_jobs_at_once_after_a_rejection(
     h.advance(IDLE)
 
     assert h.job("cb-1") == 202
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        suspend_error("ThrottlingException", 429),
+        suspend_error("ThrottlingException", 400),
+        suspend_error("ExpiredTokenException", 403),
+        suspend_error("SignatureDoesNotMatch", 403),
+    ],
+    ids=["throttle", "throttle-400", "expired-token", "clock-offset"],
+)
+def test_accepts_jobs_at_once_and_retries_after_a_refusal_for_now(
+    start: Any, logger: Any, failure: BaseException
+) -> None:
+    h = start()
+    h.microvms.failure = failure
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert "refused the call for now" in logger.messages("warning")[0]
+    assert h.job("cb-1") == 202
+    h.finish_job("cb-1")
+
+    # The idle time started again when the call failed, and once more when
+    # the job ended. So the next call comes one idle time after the job.
+    h.advance(IDLE)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_retries_a_refusal_for_now_one_idle_time_later_without_a_job(
+    start: Any,
+) -> None:
+    h = start()
+    h.microvms.failure = suspend_error("ThrottlingException", 429)
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    h.advance(IDLE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_keeps_a_hook_refusal_after_a_refusal_for_now_of_the_own_call(
+    start: Any,
+) -> None:
+    h = start()
+    h.microvms.hold = True
+    h.microvms.failure = suspend_error("ThrottlingException", 429)
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+
+    h.hook("suspend")
+    h.microvms.finish()
+    h.settle()
+
+    assert h.job("cb-1") == 503
 
 
 def test_treats_a_call_that_outlasts_its_timeout_as_an_unknown_outcome(

@@ -304,22 +304,50 @@ def post_hook(worker: MicrovmWorker, hook: str) -> None:
         connection.close()
 
 
+class RecordingLogger:
+    """Records the worker's log messages."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.messages: list[str] = []
+
+    def _add(self, msg: object, *args: object, extra: Any = None) -> None:
+        with self._lock:
+            self.messages.append(str(msg))
+
+    info = warning = error = _add
+
+    def count(self, message: str) -> int:
+        with self._lock:
+            return self.messages.count(message)
+
+
+@pytest.mark.parametrize("resume_hook", [True, False], ids=["resume-hook", "none"])
 def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
-    fake_client: Any, monkeypatch: pytest.MonkeyPatch
+    fake_client: Any, monkeypatch: pytest.MonkeyPatch, resume_hook: bool
 ) -> None:
     """The worker suspends its idle MicroVM, and the next job resumes it.
 
     A stand-in for Lambda keeps the MicroVM's state. SuspendMicrovm from the
     worker sets it to ``SUSPENDED`` and sends the ``suspend`` hook.
-    ResumeMicrovm from the session sets it to ``RUNNING`` and sends the
-    ``resume`` hook. The worker's timers run 10 times faster, so the
-    session's 10-second idle time takes 1 second.
+    ResumeMicrovm from the session sets it to ``RUNNING``, and sends the
+    ``resume`` hook when the image enables it. The worker's timers run 20
+    times faster, so the session's 60-second idle time takes 3 seconds, and
+    the 30-second refusal takes 1.5 seconds.
+
+    Without the ``resume`` hook, the worker answers the second job with 503
+    until its refusal ends. The request step delivers it again after each
+    503, after 0.25 seconds at first, doubling up to 4 seconds. The scaled
+    idle time must stay longer than the gap between two deliveries.
+    Otherwise the worker suspends again before each delivery. A 10-second
+    idle time scaled to 1 second did that. Unscaled, the shortest idle time,
+    10 seconds, is longer than the longest gap.
     """
     original_timer = worker_module._start_timer  # noqa: SLF001
     monkeypatch.setattr(
         worker_module,
         "_start_timer",
-        lambda delay, action: original_timer(delay / 10, action),
+        lambda delay, action: original_timer(delay / 20, action),
     )
     state = {"value": "RUNNING"}
     lock = threading.Lock()
@@ -336,7 +364,8 @@ def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
             super().resume_microvm(**request)
             with lock:
                 state["value"] = "RUNNING"
-            post_hook(holder["worker"], "resume")
+            if resume_hook:
+                post_hook(holder["worker"], "resume")
             return {}
 
     class WorkerMicrovms:
@@ -382,10 +411,12 @@ def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
 
     runner = DurableFunctionTestRunner(handler=handler, poll_interval=0.05)
     callbacks = RunnerCallbacks(runner)
+    logger = RecordingLogger()
     worker = start_microvm_worker(
         handler=job,
         create_client=lambda region: callbacks,  # type: ignore[arg-type, return-value]
         create_microvms_client=lambda region: worker_microvms,  # type: ignore[arg-type, return-value]
+        logger=logger,
         port=0,
     )
     holder["worker"] = worker
@@ -399,7 +430,7 @@ def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
             execution_role_arn="role",
             timeout=Duration.from_minutes(5),
             auto_suspend_on_idle=True,
-            auto_suspend_idle_time=Duration.from_seconds(10),
+            auto_suspend_idle_time=Duration.from_seconds(60),
             client=client,
         )
         arn = runner.run_async(input="null", execution_timeout=WAIT)
@@ -418,3 +449,8 @@ def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
     assert worker_microvms.suspended[0] == "mvm-1"
     assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
     assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
+    refusals = logger.count("job refused: the MicroVM is suspending")
+    if resume_hook:
+        assert refusals == 0
+    else:
+        assert refusals >= 1
