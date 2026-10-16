@@ -95,6 +95,7 @@ Every MicroVM failure is a `MicrovmError`. Catch the base class for all of them,
 |---|---|
 | `MicrovmLaunchError` | `RunMicrovm` failed after all retries. When the last attempt timed out or lost its connection, the service may have created the MicroVM anyway, and it then runs the job. So running the job again after this error can run it twice. |
 | `MicrovmDeliveryError` | HTTP delivery failed after all retries, or the route answered a 4xx status such as 404, or a redirect. |
+| `MicrovmNotRunningError` | A session job found its MicroVM terminating, terminated, or removed. It is a `MicrovmDeliveryError`. See [Suspending an idle MicroVM](#suspending-an-idle-microvm). |
 | `MicrovmJobFailedError` | The job handler in the MicroVM failed, or the MicroVM sent a result that is not valid JSON. The message includes the error type that the MicroVM reported. |
 | `MicrovmTimeoutError` | No result arrived within `timeout`, or no heartbeat within `heartbeat_timeout`. A MicroVM that crashed ends this way. |
 
@@ -150,8 +151,112 @@ The function's execution role needs:
 
 The MicroVM execution role (`execution_role_arn`) needs `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the function ARN (`arn:aws:lambda:<region>:<account>:function:<name>:*`).
 
+## `microvm_session`: run several jobs in one MicroVM
+
+`microvm_session` launches one MicroVM and runs a handler that sends jobs to it. The jobs share the MicroVM's files and processes. So a later job can use what an earlier job wrote. The MicroVM is terminated when the handler returns or raises.
+
+```python
+import os
+from typing import Any
+
+from aws_durable_execution_sdk_python.config import Duration
+from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.execution import durable_execution
+from aws_durable_execution_sdk_python_extras.microvm import (
+    MicrovmInvokeOptions,
+    MicrovmSession,
+    MicrovmSessionConfig,
+    microvm_session,
+)
+
+SESSION = MicrovmSessionConfig(
+    image_identifier=os.environ["MICROVM_IMAGE_ARN"],
+    execution_role_arn=os.environ["MICROVM_ROLE_ARN"],
+    timeout=Duration.from_hours(1),
+)
+
+
+def pipeline(vm: MicrovmSession, ctx: DurableContext) -> Any:
+    build = vm.invoke(
+        ctx,
+        "clone-build",
+        job_input={"repo": "org/app"},
+        options=MicrovmInvokeOptions(
+            path="/clone-build",
+            timeout=Duration.from_minutes(15),
+            heartbeat_timeout=Duration.from_minutes(2),
+        ),
+    )
+    ctx.wait(Duration.from_minutes(5), name="cool-down")
+    return vm.invoke(
+        ctx,
+        "test",
+        job_input=build,
+        options=MicrovmInvokeOptions(timeout=Duration.from_minutes(10)),
+    )
+
+
+@durable_execution
+def handler(event: dict, context: DurableContext) -> Any:
+    return microvm_session(context, "pipeline", config=SESSION, handler=pipeline)
+```
+
+The operation runs its durable operations in one child context named `name`:
+
+```
+pipeline                       child context
+├── pipeline.session           step: generates the session ID
+├── pipeline.launch            step: RunMicrovm
+├── clone-build                child context, one per job
+│   ├── clone-build.callback   callback
+│   └── clone-build.request    step: POSTs the job
+├── cool-down                  wait
+├── test
+│   ├── test.callback
+│   └── test.request
+└── pipeline.terminate         step: TerminateMicrovm
+```
+
+- The client token of the launch is the SHA-256 hex digest of the session ID. The session ID is random, and it is checkpointed. So a retried or replayed launch returns the same MicroVM.
+- Every job goes over HTTP. The MicroVM gets the `ALL_INGRESS` connector. A job without a `path` goes to the worker's `handler`.
+- The first job is sent right after the launch. The MicroVM endpoint refuses requests until the `run` hook returns, and the request step retries a refused request inside its attempt. So the session needs no separate readiness wait.
+- `vm.invoke` takes the context that the call runs in, as `microvm` does. Inside a `map` or `parallel` item, pass the item's context. A job must be created inside the session's child context. A job created in the context that `microvm_session` was called with runs, and the next replay then fails the execution with `NonDeterministicExecutionError`. So `vm.invoke` raises `TypeError` for that context. The core SDK does not check other contexts outside the session.
+- `config.timeout` bounds the MicroVM's lifetime: it ends at `timeout` plus 5 minutes, at most 8 hours. Each job waits for its own `timeout`. So set a `heartbeat_timeout` on every job. A job still running when the MicroVM ends then fails at its heartbeat timeout.
+
+A failed `vm.invoke` raises its MicroVM error inside the handler. The handler can catch it and send another job to the same MicroVM. An error that leaves the handler ends the session:
+
+1. A MicroVM error that the handler raises itself reaches the caller with its own class, such as `MicrovmJobFailedError`.
+2. Any other error reaches the caller as the SDK's `ChildContextError`, as from `run_in_child_context`. This includes a MicroVM error that leaves a child context that the handler created: that child context records `ChildContextError` as its error type. The caller then gets the MicroVM error's message, but not its class. Inside the handler, the `ChildContextError` of that child context has the MicroVM error as its `__cause__`. An SDK error that leaves the handler, such as the `StepError` of a failed step, also reaches the caller as `ChildContextError`, with the SDK error as its `__cause__`. This rule matches `run_in_child_context`. The JavaScript operation differs here: it passes an SDK error to the caller with its own class.
+
+An invalid job raises `ValidationError` or `TypeError` from `vm.invoke`, before the job's durable operations start. The handler can catch it too.
+
+The handler's return value is checkpointed as the session's result. So it must be serializable by the SDK, and it counts toward the checkpoint size limit.
+
+### Suspending an idle MicroVM
+
+A running MicroVM pays compute charges. A suspended MicroVM pays only for snapshot storage, and it keeps its memory and files. A session can suspend its MicroVM between jobs in two ways:
+
+1. `auto_suspend_on_idle=True` asks the worker in the MicroVM to suspend its own MicroVM when no job has run for `auto_suspend_idle_time`. The default idle time is 60 seconds, or the session `timeout` if that is shorter. The idle time must be at least 10 seconds.
+2. `idle_policy` sets the `RunMicrovm` idle policy. The service then suspends the MicroVM when its endpoint receives no traffic. A running job receives no traffic after its delivery. So `maxIdleDurationSeconds` must be longer than the longest job.
+
+With either setting, each request step calls `GetMicrovm` before it sends the job. It resumes a suspended MicroVM, and it sends the job to the endpoint that `GetMicrovm` reports. The MicroVM can suspend itself between that check and the request. The endpoint then answers 502, or the worker answers 503. So after a 502, 503, or 504, or a request without an answer, the step checks the state again before it retries. The wait for a resume counts toward the request's `retry_window`.
+
+A MicroVM that is terminating, terminated, or removed fails the job at once with `MicrovmNotRunningError`, a subclass of `MicrovmDeliveryError`. A retry finds the same state, so the job is not retried. Without either setting, the session makes no `GetMicrovm` call. A terminated MicroVM's endpoint answers 502, and the request step retries a 502 as a MicroVM that is still starting. So the job fails with a plain `MicrovmDeliveryError`, after the retries of both tiers.
+
+Suspending is off by default, because it needs more permissions and changes what the MicroVM does between jobs:
+
+- The function's role needs `lambda:GetMicrovm` and `lambda:ResumeMicrovm`. Without them, every job fails.
+- With `auto_suspend_on_idle`, the MicroVM's role needs `lambda:SuspendMicrovm` on the image. That permission lets code in any MicroVM of the image suspend any other. So use one image per trust boundary.
+- Background processes that an earlier job started stop while the MicroVM is suspended. The worker counts only its running jobs.
+
+The worker must support `auto_suspend_on_idle`. The JavaScript worker [`@aws/durable-execution-sdk-js-microvm-worker`](https://github.com/aws/aws-durable-execution-sdk-js/tree/main/packages/aws-durable-execution-sdk-js-microvm-worker) does. The Python worker in this repository does not yet. It accepts the setting, and its MicroVM keeps running. `idle_policy` works with both workers.
+
+### Session permissions
+
+A session needs the permissions of `microvm` with HTTP delivery: `lambda:RunMicrovm`, `lambda:TerminateMicrovm`, `lambda:CreateMicrovmAuthToken`, `lambda:PassNetworkConnector`, and `iam:PassRole`. Suspending adds the permissions listed above.
+
 ### Subtypes
 
-The JavaScript operation records MicroVM subtypes, such as `Microvm` on the child context and `MicrovmLaunch` on the launch step. This package records the SDK's default subtypes for now, because the Python SDK does not accept custom subtypes yet.
+The JavaScript operations record MicroVM subtypes, such as `Microvm` on the child context, `MicrovmSession` on a session, and `MicrovmLaunch` on the launch step. This package records the SDK's default subtypes for now, because the Python SDK does not accept custom subtypes yet.
 
 On replay, the SDK compares the subtype of each operation with its checkpoint. A mismatch fails the execution with `NonDeterministicExecutionError`. So a release that changed the subtypes would fail every execution that waits on a MicroVM during the deploy. So this package is published only after the SDK accepts custom subtypes, and it records the MicroVM subtypes from its first release.

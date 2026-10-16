@@ -476,6 +476,84 @@ def test_passes_on_a_base_exception_of_the_call() -> None:
         call_before_deadline(interrupted, time.monotonic() + 30, RuntimeError)
 
 
+def test_checks_the_state_again_after_a_gateway_error_or_no_answer(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint([502, None, 503, 504, 429, 500])
+    sleeps: list[float] = []
+    windows: list[float] = []
+
+    def recheck(left: float) -> str | None:
+        windows.append(left)
+        return None
+
+    status = send_job(options(fake_client(), endpoint.url, sleeps, recheck=recheck))
+
+    assert status == 202
+    # 502, no answer, 503, and 504 can mean a suspend. 429 and 500 cannot.
+    assert len(windows) == 4
+    assert all(0 < left <= 60 for left in windows)
+
+
+def test_sends_the_next_request_to_the_endpoint_that_the_recheck_returns(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    before = fake_endpoint([502])
+    after = fake_endpoint()
+
+    status = send_job(
+        options(fake_client(), before.url, [], recheck=lambda left: after.url)
+    )
+
+    assert status == 202
+    assert len(before.requests) == 1
+    assert len(after.requests) == 1
+
+
+def test_ends_the_tier_when_the_recheck_has_no_time_left(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint([502])
+    rechecks: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        # The delay uses the rest of the window.
+        time.sleep(0.9)
+
+    with pytest.raises(MicrovmEndpointUnavailableError, match="Last failure: HTTP 502"):
+        send_job(
+            options(
+                fake_client(),
+                endpoint.url,
+                [],
+                retry_window_seconds=1,
+                window_started_at=time.monotonic() - 0.2,
+                sleep=sleep,
+                recheck=rechecks.append,
+            )
+        )
+
+    assert rechecks == []
+
+
+def test_counts_the_window_from_the_given_start(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    endpoint = fake_endpoint([503])
+
+    # The state check before delivery used 59.9 of the 60 seconds. So the
+    # first delay of 0.25 seconds does not fit.
+    with pytest.raises(MicrovmEndpointUnavailableError, match="after 1 attempts"):
+        send_job(
+            options(
+                fake_client(),
+                endpoint.url,
+                [],
+                window_started_at=time.monotonic() - 59.9,
+            )
+        )
+
+
 def test_sends_no_auth_token_on_a_redirect_that_the_callers_opener_follows(
     fake_client: Any, fake_endpoint: Any
 ) -> None:

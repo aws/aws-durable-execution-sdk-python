@@ -214,6 +214,50 @@ class SendJobOptions:
     opener: urllib.request.OpenerDirector | None = None
     """The urllib opener for the POST. ``None`` uses :func:`default_opener`."""
     sleep: Callable[[float], None] = time.sleep
+    window_started_at: float | None = None
+    """When the retry window started, as a ``time.monotonic()`` time.
+
+    ``None`` means the moment :func:`send_job` is called. A session job sets
+    it to the start of the state check that runs before delivery. So the
+    wait for a resume and the request's own retries share one window.
+    """
+    recheck: Callable[[float], str | None] | None = None
+    """Make sure the MicroVM runs, and return its current endpoint.
+
+    A session that can suspend its MicroVM sets it. The suspend can land
+    between the state check before delivery and the request. The endpoint
+    then answers 502, or the worker answers 503 while it suspends. So after
+    a 502, 503, or 504, or a request without an answer, the next attempt
+    calls it first. It receives what remains of the retry window, in
+    seconds, so the wait for a resume never extends the window. ``None``
+    from it keeps the current endpoint.
+    """
+
+
+def require_time_for_call(remaining_seconds: Callable[[], float | None]) -> None:
+    """Fail at once when the invocation has too little time for one call.
+
+    A step that starts too close to the end of the invocation cannot make
+    one call before the reserve. Without this check, the first tier would
+    report that the MicroVM did not accept the job, or did not reach
+    ``RUNNING``. The cause is the function timeout. The error stays
+    retryable: a step retry runs early in a new invocation, with more time
+    left. A function timeout under the needed time fails every attempt, and
+    the final error names the fix.
+
+    Raises:
+        MicrovmEndpointUnavailableError: When less than 11 seconds remain.
+    """
+    remaining = remaining_seconds()
+    needed = INVOCATION_RESERVE_SECONDS + MIN_CALL_SECONDS
+    if remaining is not None and remaining < needed:
+        msg = (
+            f"The request step had {math.floor(remaining * 10) / 10:.1f} seconds "
+            "left in the Lambda "
+            f"invocation, and it needs at least {needed:.0f} seconds to send "
+            "the job. Raise the function timeout."
+        )
+        raise MicrovmEndpointUnavailableError(msg)
 
 
 def send_job(options: SendJobOptions) -> int:
@@ -284,23 +328,12 @@ def send_job(options: SendJobOptions) -> int:
         MicrovmEndpointUnavailableError: When the tier ends.
         Exception: When ``CreateMicrovmAuthToken`` fails.
     """
-    # A step that starts too close to the end of the invocation cannot make
-    # one call before the reserve. Say so, instead of reporting that the
-    # MicroVM did not accept the job. The error stays retryable: a step
-    # retry runs early in a new invocation, with more time left. A function
-    # timeout under the needed time fails every attempt, and the final error
-    # names the fix.
-    remaining = options.remaining_seconds()
-    needed = INVOCATION_RESERVE_SECONDS + MIN_CALL_SECONDS
-    if remaining is not None and remaining < needed:
-        msg = (
-            f"The request step had {math.floor(remaining * 10) / 10:.1f} seconds "
-            "left in the Lambda "
-            f"invocation, and it needs at least {needed:.0f} seconds to send "
-            "the job. Raise the function timeout."
-        )
-        raise MicrovmEndpointUnavailableError(msg)
-    started = time.monotonic()
+    require_time_for_call(options.remaining_seconds)
+    started = (
+        time.monotonic()
+        if options.window_started_at is None
+        else options.window_started_at
+    )
     window_ends = started + options.retry_window_seconds
     attempt = 0
     last_failure = "no attempt"
@@ -323,7 +356,8 @@ def send_job(options: SendJobOptions) -> int:
             unavailable,
         )
 
-    url = _endpoint_url(options.endpoint, options.path)
+    endpoint = options.endpoint
+    url = _endpoint_url(endpoint, options.path)
     token = new_token()
     refreshed_token = False
     delay = _INITIAL_DELAY_SECONDS
@@ -402,6 +436,17 @@ def send_job(options: SendJobOptions) -> int:
         )
         options.sleep(delay)
         delay = min(delay * 2, _MAX_DELAY_SECONDS)
+        # A request without an answer, or a gateway error, can mean that the
+        # MicroVM suspended itself. So a session checks the state, and
+        # resumes the MicroVM, before it sends the job again.
+        if options.recheck is not None and (
+            status is None or 502 <= status <= 504  # noqa: PLR2004
+        ):
+            left = deadline() - time.monotonic()
+            if left <= 0:
+                raise unavailable()
+            endpoint = options.recheck(left) or endpoint
+            url = _endpoint_url(endpoint, options.path)
 
 
 def _create_auth_token(options: SendJobOptions) -> Mapping[str, str]:

@@ -9,6 +9,7 @@ import datetime
 import hashlib
 import json
 import threading
+import time
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -16,8 +17,12 @@ from typing import Any
 import boto3
 import pytest
 from aws_durable_execution_sdk_python.config import Duration
-from aws_durable_execution_sdk_python.context import DurableContext
-from aws_durable_execution_sdk_python.exceptions import ChildContextError
+from aws_durable_execution_sdk_python.context import Callback, DurableContext
+from aws_durable_execution_sdk_python.exceptions import (
+    ChildContextError,
+    InvocationError,
+    NonDeterministicExecutionError,
+)
 from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
     durable_execution,
@@ -545,7 +550,7 @@ def test_fails_a_launch_without_an_endpoint_for_http(
 def test_fails_the_request_for_a_launch_checkpoint_without_an_endpoint(
     run: Any, fake_client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original = operation._OperationScope._launch  # noqa: SLF001
+    original = operation._MicrovmScope._launch_call  # noqa: SLF001
 
     def without_endpoint(self: Any, *args: Any) -> Any:
         launched = original(self, *args)
@@ -553,7 +558,7 @@ def test_fails_the_request_for_a_launch_checkpoint_without_an_endpoint(
             microvm_id=launched.microvm_id, delivery=launched.delivery
         )
 
-    monkeypatch.setattr(operation._OperationScope, "_launch", without_endpoint)  # noqa: SLF001
+    monkeypatch.setattr(operation._MicrovmScope, "_launch_call", without_endpoint)  # noqa: SLF001
     client = fake_client()
     config = config_with(client, request=MicrovmRequestConfig(path="/job"))
 
@@ -789,7 +794,7 @@ def test_terminates_and_fails_for_a_delivery_that_it_does_not_know(
 ) -> None:
     # A launch checkpoint from another release, for example after a rollback.
 
-    original = operation._OperationScope._launch  # noqa: SLF001
+    original = operation._MicrovmScope._launch_call  # noqa: SLF001
 
     def launch_for_another(self: Any, *args: Any) -> Any:
         launched = original(self, *args)
@@ -797,7 +802,7 @@ def test_terminates_and_fails_for_a_delivery_that_it_does_not_know(
             microvm_id=launched.microvm_id, delivery="smoke-signal"
         )
 
-    monkeypatch.setattr(operation._OperationScope, "_launch", launch_for_another)  # noqa: SLF001
+    monkeypatch.setattr(operation._MicrovmScope, "_launch_call", launch_for_another)  # noqa: SLF001
     client = fake_client()
 
     result = run(catching(config_with(client)), {})
@@ -1028,3 +1033,84 @@ def test_replay_keeps_the_http_delivery_of_the_launch(
         "/job",
         "/durable-execution/v1/job",
     ]
+
+
+@pytest.mark.parametrize("retryable", [True, False])
+def test_passes_an_invocation_error_of_the_wait_through(
+    fake_client: Any, monkeypatch: pytest.MonkeyPatch, retryable: bool
+) -> None:
+    # An SDK invocation error is not a job outcome. A retryable one makes
+    # Lambda run the invocation again, and the replay waits for the same
+    # MicroVM. So only an error that is not retryable terminates it.
+    class Interrupted(InvocationError):
+        def is_retryable(self) -> bool:
+            return retryable
+
+    original = Callback.result
+    raised = threading.Event()
+
+    def result_once(self: Any) -> Any:
+        if not raised.is_set():
+            raised.set()
+            msg = "interrupted"
+            raise Interrupted(msg)
+        return original(self)
+
+    monkeypatch.setattr(Callback, "result", result_once)
+    order: list[str] = []
+    client = fake_client(terminates=[lambda request: order.append("terminate")])
+    runner = DurableFunctionTestRunner(
+        handler=catching(config_with(client)), poll_interval=0.05
+    )
+    try:
+        arn = runner.run_async(input="{}", execution_timeout=WAIT)
+        if retryable:
+            callback_id = runner.wait_for_callback(
+                arn, name="build.callback", timeout=WAIT
+            )
+            # A terminate for the error would run at once after the raise,
+            # in the same thread. So 0.5 seconds after it, the order shows
+            # whether one ran.
+            assert raised.wait(WAIT)
+            time.sleep(0.5)
+            order.append("complete")
+            runner.send_callback_success(callback_id, b'"done"')
+        result = runner.wait_for_result(arn, timeout=WAIT)
+    finally:
+        runner.close()
+
+    # An error that is not retryable is recorded as the operation's failure.
+    # It is not a MicroVM error type, so it becomes a plain MicrovmError.
+    assert outcome(result) == (
+        {"result": "done"}
+        if retryable
+        else {"error": "MicrovmError", "message": 'MicroVM "build": interrupted'}
+    )
+    assert order == (["complete", "terminate"] if retryable else ["terminate"])
+
+
+def test_passes_an_execution_error_of_the_wait_through(
+    fake_client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The core SDK records no outcome for an ExecutionError, and the
+    # execution fails without a retry. A terminate step recorded for it would
+    # change that history. So the MicroVM runs until its maximum duration.
+    def result_fails(self: Any) -> Any:
+        msg = "history does not match"
+        raise NonDeterministicExecutionError(msg)
+
+    monkeypatch.setattr(Callback, "result", result_fails)
+    client = fake_client()
+    runner = DurableFunctionTestRunner(
+        handler=catching(config_with(client)), poll_interval=0.05
+    )
+    try:
+        arn = runner.run_async(input="{}", execution_timeout=WAIT)
+        result = runner.wait_for_result(arn, timeout=WAIT)
+    finally:
+        runner.close()
+
+    assert result.status is InvocationStatus.FAILED
+    assert result.error is not None
+    assert "history does not match" in (result.error.message or "")
+    assert client.requests("terminate_microvm") == []
