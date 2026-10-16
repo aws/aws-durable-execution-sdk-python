@@ -51,7 +51,10 @@ from aws_durable_execution_sdk_python.operation.callback import (
     CallbackOperationExecutor,
     wait_for_callback_handler,
 )
-from aws_durable_execution_sdk_python.operation.child import child_handler
+from aws_durable_execution_sdk_python.operation.child import (
+    ChildOperationExecutor,
+    child_handler,
+)
 from aws_durable_execution_sdk_python.operation.invoke import InvokeOperationExecutor
 from aws_durable_execution_sdk_python.operation.map import map_handler
 from aws_durable_execution_sdk_python.operation.parallel import parallel_handler
@@ -515,12 +518,18 @@ class DurableContext(DurableContextProtocol):
 
     @contextmanager
     def _replay_aware(
-        self, operation_identifier: OperationIdentifier | None = None
+        self,
+        operation_identifier: OperationIdentifier | None = None,
+        *,
+        is_virtual: bool = False,
     ) -> Iterator[None]:
         """Wrap a single operation with replay-boundary detection.
 
         The operation kind is inferred from its own checkpoint (when one
-        exists), so no per-call-site flag is needed.
+        exists). The one per-call-site input is `is_virtual`: a virtual child
+        context never checkpoints itself, so with `is_virtual=True` any
+        checkpoint at its id is rejected right after the identity check,
+        before replay and update hooks run.
 
         The boundary has these parts:
 
@@ -555,6 +564,10 @@ class DurableContext(DurableContextProtocol):
         if was_replaying and next_operation is not None:
             if operation_identifier is not None:
                 operation_identifier.validate_checkpoint(next_operation)
+                if is_virtual:
+                    ChildOperationExecutor.validate_virtual_checkpoint(
+                        operation_identifier, next_operation
+                    )
 
             # While replaying, an operation that already has a checkpoint was
             # observed in a prior invocation. If the backend says the operation
@@ -601,6 +614,7 @@ class DurableContext(DurableContextProtocol):
         name: str | None = None,
         *,
         operation_type: OperationType,
+        is_virtual: bool = False,
     ) -> Iterator[OperationIdentifier]:
         """Allocate an operation and validate its replay identity before hooks."""
         operation_identifier = OperationIdentifier(
@@ -610,7 +624,7 @@ class DurableContext(DurableContextProtocol):
             name=name,
             operation_type=operation_type,
         )
-        with self._replay_aware(operation_identifier):
+        with self._replay_aware(operation_identifier, is_virtual=is_virtual):
             yield operation_identifier
 
     # endregion replay status
@@ -814,14 +828,15 @@ class DurableContext(DurableContextProtocol):
             if config and config.sub_type
             else OperationSubType.RUN_IN_CHILD_CONTEXT
         )
+        is_virtual: bool = config.is_virtual if config else False
 
         with self._operation_replay_aware(
             sub_type,
             step_name,
             operation_type=OperationType.CONTEXT,
+            is_virtual=is_virtual,
         ) as operation_identifier:
             operation_id = operation_identifier.operation_id
-            is_virtual: bool = config.is_virtual if config else False
 
             def callable_with_child_context():
                 return func(
