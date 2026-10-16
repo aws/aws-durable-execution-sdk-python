@@ -34,6 +34,7 @@ class ExecutionRegistry:
         self._scheduler = scheduler
         self._workers: dict[str, ExecutionWorker] = {}
         self._lock = threading.Lock()
+        self._shut_down: bool = False
 
     # Submitting can lose a race with a worker tearing its own lane
     # down (it stops the lane, then leaves the registry), so a
@@ -44,8 +45,16 @@ class ExecutionRegistry:
     _MAX_SUBMIT_ATTEMPTS: int = 5
 
     def get_or_create(self, execution_arn: str) -> ExecutionWorker:
-        """Return the worker for ``execution_arn``, creating it if absent."""
+        """Return the worker for ``execution_arn``, creating it if absent.
+
+        Raises:
+            RuntimeError: After ``shutdown``. A lane created then would
+                outlive the runner that owned it.
+        """
         with self._lock:
+            if self._shut_down:
+                msg: str = "execution registry is shut down"
+                raise RuntimeError(msg)
             worker: ExecutionWorker | None = self._workers.get(execution_arn)
             if worker is None:
                 worker = ExecutionWorker.create(
@@ -101,6 +110,7 @@ class ExecutionRegistry:
         terminal status still has a live lane, which this stops.
         """
         with self._lock:
+            self._shut_down = True
             workers: list[ExecutionWorker] = list(self._workers.values())
             self._workers.clear()
         for worker in workers:

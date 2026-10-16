@@ -47,4 +47,15 @@ class CallbackCreated:
     callback_token: CallbackToken
 
 
-CheckpointEffect = Completed | Failed | CallbackCreated
+@dataclass(frozen=True)
+class ChainedInvokeStarted:
+    """A chained invoke was accepted and its target must be dispatched."""
+
+    execution_arn: str
+    operation_id: str
+    function_name: str
+    tenant_id: str | None
+    payload: str | None
+
+
+CheckpointEffect = Completed | Failed | CallbackCreated | ChainedInvokeStarted

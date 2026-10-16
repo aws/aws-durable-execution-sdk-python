@@ -48,17 +48,28 @@ on:
         default: main
         type: string
 
+# Backend stacks are shared across PRs. Queue whole runs so reusable
+# backend jobs do not displace another PR from their pending slots.
+concurrency:
+  group: otel-conformance-tests
+  cancel-in-progress: false
+  queue: max
+
 permissions: {}
 
 jobs:
   opentelemetry:
+    # 1. Run for non-PR events, such as scheduled runs and manual invocations
+    # 2. For PRs, run only same-repo branches from non-Dependabot actors; forked PRs or Dependabot should not access secrets.
+    if: github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       actions: write
       contents: read
       id-token: write
-    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@c31f95f448a4fe8ffb93203c7920a48e87362801
+    uses: aws/aws-durable-execution-conformance-tests/.github/workflows/opentelemetry-orchestrator.yml@e48ac54502d3c14e2e3fa216c5e200dbb4c14ac2
     with:
       language: python
+      runs_on: codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
       resource_prefix: p
       sdk_repository: aws/aws-durable-execution-sdk-python
       sdk_ref: ${{ github.event.pull_request.head.sha || github.sha }}

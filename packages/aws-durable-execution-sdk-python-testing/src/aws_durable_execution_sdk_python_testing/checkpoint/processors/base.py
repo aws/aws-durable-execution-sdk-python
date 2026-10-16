@@ -44,6 +44,19 @@ class OperationProcessor:
         """
         raise NotImplementedError
 
+    def stored_update(
+        self,
+        update: OperationUpdate,
+        current_op: Operation | None,  # noqa: ARG002
+        updated_op: Operation,  # noqa: ARG002
+    ) -> OperationUpdate:
+        """The update to keep in the execution's record for history.
+
+        Most processors keep the update as sent. A processor overrides
+        this when the service keeps less than it was sent.
+        """
+        return update
+
     def _get_start_time(
         self, current_operation: Operation | None, now: datetime.datetime
     ) -> datetime.datetime | None:

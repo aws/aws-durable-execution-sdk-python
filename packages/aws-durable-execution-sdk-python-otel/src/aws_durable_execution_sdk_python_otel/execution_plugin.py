@@ -34,7 +34,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
-from typing import Any
+from typing import Any, ClassVar
 
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -43,6 +43,7 @@ from aws_durable_execution_sdk_python.plugin import (
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
+    OperationStatus,
     OperationType,
     UserFunctionEndInfo,
     UserFunctionOutcome,
@@ -85,13 +86,18 @@ from aws_durable_execution_sdk_python_otel.durable_parent_span import (
     DurableParentSpan,
     ensure_end_after_start,
 )
+from aws_durable_execution_sdk_python_otel.execution_root import ExecutionRoot
 from aws_durable_execution_sdk_python_otel.execution_trace_context import (
     ExecutionTraceContext,
     canonical_trace_id,
 )
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
-from aws_durable_execution_sdk_python_otel.log_filter import install_log_filter
+from aws_durable_execution_sdk_python_otel.log_filter import (
+    install_log_filter,
+    uninstall_log_filter,
+)
 from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
+from aws_durable_execution_sdk_python_otel.timestamps import to_otel_timestamp
 
 
 logger = logging.getLogger(__name__)
@@ -111,7 +117,7 @@ def _to_otel_timestamp(dt: datetime.datetime | None) -> int | None:
     """Convert a datetime to an OTel timestamp (ns since epoch), or None."""
     if dt is None:
         return None
-    return int(dt.timestamp() * 1_000_000_000)
+    return to_otel_timestamp(dt)
 
 
 class ExecutionOtelPlugin(DurableInstrumentationPlugin):
@@ -122,6 +128,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             (globally configured provider, X-Ray extractor, "Workflow" root
             span).
     """
+
+    __durable_registration_api__: ClassVar[int] = 1
+    exclusive_group: ClassVar[str | None] = "aws-durable-execution-otel-view"
 
     def __init__(self, config: OtelPluginConfig | None = None) -> None:
         self._config = config or OtelPluginConfig()
@@ -164,8 +173,18 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._lock = threading.RLock()
         self._tracing_enabled = False
 
+        self._registration_accepted = False
         if self._config.enrich_logger:
             install_log_filter(self)
+
+    def on_registration_result(self, registered: bool) -> None:
+        """Preserve accepted resources, releasing only a discarded constructor."""
+        if registered:
+            self._registration_accepted = True
+            if self._config.enrich_logger:
+                install_log_filter(self)
+        elif not self._registration_accepted:
+            uninstall_log_filter(self)
 
     def _bind_sdk_tracer(self) -> bool:
         """Bind to an SDK tracer, retrying a deferred global provider."""
@@ -413,6 +432,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     # ------------------------------------------------------------------
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         logger.debug("Durable invocation started: %s", info)
+        self._registration_accepted = True
         self._reset_state()
         if info.execution_start_time is None:
             logger.warning(
@@ -471,6 +491,14 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             root_sampled=lambda: is_sampled(sampling_result),
         )
 
+        # Materialize the fallback anchor before user code can suspend or fail.
+        # Repeated invocations retain the same SDK-owned identity and timing.
+        ExecutionRoot(
+            execution_arn=self._execution_arn,
+            ancestor=self._execution_trace_context.execution_ancestor,
+            start_time=info.execution_start_time,
+        ).export(self._tracer, self._id_generator, self._sampling_intent)
+
         self._start_workflow_span(info)
         # Keep the invocation on the shared execution trace.
         self._start_invocation_span(info)
@@ -486,6 +514,10 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                     self._workflow_span, otel_context.get_current()
                 ),
             )
+
+        # Cover handlers installed after construction as well.
+        if self._config.enrich_logger:
+            install_log_filter(self)
 
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
         """Install a non-recording placeholder for the execution-scoped Workflow span.
@@ -607,7 +639,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         if self._invocation_span is not None:
             self._invocation_span.set_attribute(
                 "durable.invocation.status",
-                info.status.value if info.status else "",
+                "RETRYING"
+                if info.status is InvocationStatus.RETRY
+                else info.status.value,
             )
             if info.status in (InvocationStatus.SUCCEEDED, InvocationStatus.PENDING):
                 self._invocation_span.set_status(StatusCode.OK)
@@ -726,7 +760,7 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             span.record_exception(
                 Exception(info.error.message or info.error.type or "Unknown error")
             )
-        else:
+        elif info.status is OperationStatus.SUCCEEDED:
             span.set_status(StatusCode.OK)
 
         self._note_parent_end(info.parent_id, end_time)

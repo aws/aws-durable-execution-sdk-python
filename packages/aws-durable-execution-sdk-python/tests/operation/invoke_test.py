@@ -64,7 +64,11 @@ def test_invoke_handler_already_succeeded():
         payload="test_input",
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "invoke1", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+            "invoke1",
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            "test_invoke",
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         config=None,
     )
@@ -94,7 +98,11 @@ def test_invoke_handler_already_succeeded_none_result():
         payload="test_input",
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "invoke2", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+            "invoke2",
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            "test_invoke",
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         config=None,
     )
@@ -123,7 +131,11 @@ def test_invoke_handler_already_succeeded_no_chained_invoke_details():
         payload="test_input",
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "invoke3", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+            "invoke3",
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            "test_invoke",
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         config=None,
     )
@@ -159,7 +171,11 @@ def test_invoke_handler_already_terminated(kind: OperationStatus):
             payload="test_input",
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke4", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+                "invoke4",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                "test_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=None,
         )
@@ -190,7 +206,11 @@ def test_invoke_handler_already_timed_out():
             payload="test_input",
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke5", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+                "invoke5",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                "test_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=None,
         )
@@ -221,7 +241,11 @@ def test_invoke_handler_already_started(status):
             payload="test_input",
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke6", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+                "invoke6",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                "test_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=None,
         )
@@ -252,7 +276,11 @@ def test_invoke_handler_already_started_suspends(status):
             payload="test_input",
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke7", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+                "invoke7",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                "test_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=config,
         )
@@ -286,7 +314,11 @@ def test_invoke_handler_new_operation():
             payload="test_input",
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke8", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+                "invoke8",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                "test_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=config,
         )
@@ -325,7 +357,11 @@ def test_invoke_handler_no_config():
             payload="test_input",
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke11", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+                "invoke11",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                "test_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=None,
         )
@@ -365,7 +401,11 @@ def test_invoke_handler_custom_serdes():
         payload={"key": "value", "number": 42, "list": [1, 2, 3]},
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "invoke12", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+            "invoke12",
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            "test_invoke",
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         config=config,
     )
@@ -401,7 +441,11 @@ def test_invoke_handler_custom_serdes_new_operation():
             payload=complex_payload,
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke13", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+                "invoke13",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                "test_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=config,
         )
@@ -435,7 +479,11 @@ def test_invoke_handler_with_operation_name(status: OperationStatus):
             payload="test_input",
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke14", OperationSubType.CHAINED_INVOKE, None, "named_invoke"
+                "invoke14",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                "named_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=None,
         )
@@ -464,7 +512,11 @@ def test_invoke_handler_without_operation_name(status: OperationStatus):
             payload="test_input",
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke15", OperationSubType.CHAINED_INVOKE, None, None
+                "invoke15",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                None,
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=None,
         )
@@ -492,7 +544,11 @@ def test_invoke_handler_with_none_payload():
             payload=None,
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke16", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+                "invoke16",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                "test_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=None,
         )
@@ -524,7 +580,11 @@ def test_invoke_handler_already_succeeded_with_none_payload():
         payload=None,
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "invoke17", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+            "invoke17",
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            "test_invoke",
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         config=None,
     )
@@ -565,7 +625,11 @@ def test_invoke_handler_suspend_does_not_raise(mock_suspend):
             payload="test_input",
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke18", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+                "invoke18",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                "test_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=None,
         )
@@ -597,7 +661,11 @@ def test_invoke_handler_with_tenant_id():
             payload="test_input",
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke1", OperationSubType.CHAINED_INVOKE, None, None
+                "invoke1",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                None,
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=config,
         )
@@ -634,7 +702,11 @@ def test_invoke_handler_without_tenant_id():
             payload="test_input",
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke1", OperationSubType.CHAINED_INVOKE, None, None
+                "invoke1",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                None,
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=config,
         )
@@ -669,7 +741,11 @@ def test_invoke_handler_default_config_no_tenant_id():
             payload="test_input",
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke1", OperationSubType.CHAINED_INVOKE, None, None
+                "invoke1",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                None,
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=None,
         )
@@ -707,7 +783,11 @@ def test_invoke_handler_defaults_to_json_serdes():
             payload=payload,
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "invoke_json", OperationSubType.CHAINED_INVOKE, None, None
+                "invoke_json",
+                OperationSubType.CHAINED_INVOKE,
+                None,
+                None,
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=config,
         )
@@ -741,7 +821,11 @@ def test_invoke_handler_result_defaults_to_json_serdes():
         payload={"input": "data"},
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "invoke_result_json", OperationSubType.CHAINED_INVOKE, None, None
+            "invoke_result_json",
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            None,
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         config=config,
     )
@@ -782,6 +866,7 @@ def test_invoke_immediate_response_get_checkpoint_result_called_twice():
                 OperationSubType.CHAINED_INVOKE,
                 None,
                 "test_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=None,
         )
@@ -817,6 +902,7 @@ def test_invoke_immediate_response_create_checkpoint_with_is_sync_true():
                 OperationSubType.CHAINED_INVOKE,
                 None,
                 "test_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=None,
         )
@@ -856,7 +942,11 @@ def test_invoke_immediate_response_immediate_success():
         payload="test_input",
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "invoke_immediate_3", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+            "invoke_immediate_3",
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            "test_invoke",
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         config=None,
     )
@@ -892,7 +982,11 @@ def test_invoke_immediate_response_immediate_success_with_none_result():
         payload="test_input",
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "invoke_immediate_4", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+            "invoke_immediate_4",
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            "test_invoke",
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         config=None,
     )
@@ -942,6 +1036,7 @@ def test_invoke_immediate_response_immediate_failure(status: OperationStatus):
                 OperationSubType.CHAINED_INVOKE,
                 None,
                 "test_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=None,
         )
@@ -983,6 +1078,7 @@ def test_invoke_immediate_response_no_immediate_response():
                 OperationSubType.CHAINED_INVOKE,
                 None,
                 "test_invoke",
+                operation_type=OperationType.CHAINED_INVOKE,
             ),
             config=None,
         )
@@ -1021,7 +1117,11 @@ def test_invoke_immediate_response_already_completed():
         payload="test_input",
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "invoke_immediate_7", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+            "invoke_immediate_7",
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            "test_invoke",
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         config=None,
     )
@@ -1063,7 +1163,11 @@ def test_invoke_immediate_response_with_custom_serdes():
         payload={"key": "value", "number": 42, "list": [1, 2, 3]},
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "invoke_immediate_10", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+            "invoke_immediate_10",
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            "test_invoke",
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         config=config,
     )
@@ -1100,7 +1204,11 @@ def test_invoke_suspends_when_second_check_returns_started():
     executor = InvokeOperationExecutor(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "invoke-1", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+            "invoke-1",
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            "test_invoke",
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         function_name="my-function",
         payload={"data": "test"},
@@ -1140,7 +1248,11 @@ def test_invoke_suspends_when_second_check_returns_started_duplicate():
         payload={"data": "test"},
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "invoke-1", OperationSubType.CHAINED_INVOKE, None, "test_invoke"
+            "invoke-1",
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            "test_invoke",
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         config=InvokeConfig(),
     )

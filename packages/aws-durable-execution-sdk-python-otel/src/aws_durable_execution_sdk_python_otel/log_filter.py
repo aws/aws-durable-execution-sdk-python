@@ -113,3 +113,14 @@ def install_log_filter(
         handler.addFilter(context_filter)
 
     return context_filter
+
+
+def uninstall_log_filter(plugin: _SpanContextProvider) -> None:
+    """Remove only filters owned by a rejected, never-accepted plugin instance."""
+    for handler in logging.getLogger().handlers:
+        for log_filter in tuple(handler.filters):
+            if (
+                isinstance(log_filter, OtelContextLogFilter)
+                and log_filter._plugin is plugin
+            ):
+                handler.removeFilter(log_filter)

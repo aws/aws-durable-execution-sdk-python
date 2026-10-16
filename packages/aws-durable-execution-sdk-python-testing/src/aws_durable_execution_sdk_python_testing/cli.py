@@ -25,6 +25,7 @@ from urllib.request import Request, urlopen
 
 from botocore.exceptions import ConnectionError  # type: ignore
 
+from aws_durable_execution_sdk_python_testing.child_dispatcher import FunctionConfigs
 from aws_durable_execution_sdk_python_testing.exceptions import (
     DurableFunctionsLocalRunnerError,
     DurableFunctionsTestError,
@@ -38,6 +39,14 @@ from aws_durable_execution_sdk_python_testing.web.server import WebServiceConfig
 
 
 logger = logging.getLogger(__name__)
+
+
+def _function_configs(value: str) -> FunctionConfigs:
+    """argparse type for ``--function-configs``: parse at the boundary."""
+    try:
+        return FunctionConfigs.from_value(value)
+    except (ValueError, OSError) as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 @dataclass(frozen=True)
@@ -219,13 +228,31 @@ class CliApp:
             "--invocation-timeout",
             type=int,
             default=900,
-            help="Per-invocation timeout in seconds, simulates Lambda Timeout (default: 900)",
+            help=(
+                "Per-invocation timeout in seconds, simulates Lambda Timeout "
+                "(default: 900). Also bounds how long the runner waits on any "
+                "Invoke it sends, with 60 seconds of headroom"
+            ),
         )
         start_server_parser.add_argument(
             "--skip-time",
             action=argparse.BooleanOptionalAction,
             default=False,
             help="Skip durable timer wall-clock waits; history keeps real modeled durations. Default is real timing (--no-skip-time); pass --skip-time to opt in",
+        )
+        start_server_parser.add_argument(
+            "--function-configs",
+            default=None,
+            type=_function_configs,
+            help=(
+                "The Lambda functions a durable function may invoke: a JSON "
+                "object mapping each function name to its configuration in "
+                "Lambda's own shape, or file://<path> to a file holding it. "
+                "A durable function carries a DurableConfig, e.g. "
+                '{"ProcessPayment": {"DurableConfig": {"ExecutionTimeout": 60, '
+                '"RetentionPeriodInDays": 7}}, "LookupPrice": {}}. Required for '
+                "chained invokes; without it every chained invoke fails"
+            ),
         )
         start_server_parser.set_defaults(func=self.start_server_command)
 
@@ -301,6 +328,7 @@ class CliApp:
                 store_path=args.store_path,
                 invocation_timeout_seconds=args.invocation_timeout,
                 skip_time=args.skip_time,
+                function_configs=args.function_configs,
             )
 
             logger.info(

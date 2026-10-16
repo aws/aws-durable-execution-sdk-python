@@ -13,6 +13,7 @@ from unittest.mock import Mock
 
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
+    ChainedInvokeOptions,
     ErrorObject,
     OperationAction,
     OperationType,
@@ -22,6 +23,9 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python_testing.checkpoint.effects import Completed
 from aws_durable_execution_sdk_python_testing.checkpoint.processors.base import (
     OperationProcessor,
+)
+from aws_durable_execution_sdk_python_testing.checkpoint.processors.invoke import (
+    ChainedInvokeProcessor,
 )
 from aws_durable_execution_sdk_python_testing.checkpoint.transformer import (
     CheckpointRequestDispatcher,
@@ -75,6 +79,21 @@ def test_dispatcher_init_accepts_custom_processors():
     dispatcher = CheckpointRequestDispatcher(processors=custom)
 
     assert dispatcher.processors is custom
+
+
+def test_dispatcher_init_with_a_preflight_replaces_only_the_invoke_processor():
+    def preflight(_name: str):
+        return None
+
+    dispatcher = CheckpointRequestDispatcher(chained_invoke_preflight=preflight)
+
+    invoke_processor = dispatcher.processors[OperationType.CHAINED_INVOKE]
+    assert isinstance(invoke_processor, ChainedInvokeProcessor)
+    assert invoke_processor._preflight is preflight  # noqa: SLF001
+    # The shared default table is untouched.
+    defaults = CheckpointRequestDispatcher().processors
+    assert defaults[OperationType.CHAINED_INVOKE] is not invoke_processor
+    assert dispatcher.processors[OperationType.STEP] is defaults[OperationType.STEP]
 
 
 def test_apply_updates_with_empty_list_is_a_noop():
@@ -470,3 +489,52 @@ def test_apply_updates_records_size_for_bytes_payload():
 
     # bytes payload length == 12.
     assert execution.operation_size_bytes["with-bytes"] == 12
+
+
+def _invoke_start(payload: str) -> OperationUpdate:
+    return OperationUpdate(
+        operation_id="invoke-1",
+        operation_type=OperationType.CHAINED_INVOKE,
+        action=OperationAction.START,
+        payload=payload,
+        chained_invoke_options=ChainedInvokeOptions(
+            function_name="child", tenant_id=None
+        ),
+    )
+
+
+def test_a_failed_preflight_stores_no_input_and_weighs_nothing():
+    """The service keeps no input for a target it cannot resolve. The
+    stored update has no payload and the operation's size is zero; the
+    function name stays for history."""
+    error = ErrorObject.from_message("Function not found: child.")
+    dispatcher = CheckpointRequestDispatcher(chained_invoke_preflight=lambda _n: error)
+    execution = _make_execution()
+
+    dispatcher.apply_updates(
+        execution,
+        [_invoke_start('{"secret": "retain-me"}')],
+        None,
+        lambda _id: None,
+        datetime.now(UTC),
+    )
+
+    assert execution.updates[-1].payload is None
+    assert execution.updates[-1].chained_invoke_options.function_name == "child"
+    assert execution.operation_size_bytes["invoke-1"] == 0
+
+
+def test_a_started_invoke_stores_its_input_and_size():
+    dispatcher = CheckpointRequestDispatcher(chained_invoke_preflight=lambda _n: None)
+    execution = _make_execution()
+
+    dispatcher.apply_updates(
+        execution,
+        [_invoke_start('{"secret": "keep-me"}')],
+        None,
+        lambda _id: None,
+        datetime.now(UTC),
+    )
+
+    assert execution.updates[-1].payload == '{"secret": "keep-me"}'
+    assert execution.operation_size_bytes["invoke-1"] == len('{"secret": "keep-me"}')

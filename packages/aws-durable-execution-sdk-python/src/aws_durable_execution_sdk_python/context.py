@@ -599,7 +599,8 @@ class DurableContext(DurableContextProtocol):
         self,
         sub_type: OperationSubType,
         name: str | None = None,
-        operation_type: OperationType | None = None,
+        *,
+        operation_type: OperationType,
     ) -> Iterator[OperationIdentifier]:
         """Allocate an operation and validate its replay identity before hooks."""
         operation_identifier = OperationIdentifier(
@@ -636,7 +637,7 @@ class DurableContext(DurableContextProtocol):
         if not config:
             config = CallbackConfig()
         with self._operation_replay_aware(
-            OperationSubType.CALLBACK, name
+            OperationSubType.CALLBACK, name, operation_type=OperationType.CALLBACK
         ) as operation_identifier:
             executor: CallbackOperationExecutor = CallbackOperationExecutor(
                 state=self.state,
@@ -672,7 +673,9 @@ class DurableContext(DurableContextProtocol):
         if not config:
             config = InvokeConfig[P, R]()
         with self._operation_replay_aware(
-            OperationSubType.CHAINED_INVOKE, name
+            OperationSubType.CHAINED_INVOKE,
+            name,
+            operation_type=OperationType.CHAINED_INVOKE,
         ) as operation_identifier:
             executor: InvokeOperationExecutor[R] = InvokeOperationExecutor(
                 function_name=function_name,
@@ -700,7 +703,7 @@ class DurableContext(DurableContextProtocol):
             config.completion_config._validate_for_total(len(inputs))
 
         with self._operation_replay_aware(
-            OperationSubType.MAP, map_name
+            OperationSubType.MAP, map_name, operation_type=OperationType.CONTEXT
         ) as operation_identifier:
             operation_id = operation_identifier.operation_id
             map_context = self.create_child_context(operation_id=operation_id)
@@ -751,7 +754,7 @@ class DurableContext(DurableContextProtocol):
             config.completion_config._validate_for_total(len(functions))
 
         with self._operation_replay_aware(
-            OperationSubType.PARALLEL, name
+            OperationSubType.PARALLEL, name, operation_type=OperationType.CONTEXT
         ) as operation_identifier:
             operation_id = operation_identifier.operation_id
             parallel_context = self.create_child_context(operation_id=operation_id)
@@ -845,7 +848,7 @@ class DurableContext(DurableContextProtocol):
         if not config:
             config = StepConfig()
         with self._operation_replay_aware(
-            OperationSubType.STEP, step_name
+            OperationSubType.STEP, step_name, operation_type=OperationType.STEP
         ) as operation_identifier:
             executor: StepOperationExecutor[T] = StepOperationExecutor(
                 func=func,
@@ -868,7 +871,7 @@ class DurableContext(DurableContextProtocol):
             msg = "duration must be at least 1 second"
             raise ValidationError(msg)
         with self._operation_replay_aware(
-            OperationSubType.WAIT, name
+            OperationSubType.WAIT, name, operation_type=OperationType.WAIT
         ) as operation_identifier:
             wait_seconds = duration.seconds
             executor: WaitOperationExecutor = WaitOperationExecutor(
@@ -938,7 +941,7 @@ class DurableContext(DurableContextProtocol):
             raise ValidationError(msg)
 
         with self._operation_replay_aware(
-            OperationSubType.WAIT_FOR_CONDITION, name
+            OperationSubType.WAIT_FOR_CONDITION, name, operation_type=OperationType.STEP
         ) as operation_identifier:
             executor: WaitForConditionOperationExecutor[T] = (
                 WaitForConditionOperationExecutor(

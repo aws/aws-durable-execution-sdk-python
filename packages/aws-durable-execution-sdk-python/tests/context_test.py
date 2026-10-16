@@ -340,7 +340,11 @@ def test_create_callback_basic(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_operation_id, OperationSubType.CALLBACK, None, None
+            expected_operation_id,
+            OperationSubType.CALLBACK,
+            None,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=CallbackConfig(),
     )
@@ -374,7 +378,11 @@ def test_create_callback_with_name_and_config(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_operation_id, OperationSubType.CALLBACK, None, None
+            expected_operation_id,
+            OperationSubType.CALLBACK,
+            None,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=config,
     )
@@ -408,7 +416,10 @@ def test_create_callback_with_parent_id(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_operation_id, OperationSubType.CALLBACK, "parent123"
+            expected_operation_id,
+            OperationSubType.CALLBACK,
+            "parent123",
+            operation_type=OperationType.CALLBACK,
         ),
         config=CallbackConfig(),
     )
@@ -475,7 +486,11 @@ def test_step_basic(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_operation_id, OperationSubType.STEP, None, None
+            expected_operation_id,
+            OperationSubType.STEP,
+            None,
+            None,
+            operation_type=OperationType.STEP,
         ),
         config=ANY,  # StepConfig() is created in context.step()
         func=mock_callable,
@@ -516,7 +531,11 @@ def test_step_with_name_and_config(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_id, OperationSubType.STEP, None, None
+            expected_id,
+            OperationSubType.STEP,
+            None,
+            None,
+            operation_type=OperationType.STEP,
         ),
         config=config,
         func=mock_callable,
@@ -555,7 +574,10 @@ def test_step_with_parent_id(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_id, OperationSubType.STEP, "parent123"
+            expected_id,
+            OperationSubType.STEP,
+            "parent123",
+            operation_type=OperationType.STEP,
         ),
         config=ANY,
         func=mock_callable,
@@ -596,10 +618,22 @@ def test_step_increments_counter(mock_executor_class):
     assert context._step_counter.get_current() == 12  # noqa: SLF001
     assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id1, OperationSubType.STEP, None, None)
+    ] == OperationIdentifier(
+        expected_id1,
+        OperationSubType.STEP,
+        None,
+        None,
+        operation_type=OperationType.STEP,
+    )
     assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id2, OperationSubType.STEP, None, None)
+    ] == OperationIdentifier(
+        expected_id2,
+        OperationSubType.STEP,
+        None,
+        None,
+        operation_type=OperationType.STEP,
+    )
 
 
 @patch("aws_durable_execution_sdk_python.context.StepOperationExecutor")
@@ -662,6 +696,7 @@ def test_operation_replay_aware_looks_up_allocated_operation_id():
     with context._operation_replay_aware(  # noqa: SLF001
         OperationSubType.STEP,
         "current-step",
+        operation_type=OperationType.STEP,
     ) as operation_identifier:
         assert context._step_counter.get_current() == 1  # noqa: SLF001
 
@@ -696,7 +731,11 @@ def test_step_with_original_name(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_id, OperationSubType.STEP, None, "override_name"
+            expected_id,
+            OperationSubType.STEP,
+            None,
+            "override_name",
+            operation_type=OperationType.STEP,
         ),
         config=ANY,
         func=mock_callable,
@@ -733,7 +772,11 @@ def test_invoke_basic(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_operation_id, OperationSubType.CHAINED_INVOKE, None, None
+            expected_operation_id,
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            None,
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         function_name="test_function",
         payload="test_payload",
@@ -772,7 +815,11 @@ def test_invoke_with_name_and_config(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_id, OperationSubType.CHAINED_INVOKE, None, "named_invoke"
+            expected_id,
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            "named_invoke",
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         function_name="test_function",
         payload={"key": "value"},
@@ -806,7 +853,11 @@ def test_invoke_with_parent_id(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_id, OperationSubType.CHAINED_INVOKE, "parent123", None
+            expected_id,
+            OperationSubType.CHAINED_INVOKE,
+            "parent123",
+            None,
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         function_name="test_function",
         payload=None,
@@ -842,10 +893,22 @@ def test_invoke_increments_counter(mock_executor_class):
     assert context._step_counter.get_current() == 12  # noqa: SLF001
     assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id1, OperationSubType.CHAINED_INVOKE, None, None)
+    ] == OperationIdentifier(
+        expected_id1,
+        OperationSubType.CHAINED_INVOKE,
+        None,
+        None,
+        operation_type=OperationType.CHAINED_INVOKE,
+    )
     assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id2, OperationSubType.CHAINED_INVOKE, None, None)
+    ] == OperationIdentifier(
+        expected_id2,
+        OperationSubType.CHAINED_INVOKE,
+        None,
+        None,
+        operation_type=OperationType.CHAINED_INVOKE,
+    )
 
 
 @patch("aws_durable_execution_sdk_python.context.InvokeOperationExecutor")
@@ -873,7 +936,11 @@ def test_invoke_with_none_payload(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_id, OperationSubType.CHAINED_INVOKE, None, None
+            expected_id,
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            None,
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         function_name="test_function",
         payload=None,
@@ -918,7 +985,11 @@ def test_invoke_with_custom_serdes(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_id, OperationSubType.CHAINED_INVOKE, None, "custom_serdes_invoke"
+            expected_id,
+            OperationSubType.CHAINED_INVOKE,
+            None,
+            "custom_serdes_invoke",
+            operation_type=OperationType.CHAINED_INVOKE,
         ),
         function_name="test_function",
         payload={"original": "data"},
@@ -952,7 +1023,11 @@ def test_wait_basic(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_operation_id, OperationSubType.WAIT, None, None
+            expected_operation_id,
+            OperationSubType.WAIT,
+            None,
+            None,
+            operation_type=OperationType.WAIT,
         ),
         seconds=30,
     )
@@ -983,7 +1058,11 @@ def test_wait_with_name(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_id, OperationSubType.WAIT, None, "test_wait"
+            expected_id,
+            OperationSubType.WAIT,
+            None,
+            "test_wait",
+            operation_type=OperationType.WAIT,
         ),
         seconds=60,
     )
@@ -1014,7 +1093,10 @@ def test_wait_with_parent_id(mock_executor_class):
     mock_executor_class.assert_called_once_with(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            expected_id, OperationSubType.WAIT, "parent123"
+            expected_id,
+            OperationSubType.WAIT,
+            "parent123",
+            operation_type=OperationType.WAIT,
         ),
         seconds=45,
     )
@@ -1047,10 +1129,22 @@ def test_wait_increments_counter(mock_executor_class):
     assert context._step_counter.get_current() == 12  # noqa: SLF001
     assert mock_executor_class.call_args_list[0][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id1, OperationSubType.WAIT, None, None)
+    ] == OperationIdentifier(
+        expected_id1,
+        OperationSubType.WAIT,
+        None,
+        None,
+        operation_type=OperationType.WAIT,
+    )
     assert mock_executor_class.call_args_list[1][1][
         "operation_identifier"
-    ] == OperationIdentifier(expected_id2, OperationSubType.WAIT, None, None)
+    ] == OperationIdentifier(
+        expected_id2,
+        OperationSubType.WAIT,
+        None,
+        None,
+        operation_type=OperationType.WAIT,
+    )
 
 
 @patch("aws_durable_execution_sdk_python.context.WaitOperationExecutor")

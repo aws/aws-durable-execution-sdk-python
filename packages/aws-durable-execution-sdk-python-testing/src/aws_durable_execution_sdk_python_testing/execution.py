@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -13,6 +14,7 @@ from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
+    ChainedInvokeDetails,
     ErrorObject,
     ExecutionDetails,
     Operation,
@@ -29,6 +31,7 @@ from aws_durable_execution_sdk_python_testing.exceptions import (
 
 # Import AWS exceptions
 from aws_durable_execution_sdk_python_testing.model import (
+    executed_version,
     InvocationCompletedDetails,
     StartDurableExecutionInput,
 )
@@ -37,6 +40,16 @@ from aws_durable_execution_sdk_python_testing.token import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_CHAINED_INVOKE_TERMINAL_STATUSES: frozenset[OperationStatus] = frozenset(
+    {
+        OperationStatus.SUCCEEDED,
+        OperationStatus.FAILED,
+        OperationStatus.TIMED_OUT,
+        OperationStatus.STOPPED,
+    }
+)
 
 
 class ExecutionStatus(Enum):
@@ -121,6 +134,18 @@ class Execution:
         # Per-op payload size, tracked as a sidecar dict because
         # ``Operation`` is frozen upstream.
         self.operation_size_bytes: dict[str, int] = {}
+        # Chained-invoke linkage: operation_id -> the invoked child
+        # execution's ARN. Populated when a durable child execution is
+        # started for a CHAINED_INVOKE operation; absent for targets
+        # that run as a single invocation without their own execution.
+        self.chained_invoke_children: dict[str, str] = {}
+        # The parent execution's ARN when this execution was started by
+        # a chained invoke. A child's output is capped at the chained
+        # invoke limit, so validation needs to know.
+        self.parent_execution_arn: str | None = None
+        # The runner's region at creation; None when unknown (for
+        # example an execution built directly in a test).
+        self.region: str | None = None
         # Set when a trigger arrived while an invocation was already
         # in flight; the gate-release path consults it to decide whether
         # to schedule another invocation.
@@ -211,6 +236,9 @@ class Execution:
             "HandlerSeenSeq": self.handler_seen_seq,
             "OperationLastTouchedSeq": dict(self.operation_last_touched_seq),
             "OperationSizeBytes": dict(self.operation_size_bytes),
+            "ChainedInvokeChildren": dict(self.chained_invoke_children),
+            "ParentExecutionArn": self.parent_execution_arn,
+            "Region": self.region,
             "NeedsReinvoke": self.needs_reinvoke,
             "LastCheckpoint": (
                 self.last_checkpoint.to_json_dict() if self.last_checkpoint else None
@@ -264,6 +292,9 @@ class Execution:
             data.get("OperationLastTouchedSeq", {})
         )
         execution.operation_size_bytes = dict(data.get("OperationSizeBytes", {}))
+        execution.chained_invoke_children = dict(data.get("ChainedInvokeChildren", {}))
+        execution.parent_execution_arn = data.get("ParentExecutionArn")
+        execution.region = data.get("Region")
         execution.needs_reinvoke = data.get("NeedsReinvoke", False)
         execution.current_invocation_id = data.get("CurrentInvocationId", "")
         last_checkpoint_data = data.get("LastCheckpoint")
@@ -379,6 +410,17 @@ class Execution:
                 return True
         return False
 
+    def has_unseen_changes(self) -> bool:
+        """True if any operation changed after the handler's last
+        observed sequence watermark."""
+        return self.has_changes_after(self.handler_seen_seq)
+
+    def has_changes_after(self, seq: int) -> bool:
+        """True if any operation changed after ``seq_counter`` was ``seq``."""
+        return any(
+            touched > seq for touched in self.operation_last_touched_seq.values()
+        )
+
     def record_invocation_completion(
         self, start_timestamp: datetime, end_timestamp: datetime, request_id: str
     ) -> None:
@@ -390,10 +432,23 @@ class Execution:
                 request_id=request_id,
             )
         )
+
+    def mark_state_delivered(self) -> None:
+        """Reset the list of changed operations once an invocation's input
+        carries them.
+
+        The service reports, on each invocation, the operations that
+        changed after the last state the handler observed. The runner
+        delivers state in the invocation input. So the list is reset when
+        that input is built, not when the invocation completes: an
+        operation that completes while the handler is still running is
+        reported on the next invocation.
+        """
         self.updated_operation_ids = []
 
     def _record_updated_operation(self, operation_id: str) -> None:
-        """Remember an operation changed outside the last invocation."""
+        """Remember an operation that changed since the handler last saw
+        the state."""
         if operation_id not in self.updated_operation_ids:
             self.updated_operation_ids.append(operation_id)
 
@@ -646,6 +701,87 @@ class Execution:
             )
             return self.operations[index]
 
+    def complete_chained_invoke(
+        self,
+        operation_id: str,
+        status: OperationStatus,
+        result: str | None = None,
+        error: ErrorObject | None = None,
+        now: datetime | None = None,
+    ) -> Operation:
+        """Transition a CHAINED_INVOKE operation to a terminal status.
+
+        ``status`` must be SUCCEEDED, FAILED, TIMED_OUT, or STOPPED.
+        SUCCEEDED carries ``result``; the failure statuses carry
+        ``error``.
+        """
+        index, operation = self.find_operation(operation_id)
+        self._require_chained_invoke(operation)
+
+        if status not in _CHAINED_INVOKE_TERMINAL_STATUSES:
+            msg_bad_status: str = (
+                f"Invalid terminal status for chained invoke: {status}"
+            )
+            raise IllegalStateException(msg_bad_status)
+        if operation.status is not OperationStatus.STARTED:
+            msg_not_active: str = (
+                f"Chained invoke operation [{operation_id}] is not active"
+            )
+            raise IllegalStateException(msg_not_active)
+        if status is OperationStatus.SUCCEEDED and error is not None:
+            msg_success_error: str = (
+                "Cannot provide an Error for a SUCCEEDED chained invoke."
+            )
+            raise IllegalStateException(msg_success_error)
+
+        with self._state_lock:
+            self.touch_operation(operation_id)
+            self.operations[index] = replace(
+                operation,
+                status=status,
+                end_timestamp=now if now is not None else real_now(),
+                chained_invoke_details=ChainedInvokeDetails(result=result, error=error),
+            )
+            # State paging sizes a completed operation by its result or
+            # error, not by its START payload.
+            self.operation_size_bytes[operation_id] = len(
+                (result if result is not None else "").encode()
+            ) + (len(json.dumps(error.to_dict())) if error is not None else 0)
+            self._record_updated_operation(operation_id)
+            return self.operations[index]
+
+    def executed_version(self) -> str:
+        """The version this execution runs, as the service reports it."""
+        return executed_version(self.start_input.function_qualifier)
+
+    def function_arn(self, default_region: str) -> str:
+        """The qualified function ARN of this execution.
+
+        The service qualifies the ARN with the executed version, and
+        ``Version`` carries the same value. An execution stored before the
+        runner recorded regions has none; it reports ``default_region``.
+        """
+        region: str = self.region if self.region is not None else default_region
+        return (
+            f"arn:aws:lambda:{region}:{self.start_input.account_id}"
+            f":function:{self.start_input.function_name}:{self.executed_version()}"
+        )
+
+    def record_chained_invoke_child(
+        self, operation_id: str, child_execution_arn: str
+    ) -> None:
+        """Record the child execution ARN for a CHAINED_INVOKE operation."""
+        with self._state_lock:
+            self.chained_invoke_children[operation_id] = child_execution_arn
+
+    @staticmethod
+    def _require_chained_invoke(operation: Operation) -> None:
+        if operation.operation_type != OperationType.CHAINED_INVOKE:
+            msg: str = (
+                f"Expected CHAINED_INVOKE operation, got {operation.operation_type}"
+            )
+            raise IllegalStateException(msg)
+
     def _end_execution(
         self, status: OperationStatus, now: datetime | None = None
     ) -> None:
@@ -657,7 +793,7 @@ class Execution:
                 # state change — record it via touch_operation so
                 # introspection / GetDurableExecutionState reflects
                 # it. The handler has returned by this point, so the
-                # touch is not load-bearing for a checkpoint delta.
+                # touch cannot change any checkpoint delta.
                 self.touch_operation(execution_op.operation_id)
                 self.operations[0] = replace(
                     execution_op,

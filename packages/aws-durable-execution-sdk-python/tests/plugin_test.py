@@ -540,6 +540,13 @@ class TestPluginExecutorInit(unittest.TestCase):
         executor = PluginExecutor(plugins=[p1, p2])
         self.assertEqual(len(executor._plugins), 2)
 
+    def test_has_plugins_is_false_without_plugins(self) -> None:
+        self.assertFalse(PluginExecutor(plugins=None).has_plugins)
+        self.assertFalse(PluginExecutor(plugins=[]).has_plugins)
+
+    def test_has_plugins_is_true_with_a_plugin(self) -> None:
+        self.assertTrue(PluginExecutor(plugins=[_NoOpPlugin()]).has_plugins)
+
 
 class TestPluginExecutor(unittest.TestCase):
     def test_no_thread_pool_when_plugins_is_none(self):
@@ -1456,6 +1463,7 @@ class TestPluginExecutorOnChildContextEnd(unittest.TestCase):
             sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
             parent_id="parent-1",
             name="book-trip",
+            operation_type=ServiceOperationType.CONTEXT,
         )
         before = datetime.datetime.now(datetime.UTC)
 
@@ -1491,6 +1499,7 @@ class TestPluginExecutorOnUserFunction(unittest.TestCase):
         identifier = OperationIdentifier(
             operation_id="step-1",
             sub_type=OperationSubType.STEP,
+            operation_type=ServiceOperationType.STEP,
         )
 
         with executor.run():
@@ -1659,6 +1668,43 @@ class TestPluginExecutorOnOperationChange(unittest.TestCase):
             )
 
         self.assertEqual(self.plugin.calls, [])
+
+    def test_operation_update_without_plugins_builds_no_info(self) -> None:
+        """Without a plugin, an update converts no operation and builds no info."""
+        operation = Operation(
+            operation_id="op-1",
+            operation_type=ServiceOperationType.STEP,
+            status=OperationStatus.SUCCEEDED,
+            step_details=StepDetails(attempt=1, result='"done"', error=None),
+        )
+        executor = PluginExecutor(plugins=None)
+        plugin_module = "aws_durable_execution_sdk_python.plugin"
+
+        with executor.run():
+            # The invocation status and the terminal, changed operation reach
+            # every info constructor when the update does not return early.
+            executor.on_invocation_start(
+                execution_arn="arn:exec",
+                lambda_context=LAMBDA_CTX,
+                execution_start_time=START_TS,
+                is_first_invocation=False,
+            )
+            with (
+                patch.object(OperationInfo, "from_operation") as from_operation,
+                patch(f"{plugin_module}._to_operation_info_map") as to_info_map,
+                patch(f"{plugin_module}.OperationEndInfo") as end_info,
+                patch(f"{plugin_module}.OperationChangeInfo") as change_info,
+            ):
+                executor.on_operation_update(
+                    [operation],
+                    {"op-1": operation},
+                    previous_operations={},
+                )
+
+        from_operation.assert_not_called()
+        to_info_map.assert_not_called()
+        end_info.assert_not_called()
+        change_info.assert_not_called()
 
 
 class TestPluginExecutorExtractError(unittest.TestCase):

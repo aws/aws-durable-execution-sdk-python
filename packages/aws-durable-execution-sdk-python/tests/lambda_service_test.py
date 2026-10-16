@@ -665,7 +665,10 @@ def test_invoke_options_to_dict_complete():
 def test_operation_update_create_invoke_start():
     """Test OperationUpdate.create_invoke_start method to cover line 545."""
     identifier = OperationIdentifier(
-        "test-id", OperationSubType.CHAINED_INVOKE, "parent-id"
+        "test-id",
+        OperationSubType.CHAINED_INVOKE,
+        "parent-id",
+        operation_type=OperationType.CHAINED_INVOKE,
     )
     invoke_options = ChainedInvokeOptions("test-func")
     update = OperationUpdate.create_invoke_start(identifier, "payload", invoke_options)
@@ -767,7 +770,13 @@ def test_operation_update_create_callback():
     """Test OperationUpdate.create_callback factory method."""
     callback_options = CallbackOptions(timeout_seconds=300)
     update = OperationUpdate.create_callback(
-        OperationIdentifier("cb1", OperationSubType.CALLBACK, None, "test_callback"),
+        OperationIdentifier(
+            "cb1",
+            OperationSubType.CALLBACK,
+            None,
+            "test_callback",
+            operation_type=OperationType.CALLBACK,
+        ),
         callback_options,
     )
     assert update.operation_id == "cb1"
@@ -782,7 +791,13 @@ def test_operation_update_create_wait_start():
     """Test OperationUpdate.create_wait_start factory method."""
     wait_options = WaitOptions(wait_seconds=30)
     update = OperationUpdate.create_wait_start(
-        OperationIdentifier("wait1", OperationSubType.WAIT, "parent1", "test_wait"),
+        OperationIdentifier(
+            "wait1",
+            OperationSubType.WAIT,
+            "parent1",
+            "test_wait",
+            operation_type=OperationType.WAIT,
+        ),
         wait_options,
     )
     assert update.operation_id == "wait1"
@@ -811,7 +826,13 @@ def test_operation_update_create_execution_succeed(mock_datetime):
 def test_operation_update_create_step_succeed():
     """Test OperationUpdate.create_step_succeed factory method."""
     update = OperationUpdate.create_step_succeed(
-        OperationIdentifier("step1", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step1",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         "step_payload",
     )
     assert update.operation_id == "step1"
@@ -825,7 +846,13 @@ def test_operation_update_create_step_succeed():
 def test_operation_update_to_dict_includes_empty_payload():
     """Test OperationUpdate.to_dict includes an empty-string payload."""
     update = OperationUpdate.create_step_succeed(
-        OperationIdentifier("step1", OperationSubType.STEP, None, "empty_result"),
+        OperationIdentifier(
+            "step1",
+            OperationSubType.STEP,
+            None,
+            "empty_result",
+            operation_type=OperationType.STEP,
+        ),
         payload="",
     )
 
@@ -844,7 +871,11 @@ def test_operation_update_factory_methods():
     # Test create_context_start
     update = OperationUpdate.create_context_start(
         OperationIdentifier(
-            "ctx1", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_context"
+            "ctx1",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_context",
+            operation_type=OperationType.CONTEXT,
         ),
         OperationSubType.RUN_IN_CHILD_CONTEXT,
     )
@@ -855,7 +886,11 @@ def test_operation_update_factory_methods():
     # Test create_context_succeed
     update = OperationUpdate.create_context_succeed(
         OperationIdentifier(
-            "ctx1", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_context"
+            "ctx1",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_context",
+            operation_type=OperationType.CONTEXT,
         ),
         "payload",
         OperationSubType.RUN_IN_CHILD_CONTEXT,
@@ -867,7 +902,11 @@ def test_operation_update_factory_methods():
     # Test create_context_fail
     update = OperationUpdate.create_context_fail(
         OperationIdentifier(
-            "ctx1", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_context"
+            "ctx1",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_context",
+            operation_type=OperationType.CONTEXT,
         ),
         error,
         OperationSubType.RUN_IN_CHILD_CONTEXT,
@@ -883,7 +922,14 @@ def test_operation_update_factory_methods():
 
     # Test create_step_fail
     update = OperationUpdate.create_step_fail(
-        OperationIdentifier("step1", OperationSubType.STEP, None, "test_step"), error
+        OperationIdentifier(
+            "step1",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
+        error,
     )
     assert update.operation_type is OperationType.STEP
     assert update.action is OperationAction.FAIL
@@ -891,14 +937,26 @@ def test_operation_update_factory_methods():
 
     # Test create_step_start
     update = OperationUpdate.create_step_start(
-        OperationIdentifier("step1", OperationSubType.STEP, None, "test_step")
+        OperationIdentifier(
+            "step1",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        )
     )
     assert update.action is OperationAction.START
     assert update.sub_type is OperationSubType.STEP
 
     # Test create_step_retry
     update = OperationUpdate.create_step_retry(
-        OperationIdentifier("step1", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step1",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         error,
         30,
     )
@@ -1063,6 +1121,7 @@ def test_operation_update_create_wait_for_condition_start():
         OperationSubType.WAIT_FOR_CONDITION,
         "parent1",
         "test_wait_condition",
+        operation_type=OperationType.STEP,
     )
     update = OperationUpdate.create_wait_for_condition_start(identifier)
 
@@ -1081,6 +1140,7 @@ def test_operation_update_create_wait_for_condition_succeed():
         OperationSubType.WAIT_FOR_CONDITION,
         "parent1",
         "test_wait_condition",
+        operation_type=OperationType.STEP,
     )
     update = OperationUpdate.create_wait_for_condition_succeed(
         identifier, "success_payload"
@@ -1102,6 +1162,7 @@ def test_operation_update_create_wait_for_condition_retry():
         OperationSubType.WAIT_FOR_CONDITION,
         "parent1",
         "test_wait_condition",
+        operation_type=OperationType.STEP,
     )
     update = OperationUpdate.create_wait_for_condition_retry(
         identifier, "retry_payload", 45
@@ -1124,6 +1185,7 @@ def test_operation_update_create_wait_for_condition_fail():
         OperationSubType.WAIT_FOR_CONDITION,
         "parent1",
         "test_wait_condition",
+        operation_type=OperationType.STEP,
     )
     error = ErrorObject(
         message="Condition failed", type="ConditionError", data=None, stack_trace=None

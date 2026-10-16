@@ -44,12 +44,24 @@ from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
     ResourceNotFoundException,
 )
+from aws_durable_execution_sdk_python_testing.child_dispatcher import (
+    DEFAULT_CHILD_EXECUTION_TIMEOUT_SECONDS,
+    DEFAULT_CHILD_RETENTION_PERIOD_DAYS,
+    ChildDispatcher,
+    EndpointChildDispatcher,
+    FunctionConfigs,
+    FunctionRegistry,
+    InProcessChildDispatcher,
+    UnconfiguredChildDispatcher,
+)
 from aws_durable_execution_sdk_python_testing.executor import Executor
 from aws_durable_execution_sdk_python_testing.execution import ExecutionStatus
 from aws_durable_execution_sdk_python_testing.invoker import (
     InProcessInvoker,
     LambdaInvoker,
     create_lambda_client,
+    create_test_lambda_context,
+    read_timeout_for,
 )
 from aws_durable_execution_sdk_python_testing.model import (
     GetDurableExecutionHistoryResponse,
@@ -110,7 +122,9 @@ class WebRunnerConfig:
     store_type: StoreType = StoreType.MEMORY
     store_path: str | None = None  # Path for filesystem store
 
-    # Timeout configuration
+    # Emulated Lambda function timeout, applied to each handler
+    # invocation. Also bounds how long the runner waits on any Invoke it
+    # sends (see invoker.read_timeout_for).
     invocation_timeout_seconds: int = 900
 
     # Skip durable timer wall-clock waits (waits and step retries complete
@@ -124,6 +138,11 @@ class WebRunnerConfig:
     # GetDurableExecutionState. None falls back to Executor default
     # (5 MB).
     max_invocation_page_bytes: int | None = None
+    # The functions a durable function may invoke, by name. Required for
+    # chained invokes: the runner cannot learn a target's durability from
+    # the Lambda endpoint. See FunctionConfigs.from_value for the input.
+    # Last, so positional construction from before it exists is unchanged.
+    function_configs: FunctionConfigs | None = None
 
 
 @dataclass(frozen=True)
@@ -628,9 +647,13 @@ class DurableFunctionTestRunner:
         invocation_timeout: int = 900,
         store: ExecutionStore | None = None,
         skip_time: bool = True,  # noqa: FBT001, FBT002
+        region: str = "us-west-2",
     ):
         self._execution_timeout = execution_timeout
         self._invocation_timeout = invocation_timeout
+        # Region the runner stands in for: reported in Lambda contexts and
+        # used to reject chained-invoke targets in another region.
+        self._region = region
         self._max_invocation_page_bytes = (
             max_invocation_page_bytes
             if max_invocation_page_bytes is not None
@@ -658,7 +681,9 @@ class DurableFunctionTestRunner:
             handler,
             self._service_client,
             max_page_bytes=self._max_invocation_page_bytes,
+            region=region,
         )
+        self._function_registry = FunctionRegistry()
         self._executor = Executor(
             store=self._store,
             scheduler=self._scheduler,
@@ -668,10 +693,62 @@ class DurableFunctionTestRunner:
             invocation_timeout_seconds=invocation_timeout,
             registry=self._registry,
             clock=self._clock,
+            child_dispatcher=InProcessChildDispatcher(
+                self._function_registry,
+                lambda request: create_test_lambda_context(
+                    region=region,
+                    account_id=request.account_id,
+                    function_name=request.invoke_identifier(),
+                    tenant_id=request.tenant_id,
+                ),
+                invocation_timeout_seconds=invocation_timeout,
+                clock=self._clock,
+            ),
+            region=region,
         )
 
         # Wire up observer pattern - CheckpointProcessor uses this to notify executor of state changes
         self._checkpoint_processor.add_execution_observer(self._executor)
+        # A chained-invoke target the runner cannot resolve fails in the
+        # checkpoint response, as it does at the service.
+        self._checkpoint_processor.set_chained_invoke_preflight(
+            self._executor.preflight_chained_invoke
+        )
+
+    def register_durable_function(
+        self,
+        function_name: str,
+        handler: Callable,
+        execution_timeout: int = DEFAULT_CHILD_EXECUTION_TIMEOUT_SECONDS,
+        retention_period_days: int = DEFAULT_CHILD_RETENTION_PERIOD_DAYS,
+    ) -> DurableFunctionTestRunner:
+        """Register a durable function as a chained-invoke target.
+
+        A ``ctx.invoke`` of ``function_name`` runs ``handler`` as its
+        own durable execution with the given timeout and retention.
+        Returns the runner for chaining.
+        """
+        self._invoker.register(function_name, handler)
+        self._function_registry.register(
+            function_name,
+            handler,
+            is_durable=True,
+            execution_timeout_seconds=execution_timeout,
+            retention_period_days=retention_period_days,
+        )
+        return self
+
+    def register_function(
+        self, function_name: str, handler: Callable
+    ) -> DurableFunctionTestRunner:
+        """Register a non-durable function as a chained-invoke target.
+
+        A ``ctx.invoke`` of ``function_name`` calls ``handler`` once
+        with the deserialized payload and a test Lambda context.
+        Returns the runner for chaining.
+        """
+        self._function_registry.register(function_name, handler, is_durable=False)
+        return self
 
     def __enter__(self):
         return self
@@ -680,6 +757,7 @@ class DurableFunctionTestRunner:
         self.close()
 
     def close(self):
+        self._executor.shutdown()
         self._registry.shutdown()
         self._scheduler.stop()
 
@@ -691,6 +769,7 @@ class DurableFunctionTestRunner:
         function_name: str = "test-function",
         execution_name: str = "execution-name",
         account_id: str = "123456789012",
+        tenant_id: str | None = None,
     ) -> DurableFunctionTestResult:
         if timeout is not None and execution_timeout is None:
             warnings.warn(
@@ -710,6 +789,7 @@ class DurableFunctionTestRunner:
             function_name=function_name,
             execution_name=execution_name,
             account_id=account_id,
+            tenant_id=tenant_id,
         )
 
         return self.wait_for_result(
@@ -729,6 +809,21 @@ class DurableFunctionTestRunner:
     def send_callback_heartbeat(self, callback_id: str) -> None:
         self._executor.send_callback_heartbeat(callback_id=callback_id)
 
+    def get_execution_history(
+        self,
+        execution_arn: str,
+        include_execution_data: bool = False,  # noqa: FBT001, FBT002
+    ) -> GetDurableExecutionHistoryResponse:
+        """Return the event history for an execution.
+
+        Works for the execution under test and for any chained child
+        execution (the child's ARN is on the parent's
+        ChainedInvokeStarted event).
+        """
+        return self._executor.get_execution_history(
+            execution_arn, include_execution_data=include_execution_data
+        )
+
     def run_async(
         self,
         input: str | None = None,  # noqa: A002
@@ -737,6 +832,7 @@ class DurableFunctionTestRunner:
         function_name: str = "test-function",
         execution_name: str = "execution-name",
         account_id: str = "123456789012",
+        tenant_id: str | None = None,
     ) -> str:
         if timeout is not None and execution_timeout is None:
             execution_timeout = timeout
@@ -754,7 +850,7 @@ class DurableFunctionTestRunner:
             execution_retention_period_days=7,
             invocation_id="inv-12345678-1234-1234-1234-123456789012",
             trace_fields={"trace_id": "abc123", "span_id": "def456"},
-            tenant_id="tenant-001",
+            tenant_id=tenant_id,
             input=input,
         )
 
@@ -829,7 +925,22 @@ class DurableChildContextTestRunner(DurableFunctionTestRunner):
 
 
 class WebRunner:
-    """Web server runner for durable functions testing with HTTP API endpoints."""
+    """Web server runner for durable functions testing with HTTP API endpoints.
+
+    Handlers run at the Lambda endpoint (``WebRunnerConfig.lambda_endpoint``);
+    the runner drives each execution by invoking its handler there.
+
+    Chained invokes (``context.invoke``) need ``WebRunnerConfig.function_configs``,
+    the targets by name (:class:`FunctionConfigs`). Without it every
+    chained invoke fails with an error naming the option. A durable
+    target runs as a child execution the runner drives; a plain target is
+    one RequestResponse Invoke at the endpoint, bounded by the invocation
+    timeout, whose function error fails the operation. Every handler
+    invocation the runner sends carries ``X-Dex-Handler-Invoke: true``
+    (:data:`invoker.INVOCATION_MARKER_HEADER`), so an endpoint that starts
+    an execution on Invoke of a durable function runs the handler once
+    instead; plain targets are sent without it.
+    """
 
     def __init__(self, config: WebRunnerConfig) -> None:
         """Initialize WebRunner with configuration.
@@ -893,9 +1004,16 @@ class WebRunner:
             if self._config.max_invocation_page_bytes is not None
             else DEFAULT_MAX_INVOCATION_PAGE_BYTES
         )
+        read_timeout_seconds: int = read_timeout_for(
+            self._config.invocation_timeout_seconds
+        )
+        lambda_client: Any = self._create_boto3_client(read_timeout_seconds)
         self._invoker = LambdaInvoker(
-            self._create_boto3_client(),
+            lambda_client,
             max_page_bytes=resolved_max_page_bytes,
+            read_timeout_seconds=read_timeout_seconds,
+            endpoint_url=self._config.lambda_endpoint,
+            region_name=self._config.local_runner_region,
         )
 
         # Create shared CheckpointProcessor
@@ -908,6 +1026,19 @@ class WebRunner:
             clock=clock,
         )
 
+        # Non-durable targets are invoked with the invoker's unmarked client
+        # for the parent's endpoint, so the endpoint runs them as any
+        # caller's Invoke and they go where the parent's invocations go.
+        child_dispatcher: ChildDispatcher
+        if self._config.function_configs is not None:
+            child_dispatcher = EndpointChildDispatcher(
+                self._config.function_configs,
+                self._invoker.unmarked_client_for,
+                invocation_timeout_seconds=self._config.invocation_timeout_seconds,
+            )
+        else:
+            child_dispatcher = UnconfiguredChildDispatcher()
+
         # Create executor with all dependencies including checkpoint processor
         self._executor = Executor(
             store=self._store,
@@ -918,10 +1049,15 @@ class WebRunner:
             invocation_timeout_seconds=self._config.invocation_timeout_seconds,
             registry=self._registry,
             clock=clock,
+            child_dispatcher=child_dispatcher,
+            region=self._config.local_runner_region,
         )
 
         # Add executor as observer to the checkpoint processor
         checkpoint_processor.add_execution_observer(self._executor)
+        checkpoint_processor.set_chained_invoke_preflight(
+            self._executor.preflight_chained_invoke
+        )
 
         # Start the scheduler
         self._scheduler.start()
@@ -964,6 +1100,12 @@ class WebRunner:
 
             self._server = None
 
+        if self._executor is not None:
+            try:
+                self._executor.shutdown()
+            except Exception:
+                logger.exception("error shutting down executor")
+
         if self._registry is not None:
             try:
                 self._registry.shutdown()
@@ -982,10 +1124,12 @@ class WebRunner:
         self._invoker = None
         self._executor = None
 
-    def _create_boto3_client(self) -> Any:
+    def _create_boto3_client(self, read_timeout_seconds: int) -> Any:
         """Create boto3 client for Lambda service.
 
-        Creates a boto3 client with the local runner endpoint and region from configuration.
+        Creates a boto3 client with the local runner endpoint and region from
+        configuration. ``read_timeout_seconds`` is passed through to
+        :func:`create_lambda_client`.
 
         Returns:
             Configured boto3 client for Lambda service
@@ -997,6 +1141,7 @@ class WebRunner:
         return create_lambda_client(
             endpoint_url=self._config.lambda_endpoint,
             region_name=self._config.local_runner_region,
+            read_timeout_seconds=read_timeout_seconds,
         )
 
 

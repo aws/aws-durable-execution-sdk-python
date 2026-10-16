@@ -241,6 +241,7 @@ def test_global_proxy_binds_sdk_provider_before_first_invocation(
     plugin.on_invocation_end(_invocation_end())
 
     assert {span.name for span in exporter.get_finished_spans()} == {
+        "DurableExecutionRoot",
         "Invocation",
         "Workflow",
     }
@@ -273,6 +274,7 @@ def test_global_proxy_disables_entire_invocation_until_sdk_provider_is_ready(
     _run_step_lifecycle(plugin)
     plugin.on_invocation_end(_invocation_end())
     assert {span.name for span in exporter.get_finished_spans()} == {
+        "DurableExecutionRoot",
         "Invocation",
         "Workflow",
         OP_NAME,

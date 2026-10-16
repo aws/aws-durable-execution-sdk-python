@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from aws_durable_execution_sdk_python_testing.checkpoint.effects import (
     CallbackCreated,
+    ChainedInvokeStarted,
     Completed,
     Failed,
 )
@@ -62,6 +63,17 @@ class ExecutionObserver(ABC):
     ) -> None:
         """Called when a callback is created."""
 
+    @abstractmethod
+    def on_chained_invoke_started(
+        self,
+        execution_arn: str,
+        operation_id: str,
+        function_name: str,
+        tenant_id: str | None,
+        payload: str | None,
+    ) -> None:
+        """Called when a chained invoke is accepted and must be dispatched."""
+
 
 class ExecutionNotifier:
     """Collects lifecycle effects raised while applying checkpoint updates.
@@ -98,6 +110,25 @@ class ExecutionNotifier:
             )
         )
 
+    def notify_chained_invoke_started(
+        self,
+        execution_arn: str,
+        operation_id: str,
+        function_name: str,
+        tenant_id: str | None,
+        payload: str | None,
+    ) -> None:
+        """Record that a chained invoke was accepted."""
+        self.effects.append(
+            ChainedInvokeStarted(
+                execution_arn=execution_arn,
+                operation_id=operation_id,
+                function_name=function_name,
+                tenant_id=tenant_id,
+                payload=payload,
+            )
+        )
+
 
 def apply_effects(
     effects: Iterable[CheckpointEffect], observer: ExecutionObserver
@@ -114,4 +145,12 @@ def apply_effects(
                 effect.operation_id,
                 effect.callback_options,
                 effect.callback_token,
+            )
+        elif isinstance(effect, ChainedInvokeStarted):
+            observer.on_chained_invoke_started(
+                effect.execution_arn,
+                effect.operation_id,
+                effect.function_name,
+                effect.tenant_id,
+                effect.payload,
             )

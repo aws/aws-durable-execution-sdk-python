@@ -16,6 +16,7 @@ from urllib.error import HTTPError, URLError
 
 from botocore.exceptions import ConnectionError  # type: ignore
 
+from aws_durable_execution_sdk_python_testing.child_dispatcher import FunctionConfigs
 from aws_durable_execution_sdk_python_testing.cli import CliApp, CliConfig, main
 from aws_durable_execution_sdk_python_testing.exceptions import (
     DurableFunctionsLocalRunnerError,
@@ -193,6 +194,61 @@ def test_start_server_command_parses_arguments_correctly() -> None:
             ]
         )
         assert exit_code == 130  # KeyboardInterrupt exit code
+
+
+def test_start_server_parses_function_configs_at_the_boundary() -> None:
+    """--function-configs reaches the runner as FunctionConfigs, not text."""
+    app = CliApp()
+    with patch(
+        "aws_durable_execution_sdk_python_testing.cli.WebRunner"
+    ) as mock_web_runner:
+        mock_runner_instance = mock_web_runner.return_value
+        mock_runner_instance.__enter__.return_value = mock_runner_instance
+        mock_runner_instance.__exit__.return_value = None
+        mock_runner_instance.serve_forever.side_effect = KeyboardInterrupt()
+
+        app.run(
+            [
+                "start-server",
+                "--function-configs",
+                '{"ProcessPayment": {"DurableConfig": {"ExecutionTimeout": 60}}, "LookupPrice": {}}',
+            ]
+        )
+
+    config = mock_web_runner.call_args.args[0]
+    assert isinstance(config.function_configs, FunctionConfigs)
+    assert config.function_configs.by_name["ProcessPayment"].is_durable
+    assert (
+        config.function_configs.by_name["ProcessPayment"].execution_timeout_seconds
+        == 60
+    )
+    assert not config.function_configs.by_name["LookupPrice"].is_durable
+
+
+@pytest.mark.parametrize(
+    ("value", "detail"),
+    [
+        ('["ProcessPayment"]', "JSON object"),
+        ("{not json", "Expecting"),
+        ("file:///nonexistent/function-configs.json", "No such file"),
+        ('{"ProcessPayment": []}', "'ProcessPayment': the entry must be"),
+        ('{"ProcessPayment": false}', "'ProcessPayment': the entry must be"),
+        ('{"ProcessPayment": "plain"}', "'ProcessPayment': the entry must be"),
+        (
+            '{"ProcessPayment": {"DurableConfig": true}}',
+            "'ProcessPayment': DurableConfig",
+        ),
+    ],
+)
+def test_start_server_rejects_a_bad_function_configs_value(
+    value: str, detail: str
+) -> None:
+    """A malformed value is an argument error that names the option."""
+    with patch("sys.stderr", new_callable=StringIO) as mock_stderr:
+        exit_code = CliApp().run(["start-server", "--function-configs", value])
+    assert exit_code == 2  # argparse usage error
+    assert "--function-configs" in mock_stderr.getvalue()
+    assert detail in mock_stderr.getvalue()
 
 
 def test_invoke_command_parses_arguments_correctly() -> None:
