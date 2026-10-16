@@ -580,6 +580,24 @@ def test_answers_400_to_a_body_over_the_limit_without_reading_it(start: Any) -> 
     assert b"request body exceeds 65536 bytes" in answer
 
 
+def test_answers_400_to_a_content_length_with_too_many_digits(start: Any) -> None:
+    worker, _ = start(Held())
+
+    for expect in ("", "Expect: 100-continue\r\n"):
+        answer = raw_request(
+            worker,
+            (
+                f"POST {RUN} HTTP/1.1\r\nHost: localhost\r\n{expect}"
+                f"Content-Length: {'9' * 5000}\r\n\r\n"
+            ).encode(),
+        )
+
+        # With Expect, the length is not known to be over the limit. So the
+        # worker sends 100 Continue, and then the 400 for the invalid header.
+        assert b"HTTP/1.1 400" in answer, expect
+        assert answer.endswith(b'{"error":"request Content-Length is not valid"}')
+
+
 def test_answers_expect_100_continue_before_it_reads_the_body(start: Any) -> None:
     worker, client = start(routes={"/build": lambda job_input, context: "ok"})
     data = json.dumps(job_body()).encode()
@@ -1317,6 +1335,36 @@ def test_fails_a_run_hook_job_whose_thread_cannot_start(
         "ErrorMessage": "can't start new thread",
     }
     assert "could not start the run hook job" in logger.messages("error")
+
+
+def test_fails_a_job_whose_heartbeats_cannot_start(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handler = Held()
+    handler.release.set()
+    worker, client = start(routes={"/build": handler})
+    original = threading.Thread.start
+
+    def failing_start(self: threading.Thread) -> None:
+        if self.name.startswith("heartbeats-"):
+            msg = "can't start new thread"
+            raise RuntimeError(msg)
+        original(self)
+
+    monkeypatch.setattr(threading.Thread, "start", failing_start)
+    # The job already has its 202, so no delivery follows. The worker fails
+    # the callback, instead of leaving the job to its heartbeat timeout.
+    assert request(worker, "/build", job_body(heartbeatTimeoutSeconds=60))[0] == 202
+    assert worker.idle(WAIT)
+
+    [(name, kwargs)] = completions(client)
+    assert name == "failure"
+    assert kwargs["Error"] == {
+        "ErrorType": "RuntimeError",
+        "ErrorMessage": "can't start new thread",
+    }
+    assert handler.inputs == []
+    assert "could not start the job's heartbeats" in logger.messages("error")
 
 
 def test_counts_no_report_whose_thread_cannot_start(
