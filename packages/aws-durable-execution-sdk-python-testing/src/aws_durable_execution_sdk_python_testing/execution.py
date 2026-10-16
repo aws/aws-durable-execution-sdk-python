@@ -62,19 +62,33 @@ class ExecutionStatus(Enum):
     TIMED_OUT = "TIMED_OUT"
 
 
+class PauseState(Enum):
+    """Whether a test paused this execution, and whether resume must invoke."""
+
+    NOT_PAUSED = "NOT_PAUSED"
+    # Paused while idle: no handler was running and no invocation was due.
+    # Resume lifts the pause and the next trigger invokes as usual.
+    PAUSED = "PAUSED"
+    # Paused while progress was owed. Either the running handler checkpointed
+    # and was answered without a token, so it stopped as PENDING before it
+    # finished, or a scheduled invocation came due and was held back.
+    # Resume must start one new invocation to make up for it.
+    PAUSED_INVOCATION_DEFERRED = "PAUSED_INVOCATION_DEFERRED"
+
+
 @dataclass(frozen=True)
 class CheckpointIdempotencyRecord:
-    """Single-slot cache of the most recent accepted checkpoint response.
+    """Single-slot cache of the most recent accepted checkpoint response
+    with a checkpoint token.
 
-    Single-slot cache of the most recent accepted checkpoint response.
-    ``(client_token, inbound_checkpoint_token)`` pair is entitled to a
-    byte-identical response; this record is what we compare
-    against and replay from.
+    A matching ``(client_token, inbound_checkpoint_token)`` pair replays
+    this response without applying updates again. Pause-interrupted
+    checkpoints leave this record unchanged so their retries are rejected.
     """
 
     client_token: str
     inbound_checkpoint_token: str
-    outbound_checkpoint_token: str
+    outbound_checkpoint_token: str | None
     operations: list[Operation]
     next_marker: str | None
 
@@ -94,7 +108,7 @@ class CheckpointIdempotencyRecord:
         return cls(
             client_token=data["ClientToken"],
             inbound_checkpoint_token=data["InboundCheckpointToken"],
-            outbound_checkpoint_token=data["OutboundCheckpointToken"],
+            outbound_checkpoint_token=data.get("OutboundCheckpointToken"),
             operations=[
                 Operation.from_json_dict(op_data) for op_data in data["Operations"]
             ],
@@ -163,6 +177,33 @@ class Execution:
         self.result: DurableExecutionInvocationOutput | None = None
         self.consecutive_failed_invocation_attempts: int = 0
         self.close_status: ExecutionStatus | None = None
+        self._pause_state: PauseState = PauseState.NOT_PAUSED
+
+    @property
+    def pause_state(self) -> PauseState:
+        return self._pause_state
+
+    @property
+    def is_paused(self) -> bool:
+        return self._pause_state is not PauseState.NOT_PAUSED
+
+    @property
+    def has_deferred_invocation(self) -> bool:
+        return self._pause_state is PauseState.PAUSED_INVOCATION_DEFERRED
+
+    def pause(self) -> None:
+        if self._pause_state is PauseState.NOT_PAUSED:
+            self._pause_state = PauseState.PAUSED
+
+    def defer_invocation(self) -> None:
+        if self._pause_state is PauseState.PAUSED:
+            self._pause_state = PauseState.PAUSED_INVOCATION_DEFERRED
+
+    def resume(self) -> bool:
+        """Clear the pause and return whether the caller must schedule an invocation."""
+        deferred: bool = self._pause_state is PauseState.PAUSED_INVOCATION_DEFERRED
+        self._pause_state = PauseState.NOT_PAUSED
+        return deferred
 
     def touch_operation(self, operation_id: str) -> None:
         """Record a state-affecting event on an operation.
@@ -248,6 +289,7 @@ class Execution:
             "ConsecutiveFailedInvocationAttempts": self.consecutive_failed_invocation_attempts,
             "CloseStatus": self.close_status.value if self.close_status else None,
             "CurrentInvocationId": self.current_invocation_id,
+            "PauseState": self._pause_state.value,
         }
 
     @classmethod
@@ -315,6 +357,9 @@ class Execution:
         close_status_str = data.get("CloseStatus")
         execution.close_status = (
             ExecutionStatus(close_status_str) if close_status_str else None
+        )
+        execution._pause_state = PauseState(
+            data.get("PauseState", PauseState.NOT_PAUSED.value)
         )
 
         return execution

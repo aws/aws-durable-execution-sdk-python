@@ -66,7 +66,7 @@ def test_filesystem_execution_store_save_and_load(store, sample_execution):
 def test_filesystem_execution_store_load_nonexistent(store):
     """Test loading a nonexistent execution raises ResourceNotFoundException."""
     with pytest.raises(
-        ResourceNotFoundException, match="Execution nonexistent-arn not found"
+        ResourceNotFoundException, match="^Durable Execution does not exist$"
     ):
         store.load("nonexistent-arn")
 

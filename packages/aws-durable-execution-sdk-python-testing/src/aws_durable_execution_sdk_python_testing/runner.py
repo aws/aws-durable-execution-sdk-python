@@ -863,6 +863,53 @@ class DurableFunctionTestRunner:
             raise DurableFunctionsTestError(msg_arn)
         return output.execution_arn
 
+    def pause_execution(self, execution_arn: str, timeout: float = 60) -> None:
+        """Experimental; may change or be removed in a future release.
+
+        Pause an execution and wait for its current invocation to stop.
+
+        If a running invocation sends another checkpoint after the pause is
+        applied, its updates are accepted and saved. The response omits the
+        checkpoint token, causing the SDK to end the invocation with PENDING.
+        Further checkpoints from that invocation are rejected.
+
+        Returns once the pause request is applied and no invocation is running.
+        A running step is not interrupted.
+
+        Repeated calls leave an existing pause unchanged and wait again for
+        the running invocation to stop. Completed executions are unchanged.
+
+        If this call times out, the pause request is not cancelled.
+
+        Args:
+            execution_arn: Execution to pause.
+            timeout: Maximum wait in real seconds. Must be finite and positive.
+
+        Raises:
+            InvalidParameterValueException: If the ARN is blank.
+            ResourceNotFoundException: If the execution does not exist.
+            ValueError: If timeout is not finite and positive.
+            TimeoutError: If the pause wait times out.
+        """
+        self._executor.pause_execution(execution_arn, timeout=timeout)
+
+    def resume_execution(self, execution_arn: str) -> None:
+        """Experimental; may change or be removed in a future release.
+
+        Make the local checkpoint server answer this execution's
+        checkpoints with a token again.
+
+        Starts the invocation pause_execution(arn) held back, if any.
+
+        Repeated calls leave an execution that is not paused unchanged.
+        Completed executions are unchanged.
+
+        Raises:
+            InvalidParameterValueException: If the ARN is blank.
+            ResourceNotFoundException: If the execution does not exist.
+        """
+        self._executor.resume_execution(execution_arn)
+
     def wait_for_result(
         self, execution_arn: str, timeout: int = 60
     ) -> DurableFunctionTestResult:
@@ -1263,6 +1310,28 @@ class DurableFunctionCloudTestRunner:
             raise DurableFunctionsTestError(msg)
 
         return response.get("DurableExecutionArn")
+
+    def pause_execution(self, execution_arn: str, timeout: float = 60) -> None:
+        """Experimental; may change or be removed in a future release.
+
+        Cloud pause is not implemented; use DurableFunctionTestRunner instead.
+
+        Raises:
+            NotImplementedError: Always. No service request is sent.
+        """
+        msg = "pause_execution() is not implemented for DurableFunctionCloudTestRunner"
+        raise NotImplementedError(msg)
+
+    def resume_execution(self, execution_arn: str) -> None:
+        """Experimental; may change or be removed in a future release.
+
+        Cloud resume is not implemented; use DurableFunctionTestRunner instead.
+
+        Raises:
+            NotImplementedError: Always. No service request is sent.
+        """
+        msg = "resume_execution() is not implemented for DurableFunctionCloudTestRunner"
+        raise NotImplementedError(msg)
 
     def send_callback_success(
         self, callback_id: str, result: bytes | None = None
