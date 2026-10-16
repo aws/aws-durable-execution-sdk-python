@@ -5,7 +5,9 @@
 
 1. The durable function runs on the local test runner.
 2. The fake ``RunMicrovm`` sends the ``run`` hook to a real worker on a free
-   port, as Lambda does when the MicroVM starts.
+   port, as Lambda does when the MicroVM starts. It returns the worker's
+   address as the MicroVM's endpoint. So an HTTP delivery reaches the worker
+   too.
 3. The worker runs the job, and reports through a Lambda client double that
    forwards each callback call to the runner.
 
@@ -37,9 +39,15 @@ from aws_durable_execution_sdk_python_microvm_worker import (
 from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
 
 from aws_durable_execution_sdk_python_extras.microvm import (
+    MAX_RUN_HOOK_PAYLOAD_LENGTH,
     MicrovmConfig,
     MicrovmError,
+    MicrovmInvokeOptions,
+    MicrovmRequestConfig,
+    MicrovmSession,
+    MicrovmSessionConfig,
     microvm,
+    microvm_session,
 )
 
 
@@ -125,13 +133,17 @@ def composed(fake_client: Any) -> Iterator[Callable[..., Any]]:
         callbacks = RunnerCallbacks(runner)
         worker = start_microvm_worker(
             handler=job,
+            routes=fields.pop("routes", None),
             # The double has the three callback methods that the worker calls.
             create_client=lambda region: callbacks,  # type: ignore[arg-type, return-value]
             heartbeat_interval_seconds=fields.pop("heartbeat_interval", None),
             port=0,
         )
         closers.append(worker.close)
-        client = fake_client(launches=[run_hook_to(worker)])
+        client = fake_client(
+            launches=[run_hook_to(worker)],
+            endpoint=f"http://127.0.0.1:{worker.port}",
+        )
         holder["config"] = MicrovmConfig(
             image_identifier="img",
             execution_role_arn="role",
@@ -190,3 +202,85 @@ def test_sends_heartbeats_when_the_job_has_a_heartbeat_timeout(
 
     assert outcome == {"result": "done"}
     assert callbacks.heartbeats >= 2
+
+
+def test_runs_a_job_too_large_for_the_run_hook_over_http(composed: Any) -> None:
+    def job(job_input: Any, context: MicrovmJobContext) -> Any:
+        return {"length": len(job_input), "microvm": context.microvm_id}
+
+    outcome, client, _ = composed(job, "日" * MAX_RUN_HOOK_PAYLOAD_LENGTH)
+
+    assert outcome == {"result": {"length": 4096, "microvm": "mvm-1"}}
+    assert len(client.requests("create_microvm_auth_token")) == 1
+    assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
+
+
+def test_runs_a_job_on_a_route_of_the_worker(composed: Any) -> None:
+    def job(job_input: Any, context: MicrovmJobContext) -> Any:
+        return "handler"
+
+    outcome, _, _ = composed(
+        job,
+        {"n": 1},
+        request=MicrovmRequestConfig(path="/clone-build"),
+        routes={"/clone-build": lambda job_input, context: {"route": job_input}},
+    )
+
+    assert outcome == {"result": {"route": {"n": 1}}}
+
+
+def test_runs_two_session_jobs_in_one_worker(fake_client: Any, tmp_path: Any) -> None:
+    """The second job reads what the first job wrote in the same MicroVM."""
+
+    def job(job_input: Any, context: MicrovmJobContext) -> Any:
+        state = tmp_path / "artifact.txt"
+        if job_input == "build":
+            state.write_text(f"built in {context.microvm_id}")
+            return "built"
+        return state.read_text()
+
+    holder: dict[str, MicrovmSessionConfig] = {}
+
+    def pipeline(vm: MicrovmSession, ctx: DurableContext) -> Any:
+        options = MicrovmInvokeOptions(timeout=Duration.from_minutes(1))
+        return [
+            vm.invoke(ctx, "build", job_input="build", options=options),
+            vm.invoke(ctx, "test", job_input="test", options=options),
+        ]
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        return microvm_session(
+            context, "pipeline", config=holder["config"], handler=pipeline
+        )
+
+    runner = DurableFunctionTestRunner(handler=handler, poll_interval=0.05)
+    callbacks = RunnerCallbacks(runner)
+    worker = start_microvm_worker(
+        handler=job,
+        create_client=lambda region: callbacks,  # type: ignore[arg-type, return-value]
+        port=0,
+    )
+    try:
+        client = fake_client(
+            launches=[run_hook_to(worker)],
+            endpoint=f"http://127.0.0.1:{worker.port}",
+        )
+        holder["config"] = MicrovmSessionConfig(
+            image_identifier="img",
+            execution_role_arn="role",
+            timeout=Duration.from_minutes(5),
+            client=client,
+        )
+        arn = runner.run_async(input="null", execution_timeout=WAIT)
+        result = runner.wait_for_result(arn, timeout=WAIT)
+        assert worker.idle(WAIT)
+    finally:
+        worker.close()
+        runner.close()
+
+    assert result.status is InvocationStatus.SUCCEEDED, result.error
+    assert json.loads(result.result or "null") == ["built", "built in mvm-1"]
+    assert len(client.requests("run_microvm")) == 1
+    assert len(client.requests("create_microvm_auth_token")) == 2
+    assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]

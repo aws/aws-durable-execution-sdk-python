@@ -17,6 +17,7 @@ from aws_durable_execution_sdk_python_extras.microvm import (
     MicrovmError,
     MicrovmJobFailedError,
     MicrovmLaunchError,
+    MicrovmNotRunningError,
     MicrovmTimeoutError,
 )
 
@@ -39,6 +40,7 @@ def child_context_error(raised: Exception) -> ChildContextError:
         MicrovmLaunchError,
         MicrovmDeliveryError,
         MicrovmJobFailedError,
+        MicrovmNotRunningError,
         MicrovmTimeoutError,
     ],
 )
@@ -74,6 +76,7 @@ def test_every_microvm_error_is_a_durable_operation_error() -> None:
         MicrovmLaunchError,
         MicrovmDeliveryError,
         MicrovmJobFailedError,
+        MicrovmNotRunningError,
         MicrovmTimeoutError,
     ):
         assert issubclass(error_class, MicrovmError)
@@ -86,6 +89,7 @@ def test_every_microvm_error_is_a_durable_operation_error() -> None:
         MicrovmLaunchError,
         MicrovmDeliveryError,
         MicrovmJobFailedError,
+        MicrovmNotRunningError,
         MicrovmTimeoutError,
     ],
 )
