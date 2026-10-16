@@ -15,13 +15,16 @@ from aws_durable_execution_sdk_python.exceptions import (
     DurableApiErrorCategory,
     ExecutionError,
     InvocationError,
+    NonDeterministicExecutionError,
     RetryableSerDesError,
     SerDesError,
     StepError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
+    ContextDetails,
     ErrorObject,
+    Operation,
     OperationAction,
     OperationStatus,
     OperationSubType,
@@ -29,7 +32,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.operation.child import child_handler
 from aws_durable_execution_sdk_python.serdes import SerDes, SerDesContext
-from aws_durable_execution_sdk_python.state import ExecutionState
+from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 from aws_durable_execution_sdk_python.types import SummaryGenerator
 from tests.serdes_test import (
     CustomDictSerDes,
@@ -93,7 +96,11 @@ def test_child_handler_not_started(
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op1", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op1",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         config,
     )
@@ -153,7 +160,11 @@ def test_child_handler_already_succeeded():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op2", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op2",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         None,
     )
@@ -182,7 +193,11 @@ def test_child_handler_already_succeeded_none_result():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op3", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op3",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         None,
     )
@@ -214,7 +229,11 @@ def test_child_handler_already_failed():
             mock_callable,
             mock_state,
             OperationIdentifier(
-                "op4", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+                "op4",
+                OperationSubType.RUN_IN_CHILD_CONTEXT,
+                None,
+                "test_name",
+                operation_type=OperationType.CONTEXT,
             ),
             None,
         )
@@ -261,7 +280,11 @@ def test_child_handler_already_started(
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op5", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op5",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         config,
     )
@@ -322,7 +345,11 @@ def test_child_handler_callable_exception(
             mock_callable,
             mock_state,
             OperationIdentifier(
-                "op6", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+                "op6",
+                OperationSubType.RUN_IN_CHILD_CONTEXT,
+                None,
+                "test_name",
+                operation_type=OperationType.CONTEXT,
             ),
             config,
         )
@@ -383,7 +410,11 @@ def test_child_handler_error_wrapped():
             mock_callable,
             mock_state,
             OperationIdentifier(
-                "op7", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+                "op7",
+                OperationSubType.RUN_IN_CHILD_CONTEXT,
+                None,
+                "test_name",
+                operation_type=OperationType.CONTEXT,
             ),
             None,
         )
@@ -412,7 +443,11 @@ def test_child_handler_invocation_error_reraised():
             mock_callable,
             mock_state,
             OperationIdentifier(
-                "op7b", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+                "op7b",
+                OperationSubType.RUN_IN_CHILD_CONTEXT,
+                None,
+                "test_name",
+                operation_type=OperationType.CONTEXT,
             ),
             None,
         )
@@ -446,7 +481,11 @@ def test_child_handler_execution_error_reraised_without_fail_checkpoint():
             mock_callable,
             mock_state,
             OperationIdentifier(
-                "op7c", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+                "op7c",
+                OperationSubType.RUN_IN_CHILD_CONTEXT,
+                None,
+                "test_name",
+                operation_type=OperationType.CONTEXT,
             ),
             None,
         )
@@ -484,7 +523,11 @@ def test_child_handler_non_retryable_invocation_error_wrapped():
             mock_callable,
             mock_state,
             OperationIdentifier(
-                "op7d", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+                "op7d",
+                OperationSubType.RUN_IN_CHILD_CONTEXT,
+                None,
+                "test_name",
+                operation_type=OperationType.CONTEXT,
             ),
             None,
         )
@@ -540,7 +583,11 @@ def test_child_handler_preserves_data_across_nested_boundaries():
             inner_body,
             mock_state,
             OperationIdentifier(
-                "inner", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "inner_name"
+                "inner",
+                OperationSubType.RUN_IN_CHILD_CONTEXT,
+                None,
+                "inner_name",
+                operation_type=OperationType.CONTEXT,
             ),
             None,
         )
@@ -550,7 +597,11 @@ def test_child_handler_preserves_data_across_nested_boundaries():
             outer_body,
             mock_state,
             OperationIdentifier(
-                "outer", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "outer_name"
+                "outer",
+                OperationSubType.RUN_IN_CHILD_CONTEXT,
+                None,
+                "outer_name",
+                operation_type=OperationType.CONTEXT,
             ),
             None,
         )
@@ -590,7 +641,11 @@ def test_child_handler_with_config():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op8", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op8",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         config,
     )
@@ -620,7 +675,11 @@ def test_child_handler_default_serialization():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op9",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         None,
     )
@@ -656,7 +715,11 @@ def test_child_handler_custom_serdes_not_start() -> None:
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op9",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         child_config,
     )
@@ -687,7 +750,11 @@ def test_child_handler_custom_serdes_already_succeeded() -> None:
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op9",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         child_config,
     )
@@ -734,7 +801,11 @@ def test_child_handler_large_payload_with_summary_generator() -> None:
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op9",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         child_config,
     )
@@ -776,7 +847,11 @@ def test_child_handler_large_payload_without_summary_generator() -> None:
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op9",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         child_config,
     )
@@ -815,7 +890,11 @@ def test_child_handler_replay_children_mode() -> None:
     child_config: ChildConfig = ChildConfig()
 
     identifier = OperationIdentifier(
-        "op9", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        "op9",
+        OperationSubType.RUN_IN_CHILD_CONTEXT,
+        None,
+        "test_name",
+        operation_type=OperationType.CONTEXT,
     )
     actual_result = child_handler(
         mock_callable,
@@ -869,7 +948,11 @@ def test_small_payload_with_summary_generator():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op1", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op1",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         child_config,
     )
@@ -916,7 +999,11 @@ def test_small_payload_without_summary_generator():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op1", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op1",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         child_config,
     )
@@ -957,7 +1044,11 @@ def test_child_handler_is_virtual_no_start():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op1", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op1",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         config,
     )
@@ -995,7 +1086,11 @@ def test_child_handler_is_virtual_no_succeed():
     config = ChildConfig(is_virtual=True)
 
     identifier = OperationIdentifier(
-        "op2", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        "op2",
+        OperationSubType.RUN_IN_CHILD_CONTEXT,
+        None,
+        "test_name",
+        operation_type=OperationType.CONTEXT,
     )
     result = child_handler(
         mock_callable,
@@ -1037,7 +1132,11 @@ def test_child_handler_not_is_virtual_finish_mode():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "op3", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op3",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         config,
     )
@@ -1087,7 +1186,11 @@ def test_child_handler_is_virtual_with_exception():
     config = ChildConfig(is_virtual=True)
 
     identifier = OperationIdentifier(
-        "op4", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        "op4",
+        OperationSubType.RUN_IN_CHILD_CONTEXT,
+        None,
+        "test_name",
+        operation_type=OperationType.CONTEXT,
     )
     with pytest.raises(ChildContextError):
         child_handler(
@@ -1130,7 +1233,11 @@ def test_child_handler_not_is_virtual_with_exception():
             mock_callable,
             mock_state,
             OperationIdentifier(
-                "op5", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+                "op5",
+                OperationSubType.RUN_IN_CHILD_CONTEXT,
+                None,
+                "test_name",
+                operation_type=OperationType.CONTEXT,
             ),
             config,
         )
@@ -1178,7 +1285,11 @@ def test_child_handler_is_virtual_comparison():
         mock_callable1,
         mock_state1,
         OperationIdentifier(
-            "op1", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op1",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         config1,
     )
@@ -1194,13 +1305,92 @@ def test_child_handler_is_virtual_comparison():
         mock_callable2,
         mock_state2,
         OperationIdentifier(
-            "op2", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "op2",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         config2,
     )
 
     assert result2 == "test_result"
     assert mock_state2.create_checkpoint.call_count == 0  # No checkpoints
+
+
+@pytest.mark.parametrize(
+    ("status", "replay_children"),
+    [
+        (OperationStatus.SUCCEEDED, False),
+        (OperationStatus.SUCCEEDED, True),
+        (OperationStatus.FAILED, False),
+        (OperationStatus.STARTED, False),
+    ],
+)
+def test_child_handler_is_virtual_rejects_container_checkpoint(
+    status: OperationStatus, replay_children: bool
+):
+    """Reject a CONTEXT checkpoint at the id of a virtual child.
+
+    A virtual child never checkpoints itself, so the checkpoint was written by
+    a non-virtual child in an earlier invocation. Returning its result or
+    re-raising its error would skip the virtual body, so replay must fail
+    before the checkpoint is used.
+    """
+    mock_state = Mock(spec=ExecutionState)
+    mock_state.durable_execution_arn = "test_arn"
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_from_operation(
+            Operation(
+                operation_id="op1",
+                operation_type=OperationType.CONTEXT,
+                status=status,
+                sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+                name="test_name",
+                context_details=ContextDetails(
+                    replay_children=replay_children,
+                    result=(
+                        json.dumps("cached_result")
+                        if status is OperationStatus.SUCCEEDED
+                        else None
+                    ),
+                    error=(
+                        ErrorObject(
+                            message="Previous failure",
+                            type="ValueError",
+                            data=None,
+                            stack_trace=None,
+                        )
+                        if status is OperationStatus.FAILED
+                        else None
+                    ),
+                ),
+            )
+        )
+    )
+    mock_callable = Mock(return_value="fresh_result")
+
+    with pytest.raises(
+        NonDeterministicExecutionError, match="current child context is virtual"
+    ) as exc_info:
+        child_handler(
+            mock_callable,
+            mock_state,
+            OperationIdentifier(
+                "op1",
+                OperationSubType.RUN_IN_CHILD_CONTEXT,
+                None,
+                "test_name",
+                operation_type=OperationType.CONTEXT,
+            ),
+            ChildConfig(is_virtual=True),
+        )
+
+    assert exc_info.value.step_id == "op1"
+    mock_callable.assert_not_called()
+    mock_state.wrap_user_function.assert_not_called()
+    mock_state.create_checkpoint.assert_not_called()
+    mock_state.emit_child_context_end_hook.assert_not_called()
 
 
 # region first-run round-trip
@@ -1215,7 +1405,11 @@ def test_child_handler_first_run_returns_round_tripped_result():
     raw_result = {"key": "value"}
     config = ChildConfig(serdes=serdes)
     op_id = OperationIdentifier(
-        "child_rt", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+        "child_rt",
+        OperationSubType.RUN_IN_CHILD_CONTEXT,
+        None,
+        "test_name",
+        operation_type=OperationType.CONTEXT,
     )
 
     # --- First run ---
@@ -1288,7 +1482,11 @@ def test_child_handler_first_run_none_payload_skips_deserialize():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "child_none", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "child_none",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         ChildConfig(serdes=NonePayloadSerDes()),
     )
@@ -1319,7 +1517,11 @@ def test_child_handler_virtual_returns_round_tripped_result():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "child_virtual_rt", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "child_virtual_rt",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         ChildConfig(serdes=serdes, is_virtual=True),
     )
@@ -1354,7 +1556,11 @@ def test_child_handler_replay_children_returns_round_tripped_result():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "child_replay_rt", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+            "child_replay_rt",
+            OperationSubType.RUN_IN_CHILD_CONTEXT,
+            None,
+            "test_name",
+            operation_type=OperationType.CONTEXT,
         ),
         ChildConfig(serdes=serdes),
     )
@@ -1391,7 +1597,11 @@ def test_child_handler_permanent_serdes_error_surfaces_without_double_checkpoint
             mock_callable,
             mock_state,
             OperationIdentifier(
-                "childP", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+                "childP",
+                OperationSubType.RUN_IN_CHILD_CONTEXT,
+                None,
+                "test_name",
+                operation_type=OperationType.CONTEXT,
             ),
             ChildConfig(serdes=PermanentDeserializeSerDes()),
         )
@@ -1422,7 +1632,11 @@ def test_child_handler_transient_serdes_error_reraised():
             mock_callable,
             mock_state,
             OperationIdentifier(
-                "childT", OperationSubType.RUN_IN_CHILD_CONTEXT, None, "test_name"
+                "childT",
+                OperationSubType.RUN_IN_CHILD_CONTEXT,
+                None,
+                "test_name",
+                operation_type=OperationType.CONTEXT,
             ),
             ChildConfig(serdes=RetryableDeserializeSerDes()),
         )

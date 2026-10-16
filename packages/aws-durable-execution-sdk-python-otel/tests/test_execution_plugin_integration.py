@@ -265,6 +265,7 @@ def test_global_proxy_binds_sdk_provider_before_first_invocation(
     plugin.on_invocation_end(_invocation_end())
 
     assert {span.name for span in exporter.get_finished_spans()} == {
+        "DurableExecutionRoot",
         "Invocation",
         "Workflow",
     }
@@ -289,6 +290,7 @@ def test_parent_placeholder_supports_adot_style_parent_inspection() -> None:
     plugin.on_invocation_end(_invocation_end())
 
     assert {span.name for span in exporter.get_finished_spans()} == {
+        "DurableExecutionRoot",
         "Invocation",
         "Workflow",
         OP_NAME,
@@ -323,6 +325,7 @@ def test_global_proxy_disables_entire_invocation_until_sdk_provider_is_ready(
     _run_step_lifecycle(plugin)
     plugin.on_invocation_end(_invocation_end())
     assert {span.name for span in exporter.get_finished_spans()} == {
+        "DurableExecutionRoot",
         "Invocation",
         "Workflow",
         OP_NAME,

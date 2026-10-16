@@ -339,3 +339,57 @@ def test_derive_execution_root_span_id_differs_from_workflow_span_id():
     assert derive_execution_root_span_id(_ROOT_ARN) != derive_workflow_span_id(
         _ROOT_ARN
     )
+
+
+def test_trace_override_is_consumed_once_and_randomness_is_released() -> None:
+    fallback_trace = int("a" * 32, 16)
+    generator = DeterministicIdGenerator(
+        _StubIdGenerator(
+            trace_id=fallback_trace,
+            span_id=int("b" * 16, 16),
+            trace_id_is_random=True,
+        )
+    )
+    with generator._use_ids_for_span(trace_id=123, span_id=456):
+        assert generator.generate_trace_id() == 123
+        assert generator.is_trace_id_random() is False
+        assert generator.generate_span_id() == 456
+        # The SDK calls processors after generating this span's identity.
+        assert generator.is_trace_id_random() is True
+        assert generator.generate_trace_id() == fallback_trace
+        assert generator.generate_span_id() == int("b" * 16, 16)
+
+
+def test_public_trace_only_scope_preserves_existing_override() -> None:
+    generator = DeterministicIdGenerator(
+        _StubIdGenerator(
+            trace_id=123,
+            span_id=456,
+            trace_id_is_random=True,
+        )
+    )
+    with generator.use_ids(trace_id=789, span_id=None):
+        assert generator.generate_trace_id() == 789
+        assert generator.is_trace_id_random() is False
+        assert generator.generate_span_id() == 456
+        assert generator.is_trace_id_random() is False
+        assert generator.generate_trace_id() == 789
+
+
+def test_default_use_ids_preserves_scope_wide_trace_override() -> None:
+    """Existing advanced callers can intentionally create multiple roots on one trace."""
+    generator = DeterministicIdGenerator(
+        _StubIdGenerator(
+            trace_id=123,
+            span_id=456,
+            trace_id_is_random=True,
+        )
+    )
+    with generator.use_ids(trace_id=789, span_id=999):
+        assert generator.generate_trace_id() == 789
+        assert generator.generate_span_id() == 999
+        assert generator.generate_trace_id() == 789
+        assert generator.generate_span_id() == 456
+        assert generator.is_trace_id_random() is False
+    assert generator.generate_trace_id() == 123
+    assert generator.is_trace_id_random() is True

@@ -2957,6 +2957,86 @@ def test_durable_execution_replays_child_context_with_step_subtype():
     assert child_body_calls == []
 
 
+@pytest.mark.parametrize(
+    "child_status",
+    [OperationStatus.SUCCEEDED, OperationStatus.FAILED, OperationStatus.STARTED],
+)
+def test_durable_execution_rejects_non_virtual_child_checkpoint_in_virtual_replay(
+    child_status: OperationStatus,
+):
+    """Replay rejects a child changed from non-virtual to virtual.
+
+    A virtual child never checkpoints itself, so a CONTEXT checkpoint at its id
+    comes from a non-virtual child. Replay fails before the cached result or
+    error is used and before the child body runs.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    child_id = OperationIdNamespace().create_id_for_step(1)
+    execution_operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+    child_operation = Operation(
+        operation_id=child_id,
+        operation_type=OperationType.CONTEXT,
+        status=child_status,
+        sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+        name="child",
+        context_details=ContextDetails(
+            result=(
+                json.dumps("cached")
+                if child_status is OperationStatus.SUCCEEDED
+                else None
+            ),
+            error=(
+                ErrorObject(
+                    message="child failed",
+                    type="ValueError",
+                    data=None,
+                    stack_trace=None,
+                )
+                if child_status is OperationStatus.FAILED
+                else None
+            ),
+        ),
+    )
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution/exec1",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=InitialExecutionState(
+            operations=[execution_operation, child_operation],
+            next_marker="",
+        ),
+        service_client=mock_client,
+    )
+    child_body_calls: list[bool] = []
+
+    def child_body(_child: DurableContext) -> str:
+        child_body_calls.append(True)
+        return "executed"
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> str:
+        return context.run_in_child_context(
+            child_body,
+            name="child",
+            config=ChildConfig(is_virtual=True),
+        )
+
+    result = test_handler(invocation_input, _make_lambda_context())
+
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.NonDeterministicExecutionError"
+    )
+    assert "current child context is virtual" in result["Error"]["ErrorMessage"]
+    assert child_body_calls == []
+    mock_client.checkpoint.assert_not_called()
+
+
 @pytest.mark.parametrize("operation_kind", ["map", "parallel"])
 @pytest.mark.parametrize("parent_replay_children", [False, True])
 @pytest.mark.parametrize(

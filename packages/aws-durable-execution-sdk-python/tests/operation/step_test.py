@@ -84,7 +84,13 @@ def test_step_handler_already_succeeded():
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step1", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step1",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         None,
         mock_logger,
     )
@@ -115,7 +121,13 @@ def test_step_handler_already_succeeded_none_result():
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step2", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step2",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         None,
         mock_logger,
     )
@@ -149,7 +161,13 @@ def test_step_handler_already_failed():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step3", OperationSubType.STEP, None, "test_step"),
+            OperationIdentifier(
+                "step3",
+                OperationSubType.STEP,
+                None,
+                "test_step",
+                operation_type=OperationType.STEP,
+            ),
             None,
             mock_logger,
         )
@@ -180,7 +198,13 @@ def test_step_handler_started_at_most_once():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step4", OperationSubType.STEP, None, "test_step"),
+            OperationIdentifier(
+                "step4",
+                OperationSubType.STEP,
+                None,
+                "test_step",
+                operation_type=OperationType.STEP,
+            ),
             config,
             mock_logger,
         )
@@ -212,7 +236,13 @@ def test_step_handler_started_at_least_once():
     step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step5", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step5",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         config,
         mock_logger,
     )
@@ -234,7 +264,13 @@ def test_step_handler_success_at_least_once():
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step6", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step6",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         config,
         mock_logger,
     )
@@ -299,7 +335,13 @@ def test_step_context_exposes_current_attempt(
     result: str = step_handler(
         step_func,
         mock_state,
-        OperationIdentifier("step-attempt", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step-attempt",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY),
         mock_logger,
     )
@@ -336,7 +378,13 @@ def test_step_handler_success_at_most_once():
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step7", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step7",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         config,
         mock_logger,
     )
@@ -379,7 +427,13 @@ def test_step_handler_non_retriable_execution_error():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step8", OperationSubType.STEP, None, "test_step"),
+            OperationIdentifier(
+                "step8",
+                OperationSubType.STEP,
+                None,
+                "test_step",
+                operation_type=OperationType.STEP,
+            ),
             None,
             mock_logger,
         )
@@ -405,7 +459,13 @@ def test_step_handler_retry_success():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step9", OperationSubType.STEP, None, "test_step"),
+            OperationIdentifier(
+                "step9",
+                OperationSubType.STEP,
+                None,
+                "test_step",
+                operation_type=OperationType.STEP,
+            ),
             config,
             mock_logger,
         )
@@ -449,7 +509,13 @@ def test_step_handler_retry_exhausted():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step10", OperationSubType.STEP, None, "test_step"),
+            OperationIdentifier(
+                "step10",
+                OperationSubType.STEP,
+                None,
+                "test_step",
+                operation_type=OperationType.STEP,
+            ),
             config,
             mock_logger,
         )
@@ -498,7 +564,13 @@ def test_step_handler_retry_interrupted_error():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step11", OperationSubType.STEP, None, "test_step"),
+            OperationIdentifier(
+                "step11",
+                OperationSubType.STEP,
+                None,
+                "test_step",
+                operation_type=OperationType.STEP,
+            ),
             config,
             mock_logger,
         )
@@ -551,7 +623,13 @@ def test_step_handler_retry_with_existing_attempts():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step12", OperationSubType.STEP, None, "test_step"),
+            OperationIdentifier(
+                "step12",
+                OperationSubType.STEP,
+                None,
+                "test_step",
+                operation_type=OperationType.STEP,
+            ),
             config,
             mock_logger,
         )
@@ -589,7 +667,13 @@ def test_step_handler_pending_without_existing_attempts():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step12", OperationSubType.STEP, None, "test_step"),
+            OperationIdentifier(
+                "step12",
+                OperationSubType.STEP,
+                None,
+                "test_step",
+                operation_type=OperationType.STEP,
+            ),
             config,
             mock_logger,
         )
@@ -634,7 +718,13 @@ def test_step_handler_retry_handler_no_exception(mock_retry_handler):
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("step13", OperationSubType.STEP, None, "test_step"),
+            OperationIdentifier(
+                "step13",
+                OperationSubType.STEP,
+                None,
+                "test_step",
+                operation_type=OperationType.STEP,
+            ),
             None,
             mock_logger,
         )
@@ -660,7 +750,13 @@ def test_step_handler_custom_serdes_success():
     step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step6", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step6",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         config,
         mock_logger,
     )
@@ -696,7 +792,13 @@ def test_step_handler_custom_serdes_already_succeeded():
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step1", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step1",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         StepConfig(serdes=CustomDictSerDes()),
         mock_logger,
     )
@@ -745,7 +847,13 @@ def test_step_handler_first_run_returns_round_tripped_result():
     first_run_result = step_handler(
         mock_callable,
         first_run_state,
-        OperationIdentifier("step_rt", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step_rt",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         config,
         mock_logger,
     )
@@ -771,7 +879,13 @@ def test_step_handler_first_run_returns_round_tripped_result():
     replay_result = step_handler(
         Mock(return_value="should_not_call"),
         replay_state,
-        OperationIdentifier("step_rt", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step_rt",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         config,
         Mock(spec=Logger),
     )
@@ -818,7 +932,13 @@ def test_step_handler_first_run_none_payload_skips_deserialize():
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step_none", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step_none",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         config,
         mock_logger,
     )
@@ -845,7 +965,13 @@ def test_step_handler_empty_string_result_first_run():
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step1", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step1",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         config,
         mock_logger,
     )
@@ -879,7 +1005,13 @@ def test_step_handler_already_succeeded_empty_string_result():
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step1", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step1",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         StepConfig(serdes=PassThroughSerDes()),
         mock_logger,
     )
@@ -920,7 +1052,11 @@ def test_step_immediate_response_get_checkpoint_called_twice():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "step_immediate_1", OperationSubType.STEP, None, "test_step"
+            "step_immediate_1",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
         ),
         config,
         mock_logger,
@@ -959,7 +1095,11 @@ def test_step_immediate_response_create_checkpoint_sync_at_most_once():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "step_immediate_2", OperationSubType.STEP, None, "test_step"
+            "step_immediate_2",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
         ),
         config,
         mock_logger,
@@ -989,7 +1129,11 @@ def test_step_immediate_response_create_checkpoint_async_at_least_once():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "step_immediate_3", OperationSubType.STEP, None, "test_step"
+            "step_immediate_3",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
         ),
         config,
         mock_logger,
@@ -1033,7 +1177,11 @@ def test_step_immediate_response_immediate_success():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "step_immediate_4", OperationSubType.STEP, None, "test_step"
+            "step_immediate_4",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
         ),
         config,
         mock_logger,
@@ -1087,7 +1235,11 @@ def test_step_immediate_response_immediate_failure():
             mock_callable,
             mock_state,
             OperationIdentifier(
-                "step_immediate_5", OperationSubType.STEP, None, "test_step"
+                "step_immediate_5",
+                OperationSubType.STEP,
+                None,
+                "test_step",
+                operation_type=OperationType.STEP,
             ),
             config,
             mock_logger,
@@ -1127,7 +1279,11 @@ def test_step_immediate_response_no_immediate_response():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "step_immediate_6", OperationSubType.STEP, None, "test_step"
+            "step_immediate_6",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
         ),
         config,
         mock_logger,
@@ -1165,7 +1321,11 @@ def test_step_immediate_response_already_completed():
         mock_callable,
         mock_state,
         OperationIdentifier(
-            "step_immediate_7", OperationSubType.STEP, None, "test_step"
+            "step_immediate_7",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
         ),
         config,
         mock_logger,
@@ -1210,7 +1370,11 @@ def test_step_executes_function_when_second_check_returns_started():
         config=StepConfig(step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY),
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "step-1", OperationSubType.STEP, None, "test_step"
+            "step-1",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
         ),
         context_logger=mock_logger,
     )
@@ -1262,7 +1426,13 @@ def test_step_creates_start_checkpoint_when_status_is_ready():
     result = step_handler(
         mock_callable,
         mock_state,
-        OperationIdentifier("step_ready_1", OperationSubType.STEP, None, "test_step"),
+        OperationIdentifier(
+            "step_ready_1",
+            OperationSubType.STEP,
+            None,
+            "test_step",
+            operation_type=OperationType.STEP,
+        ),
         config,
         mock_logger,
     )
@@ -1305,7 +1475,13 @@ def test_step_handler_permanent_serdes_error_surfaces_without_double_checkpoint(
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("stepP", OperationSubType.STEP, None, "test_step"),
+            OperationIdentifier(
+                "stepP",
+                OperationSubType.STEP,
+                None,
+                "test_step",
+                operation_type=OperationType.STEP,
+            ),
             StepConfig(
                 step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY,
                 serdes=PermanentDeserializeSerDes(),
@@ -1341,7 +1517,13 @@ def test_step_handler_permanent_serdes_error_bypasses_retry_strategy():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("stepPR", OperationSubType.STEP, None, "test_step"),
+            OperationIdentifier(
+                "stepPR",
+                OperationSubType.STEP,
+                None,
+                "test_step",
+                operation_type=OperationType.STEP,
+            ),
             StepConfig(
                 step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY,
                 serdes=PermanentDeserializeSerDes(),
@@ -1381,7 +1563,13 @@ def test_step_handler_transient_serdes_error_reraised():
         step_handler(
             mock_callable,
             mock_state,
-            OperationIdentifier("stepT", OperationSubType.STEP, None, "test_step"),
+            OperationIdentifier(
+                "stepT",
+                OperationSubType.STEP,
+                None,
+                "test_step",
+                operation_type=OperationType.STEP,
+            ),
             StepConfig(
                 step_semantics=StepSemantics.AT_LEAST_ONCE_PER_RETRY,
                 serdes=RetryableDeserializeSerDes(),

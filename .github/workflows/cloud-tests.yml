@@ -27,13 +27,26 @@ jobs:
     # 1. Run for non-PR events, such as scheduled runs and manual invocations
     # 2. For PRs, run only same-repo branches from non-Dependabot actors; forked PRs or Dependabot should not access secrets.
     if: github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    # CodeBuild-hosted runner in the Python testing account (Lambda compute,
+    # Amazon Linux python3.13 image). Fork PRs are already excluded by the `if:`
+    # above, so the plain label is safe. The label must match the CodeBuild
+    # project name exactly.
+    runs-on:
+      - codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: read
       id-token: write
+    env:
+      # The runner image ships /etc/pip.conf with `[global] target =
+      # /tmp/opt/python/site-packages` on PYTHONPATH, so every pip install
+      # (including Hatch's env installs) would land in one shared directory.
+      # Ignore both so each environment stays isolated.
+      PIP_CONFIG_FILE: /dev/null
+      PYTHONPATH: ""
     concurrency:
       group: cloud-tests-${{ matrix.python-prefix }}
       cancel-in-progress: false
+      queue: max
     strategy:
       fail-fast: false
       matrix:
@@ -50,9 +63,12 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Setup Python
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      # The runner image is Amazon Linux; actions/setup-python only ships Ubuntu
+      # builds, so uv provides the interpreter and activates a venv.
+      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       with:
         python-version: ${{ matrix.python-version }}
+        activate-environment: true
 
     - name: Configure AWS credentials
       if: github.event_name != 'workflow_dispatch' || github.actor != 'nektos/act'
@@ -75,7 +91,7 @@ jobs:
         echo "Using AWS test account $ACTUAL_ACCOUNT_ID"
 
     - name: Install Hatch
-      run: pip install hatch
+      run: uv pip install hatch==1.16.5
 
     - name: Setup SAM CLI
       uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
@@ -100,8 +116,11 @@ jobs:
         sam build --template-file packages/aws-durable-execution-sdk-python-examples/template.generated.json
 
         ADOT_LAYER_ARN=$(
-          gh api repos/aws-observability/aws-otel-python-instrumentation/releases/latest \
-            --jq .body |
+          curl -sSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/aws-observability/aws-otel-python-instrumentation/releases/latest |
+            python3 -c "import sys, json; print(json.load(sys.stdin)['body'])" |
             awk -F '|' -v region="$AWS_REGION" '
               $2 ~ "^[[:space:]]*" region "[[:space:]]*$" {
                 gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3)
@@ -114,7 +133,9 @@ jobs:
           echo "Could not resolve the latest ADOT Python layer for $AWS_REGION"
           exit 1
         fi
-        aws lambda get-layer-version-by-arn \
+        # Parallel jobs can throttle this read; keep retries local to the lookup.
+        AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=8 \
+          aws lambda get-layer-version-by-arn \
           --arn "$ADOT_LAYER_ARN" \
           --region "$AWS_REGION" \
           --query LayerVersionArn \
