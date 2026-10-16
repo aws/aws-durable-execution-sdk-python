@@ -27,7 +27,8 @@ MAX_MICROVM_DURATION_SECONDS = 28_800
 
 @dataclass(frozen=True, kw_only=True)
 class MicrovmRequestConfig:
-    """How :func:`microvm` delivers a job over HTTP.
+    """How :func:`microvm` and :meth:`MicrovmSession.invoke` deliver a job over
+    HTTP.
 
     An HTTP delivery POSTs the job document to a route of the application in
     the MicroVM. The route must answer with a 2xx status at once, and run the
@@ -50,9 +51,10 @@ class MicrovmRequestConfig:
 
     ``None`` sends the job to :data:`DEFAULT_MICROVM_JOB_PATH`. The worker
     package serves that path with its ``handler``. A path sends the job to one
-    of your own routes instead, and it selects HTTP delivery for every input
-    size. The worker runs a job that arrives in the ``run`` hook with its
-    ``handler``, not with a route. So a job for a route must go over HTTP.
+    of your own routes instead. For :func:`microvm`, a path also selects HTTP
+    delivery for every input size. The worker runs a job that arrives in the
+    ``run`` hook with its ``handler``, not with a route. So a job for a route
+    must go over HTTP. A session job always goes over HTTP.
     """
 
     port: int | None = None
@@ -61,8 +63,9 @@ class MicrovmRequestConfig:
     ``None`` uses port 8080, the port that the MicroVM endpoint forwards to by
     default. The port applies only when the job goes over HTTP. Lambda sends
     the ``run`` hook to the port in the image's hook configuration, not to
-    this port. So without a ``path``, the port is used only for an input too
-    large for the ``run`` hook.
+    this port. So for :func:`microvm` without a ``path``, the port is used
+    only for an input too large for the ``run`` hook. A session job always
+    uses the port.
     """
 
     retry_window: Duration | None = None

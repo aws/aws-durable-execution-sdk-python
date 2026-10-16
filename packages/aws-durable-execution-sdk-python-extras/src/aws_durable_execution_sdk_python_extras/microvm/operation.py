@@ -26,6 +26,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     CallbackError,
     CallbackTimeoutError,
     ChildContextError,
+    ExecutionError,
     InvocationError,
     StepError,
     ValidationError,
@@ -720,6 +721,11 @@ class _OperationScope(_MicrovmScope):
 
         try:
             result = callback.result()
+        except ExecutionError:
+            # The execution fails without a retry, and the core SDK records
+            # no outcome for the child context. A terminate step recorded now
+            # would change that history. So the error passes through.
+            raise
         except InvocationError as error:
             # An SDK invocation error is not a job outcome. A retryable one
             # makes Lambda run the invocation again, and the replay waits for

@@ -18,6 +18,7 @@ from aws_durable_execution_sdk_python.context import Callback, DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
     InvocationError,
+    NonDeterministicExecutionError,
     RetryableSerDesError,
     ValidationError,
 )
@@ -1053,3 +1054,97 @@ def test_wraps_a_job_error_that_leaves_a_child_context_of_the_handler(
     ]
     assert "MicrovmJobFailedError" in inside
     assert len(client.requests("terminate_microvm")) == 1
+
+
+def test_records_the_handlers_non_determinism_and_does_not_terminate(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    client = fake_client(endpoint=fake_endpoint().url)
+    names = ["build"]
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        first = vm.invoke(ctx, names[0], job_input=1, options=job())
+        return [first, vm.invoke(ctx, "test", job_input=2, options=job())]
+
+    runner = DurableFunctionTestRunner(
+        handler=session_handler(session_config(client), body), poll_interval=0.05
+    )
+    try:
+        arn = runner.run_async(input="null", execution_timeout=WAIT)
+        build = runner.wait_for_callback(arn, name="build.callback", timeout=WAIT)
+        runner.send_callback_success(build, b"1")
+        test = runner.wait_for_callback(arn, name="test.callback", timeout=WAIT)
+        # A deploy renames the first job while the execution waits.
+        names[0] = "compile"
+        runner.send_callback_success(test, b"2")
+        result = runner.wait_for_result(arn, timeout=WAIT)
+    finally:
+        runner.close()
+
+    assert result.status is InvocationStatus.FAILED
+    assert result.error is not None
+    assert "current='compile'" in (result.error.message or "")
+    assert client.requests("terminate_microvm") == []
+
+
+def test_wraps_an_sdk_error_that_leaves_the_handler(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    # The JavaScript operation passes an SDK error to the caller with its own
+    # class. This port follows run_in_child_context instead.
+    client = fake_client(endpoint=fake_endpoint().url)
+    config = session_config(client)
+
+    def fail(_: Any) -> Any:
+        msg = "no artifact"
+        raise LookupError(msg)
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        def body(vm: MicrovmSession, ctx: DurableContext) -> Any:
+            return ctx.step(
+                fail,
+                name="fetch",
+                config=StepConfig(retry_strategy=lambda e, a: RetryDecision.no_retry()),
+            )
+
+        try:
+            microvm_session(context, "pipeline", config=config, handler=body)
+        except ChildContextError as error:
+            return [type(error.__cause__).__name__, error.message]
+        return None
+
+    result = run(handler)
+
+    assert outcome(result) == ["StepError", "no artifact"]
+    assert len(client.requests("terminate_microvm")) == 1
+
+
+def test_passes_an_execution_error_of_a_job_wait_through(
+    fake_client: Any, fake_endpoint: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The core SDK records no outcome for an ExecutionError. So the job does
+    # not fail with it, and the session does not terminate for it.
+    def result_fails(self: Any) -> Any:
+        msg = "history does not match"
+        raise NonDeterministicExecutionError(msg)
+
+    monkeypatch.setattr(Callback, "result", result_fails)
+    client = fake_client(endpoint=fake_endpoint().url)
+
+    def body(vm: MicrovmSession, ctx: DurableContext, event: Any) -> Any:
+        return vm.invoke(ctx, "build", job_input=1, options=job())
+
+    runner = DurableFunctionTestRunner(
+        handler=session_handler(session_config(client), body), poll_interval=0.05
+    )
+    try:
+        arn = runner.run_async(input="null", execution_timeout=WAIT)
+        result = runner.wait_for_result(arn, timeout=WAIT)
+    finally:
+        runner.close()
+
+    assert result.status is InvocationStatus.FAILED
+    assert result.error is not None
+    assert "history does not match" in (result.error.message or "")
+    assert client.requests("terminate_microvm") == []

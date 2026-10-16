@@ -21,6 +21,7 @@ from aws_durable_execution_sdk_python.context import Callback, DurableContext
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
     InvocationError,
+    NonDeterministicExecutionError,
 )
 from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
@@ -1086,3 +1087,30 @@ def test_passes_an_invocation_error_of_the_wait_through(
         else {"error": "MicrovmError", "message": 'MicroVM "build": interrupted'}
     )
     assert order == (["complete", "terminate"] if retryable else ["terminate"])
+
+
+def test_passes_an_execution_error_of_the_wait_through(
+    fake_client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The core SDK records no outcome for an ExecutionError, and the
+    # execution fails without a retry. A terminate step recorded for it would
+    # change that history. So the MicroVM runs until its maximum duration.
+    def result_fails(self: Any) -> Any:
+        msg = "history does not match"
+        raise NonDeterministicExecutionError(msg)
+
+    monkeypatch.setattr(Callback, "result", result_fails)
+    client = fake_client()
+    runner = DurableFunctionTestRunner(
+        handler=catching(config_with(client)), poll_interval=0.05
+    )
+    try:
+        arn = runner.run_async(input="{}", execution_timeout=WAIT)
+        result = runner.wait_for_result(arn, timeout=WAIT)
+    finally:
+        runner.close()
+
+    assert result.status is InvocationStatus.FAILED
+    assert result.error is not None
+    assert "history does not match" in (result.error.message or "")
+    assert client.requests("terminate_microvm") == []
