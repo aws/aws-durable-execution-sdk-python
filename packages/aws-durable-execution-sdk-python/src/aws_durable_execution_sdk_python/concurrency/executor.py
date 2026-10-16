@@ -292,6 +292,7 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
         execution_state.register_branch_pool(pool)
 
         def submit(branch: Branch[CallableType, ResultType]) -> None:
+            execution_state.invocation_deadline.check()
             branch.start()
             if execution_state._plugin_executor._plugins:  # noqa: SLF001
                 # Every admission/resume gets its own Context. Branch bindings
@@ -323,6 +324,7 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             # and the reason, so user code runs at most once per change.
             decision: CompletionDecision | None = None
             while True:
+                execution_state.invocation_deadline.check()
                 if needs_snapshot_rebuild:
                     items_snapshot = (
                         self._build_items_snapshot()
@@ -386,7 +388,9 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 if resume_times:
                     timeout = max(resume_times[0] - time.time(), 0)
                 try:
-                    event: BranchEvent[ResultType] = events.get(timeout=timeout)
+                    event: BranchEvent[ResultType] = events.get(
+                        timeout=execution_state.invocation_deadline.remaining(timeout)
+                    )
                 except queue.Empty:
                     # A timed resume came due while branches were running.
                     continue

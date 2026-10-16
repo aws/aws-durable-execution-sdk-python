@@ -6,6 +6,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from aws_durable_execution_sdk_python.deadline import InvocationDeadline
+
 # Mock the executor.execute method
 from aws_durable_execution_sdk_python.plugin import PluginExecutor
 from aws_durable_execution_sdk_python.concurrency.models import (
@@ -54,6 +56,7 @@ def create_test_context(
     """Helper to create DurableContext for tests with required execution_context."""
     if state is None:
         state = Mock(spec=ExecutionState)
+        state.invocation_deadline = InvocationDeadline()
         state.durable_execution_arn = (
             "arn:aws:durable:us-east-1:123456789012:execution/test"
         )
@@ -188,6 +191,11 @@ def test_map_handler():
 
     # Create a minimal ExecutionState mock
     class MockExecutionState:
+        invocation_deadline = InvocationDeadline()
+
+        def check_operation_active(self, _identifier):
+            pass
+
         _plugin_executor = PluginExecutor([])
 
         def register_branch_pool(self, pool):
@@ -232,6 +240,11 @@ def test_map_handler_with_none_config():
         return func("mock_context")
 
     class MockExecutionState:
+        invocation_deadline = InvocationDeadline()
+
+        def check_operation_active(self, _identifier):
+            pass
+
         _plugin_executor = PluginExecutor([])
 
         def register_branch_pool(self, pool):
@@ -370,6 +383,11 @@ def test_map_handler_calls_executor_execute():
     ) as mock_execute:
 
         class MockExecutionState:
+            invocation_deadline = InvocationDeadline()
+
+            def check_operation_active(self, _identifier):
+                pass
+
             _plugin_executor = PluginExecutor([])
 
             def register_branch_pool(self, pool):
@@ -429,6 +447,11 @@ def test_map_handler_with_none_config_creates_default():
         executor_context.create_child_context = lambda *args, **kwargs: Mock()
 
         class MockExecutionState:
+            invocation_deadline = InvocationDeadline()
+
+            def check_operation_active(self, _identifier):
+                pass
+
             _plugin_executor = PluginExecutor([])
 
             def register_branch_pool(self, pool):
@@ -489,6 +512,11 @@ def test_map_handler_with_serdes():
     executor_context.create_child_context = lambda *args, **kwargs: child_context
 
     class MockExecutionState:
+        invocation_deadline = InvocationDeadline()
+
+        def check_operation_active(self, _identifier):
+            pass
+
         _plugin_executor = PluginExecutor([])
 
         def register_branch_pool(self, pool):
@@ -544,6 +572,11 @@ def test_map_handler_with_summary_generator():
     executor_context.create_child_context = Mock(return_value=_child_ctx)
 
     class MockExecutionState:
+        invocation_deadline = InvocationDeadline()
+
+        def check_operation_active(self, _identifier):
+            pass
+
         _plugin_executor = PluginExecutor([])
 
         def register_branch_pool(self, pool):
@@ -590,6 +623,11 @@ def test_map_handler_default_summary_generator():
     executor_context.create_child_context = Mock(return_value=Mock())  # SLF001
 
     class MockExecutionState:
+        invocation_deadline = InvocationDeadline()
+
+        def check_operation_active(self, _identifier):
+            pass
+
         _plugin_executor = PluginExecutor([])
 
         def register_branch_pool(self, pool):
@@ -635,6 +673,11 @@ def test_map_handler_with_explicit_none_summary_generator():
     config = MapConfig(summary_generator=None)
 
     class MockExecutionState:
+        invocation_deadline = InvocationDeadline()
+
+        def check_operation_active(self, _identifier):
+            pass
+
         _plugin_executor = PluginExecutor([])
 
         def register_branch_pool(self, pool):
@@ -686,6 +729,11 @@ def test_map_handler_replay_mechanism():
 
     # Mock execution state that indicates operation already succeeded
     class MockExecutionState:
+        invocation_deadline = InvocationDeadline()
+
+        def check_operation_active(self, _identifier):
+            pass
+
         _plugin_executor = PluginExecutor([])
 
         def register_branch_pool(self, pool):
@@ -761,6 +809,11 @@ def test_map_handler_replay_with_replay_children():
 
     # Mock execution state that indicates operation succeeded but children need replay
     class MockExecutionState:
+        invocation_deadline = InvocationDeadline()
+
+        def check_operation_active(self, _identifier):
+            pass
+
         _plugin_executor = PluginExecutor([])
 
         def register_branch_pool(self, pool):
@@ -870,6 +923,11 @@ def test_map_handler_first_execution_then_replay_integration():
     execution_count = 0
 
     class MockExecutionState:
+        invocation_deadline = InvocationDeadline()
+
+        def check_operation_active(self, _identifier):
+            pass
+
         _plugin_executor = PluginExecutor([])
 
         def register_branch_pool(self, pool):
@@ -974,6 +1032,7 @@ def test_map_item_serialize(mock_serialize, item_serdes, batch_serdes):
         return child_checkpoint if op_id.startswith("child-") else parent_checkpoint
 
     mock_state = Mock()
+    mock_state.invocation_deadline = InvocationDeadline()
     mock_state.durable_execution_arn = "arn:test"
     mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
     mock_state.create_checkpoint = Mock()
@@ -1046,6 +1105,7 @@ def test_map_item_deserialize(mock_deserialize, item_serdes, batch_serdes):
         return child_checkpoint if op_id.startswith("child-") else parent_checkpoint
 
     mock_state = Mock()
+    mock_state.invocation_deadline = InvocationDeadline()
     mock_state.durable_execution_arn = "arn:test"
     mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
     mock_state.create_checkpoint = Mock()
@@ -1102,6 +1162,11 @@ def test_map_result_serialization_roundtrip():
         return {"item": item.upper(), "index": idx}
 
     class MockExecutionState:
+        invocation_deadline = InvocationDeadline()
+
+        def check_operation_active(self, _identifier):
+            pass
+
         _plugin_executor = PluginExecutor([])
 
         def register_branch_pool(self, pool):
@@ -1183,6 +1248,7 @@ def test_map_handler_serializes_batch_result():
                 )
 
             mock_state = Mock()
+            mock_state.invocation_deadline = InvocationDeadline()
             mock_state.durable_execution_arn = "arn:test"
             mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
             mock_state.create_checkpoint = Mock()
@@ -1256,6 +1322,7 @@ def test_map_default_serdes_serializes_batch_result():
                 )
 
             mock_state = Mock()
+            mock_state.invocation_deadline = InvocationDeadline()
             mock_state.durable_execution_arn = "arn:test"
             mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
             mock_state.create_checkpoint = Mock()
@@ -1342,6 +1409,7 @@ def test_map_custom_serdes_serializes_batch_result():
                 )
 
             mock_state = Mock()
+            mock_state.invocation_deadline = InvocationDeadline()
             mock_state.durable_execution_arn = "arn:test"
             mock_state.get_checkpoint_result = Mock(side_effect=get_checkpoint)
             mock_state.create_checkpoint = Mock()
@@ -1397,6 +1465,7 @@ def test_map_with_empty_list_should_exit_early():
         return f"processed_{item}"
 
     mock_state = Mock()
+    mock_state.invocation_deadline = InvocationDeadline()
     mock_state.durable_execution_arn = "arn:test"
 
     parent_checkpoint = Mock()
@@ -1557,6 +1626,11 @@ def test_map_handler_defaults_summary_generator_for_user_config():
     """
 
     class MockExecutionState:
+        invocation_deadline = InvocationDeadline()
+
+        def check_operation_active(self, _identifier):
+            pass
+
         _plugin_executor = PluginExecutor([])
 
         def register_branch_pool(self, pool):
@@ -1638,6 +1712,11 @@ def test_map_handler_with_should_complete_predicate():
     ) as mock_execute:
 
         class MockExecutionState:
+            invocation_deadline = InvocationDeadline()
+
+            def check_operation_active(self, _identifier):
+                pass
+
             _plugin_executor = PluginExecutor([])
 
             def register_branch_pool(self, pool):

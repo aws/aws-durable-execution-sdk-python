@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.deadline import InvocationDeadline
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     BotoClientError,
@@ -193,6 +194,8 @@ def durable_execution(
     plugin_executor = PluginExecutor(configured_plugins)
 
     def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
+        deadline = InvocationDeadline.from_lambda_context(context)
+        deadline.check()
         invocation_input: DurableExecutionInvocationInput
         service_client: DurableServiceClient
 
@@ -228,6 +231,7 @@ def durable_execution(
             service_client=service_client,
             plugin_executor=plugin_executor,
             updated_operation_ids=invocation_input.updated_operation_ids,
+            invocation_deadline=deadline,
         )
 
         try:
@@ -286,6 +290,7 @@ def durable_execution(
             )
             try:
                 # Background checkpointing errors will propagate through CompletionEvent.wait() as BackgroundThreadError
+                deadline.check()
                 result = func(input_event, durable_context)
 
                 # done with userland
@@ -445,6 +450,7 @@ def durable_execution(
                         )
                         execution_operation = execution_state.get_execution_operation()
 
+                        deadline.check()
                         # execute the plugins
                         plugin_executor.on_invocation_start(
                             execution_arn=invocation_input.durable_execution_arn,
@@ -470,6 +476,7 @@ def durable_execution(
                         output = plugin_executor._run_in_invocation_context(
                             invoke_handler
                         )
+                    execution_state.check_invocation_result()
                     plugin_executor.on_invocation_end(
                         DurableExecutionInvocationOutput.from_dict(output)
                     )
@@ -492,7 +499,11 @@ def durable_execution(
             else:
                 # Preserve the original fresh-worker context without plugins.
                 invocation_future = executor.submit(invoke_worker)
-            return invocation_future.result()
+            result = invocation_future.result()
+        # Cleanup hooks and all owned workers have returned. A hook can consume
+        # the remaining budget; do not call End again when this check fails.
+        execution_state.check_invocation_result()
+        return result
 
     return wrapper
 

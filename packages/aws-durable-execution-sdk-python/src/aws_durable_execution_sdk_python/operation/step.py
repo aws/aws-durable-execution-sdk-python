@@ -12,6 +12,7 @@ from aws_durable_execution_sdk_python.config import (
 from aws_durable_execution_sdk_python.exceptions import (
     ExecutionError,
     InvalidStateError,
+    InvocationDeadlineExceeded,
     RetryableSerDesError,
     SerDesError,
     StepError,
@@ -266,6 +267,10 @@ class StepOperationExecutor(OperationExecutor[T]):
                 self.operation_identifier.name,
             )
             return return_value
+        except InvocationDeadlineExceeded:
+            # Deadline interruption belongs to the invocation, not the step
+            # retry policy or persisted operation failure.
+            raise
         except RetryableSerDesError:
             # Transient serdes failure: fail the invocation for backend retry,
             # bypassing the step retry strategy. For AT_MOST_ONCE steps the

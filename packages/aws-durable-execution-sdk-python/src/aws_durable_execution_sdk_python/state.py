@@ -16,12 +16,14 @@ from enum import Enum
 from threading import Lock
 from typing import TYPE_CHECKING, Callable, NoReturn
 
+from aws_durable_execution_sdk_python.deadline import InvocationDeadline
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
     CheckpointError,
     DurableExecutionsError,
     DurableOperationError,
     GetExecutionStateError,
+    InvocationDeadlineExceeded,
     OrphanedChildException,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
@@ -112,9 +114,10 @@ class ScheduledRefresh:
     earliest_check_time: float
     completion_event: CompletionEvent
     cancelled: threading.Event = field(default_factory=threading.Event)
+    invocation_deadline: InvocationDeadline = field(default_factory=InvocationDeadline)
 
     def wait(self, timeout: float | None = None) -> bool:
-        return self.completion_event.wait(timeout)
+        return self.invocation_deadline.wait(self.completion_event, timeout)
 
     def is_set(self) -> bool:
         return self.completion_event.is_set()
@@ -369,8 +372,11 @@ class ExecutionState:
         plugin_executor: PluginExecutor,
         batcher_config: CheckpointBatcherConfig | None = None,
         updated_operation_ids: list[str] | None = None,
+        invocation_deadline: InvocationDeadline | None = None,
     ):
         self.durable_execution_arn: str = durable_execution_arn
+        self.invocation_deadline = invocation_deadline or InvocationDeadline()
+        self._terminal_execution_acknowledged = threading.Event()
         self._current_checkpoint_token: str = initial_checkpoint_token
         self._operations: dict[str, Operation] = dict(operations)
         self._service_client: DurableServiceClient = service_client
@@ -453,6 +459,8 @@ class ExecutionState:
         initial_operations: list[Operation],
         checkpoint_token: str,
         next_marker: str | None,
+        *,
+        finish_terminal_checkpoint: bool = False,
     ) -> list[Operation]:
         """Add initial operations and fetch all paginated operations from the Durable Functions API. This method is thread_safe.
 
@@ -476,6 +484,15 @@ class ExecutionState:
         )
         try:
             while next_marker:
+                try:
+                    self.invocation_deadline.check()
+                except InvocationDeadlineExceeded:
+                    if not finish_terminal_checkpoint:
+                        raise
+                    # The terminal execution outcome is authoritative. Preserve
+                    # inline/already-read metadata without starting another I/O
+                    # request after expiry merely to finish its metadata pages.
+                    break
                 output: StateOutput = self._service_client.get_execution_state(
                     durable_execution_arn=self.durable_execution_arn,
                     checkpoint_token=checkpoint_token,
@@ -642,12 +659,37 @@ class ExecutionState:
             operation_id=operation_id,
         )
 
-    def _reject_if_parent_done(self, operation_update: OperationUpdate) -> None:
+    def check_operation_active(self, identifier: OperationIdentifier) -> None:
+        """Reject new work under an expired invocation or completed ancestor."""
+        self.invocation_deadline.check()
+        with self._parent_done_lock:
+            self._reject_if_parent_done(identifier)
+            if identifier.parent_id:
+                self._parent_to_children.setdefault(identifier.parent_id, set()).add(
+                    identifier.operation_id
+                )
+
+    def check_invocation_result(self) -> None:
+        # A terminal execution checkpoint is already authoritative. Preserve it
+        # even if local cleanup took the remaining invocation budget.
+        if not self._terminal_execution_acknowledged.is_set():
+            self.invocation_deadline.check()
+
+    def _reject_if_parent_done(
+        self, operation_update: OperationUpdate | OperationIdentifier
+    ) -> None:
         """Raise OrphanedChildException when the operation is orphaned.
 
         Must be called while holding _parent_done_lock so the check can be
         linearized with parent completion and, at the final call site, enqueue.
         """
+        if (
+            operation_update.parent_id in self._parent_done
+            or operation_update.parent_id in self._terminal_contexts
+        ):
+            # Inherit cancellation even when this child did not exist when its
+            # ancestor completed. Registration and completion share this lock.
+            self._parent_done.add(operation_update.operation_id)
         if operation_update.operation_id not in self._parent_done:
             return
         logger.debug(
@@ -731,6 +773,7 @@ class ExecutionState:
             # Empty checkpoint (async for performance)
             execution_state.create_checkpoint(is_sync=False)
         """
+        self.invocation_deadline.check()
         # if this is CONTEXT complete, mark incomplete descendants as orphans so the children can't complete after the parent
         if operation_update is not None:
             # Use single lock to coordinate completion and checkpoint validation
@@ -798,6 +841,7 @@ class ExecutionState:
         # _completion_lock and hold both through queue insertion so parent completion
         # cannot mark the operation orphaned between the final check and enqueue.
         with self._completion_lock:
+            self.invocation_deadline.check()
             if self._checkpointing_failed.is_set():
                 # Raises the stored BackgroundThreadError.
                 self._checkpointing_failed.wait()
@@ -818,7 +862,21 @@ class ExecutionState:
                 raise DurableExecutionsError(msg)
 
             # Wait for completion - will raise BackgroundThreadError if background thread fails
-            completion_event.wait()
+            try:
+                self.invocation_deadline.wait(completion_event)
+            except InvocationDeadlineExceeded:
+                if (
+                    operation_update is not None
+                    and operation_update.operation_type is OperationType.EXECUTION
+                    and operation_update.action
+                    in {OperationAction.SUCCEED, OperationAction.FAIL}
+                    and self._terminal_execution_acknowledged.is_set()
+                ):
+                    # The service already accepted this terminal outcome. Finish
+                    # its local processing rather than report a retry after it.
+                    completion_event.wait()
+                else:
+                    raise
         else:
             logger.debug("Enqueued checkpoint operation for asynchronous processing")
 
@@ -831,8 +889,13 @@ class ExecutionState:
         caller waits on the handle when it needs the refreshed operations, and
         cancels it if it stops needing them.
         """
-        refresh = ScheduledRefresh(earliest_check_time, CompletionEvent())
+        refresh = ScheduledRefresh(
+            earliest_check_time,
+            CompletionEvent(),
+            invocation_deadline=self.invocation_deadline,
+        )
         with self._completion_lock:
+            self.invocation_deadline.check()
             if self._checkpointing_failed.is_set():
                 self._checkpointing_failed.wait()
             self._reject_if_execution_completed(None)
@@ -994,7 +1057,7 @@ class ExecutionState:
             # Collect operations into a batch
             batch: list[QueuedOperation] = self._collect_checkpoint_batch()
 
-            if batch:
+            if batch or self.invocation_deadline.remaining() == 0:
                 # Extract OperationUpdates, excluding empty checkpoints from API call
                 updates: list[OperationUpdate] = []
                 empty_count = 0
@@ -1013,6 +1076,9 @@ class ExecutionState:
                 )
 
                 try:
+                    # Do not dispatch new checkpoint I/O after expiry. An I/O
+                    # call already in progress must still be joined.
+                    self.invocation_deadline.check()
                     # Make API call with batched operations
                     output: CheckpointOutput = self._service_client.checkpoint(
                         durable_execution_arn=self.durable_execution_arn,
@@ -1040,6 +1106,14 @@ class ExecutionState:
                             "checkpoint."
                         )
 
+                    if any(
+                        update.operation_type is OperationType.EXECUTION
+                        and update.action
+                        in {OperationAction.SUCCEED, OperationAction.FAIL}
+                        for update in updates
+                    ):
+                        self._terminal_execution_acknowledged.set()
+
                     # Each read of self.operations copies the whole map, and only
                     # plugins use these copies. So take the snapshots, and call
                     # the hook, only when a plugin is registered.
@@ -1059,6 +1133,7 @@ class ExecutionState:
                         output.new_execution_state.operations,
                         current_checkpoint_token,
                         fetch_marker,
+                        finish_terminal_checkpoint=self._terminal_execution_acknowledged.is_set(),
                     )
                     if has_plugins:
                         self._plugin_executor.on_operation_update(
@@ -1189,9 +1264,10 @@ class ExecutionState:
         """Signal background thread to stop checkpointing.
 
         This method sets the checkpointing stopped event, which signals the background
-        thread to exit. Any remaining async checkpoints in the queue are non-essential
-        (observability only) and will be abandoned. All critical synchronous checkpoints
-        will have already completed before this is called.
+        thread to exit. On ordinary completion, all required synchronous checkpoints
+        have completed. At deadline expiry their callers instead unwind with an
+        invocation interruption; an in-flight service call is still joined by the
+        wrapper. Unsent async checkpoints are abandoned.
         """
         logger.debug("Signaling background thread to stop checkpointing")
         self._checkpointing_stopped.set()
@@ -1205,6 +1281,7 @@ class ExecutionState:
         OrphanedChildException at their next checkpoint attempt) before the
         invocation returns.
         """
+        self.invocation_deadline.check()
         with self._branch_pools_lock:
             self._branch_pools.append(pool)
 
@@ -1251,7 +1328,10 @@ class ExecutionState:
         while not batch.is_full() and not self._checkpointing_stopped.is_set():
             now = time.time()
             self._add_due_refreshes(batch, now)
-            timeout = self._read_timeout(batch, now, deadline)
+            timeout = self.invocation_deadline.remaining(
+                self._read_timeout(batch, now, deadline)
+            )
+            assert timeout is not None
             if timeout <= 0:
                 break
             try:
@@ -1304,8 +1384,11 @@ class ExecutionState:
     def _wait_for_first_operation(self, batch: _BatchAccumulator) -> bool:
         """Block until the batch has an operation. Returns False at shutdown."""
         while not self._checkpointing_stopped.is_set():
+            if self.invocation_deadline.remaining() == 0:
+                return False
             now = time.time()
-            timeout = _STOP_SIGNAL_POLL_SECONDS
+            timeout = self.invocation_deadline.remaining(_STOP_SIGNAL_POLL_SECONDS)
+            assert timeout is not None
             until_refresh = self._seconds_until_next_refresh(now)
             if until_refresh is not None:
                 timeout = max(0.0, min(timeout, until_refresh))
@@ -1366,6 +1449,11 @@ class ExecutionState:
         orphaned branch) and unwind. Stopping the batcher first would
         deadlock that branch until the Lambda timeout.
 
+        SDK-owned waits share the invocation deadline and unwind on expiry, so
+        they cannot pin this join indefinitely. Running user code, service I/O,
+        and plugin hooks must still finish cooperatively; Python cannot safely
+        terminate their threads and this method does not detach them.
+
         Drains registrations until no pools remain: a branch joined in one
         batch can start a nested map or parallel operation, whose
         coordinator registers a new pool mid-join. The lock is never held
@@ -1390,12 +1478,14 @@ class ExecutionState:
     ):
         @functools.wraps(user_function)
         def wrapper(*args, **kwargs):
+            self.check_operation_active(operation_identifier)
             start_info = self._plugin_executor.on_user_function_start(
                 operation_identifier, is_replay_children, attempt
             )
             outcome = UserFunctionOutcome.INCOMPLETE
             error = None
             try:
+                self.check_operation_active(operation_identifier)
                 result = user_function(*args, **kwargs)
             except Exception as exception:
                 outcome = UserFunctionOutcome.FAILED

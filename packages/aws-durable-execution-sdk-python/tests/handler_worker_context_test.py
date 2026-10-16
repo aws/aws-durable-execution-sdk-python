@@ -63,6 +63,7 @@ def invocation(client: Any = None) -> tuple[Any, Any]:
         service_client=client,
     )
     context = Mock()
+    context.get_remaining_time_in_millis.return_value = 900000
     context.aws_request_id = "worker-request"
     context.client_context = context.identity = context.invoked_function_arn = None
     context._epoch_deadline_time_in_ms = 0

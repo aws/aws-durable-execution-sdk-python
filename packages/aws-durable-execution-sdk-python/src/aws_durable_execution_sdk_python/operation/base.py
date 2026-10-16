@@ -179,6 +179,7 @@ class OperationExecutor(ABC, Generic[T]):
             InvalidStateError: If the check result is in an invalid state
             May raise operation-specific errors from check_result_status() or execute()
         """
+        self.state.check_operation_active(self.operation_identifier)
         # Check 1: Entry (handles replay and existing checkpoints)
         result = self.check_result_status()
 
