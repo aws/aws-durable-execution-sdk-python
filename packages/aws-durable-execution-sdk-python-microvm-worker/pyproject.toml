@@ -22,10 +22,11 @@ classifiers = [
 ]
 # The worker runs inside the MicroVM, not in the durable function. So it does
 # not depend on the durable execution SDK. It needs boto3 for the durable
-# callback APIs. The MicroVM image installs it, because no Lambda runtime
-# provides it there.
+# callback APIs, and for SuspendMicrovm when a session suspends when idle. The
+# MicroVM image installs it, because no Lambda runtime provides it there.
 dependencies = [
-  "boto3>=1.42.1",
+  # botocore 1.43.35 is the first release with the lambda-microvms client.
+  "boto3>=1.43.35",
 ]
 
 [project.urls]
