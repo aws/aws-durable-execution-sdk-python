@@ -7,7 +7,7 @@ import logging
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
@@ -41,6 +41,26 @@ ResultType = TypeVar("ResultType")
 
 
 # region Result models
+
+_MISSING_FAILED_ITEM_ERROR_MESSAGE = (
+    "Unknown error. No ErrorObject exists on the Checkpoint Operation."
+)
+
+
+def _generic_failed_item_error() -> ErrorObject:
+    """ErrorObject for a FAILED batch item that carried no checkpoint error.
+
+    Matches ``_failed_checkpoint_error_object`` when the child-context
+    checkpoint has no ErrorObject: the same generic ChildContextError
+    replaying that child would raise.
+    """
+    err = ChildContextError(message=_MISSING_FAILED_ITEM_ERROR_MESSAGE)
+    return ErrorObject(
+        message=err.message,
+        type=err.error_type,
+        data=err.data,
+        stack_trace=err.stack_trace,
+    )
 
 
 class CompletionReason(Enum):
@@ -401,6 +421,10 @@ class BatchItem(Generic[R]):
     result: R | None = None
     error: ErrorObject | None = None
 
+    def __post_init__(self) -> None:
+        if self.status is BatchItemStatus.FAILED and self.error is None:
+            object.__setattr__(self, "error", _generic_failed_item_error())
+
     def to_dict(self) -> dict:
         return {
             "index": self.index,
@@ -489,18 +513,10 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
         }
 
     def succeeded(self) -> list[BatchItem[R]]:
-        return [
-            item
-            for item in self.all
-            if item.status is BatchItemStatus.SUCCEEDED and item.result is not None
-        ]
+        return [item for item in self.all if item.status is BatchItemStatus.SUCCEEDED]
 
     def failed(self) -> list[BatchItem[R]]:
-        return [
-            item
-            for item in self.all
-            if item.status is BatchItemStatus.FAILED and item.error is not None
-        ]
+        return [item for item in self.all if item.status is BatchItemStatus.FAILED]
 
     def started(self) -> list[BatchItem[R]]:
         return [item for item in self.all if item.status is BatchItemStatus.STARTED]
@@ -533,17 +549,13 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
             raise BatchCompletionError(self.completion_reason)
 
     def get_results(self) -> list[R]:
-        return [
-            item.result
-            for item in self.all
-            if item.status is BatchItemStatus.SUCCEEDED and item.result is not None
-        ]
+        # None is a valid result for a branch that returns nothing.
+        return [cast("R", item.result) for item in self.succeeded()]
 
     def get_errors(self) -> list[ErrorObject]:
         return [
-            item.error
-            for item in self.all
-            if item.status is BatchItemStatus.FAILED and item.error is not None
+            item.error if item.error is not None else _generic_failed_item_error()
+            for item in self.failed()
         ]
 
     @property
