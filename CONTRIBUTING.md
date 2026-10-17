@@ -72,11 +72,11 @@ hatch run dev-examples:test    # run examples tests only
 
 ### Installed package compatibility testing
 
-Build the core and OTel distributions with `hatch build` in each package, then run
+Build the core, OTel and testing-library distributions with `hatch build` in each package, then run
 these commands from the repository root:
 
 ```bash
-hatch run test-wheel-otel:test        # full OTel suite on the two built wheels
+hatch run test-wheel-otel:test        # full OTel suite on the three built wheels
 hatch run test-wheel-otel-legacy:test # released OTel 1.0.0 with the built core
 hatch run test-pypi-examples:test     # examples against the published core
 ```

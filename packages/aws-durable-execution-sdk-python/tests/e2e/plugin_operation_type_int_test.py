@@ -120,10 +120,16 @@ def test_builtin_operation_categories_survive_suspend_and_replay() -> None:
     assert {info.sub_type for info in plugin.operation_starts} == set(expected)
     assert {info.sub_type for info in plugin.operation_ends} == set(expected)
 
-    # The final replay starts with every earlier operation checkpointed,
-    # including the execution root, whose service record has no subtype.
+    # Live hooks above cover every category. The service prunes descendants of
+    # the completed callback/map/parallel contexts from the replay input; the
+    # surviving records, including the subtype-less execution root, keep type.
     replay_operations = plugin.invocation_starts[-1].operations.values()
-    assert {info.sub_type for info in replay_operations} == {*expected, None}
+    retained_subtypes = set(expected) - {
+        OperationSubType.CALLBACK,
+        OperationSubType.MAP_ITERATION,
+        OperationSubType.PARALLEL_BRANCH,
+    }
+    assert {info.sub_type for info in replay_operations} == {*retained_subtypes, None}
     all_infos: list[OperationInfo] = [
         *plugin.operation_starts,
         *plugin.operation_ends,

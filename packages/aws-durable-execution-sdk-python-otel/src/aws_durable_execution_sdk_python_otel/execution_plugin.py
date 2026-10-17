@@ -31,6 +31,7 @@ the plugin never leaves an ended or suspended span current.
 
 from __future__ import annotations
 
+import contextvars
 import datetime
 import logging
 import threading
@@ -64,12 +65,19 @@ from opentelemetry.trace import (
     TraceState,
 )
 
+from aws_durable_execution_sdk_python_otel._invocation_state import (
+    ExecutionState,
+    begin_state,
+    completed_input_parents,
+    finish_state,
+)
 from aws_durable_execution_sdk_python_otel.context_extractors import (
     ContextExtractor,
     ExtractedContext,
     _ensure_extracted_context,
     xray_context_extractor,
 )
+from aws_durable_execution_sdk_python_otel._flush import flush_provider
 from aws_durable_execution_sdk_python_otel.deterministic_id_generator import (
     DeterministicIdGenerator,
     derive_workflow_span_id,
@@ -140,42 +148,166 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._workflow_span_name = self._config.workflow_span_name
 
         result = create_tracer_provider(self._config)
-        self._provider = result.tracer_provider
         self._uses_global_provider = result.uses_global_provider
-
-        self._tracer: Tracer = self._provider.get_tracer(self._config.instrument_name)
-        self._id_generator = DeterministicIdGenerator()
-        self._sampling_delegate: Sampler | None = None
-        self._bind_sdk_tracer()
-
-        # Per-invocation state.
-        self._execution_arn = ""
-        self._execution_trace_id: int | None = None
-        self._execution_start_time: datetime.datetime | None = None
-        self._extracted_context: ExtractedContext | None = None
-        self._execution_trace_context: ExecutionTraceContext | None = None
-        self._sampling_intent: DurableSamplingIntent | None = None
-        self._workflow_span: Span | None = None
-        self._invocation_span: Span | None = None
-        self._operation_spans: dict[str, Span] = {}
-        # CONTEXT operations that emitted a durable START hook this invocation.
-        # A context absent from this set is checkpointless (for example, a FLAT
-        # map/parallel branch) and needs a fresh per-invocation span identity.
-        self._checkpointed_context_ids: set[str] = set()
-        # Operations whose span was already exported this invocation, so a
-        # repeated on_operation_end does not export it twice.
-        self._ended_operation_ids: set[str] = set()
-        # Tokens returned by context.attach(), keyed by the span registry key,
-        # paired with the thread that attached them. Every attach the plugin
-        # owns is released through _detach_context so the plugin never leaves a
-        # scope on the context stack.
-        self._context_tokens: dict[str, tuple[int, object]] = {}
+        self._template = ExecutionState(
+            provider=result.tracer_provider,
+            tracer=result.tracer_provider.get_tracer(self._config.instrument_name),
+            id_generator=DeterministicIdGenerator(),
+        )
+        self._state: contextvars.ContextVar[ExecutionState] = contextvars.ContextVar(
+            "durable_execution_otel_invocation", default=self._template
+        )
         self._lock = threading.RLock()
-        self._tracing_enabled = False
+        self._bind_sdk_tracer()
 
         self._registration_accepted = False
         if self._config.enrich_logger:
             install_log_filter(self)
+
+    # Private accessors route existing helpers through the current invocation.
+    @property
+    def _provider(self) -> trace.TracerProvider:
+        return self._state.get().provider
+
+    @_provider.setter
+    def _provider(self, value: trace.TracerProvider) -> None:
+        self._state.get().provider = value
+
+    @property
+    def _tracer(self) -> Tracer:
+        return self._state.get().tracer
+
+    @_tracer.setter
+    def _tracer(self, value: Tracer) -> None:
+        self._state.get().tracer = value
+
+    @property
+    def _id_generator(self) -> DeterministicIdGenerator:
+        return self._state.get().id_generator
+
+    @_id_generator.setter
+    def _id_generator(self, value: DeterministicIdGenerator) -> None:
+        self._state.get().id_generator = value
+
+    @property
+    def _sampling_delegate(self) -> Sampler | None:
+        return self._state.get().sampling_delegate
+
+    @_sampling_delegate.setter
+    def _sampling_delegate(self, value: Sampler | None) -> None:
+        self._state.get().sampling_delegate = value
+
+    @property
+    def _execution_arn(self) -> str:
+        return self._state.get().execution_arn
+
+    @_execution_arn.setter
+    def _execution_arn(self, value: str) -> None:
+        self._state.get().execution_arn = value
+
+    @property
+    def _execution_trace_id(self) -> int | None:
+        return self._state.get().execution_trace_id
+
+    @_execution_trace_id.setter
+    def _execution_trace_id(self, value: int | None) -> None:
+        self._state.get().execution_trace_id = value
+
+    @property
+    def _execution_start_time(self) -> datetime.datetime | None:
+        return self._state.get().execution_start_time
+
+    @_execution_start_time.setter
+    def _execution_start_time(self, value: datetime.datetime | None) -> None:
+        self._state.get().execution_start_time = value
+
+    @property
+    def _extracted_context(self) -> ExtractedContext | None:
+        return self._state.get().extracted_context
+
+    @_extracted_context.setter
+    def _extracted_context(self, value: ExtractedContext | None) -> None:
+        self._state.get().extracted_context = value
+
+    @property
+    def _execution_trace_context(self) -> ExecutionTraceContext | None:
+        return self._state.get().execution_trace_context
+
+    @_execution_trace_context.setter
+    def _execution_trace_context(self, value: ExecutionTraceContext | None) -> None:
+        self._state.get().execution_trace_context = value
+
+    @property
+    def _sampling_intent(self) -> DurableSamplingIntent | None:
+        return self._state.get().sampling_intent
+
+    @_sampling_intent.setter
+    def _sampling_intent(self, value: DurableSamplingIntent | None) -> None:
+        self._state.get().sampling_intent = value
+
+    @property
+    def _workflow_span(self) -> Span | None:
+        return self._state.get().workflow_span
+
+    @_workflow_span.setter
+    def _workflow_span(self, value: Span | None) -> None:
+        self._state.get().workflow_span = value
+
+    @property
+    def _context_tokens(self) -> dict[str, tuple[int, object]]:
+        return self._state.get().context_tokens
+
+    @_context_tokens.setter
+    def _context_tokens(self, value: dict[str, tuple[int, object]]) -> None:
+        self._state.get().context_tokens = value
+
+    @property
+    def _tracing_enabled(self) -> bool:
+        return self._state.get().tracing_enabled
+
+    @_tracing_enabled.setter
+    def _tracing_enabled(self, value: bool) -> None:
+        self._state.get().tracing_enabled = value
+
+    @property
+    def _invocation_span(self) -> Span | None:
+        return self._state.get().invocation_span
+
+    @_invocation_span.setter
+    def _invocation_span(self, value: Span | None) -> None:
+        self._state.get().invocation_span = value
+
+    @property
+    def _operation_spans(self) -> dict[str, Span]:
+        return self._state.get().operation_spans
+
+    @_operation_spans.setter
+    def _operation_spans(self, value: dict[str, Span]) -> None:
+        self._state.get().operation_spans = value
+
+    @property
+    def _checkpointed_context_ids(self) -> set[str]:
+        return self._state.get().checkpointed_context_ids
+
+    @_checkpointed_context_ids.setter
+    def _checkpointed_context_ids(self, value: set[str]) -> None:
+        self._state.get().checkpointed_context_ids = value
+
+    @property
+    def _ended_operation_ids(self) -> set[str]:
+        return self._state.get().ended_operation_ids
+
+    @_ended_operation_ids.setter
+    def _ended_operation_ids(self, value: set[str]) -> None:
+        self._state.get().ended_operation_ids = value
+
+    @property
+    def _pending_operation_ends(self) -> dict[str, list[OperationEndInfo]]:
+        return self._state.get().pending_operation_ends
+
+    @_pending_operation_ends.setter
+    def _pending_operation_ends(self, value: dict[str, list[OperationEndInfo]]) -> None:
+        self._state.get().pending_operation_ends = value
 
     def on_registration_result(self, registered: bool) -> None:
         """Preserve accepted resources, releasing only a discarded constructor."""
@@ -210,6 +342,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     def _set_span(self, key: str, span: Span) -> None:
         with self._lock:
             self._operation_spans[key] = span
+            pending = self._pending_operation_ends.pop(key, [])
+        for info in pending:
+            self._render_operation_end(info)
 
     def _get_span(self, key: str | None) -> Span | None:
         if key is None:
@@ -433,7 +568,15 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         logger.debug("Durable invocation started: %s", info)
         self._registration_accepted = True
-        self._reset_state()
+        begin_state(
+            self._state,
+            ExecutionState(
+                provider=self._template.provider,
+                tracer=self._template.tracer,
+                id_generator=self._template.id_generator,
+            ),
+            self._reset_state,
+        )
         if info.execution_start_time is None:
             logger.warning(
                 "ExecutionOtelPlugin requires InvocationStartInfo.execution_start_time "
@@ -502,6 +645,10 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._start_workflow_span(info)
         # Keep the invocation on the shared execution trace.
         self._start_invocation_span(info)
+        # A completed child will not run another user-function Start hook.
+        # Reference its original logical identity without exporting it again.
+        for parent in completed_input_parents(info):
+            self._register_operation_placeholder(parent.operation_id, parent.start_time)
 
         # Make the Workflow span the active span so auto-instrumented spans
         # created during the invocation become its children. The token is
@@ -627,6 +774,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             self._reset_state()
             return
 
+        with self._lock:
+            unresolved_parents = tuple(self._pending_operation_ends)
+
         # End the invocation span regardless of terminal status. Record the
         # invocation status and map it to a span status:
         #   SUCCEEDED/PENDING -> OK  (this invocation did its work, whether it
@@ -662,13 +812,18 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         if info.status in _TERMINAL_INVOCATION_STATUSES:
             self._export_workflow_span(info)
 
+        provider = self._provider
         self._reset_state()
 
-        if hasattr(self._provider, "force_flush"):
+        if hasattr(provider, "force_flush"):
             try:
-                self._provider.force_flush()
+                flush_provider(provider.force_flush)
             except Exception:  # noqa: BLE001
                 logger.exception("force_flush failed at invocation end")
+        if unresolved_parents:
+            raise ValueError(
+                f"No parent span found for deferred operation ends: {unresolved_parents}"
+            )
 
     def _reset_state(self) -> None:
         self._detach_remaining_contexts()
@@ -684,7 +839,9 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
             self._operation_spans = {}
             self._checkpointed_context_ids = set()
             self._ended_operation_ids = set()
+            self._pending_operation_ends = {}
         self._tracing_enabled = False
+        finish_state(self._state)
 
     # ------------------------------------------------------------------
     # Operation lifecycle
@@ -703,6 +860,10 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         self._note_parent_start(info.parent_id, info.start_time)
 
     def on_operation_end(self, info: OperationEndInfo) -> None:
+        self._render_operation_end(info)
+
+    def _render_operation_end(self, info: OperationEndInfo) -> None:
+        """Render or defer one delivery without re-entering a public hook."""
         logger.debug("Durable operation ended: %s", info)
         if not self._tracing_enabled:
             return
@@ -711,15 +872,22 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         # replay-only and must not re-export the deterministic logical span.
         if info.is_replayed:
             return
+        with self._lock:
+            if (
+                info.parent_id is not None
+                and info.parent_id not in self._operation_spans
+            ):
+                self._pending_operation_ends.setdefault(info.parent_id, []).append(info)
+                return
         # Export the span only on the first end for this operation.
         with self._lock:
             if info.operation_id in self._ended_operation_ids:
                 return
             self._ended_operation_ids.add(info.operation_id)
-        # An open operation is held as a non-recording placeholder; drop it and
-        # create the single recording span for the operation now.
+        # Keep the parent context registered while materializing its span.
+        # _start_span replaces the placeholder atomically under the registry lock,
+        # so a concurrent child end cannot be stranded by a temporary absence.
         placeholder = self._get_span(info.operation_id)
-        self._pop_span(info.operation_id)
         parent = self._resolve_parent(info.parent_id)
         start_time = info.start_time
         end_time = info.end_time
@@ -758,13 +926,27 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
         if info.error:
             span.set_status(StatusCode.ERROR, info.error.message or "")
             span.record_exception(
-                Exception(info.error.message or info.error.type or "Unknown error")
+                Exception(info.error.message or info.error.type or "Unknown error"),
+                timestamp=_to_otel_timestamp(end_time),
             )
+        elif info.status in (
+            OperationStatus.FAILED,
+            OperationStatus.TIMED_OUT,
+            OperationStatus.STOPPED,
+        ):
+            span.set_status(StatusCode.ERROR)
         elif info.status is OperationStatus.SUCCEEDED:
             span.set_status(StatusCode.OK)
 
         self._note_parent_end(info.parent_id, end_time)
-        popped = self._pop_span(info.operation_id)
+        with self._lock:
+            popped = self._operation_spans.pop(info.operation_id, None)
+            if popped is not None and info.operation_type is OperationType.CONTEXT:
+                # A callback created by this child can finish in a later root
+                # checkpoint. Retain only its actual parent context until End.
+                self._operation_spans[info.operation_id] = DurableParentSpan(
+                    popped.get_span_context(), start_time=start_time
+                )
         if popped is not None:
             popped.end(end_time=_to_otel_timestamp(end_time))
 
@@ -895,7 +1077,8 @@ class ExecutionOtelPlugin(DurableInstrumentationPlugin):
                         (info.error.message or info.error.type)
                         if info.error
                         else "Unknown error"
-                    )
+                    ),
+                    timestamp=_to_otel_timestamp(end_time),
                 )
             else:
                 span.set_status(StatusCode.OK)

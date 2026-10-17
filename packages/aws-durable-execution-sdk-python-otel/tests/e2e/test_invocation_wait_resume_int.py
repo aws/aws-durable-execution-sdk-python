@@ -15,10 +15,13 @@ from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
     durable_execution,
 )
+from aws_durable_execution_sdk_python.exceptions import InvokeError
 from aws_durable_execution_sdk_python.lambda_service import (
+    ChainedInvokeDetails,
     CheckpointOutput,
     CheckpointUpdatedExecutionState,
     ExecutionDetails,
+    ErrorObject,
     Operation,
     OperationAction,
     OperationStatus,
@@ -140,6 +143,128 @@ def _checkpoint_store(initial_operations: list[Operation]):
         )
 
     return checkpoint, operations
+
+
+@pytest.mark.parametrize("plugin_type", [ExecutionOtelPlugin, InvocationOtelPlugin])
+@pytest.mark.parametrize("with_error", [False, True])
+def test_caught_invoke_failure_without_details_is_error_on_live_and_replay(
+    plugin_type, with_error
+) -> None:
+    """Use real SDK replay with service-shaped failed-invoke checkpoint responses.
+
+    The local child runner synthesizes a diagnostic for FAILED children, so the
+    absent-error case belongs at the LambdaClient transport boundary. No plugin
+    lifecycle/status callback is fabricated here.
+    """
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    plugin = plugin_type(
+        OtelPluginConfig(
+            tracer_provider=provider,
+            context_extractor=lambda _: None,
+            enrich_logger=False,
+        )
+    )
+    error = (
+        ErrorObject(
+            message="supplied invoke failure",
+            type="External",
+            data=None,
+            stack_trace=None,
+        )
+        if with_error
+        else None
+    )
+    caught: list[str] = []
+    saved_calls: list[str] = []
+
+    @durable_step
+    def saved(_context) -> str:
+        saved_calls.append("saved")
+        return "caught"
+
+    def body(_event, context: DurableContext) -> str:
+        try:
+            context.invoke("child", {}, name="failed-invoke")
+        except InvokeError as observed:
+            caught.append(type(observed).__name__)
+        value = context.step(saved(), name="saved-result")
+        context.wait(Duration.from_seconds(1), name="resume-wait")
+        return value
+
+    handler = durable_execution(body, plugins=[plugin])
+
+    def failed_invoke_store(initial):
+        checkpoint, operations = _checkpoint_store(initial)
+
+        def send(*args, **kwargs):
+            output = checkpoint(*args, **kwargs)
+            for key, operation in operations.items():
+                if operation.name == "failed-invoke":
+                    operations[key] = replace(
+                        operation,
+                        status=OperationStatus.FAILED,
+                        sub_type=OperationSubType.CHAINED_INVOKE,
+                        end_timestamp=datetime.now(UTC),
+                        chained_invoke_details=ChainedInvokeDetails(error=error),
+                    )
+            return replace(
+                output,
+                new_execution_state=CheckpointUpdatedExecutionState(
+                    operations=list(operations.values())
+                ),
+            )
+
+        return send, operations
+
+    initial = [_execution_operation()]
+    checkpoint, operations = failed_invoke_store(initial)
+    try:
+        with patch(
+            "aws_durable_execution_sdk_python.execution.LambdaClient"
+        ) as client_class:
+            client = Mock()
+            client.checkpoint = checkpoint
+            client_class.initialize_client.return_value = client
+            first = handler(_event(initial), _lambda_context())
+        assert first["Status"] == "PENDING"
+        first_spans = [
+            s for s in exporter.get_finished_spans() if s.name == "failed-invoke"
+        ]
+        resumed = [
+            replace(
+                op, status=OperationStatus.SUCCEEDED, end_timestamp=datetime.now(UTC)
+            )
+            if op.name == "resume-wait"
+            else op
+            for op in operations.values()
+        ]
+        wait_id = next(op.operation_id for op in resumed if op.name == "resume-wait")
+        checkpoint, _ = failed_invoke_store(resumed)
+        with patch(
+            "aws_durable_execution_sdk_python.execution.LambdaClient"
+        ) as client_class:
+            client = Mock()
+            client.checkpoint = checkpoint
+            client_class.initialize_client.return_value = client
+            second = handler(_event(resumed, [wait_id]), _lambda_context())
+        assert second == {"Status": "SUCCEEDED", "Result": '"caught"'}
+        assert caught == ["InvokeError", "InvokeError"]
+        assert saved_calls == ["saved"]
+        spans = [s for s in exporter.get_finished_spans() if s.name == "failed-invoke"]
+        assert spans == first_spans
+        (span,) = spans
+        assert span.attributes is not None
+        assert span.attributes["durable.operation.status"] == "FAILED"
+        assert span.status.status_code is trace.StatusCode.ERROR
+        assert len(span.events) == int(with_error)
+        workflow = next(
+            s for s in exporter.get_finished_spans() if s.name == "Workflow"
+        )
+        assert workflow.status.status_code is trace.StatusCode.OK
+    finally:
+        provider.shutdown()
 
 
 @pytest.mark.parametrize(

@@ -395,12 +395,84 @@ each durable span in the same invocation.
 
 `durable.invocation.status` uses `RETRYING` when the core plugin hook reports
 `InvocationStatus.RETRY`. The core enum remains unchanged. Operation spans use
-OTel `OK` only for `SUCCEEDED`, `ERROR` when error details are delivered, and
-`UNSET` for other outcomes without error details, including `FAILED`,
-`CANCELLED`, `TIMED_OUT`, and `STOPPED`. The original durable operation status
-remains in `durable.operation.status`.
+OTel `ERROR` for explicit `FAILED`, `TIMED_OUT`, or `STOPPED` outcomes even when
+error details are absent. Supplied error details continue to set `ERROR` and
+record an exception event; a failure status alone does not invent that event.
+Without error details, `SUCCEEDED` is `OK` and other statuses, including
+`CANCELLED`, remain `UNSET`. The original durable operation status remains in
+`durable.operation.status`. A handler that catches an operation failure and
+returns successfully still has a successful invocation/workflow outcome; the
+failed operation retains its own error status on initial completion and replay.
+
+Exception events use the same normalized end timestamp as their operation or
+attempt span. This keeps events inside the exported span when a completion has
+no durable start time or arrives later than its backend end time; the existing
+view-specific span-boundary rules remain intact.
+
+When a concurrent branch's terminal completion arrives before replay has created
+its parent span, Invocation view retains that completion until the actual parent
+span is registered. The terminal segment is exported under that parent before
+control returns to the branch's user code. No ancestor is invented and SDK
+completion delivery is unchanged. If the parent never becomes active, normal
+invocation cleanup and flushing still run before the missing parent is reported.
+
+### Invocation flushing
+
+After span and ContextVar cleanup, the plugins wait up to the OpenTelemetry
+provider's existing 30-second default budget for `force_flush()`. Only provider
+I/O runs on a background daemon worker; invocation Start/End hooks and token
+cleanup stay on their original worker and Context. The I/O receives a snapshot
+of that post-cleanup Context.
+
+There is at most one outstanding provider flush in the process and no pending
+I/O queue. Concurrent requests, including requests using another provider, wait
+for admission within the same absolute deadline used for completion. A timeout
+does not cancel the exporter or free its slot. A request whose budget expires
+before admission returns with a warning without starting more work.
+A failed or skipped flush is not an export
+acknowledgment, and late exports may continue. Applications still own exporter
+transport timeouts and provider shutdown. This bound does not cover synchronous
+span-processor `on_end` work that runs before flushing.
+
+Ordinary provider exceptions that finish within the budget retain the existing
+plugin exception isolation; fatal exceptions are propagated on the lifecycle
+owner. Exceptions after the caller has stopped waiting are logged and cannot be
+raised retroactively into the completed invocation.
 
 ### Invocation context isolation
+
+Tracing state belongs to each invocation's Context, including its trace IDs,
+span registry, deferred completions, timestamps and scope tokens. A shared plugin
+instance can therefore serve overlapping invocations without one invocation's
+cleanup clearing another's trace. Provider configuration and registration remain
+instance resources. SDK-owned worker tasks capture the selected invocation
+Context; Start/End hooks and token reset retain their existing owner and order.
+
+Visible terminal input updates are delivered after all Start hooks. The service
+omits descendants of completed contexts unless their ancestors retain children
+through `ReplayChildren`; an `UpdatedOperationIds` entry alone does not provide
+missing operation metadata. The SDK does not synthesize a hook or a span from
+that missing record. Public input-delivery tests use a real large child result
+to retain metadata, while still asserting one saved-step execution and terminal
+export with the correct parent in each view.
+
+Known completed context metadata is retained from the full visible input
+snapshot for descendant completions delivered by later checkpoint responses.
+A child that finishes during the invocation retains its actual non-recording
+parent context until cleanup. In Invocation view, completions wait for any
+current replay segment, including a large-result ReplayChildren parent. Only
+at End does a completion still lacking a current segment use a known completed
+input parent's identity. Missing or nonterminal parents remain deferred;
+unresolved parentage is reported after cleanup. No root parent or missing
+metadata is invented, and queue draining does not re-enter a public hook.
+
+Completion metadata can be redelivered after a failed invocation or checkpoint
+transport attempt that has no successful response acknowledgment. There is no
+exporter acknowledgment in durable state, so this does not promise exactly-once
+telemetry across failed/redelivered invocations. Successful replay preserves
+checkpointed work; this limit is not a claim that already-checkpointed step
+bodies run again. The plugin does not use a global exported-operation cache that
+could discard a first delivery after a failed attempt.
 
 With core 2.1+, invocation hooks and the handler run on one worker in an
 invocation-local Context initialized from the host's bindings. Successful Start

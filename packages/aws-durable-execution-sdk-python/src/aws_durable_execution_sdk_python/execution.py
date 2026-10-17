@@ -190,9 +190,9 @@ def durable_execution(
     logger.debug("Starting durable execution handler...")
 
     configured_plugins = load_configured_plugins(plugins)
-    plugin_executor = PluginExecutor(configured_plugins)
 
     def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
+        plugin_executor = PluginExecutor(configured_plugins)
         invocation_input: DurableExecutionInvocationInput
         service_client: DurableServiceClient
 
@@ -464,9 +464,20 @@ def durable_execution(
                             updated_operation_ids=invocation_input.updated_operation_ids,
                         )
                         # No checkpoint work starts until all Start hooks finish.
-                        checkpoint_future = executor.submit(
-                            execution_state.checkpoint_batches_forever
-                        )
+                        if configured_plugins:
+                            checkpoint_context = (
+                                plugin_executor._run_in_invocation_context(
+                                    contextvars.copy_context
+                                )
+                            )
+                            checkpoint_future = executor.submit(
+                                checkpoint_context.run,
+                                execution_state.checkpoint_batches_forever,
+                            )
+                        else:
+                            checkpoint_future = executor.submit(
+                                execution_state.checkpoint_batches_forever
+                            )
                         output = plugin_executor._run_in_invocation_context(
                             invoke_handler
                         )

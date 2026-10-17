@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 CORE = "aws-durable-execution-sdk-python"
 OTEL = CORE + "-otel"
+TESTING = CORE + "-testing"
 
 
 def built_wheel(package: str) -> Path:
@@ -72,7 +73,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--legacy-plugin", action="store_true")
     args = parser.parse_args()
-    packages = [CORE] if args.legacy_plugin else [CORE, OTEL]
+    # This PR also repairs the local service simulator. Validate its actual
+    # built artifact with the SDK/plugin, retaining every test assertion.
+    packages = [CORE] if args.legacy_plugin else [CORE, OTEL, TESTING]
     wheels = [built_wheel(package) for package in packages]
     subprocess.run(
         [

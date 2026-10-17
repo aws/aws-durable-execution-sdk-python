@@ -79,7 +79,7 @@ def test_operation_status_and_exception(
     with_error: bool,
     started_here: bool,
 ) -> None:
-    """A delivered terminal hook must not label an unsuccessful operation OK."""
+    """Explicit failures are errors even when diagnostic details are absent."""
     plugin, exporter = instrumented_view
     invocation: dict[str, Any] = dict(
         request_id="first",
@@ -123,6 +123,8 @@ def test_operation_status_and_exception(
     expected = (
         StatusCode.ERROR
         if with_error
+        or status
+        in (OperationStatus.FAILED, OperationStatus.TIMED_OUT, OperationStatus.STOPPED)
         else (
             StatusCode.OK if status is OperationStatus.SUCCEEDED else StatusCode.UNSET
         )
@@ -134,8 +136,48 @@ def test_operation_status_and_exception(
         assert span.events[0].name == "exception"
         assert span.events[0].attributes is not None
         assert span.events[0].attributes["exception.message"] == "deadline exceeded"
+        assert span.start_time is not None and span.end_time is not None
+        assert span.start_time <= span.events[0].timestamp <= span.end_time
     else:
         assert not span.events
+
+
+def test_error_event_is_inside_completion_without_a_start(
+    instrumented_view: InstrumentedView,
+) -> None:
+    plugin, exporter = instrumented_view
+    invocation: dict[str, Any] = dict(
+        request_id="missing-start",
+        execution_arn=ARN,
+        execution_start_time=START,
+        is_first_invocation=True,
+    )
+    plugin.on_invocation_start(InvocationStartInfo(**invocation))
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id="missing-start",
+            name="missing-start",
+            parent_id=None,
+            operation_type=OperationType.WAIT,
+            sub_type=OperationSubType.WAIT,
+            start_time=None,
+            end_time=END,
+            is_replayed=False,
+            status=OperationStatus.FAILED,
+            error=ErrorObject(
+                message="real failure", type="Failure", data=None, stack_trace=None
+            ),
+        )
+    )
+    plugin.on_invocation_end(
+        InvocationEndInfo(**invocation, status=InvocationStatus.SUCCEEDED)
+    )
+    span = next(s for s in exporter.get_finished_spans() if s.name == "missing-start")
+    assert len(span.events) == 1
+    assert span.events[0].attributes is not None
+    assert span.events[0].attributes["exception.message"] == "real failure"
+    assert span.start_time is not None and span.end_time is not None
+    assert span.start_time <= span.events[0].timestamp <= span.end_time
 
 
 def test_retry_then_resume_exports_retrying(

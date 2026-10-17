@@ -122,6 +122,14 @@ checkpointing is available, stops and waits for checkpoint processing, then call
 End before returning the outcome. The caller shuts down the handler executor.
 There is no separate handler-context hook or context-manager plugin API.
 
+After all Start hooks, visible terminal operations named by the invocation
+input's `UpdatedOperationIds` receive their existing `on_operation_end` callback.
+This includes descendants that a cached completed child will not revisit.
+Input delivery and later checkpoint/replay observations share the per-invocation
+notification ledger; an operation/status is not reported twice in that invocation.
+Missing operation metadata is not fabricated, and failed invocation delivery can
+be redelivered on a later attempt. This is not an exporter acknowledgment.
+
 When plugins are registered, the worker begins with a copy of the caller's
 context-variable bindings. Successful Start bindings flow into later Start hooks,
 the handler, serialization and resource cleanup. A later successful Start may

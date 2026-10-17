@@ -698,6 +698,10 @@ def test_pending_response_is_valid_when_an_operation_completed_after_the_handler
     mock_execution.consecutive_failed_invocation_attempts = 0
     mock_execution.seq_counter = 4
     mock_execution.handler_seen_seq = 2
+    mock_execution.token_sequence = 0
+    mock_execution.operations = []
+    mock_execution.updated_operation_ids = []
+    mock_execution.operation_last_touched_seq = {}
     mock_execution.has_pending_operations.return_value = False
     mock_execution.has_changes_after.side_effect = lambda seq: seq == 4
     mock_execution.has_unseen_changes.return_value = True
@@ -1237,6 +1241,12 @@ def test_should_retry_invocation_when_under_limit_through_public_api(
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
     mock_execution.consecutive_failed_invocation_attempts = 3  # Under limit (5 is max)
+    mock_execution.seq_counter = 0
+    mock_execution.handler_seen_seq = 0
+    mock_execution.token_sequence = 0
+    mock_execution.operations = []
+    mock_execution.updated_operation_ids = []
+    mock_execution.operation_last_touched_seq = {}
 
     # Configure invoker to fail initially with validation error, then succeed on retry
     mock_invocation_input = Mock()

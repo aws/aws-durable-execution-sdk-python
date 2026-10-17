@@ -4,7 +4,11 @@ import datetime
 import json
 import time
 import warnings
+import contextvars
+import threading
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from copy import deepcopy
 from typing import Any
 from unittest.mock import Mock, patch
@@ -3581,6 +3585,75 @@ def test_durable_execution_loads_plugins_when_handler_is_initialized():
 
     load_plugins.assert_called_once_with([explicit_plugin])
     assert callable(test_handler)
+
+
+def test_overlapping_handler_calls_keep_each_plugin_end_and_payload():
+    """One wrapper must not let another call replace its invocation-hook state."""
+    entered = threading.Event()
+    release = threading.Event()
+    binding: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+        "unit-plugin-owner", default=None
+    )
+    tokens: contextvars.ContextVar[contextvars.Token[str | None] | None] = (
+        contextvars.ContextVar("unit-plugin-token", default=None)
+    )
+    starts = []
+    ends = []
+
+    class SafePlugin(DurableInstrumentationPlugin):
+        def on_invocation_start(self, info):
+            tokens.set(binding.set(info.request_id))
+            starts.append(info.request_id)
+
+        def on_invocation_end(self, info):
+            assert binding.get() == info.request_id
+            token = tokens.get()
+            assert token is not None
+            binding.reset(token)
+            ends.append(
+                (
+                    info.request_id,
+                    info.execution_input["label"],
+                    json.loads(info.execution_result),
+                )
+            )
+
+    def body(event, _context):
+        if event["label"] == "a":
+            entered.set()
+            assert release.wait(5)
+        return event["label"]
+
+    wrapped = durable_execution(body, plugins=[SafePlugin()])
+    client = Mock(spec=DurableServiceClient)
+    client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    def call(label):
+        incoming = replace(
+            _make_invocation_input(client, input_payload=json.dumps({"label": label})),
+            durable_execution_arn=f"arn:test:execution-{label}/exec1",
+        )
+        context = _make_lambda_context()
+        context.aws_request_id = label
+        return wrapped(incoming, context)
+
+    with ThreadPoolExecutor(max_workers=2) as callers:
+        first = callers.submit(call, "a")
+        try:
+            assert entered.wait(5)
+            second = callers.submit(call, "b")
+            second_result = second.result(timeout=5)
+        finally:
+            release.set()
+        first_result = first.result(timeout=5)
+    assert first_result == {"Status": "SUCCEEDED", "Result": '"a"'}
+    assert second_result == {"Status": "SUCCEEDED", "Result": '"b"'}
+    assert starts == ["a", "b"]
+    assert ends == [("b", "b", "b"), ("a", "a", "a")]
+    assert binding.get() is None
 
 
 def test_durable_execution_with_plugins_success():
