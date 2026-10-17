@@ -113,7 +113,9 @@ _SERVER_POLL_SECONDS = 0.1
 
 _UNKNOWN_MICROVM_ID = "unknown"
 
-_CONTENT_LENGTH = re.compile(r"[0-9]+")
+# At most 19 digits, so that int() stays under Python's limit on digits, and
+# any declared length still exceeds every body limit.
+_CONTENT_LENGTH = re.compile(r"[0-9]{1,19}")
 
 _CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]+")
 
@@ -1066,16 +1068,40 @@ class MicrovmWorkerListener:
             # The heartbeats start under the lock. So the terminate hook
             # either finds them and stops them, or has already marked the job,
             # and the handler does not run.
+            start_error: Exception | None = None
             with self._lock:
                 started = not active.terminated
                 if started:
-                    active.heartbeats = Heartbeats.start(
-                        reporter,
-                        heartbeat_timeout_seconds=job.heartbeat_timeout_seconds,
-                        on_callback_gone=on_callback_gone,
-                        heartbeat_interval_seconds=self._heartbeat_interval_seconds,
-                        logger=self._logger,
-                    )
+                    try:
+                        active.heartbeats = Heartbeats.start(
+                            reporter,
+                            heartbeat_timeout_seconds=job.heartbeat_timeout_seconds,
+                            on_callback_gone=on_callback_gone,
+                            heartbeat_interval_seconds=self._heartbeat_interval_seconds,
+                            logger=self._logger,
+                        )
+                    except Exception as error:  # noqa: BLE001
+                        start_error = error
+                        # This thread reports the failure. So the terminate
+                        # hook must not fail the job again, and must wait for
+                        # the report.
+                        self._active.pop(callback_id, None)
+                        self._reporting.add(callback_id)
+            if start_error is not None:
+                # The job has its answer, so no later delivery runs it. Fail
+                # the callback, instead of leaving the job to its heartbeat
+                # timeout.
+                self._logger.error(
+                    "could not start the job's heartbeats",
+                    extra={**fields, "error": describe(start_error)},
+                )
+                try:
+                    self._report(reporter, _Outcome(error=start_error), fields)
+                finally:
+                    with self._changed:
+                        self._reporting.discard(callback_id)
+                        self._changed.notify_all()
+                return
             heartbeats = active.heartbeats
             if not started or heartbeats is None:
                 # The terminate hook arrived before the job started, and

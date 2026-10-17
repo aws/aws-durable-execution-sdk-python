@@ -1870,3 +1870,28 @@ def test_a_stale_refusal_timer_does_not_end_a_later_refusal(
     assert h.job("cb-1") == 503
     h.advance(9)
     assert h.job("cb-1") == 202
+
+
+def test_terminate_waits_for_and_does_not_repeat_a_heartbeat_start_failure(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A job whose heartbeats cannot start fails its own callback. The
+    # terminate hook waits for that report, and does not fail the job again.
+    h = start()
+    h.run_hook()
+    h.lambda_client.hold = True
+    failing_thread_start(monkeypatch, "heartbeats-")
+    assert h.job("cb-1", heartbeatTimeoutSeconds=30) == 202
+    assert eventually(lambda: h.lambda_client.waiting() == 1)
+    monkeypatch.undo()
+
+    answer = h.hook_in_background("terminate")
+    assert not answered_within(answer, 0.2)
+
+    h.lambda_client.finish()
+    assert answer.result(WAIT) == 200
+    recorded = h.lambda_client.recorded()
+    assert [(c["callbackId"], c["errorType"]) for c in recorded] == [
+        ("cb-1", "RuntimeError")
+    ]
+    assert not h.started("cb-1")
