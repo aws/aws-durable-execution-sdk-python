@@ -61,7 +61,7 @@ class FileSystemExecutionStore(BaseExecutionStore):
         """Load execution from file system."""
         file_path = self._get_file_path(execution_arn)
         if not file_path.exists():
-            msg = f"Execution {execution_arn} not found"
+            msg = "Durable Execution does not exist"
             raise ResourceNotFoundException(msg)
 
         with open(file_path, encoding="utf-8") as f:
