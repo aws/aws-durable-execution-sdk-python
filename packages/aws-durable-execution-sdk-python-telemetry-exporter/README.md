@@ -151,7 +151,7 @@ FirehoseExporter(delivery_stream_name="durable-execution-telemetry-stream")
 
 ### EventBridgeExporter
 
-`PutEvents` with `Source` (default `aws.durable-execution.telemetry`),
+`PutEvents` with `Source` (default `software.amazon.lambda.durable.telemetry`),
 `DetailType` = record status, `Detail` = record. All arguments optional. IAM:
 `events:PutEvents`.
 

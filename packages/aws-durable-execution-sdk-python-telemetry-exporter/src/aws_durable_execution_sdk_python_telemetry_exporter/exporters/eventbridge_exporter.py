@@ -29,7 +29,7 @@ class EventBridgeExporter:
     def __init__(
         self,
         event_bus_name: str = "default",
-        source: str = "aws.durable-execution.telemetry",
+        source: str = "software.amazon.lambda.durable.telemetry",
         region: str | None = None,
         operations_format: OperationsFormat | OperationsFormatInput = (
             OperationsFormat.ARRAY

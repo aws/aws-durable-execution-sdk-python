@@ -65,7 +65,7 @@ def test_public_import_path_and_defaults() -> None:
     assert EventBridgeExporter is EventBridgeExporterFromModule
     exporter = EventBridgeExporter(client=FakeEventsClient())
     assert exporter.event_bus_name == "default"
-    assert exporter.source == "aws.durable-execution.telemetry"
+    assert exporter.source == "software.amazon.lambda.durable.telemetry"
     assert exporter.operations_format == "array"
     assert exporter.max_record_size_bytes == 256_000
     exporter.flush()  # no buffering: a no-op
@@ -83,7 +83,9 @@ def test_publishes_single_event_with_status_detail_type() -> None:
     assert len(entries) == 1
     entry = entries[0]
     assert entry["EventBusName"] == "default"
-    assert entry["Source"] == "aws.durable-execution.telemetry"
+    assert entry["Source"] == "software.amazon.lambda.durable.telemetry"
+    # EventBridge reserves the "aws." source prefix for AWS services.
+    assert not entry["Source"].startswith("aws.")
     assert entry["DetailType"] == "SUCCEEDED"
     assert entry["Time"] == datetime.datetime(
         2026, 7, 15, 12, 0, 0, tzinfo=datetime.UTC
