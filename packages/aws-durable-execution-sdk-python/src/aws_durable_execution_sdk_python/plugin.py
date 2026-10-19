@@ -474,6 +474,9 @@ class PluginExecutor:
         self._startup_context: contextvars.Context | None = None
         self._invocation_contexts: list[contextvars.Context | None] = []
         self._reported_terminal_updates: set[tuple[str, OperationStatus]] = set()
+        self._pending_input_ends: dict[
+            tuple[str, OperationStatus], tuple[OperationEndInfo, set[str]]
+        ] = {}
         self._terminal_updates_lock = Lock()
 
     @property
@@ -485,6 +488,7 @@ class PluginExecutor:
     def run(self):
         with self._terminal_updates_lock:
             self._reported_terminal_updates.clear()
+            self._pending_input_ends.clear()
         if self._plugins:
             self._executor = ThreadPoolExecutor(
                 max_workers=1,
@@ -502,6 +506,7 @@ class PluginExecutor:
                 self._executor.shutdown(wait=True)
             with self._terminal_updates_lock:
                 self._reported_terminal_updates.clear()
+                self._pending_input_ends.clear()
 
     @staticmethod
     def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> bool:
@@ -678,14 +683,60 @@ class PluginExecutor:
             for operation in (raw_operations[operation_id],)
             if self._is_terminal_status(operation.status)
         ]
+        # A live input parent still needs its natural replay Start. Completed
+        # ancestors may be skipped entirely, so they do not delay delivery.
+        with self._terminal_updates_lock:
+            self._pending_input_ends = {
+                (info.operation_id, info.status): (
+                    info,
+                    self._input_parent_starts(info.parent_id, raw_operations),
+                )
+                for info in input_ends
+            }
         self.execute_plugins(self._invocation_status, sync=True)
-        if input_ends:
+        self._run_in_invocation_context(self._flush_input_ends)
 
-            def report_input_updates() -> None:
-                for operation_end in input_ends:
-                    self._report_terminal_update(operation_end)
+    def _input_parent_starts(
+        self, parent_id: str | None, operations: Mapping[str, Operation]
+    ) -> set[str]:
+        waiting = set()
+        visited = set()
+        while parent_id:
+            if parent_id in visited:
+                waiting.add(parent_id)
+                break
+            visited.add(parent_id)
+            parent = operations.get(parent_id)
+            if parent is None:
+                # Unknown ancestry is not evidence of an abandoned parent.
+                waiting.add(parent_id)
+                break
+            if parent.operation_type is ServiceOperationType.EXECUTION:
+                break  # Invocation Start already establishes the execution root.
+            if not self._is_terminal_status(parent.status):
+                waiting.add(parent_id)
+            parent_id = parent.parent_id
+        return waiting
 
-            self._run_in_invocation_context(report_input_updates)
+    def _flush_input_ends(
+        self, started_parent: str | None = None, *, final: bool = False
+    ) -> None:
+        if not self._pending_input_ends:
+            return
+        ready = []
+        with self._terminal_updates_lock:
+            for key, (info, waiting) in list(self._pending_input_ends.items()):
+                if started_parent is not None:
+                    waiting.discard(started_parent)
+                if final or not waiting:
+                    del self._pending_input_ends[key]
+                    if key not in self._reported_terminal_updates:
+                        # Claim while removing the pending input, so a concurrent
+                        # checkpoint observation cannot overtake this snapshot.
+                        self._reported_terminal_updates.add(key)
+                        ready.append(info)
+        for info in ready:
+            self.execute_plugins(info, sync=True)
 
     def _snapshot_execution_input(self, execution_input: Any) -> Any:
         """Deep-copy the execution input so the plugin view is isolated.
@@ -733,6 +784,9 @@ class PluginExecutor:
                 operations=self._snapshot_operation_infos(self._operations_provider),
             )
         )
+        # Unvisited input updates must finish before End closes plugin state and
+        # before the caller can acknowledge the invocation response.
+        self._run_in_invocation_context(lambda: self._flush_input_ends(final=True))
         self.execute_plugins(invocation_end_info, sync=True)
 
     def on_user_function_start(
@@ -755,6 +809,10 @@ class PluginExecutor:
             attempt=attempt,
         )
         self.execute_plugins(start_info, sync=True)
+        if start_info.operation_type is OperationType.CONTEXT:
+            # Context spans are established by the user-function hook, not the
+            # earlier durable operation START/replay notification.
+            self._flush_input_ends(operation_identifier.operation_id)
         return start_info
 
     def on_user_function_end(
@@ -799,6 +857,8 @@ class PluginExecutor:
                 ),
                 sync=True,
             )
+            if update.operation_type is not ServiceOperationType.CONTEXT:
+                self._flush_input_ends(update.operation_id)
 
     def on_operation_replay(self, operation: Operation) -> None:
         """Execute plugins for a non-terminal operation observed during replay."""
@@ -816,6 +876,8 @@ class PluginExecutor:
             status=operation.status,
         )
         self.execute_plugins(start_info, sync=True)
+        if operation.operation_type is not ServiceOperationType.CONTEXT:
+            self._flush_input_ends(operation.operation_id)
 
     def on_child_context_end(
         self,
@@ -930,7 +992,10 @@ class PluginExecutor:
         if self._plugins:
             key = (info.operation_id, info.status)
             with self._terminal_updates_lock:
-                if key in self._reported_terminal_updates:
+                if (
+                    key in self._pending_input_ends
+                    or key in self._reported_terminal_updates
+                ):
                     return
                 self._reported_terminal_updates.add(key)
         self.execute_plugins(info, sync=True)

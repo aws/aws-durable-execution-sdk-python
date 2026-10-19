@@ -73,9 +73,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--legacy-plugin", action="store_true")
     args = parser.parse_args()
-    # This PR also repairs the local service simulator. Validate its actual
-    # built artifact with the SDK/plugin, retaining every test assertion.
-    packages = [CORE] if args.legacy_plugin else [CORE, OTEL, TESTING]
+    # Both lanes use the built local runner, including its real callback-update
+    # producer. The legacy lane keeps the actual published OTel plugin unchanged.
+    packages = [CORE, TESTING] if args.legacy_plugin else [CORE, OTEL, TESTING]
     wheels = [built_wheel(package) for package in packages]
     subprocess.run(
         [

@@ -122,9 +122,14 @@ checkpointing is available, stops and waits for checkpoint processing, then call
 End before returning the outcome. The caller shuts down the handler executor.
 There is no separate handler-context hook or context-manager plugin API.
 
-After all Start hooks, visible terminal operations named by the invocation
-input's `UpdatedOperationIds` receive their existing `on_operation_end` callback.
-This includes descendants that a cached completed child will not revisit.
+After all invocation Start hooks, visible terminal operations named by the input's
+`UpdatedOperationIds` receive their existing `on_operation_end` callback once
+unfinished parent scopes are ready. A CONTEXT becomes ready after its existing
+user-function-start hooks finish, preserving nested callback parenting for older
+plugins. Completed cached parents require no synthetic Start, so their visible
+descendant updates still deliver eagerly even when replay skips the child body.
+Any input update whose parent is not visited is drained before invocation End
+closes plugin state and before the response can be acknowledged.
 Input delivery and later checkpoint/replay observations share the per-invocation
 notification ledger; an operation/status is not reported twice in that invocation.
 Missing operation metadata is not fabricated, and failed invocation delivery can

@@ -448,7 +448,16 @@ cleanup clearing another's trace. Provider configuration and registration remain
 instance resources. SDK-owned worker tasks capture the selected invocation
 Context; Start/End hooks and token reset retain their existing owner and order.
 
-Visible terminal input updates are delivered after all Start hooks. The service
+Visible terminal input updates are captured before plugin Start hooks and delivered
+only after all Start hooks. For an unfinished parent context, its existing
+user-function-start hooks also finish before a child's completion is delivered;
+this preserves nested callback parents when only core is upgraded and OTel 1.0
+is retained. Completed cached parents need no synthetic Start, so their visible
+child updates can still be delivered immediately. If an input parent is never
+visited, remaining completions are delivered before invocation End closes plugin
+state and before the invocation response can be acknowledged. Repeated input and
+checkpoint observations still share one invocation-local notification ledger.
+The service
 omits descendants of completed contexts unless their ancestors retain children
 through `ReplayChildren`; an `UpdatedOperationIds` entry alone does not provide
 missing operation metadata. The SDK does not synthesize a hook or a span from

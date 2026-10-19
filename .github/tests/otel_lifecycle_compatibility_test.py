@@ -160,3 +160,93 @@ def test_installed_pair_preserves_context_and_documents_legacy_fallback(
             provider.shutdown()
 
     contextvars.Context().run(run)
+
+
+@pytest.mark.parametrize("view", [InvocationOtelPlugin, ExecutionOtelPlugin])
+def test_installed_pair_preserves_nested_callback_terminal_on_resume(view):
+    """A core-only upgrade must retain the released plugin's callback end."""
+    from aws_durable_execution_sdk_python_testing.runner import (
+        DurableFunctionTestRunner,
+    )
+    import aws_durable_execution_sdk_python_testing as installed_testing
+
+    import aws_durable_execution_sdk_python_otel as installed_otel
+
+    assert "site-packages" in Path(installed_testing.__file__).resolve().parts
+    assert "site-packages" in Path(core_execution.__file__).resolve().parts
+    assert "site-packages" in Path(installed_otel.__file__).resolve().parts
+    assert version("aws-durable-execution-sdk-python-otel") == (
+        "1.0.0" if os.environ.get("OTEL_COMPAT_LEGACY") == "1" else "1.1.0"
+    )
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    plugin = view(
+        OtelPluginConfig(
+            tracer_provider=provider,
+            enrich_logger=False,
+            context_extractor=lambda _: None,
+        )
+    )
+    submitted = threading.Event()
+    suspended = threading.Event()
+    callback_ids = []
+    updated_ids = []
+    invocation_statuses = []
+    side_effects = []
+
+    class Observer(DurableInstrumentationPlugin):
+        def on_invocation_start(self, info):
+            updated_ids.append(list(info.updated_operations))
+
+        def on_invocation_end(self, info):
+            invocation_statuses.append(info.status.value)
+            if info.status.value == "PENDING":
+                suspended.set()
+
+    def submit(callback_id, _context):
+        side_effects.append("submit")
+        callback_ids.append(callback_id)
+        submitted.set()
+
+    def saved(_context):
+        side_effects.append("saved")
+        return "saved"
+
+    def body(_event, context):
+        context.step(saved, name="saved-before")
+        return context.wait_for_callback(submit, name="await-external")
+
+    handler = durable_execution(body, plugins=[plugin, Observer()])
+    try:
+        with DurableFunctionTestRunner(
+            handler=handler, skip_time=False, poll_interval=0.01, execution_timeout=20
+        ) as runner:
+            arn = runner.run_async(input="{}")
+            assert submitted.wait(8) and suspended.wait(8)
+            runner.send_callback_success(callback_ids[0], result=b"done")
+            result = runner.wait_for_result(arn, timeout=10)
+        assert result.status.value == "SUCCEEDED"
+        assert result.result == '"done"'
+        assert invocation_statuses == ["PENDING", "SUCCEEDED"]
+        assert side_effects == ["saved", "submit"]
+        assert updated_ids[0] == [] and len(updated_ids[1]) == 1
+        spans = exporter.get_finished_spans()
+        callback_spans = [
+            span for span in spans if span.name == "await-external create callback id"
+        ]
+        terminal = [
+            span
+            for span in callback_spans
+            if span.attributes["durable.operation.status"] == "SUCCEEDED"
+        ]
+        assert len(terminal) == 1
+        assert terminal[0].attributes["durable.operation.id"] == updated_ids[1][0]
+        parent_spans = [span for span in spans if span.name == "await-external"]
+        assert terminal[0].parent in [span.context for span in parent_spans]
+        assert all(
+            span.context.trace_id == terminal[0].context.trace_id
+            for span in callback_spans
+        )
+    finally:
+        provider.shutdown()
