@@ -250,3 +250,156 @@ def test_installed_pair_preserves_nested_callback_terminal_on_resume(view):
         )
     finally:
         provider.shutdown()
+
+
+@pytest.mark.parametrize("view", [InvocationOtelPlugin, ExecutionOtelPlugin])
+def test_installed_pair_waits_for_completed_replaychildren_parent(view):
+    """A real large child result retains and replays its callback's parent."""
+    import json
+    import time
+
+    from aws_durable_execution_sdk_python.config import CallbackConfig
+    from aws_durable_execution_sdk_python.serdes import JsonSerDes
+    from aws_durable_execution_sdk_python_testing.runner import (
+        DurableFunctionTestRunner,
+    )
+    import aws_durable_execution_sdk_python_otel as installed_otel
+    import aws_durable_execution_sdk_python_testing as installed_testing
+
+    for module in (core_execution, installed_otel, installed_testing):
+        assert "site-packages" in Path(module.__file__).resolve().parts
+    assert version("aws-durable-execution-sdk-python-otel") == (
+        "1.0.0" if os.environ.get("OTEL_COMPAT_LEGACY") == "1" else "1.1.0"
+    )
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    plugin = view(
+        OtelPluginConfig(
+            tracer_provider=provider,
+            enrich_logger=False,
+            context_extractor=lambda _: None,
+        )
+    )
+    starts, ends, input_parents = [], [], []
+    child_calls, saved_calls, marker_calls = [], [], []
+    exports_at_marker = []
+
+    class Observer(DurableInstrumentationPlugin):
+        def on_invocation_start(self, info):
+            starts.append(info)
+
+        def on_invocation_end(self, info):
+            ends.append(info.status.value)
+
+    def callback_spans():
+        return [
+            span
+            for span in exporter.get_finished_spans()
+            if span.name == "b"
+            and span.attributes.get("durable.operation.status") == "SUCCEEDED"
+        ]
+
+    def saved(_context):
+        saved_calls.append(1)
+        return "saved"
+
+    def child(context):
+        child_calls.append(1)
+        callback = context.create_callback(
+            name="b", config=CallbackConfig(serdes=JsonSerDes())
+        )
+        assert context.step(saved, name="saved-child") == "saved"
+        return {"id": callback.callback_id, "large": "x" * (300 * 1024)}
+
+    def marker(_context):
+        marker_calls.append(1)
+        exports_at_marker.extend(callback_spans())
+        return "marked"
+
+    def body(_event, context):
+        a = context.create_callback(
+            name="a", config=CallbackConfig(serdes=JsonSerDes())
+        )
+        b_id = context.run_in_child_context(child, name="large-parent")["id"]
+        result = a.result()
+        assert context.step(marker, name="after-a") == "marked"
+        return {"a": result, "b_id": b_id}
+
+    wrapped = durable_execution(body, plugins=[Observer(), plugin])
+
+    def entrypoint(event, context):
+        input_parents.append(
+            [
+                (op.operation_id, op.status.value, op.context_details.replay_children)
+                for op in event.initial_execution_state.operations
+                if op.name == "large-parent" and op.context_details is not None
+            ]
+        )
+        return wrapped(event, context)
+
+    def completed(runner, arn, count):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            events = runner.get_execution_history(
+                arn, include_execution_data=True
+            ).events
+            if (
+                len(ends) >= count
+                and sum(e.event_type == "InvocationCompleted" for e in events) >= count
+            ):
+                return
+            time.sleep(0.01)
+        raise AssertionError("Invocation did not finish")
+
+    try:
+        with DurableFunctionTestRunner(
+            handler=entrypoint,
+            skip_time=False,
+            poll_interval=0.01,
+            execution_timeout=25,
+        ) as runner:
+            arn = runner.run_async(input="{}")
+            a_id = runner.wait_for_callback(arn, name="a", timeout=5)
+            b_id = runner.wait_for_callback(arn, name="b", timeout=5)
+            completed(runner, arn, 1)
+            runner.send_callback_success(b_id, result=b'"B"')
+            completed(runner, arn, 2)
+            middle_exports = callback_spans()
+            runner.send_callback_success(a_id, result=b'"A"')
+            result = runner.wait_for_result(arn, timeout=10)
+        assert result.status.value == "SUCCEEDED"
+        assert json.loads(result.result) == {"a": "A", "b_id": b_id}
+        assert ends == ["PENDING", "PENDING", "SUCCEEDED"]
+        assert child_calls == [1, 1, 1] and saved_calls == [1] and marker_calls == [1]
+        b_info = next(
+            info for info in starts[1].updated_operations.values() if info.name == "b"
+        )
+        assert input_parents[1] == [(b_info.parent_id, "SUCCEEDED", True)]
+        terminal = callback_spans()
+        assert len(middle_exports) == len(terminal) == 1
+        assert exports_at_marker == middle_exports == terminal
+        assert terminal[0].attributes["durable.operation.id"] == b_info.operation_id
+        parents = [
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("durable.operation.id") == b_info.parent_id
+            and span.attributes.get("durable.operation.status") == "SUCCEEDED"
+        ]
+        assert terminal[0].parent in [span.context for span in parents]
+        assert all(
+            span.context.trace_id == terminal[0].context.trace_id for span in parents
+        )
+        if view is InvocationOtelPlugin:
+            invocations = [
+                span
+                for span in exporter.get_finished_spans()
+                if span.name == "Invocation"
+            ]
+            assert len(parents) == len(invocations) == 3
+            assert terminal[0].parent == parents[1].context
+            assert parents[1].parent == invocations[1].context
+        else:
+            assert len(parents) == 1
+    finally:
+        provider.shutdown()

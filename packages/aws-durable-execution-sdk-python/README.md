@@ -126,8 +126,9 @@ After all invocation Start hooks, visible terminal operations named by the input
 `UpdatedOperationIds` receive their existing `on_operation_end` callback once
 unfinished parent scopes are ready. A CONTEXT becomes ready after its existing
 user-function-start hooks finish, preserving nested callback parenting for older
-plugins. Completed cached parents require no synthetic Start, so their visible
-descendant updates still deliver eagerly even when replay skips the child body.
+plugins. Completed parents that skip their child body require no synthetic Start, so
+their visible descendant updates still deliver eagerly. Successful contexts
+with `ReplayChildren` still re-enter user-function Start and wait for that scope.
 Any input update whose parent is not visited is drained before invocation End
 closes plugin state and before the response can be acknowledged.
 Input delivery and later checkpoint/replay observations share the per-invocation

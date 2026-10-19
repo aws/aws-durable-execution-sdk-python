@@ -452,8 +452,9 @@ Visible terminal input updates are captured before plugin Start hooks and delive
 only after all Start hooks. For an unfinished parent context, its existing
 user-function-start hooks also finish before a child's completion is delivered;
 this preserves nested callback parents when only core is upgraded and OTel 1.0
-is retained. Completed cached parents need no synthetic Start, so their visible
-child updates can still be delivered immediately. If an input parent is never
+is retained. Completed parents that skip their body need no synthetic Start, so their visible
+child updates can still be delivered immediately. Successful `ReplayChildren`
+contexts still wait for their actual user-function-start hooks. If an input parent is never
 visited, remaining completions are delivered before invocation End closes plugin
 state and before the invocation response can be acknowledged. Repeated input and
 checkpoint observations still share one invocation-local notification ledger.

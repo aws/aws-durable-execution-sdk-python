@@ -15,6 +15,7 @@ from aws_durable_execution_sdk_python.execution import (
 )
 from aws_durable_execution_sdk_python.lambda_service import (
     CallbackDetails,
+    ContextDetails,
     ErrorObject,
     Operation,
     OperationAction,
@@ -232,11 +233,22 @@ def test_input_waits_for_the_real_parent_chain_and_concurrent_starts(start_kind)
             assert delivered[-1].parent_id == "parent"
 
 
-def test_cached_terminal_parent_does_not_require_a_synthetic_start():
+@pytest.mark.parametrize(
+    ("status", "replay_children", "waits_for_scope"),
+    [
+        (OperationStatus.SUCCEEDED, False, False),
+        (OperationStatus.SUCCEEDED, True, True),
+        (OperationStatus.FAILED, True, False),
+    ],
+)
+def test_terminal_parent_waits_only_when_its_child_body_replays(
+    status, replay_children, waits_for_scope
+):
     parent = Operation(
         operation_id="cached-parent",
         operation_type=OperationType.CONTEXT,
-        status=OperationStatus.SUCCEEDED,
+        status=status,
+        context_details=ContextDetails(replay_children=replay_children),
         sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
     )
     child = replace(_callback("child"), parent_id=parent.operation_id)
@@ -245,6 +257,9 @@ def test_cached_terminal_parent_does_not_require_a_synthetic_start():
     class Observe(DurableInstrumentationPlugin):
         def on_operation_start(self, info):
             events.append(("start", info.operation_id))
+
+        def on_user_function_start(self, info):
+            events.append(("user-start", info.operation_id))
 
         def on_operation_end(self, info):
             events.append(("end", info.operation_id))
@@ -256,9 +271,25 @@ def test_cached_terminal_parent_does_not_require_a_synthetic_start():
             {parent.operation_id: parent, child.operation_id: child},
             ["child"],
         )
-        assert events == [("end", "child")]
+        expected = [("end", "child")]
+        if waits_for_scope:
+            assert events == []
+            executor.on_operation_update(child)
+            assert events == []
+            executor.on_user_function_start(
+                OperationIdentifier(
+                    operation_id=parent.operation_id,
+                    parent_id=None,
+                    name="cached-parent",
+                    operation_type=OperationType.CONTEXT,
+                    sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+                ),
+                is_replay_children=True,
+            )
+            expected.insert(0, ("user-start", "cached-parent"))
+        assert events == expected
         executor.on_operation_update(child)
-        assert events == [("end", "child")]
+        assert events == expected
 
 
 def test_unvisited_live_parent_flushes_input_before_invocation_end():

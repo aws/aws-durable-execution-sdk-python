@@ -713,7 +713,13 @@ class PluginExecutor:
                 break
             if parent.operation_type is ServiceOperationType.EXECUTION:
                 break  # Invocation Start already establishes the execution root.
-            if not self._is_terminal_status(parent.status):
+            replays_children = (
+                parent.operation_type is ServiceOperationType.CONTEXT
+                and parent.status is OperationStatus.SUCCEEDED
+                and parent.context_details is not None
+                and parent.context_details.replay_children
+            )
+            if not self._is_terminal_status(parent.status) or replays_children:
                 waiting.add(parent_id)
             parent_id = parent.parent_id
         return waiting
