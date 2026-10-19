@@ -158,6 +158,11 @@ class DurableExecutionInvocationOutput:
         """Create a failed invocation output."""
         return cls(status=InvocationStatus.RETRY, error=error)
 
+    @classmethod
+    def create_pending(cls) -> DurableExecutionInvocationOutput:
+        """Create a pending invocation output without a result or error."""
+        return cls(status=InvocationStatus.PENDING)
+
 
 @dataclass(frozen=True)
 class ExecutionDetails:
