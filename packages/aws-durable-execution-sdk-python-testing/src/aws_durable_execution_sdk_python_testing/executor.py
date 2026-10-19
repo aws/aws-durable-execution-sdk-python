@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
+import time
 import uuid
+from concurrent.futures import wait
 from datetime import datetime
 from typing import TYPE_CHECKING, assert_never
 
@@ -351,7 +354,7 @@ class Executor(ExecutionObserver):
         try:
             return self._store.load(execution_arn)
         except KeyError as e:
-            msg: str = f"Execution {execution_arn} not found"
+            msg: str = "Durable Execution does not exist"
             raise ResourceNotFoundException(msg) from e
 
     def get_execution_details(self, execution_arn: str) -> GetDurableExecutionResponse:
@@ -1454,15 +1457,22 @@ class Executor(ExecutionObserver):
                 )
 
             case InvocationStatus.PENDING:
-                # An operation the handler waited on may complete between
-                # the handler's return and this check. A change the
-                # handler has not seen, after the invocation's input was
-                # built, earns a re-invoke, so PENDING is valid; only a
-                # handler that waited on nothing is in error.
-                if not execution.has_pending_operations(execution) and not (
-                    invocation_seq is not None
-                    and execution.has_changes_after(
-                        max(invocation_seq, execution.handler_seen_seq)
+                # A paused execution answers the running invocation's
+                # checkpoint without a token and defers its next invocation;
+                # that invocation must stop as PENDING even with nothing
+                # pending, and resume re-invokes it. Any other PENDING needs
+                # pending operations or a change the handler has not seen
+                # since its input was built. The unseen-change case happens
+                # when an operation completes after this invocation's input
+                # was built but before this response is validated.
+                if (
+                    not execution.has_deferred_invocation
+                    and not execution.has_pending_operations(execution)
+                    and not (
+                        invocation_seq is not None
+                        and execution.has_changes_after(
+                            max(invocation_seq, execution.handler_seen_seq)
+                        )
                     )
                 ):
                     msg_pending_ops: str = (
@@ -1517,6 +1527,15 @@ class Executor(ExecutionObserver):
             self._store.save(execution)
             logger.info(
                 "[%s] Handler already INVOKING; deferring re-invoke",
+                execution_arn,
+            )
+            return None
+
+        if execution.is_paused:
+            execution.defer_invocation()
+            self._store.save(execution)
+            logger.debug(
+                "[%s] Holding back scheduled invocation while paused",
                 execution_arn,
             )
             return None
@@ -1775,6 +1794,107 @@ class Executor(ExecutionObserver):
             delay=delay,
             completion_event=completion_event,
         )
+
+    def pause_execution(self, execution_arn: str, timeout: float = 60) -> None:
+        """Experimental; may change or be removed in a future release.
+
+        Pause an execution and wait for its current invocation to stop.
+
+        If a running invocation sends another checkpoint after the pause is
+        applied, its updates are accepted and saved. The response omits the
+        checkpoint token, causing the SDK to end the invocation with PENDING.
+        Further checkpoints from that invocation are rejected.
+
+        Returns once the pause request is applied and no invocation is running.
+        A running step is not interrupted.
+
+        Repeated calls leave an existing pause unchanged and wait again for
+        the running invocation to stop. Completed executions are unchanged.
+
+        If this call times out, the pause request is not cancelled.
+
+        Args:
+            execution_arn: Execution to pause.
+            timeout: Maximum wait in real seconds. Must be finite and positive.
+
+        Raises:
+            InvalidParameterValueException: If the ARN is blank.
+            ResourceNotFoundException: If the execution does not exist.
+            ValueError: If timeout is not finite and positive.
+            TimeoutError: If the pause wait times out.
+        """
+
+        if not math.isfinite(timeout) or timeout <= 0:
+            msg = "timeout must be finite and positive"
+            raise ValueError(msg)
+        deadline = time.monotonic() + timeout
+
+        self._validate_execution_arn(execution_arn)
+        pause = self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._set_paused(execution_arn)),
+        )
+
+        timeout_message = (
+            f"Execution {execution_arn} did not become idle within {timeout:g} seconds "
+            "of requesting pause. The pause request has not been cancelled."
+        )
+
+        done, _ = wait([pause], timeout=max(0, deadline - time.monotonic()))
+        if not done:
+            raise TimeoutError(timeout_message)
+        pause.result()
+
+        self._wait_until_idle(execution_arn, deadline, timeout_message)
+
+    def resume_execution(self, execution_arn: str) -> None:
+        """Experimental; may change or be removed in a future release.
+
+        Make the local checkpoint server answer this execution's
+        checkpoints with a token again.
+
+        Starts the invocation that pause_execution(arn) held back, if any.
+
+        Repeated calls leave an execution that is not paused unchanged.
+        Completed executions are unchanged.
+
+        Raises:
+            InvalidParameterValueException: If the ARN is blank.
+            ResourceNotFoundException: If the execution does not exist.
+        """
+        self._validate_execution_arn(execution_arn)
+        self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._resume_execution(execution_arn)),
+        ).result()
+
+    def _set_paused(self, execution_arn: str) -> None:
+        execution = self.get_execution(execution_arn)
+        if execution.is_complete or execution.is_paused:
+            return
+        execution.pause()
+        self._store.save(execution)
+
+    def _resume_execution(self, execution_arn: str) -> None:
+        execution = self.get_execution(execution_arn)
+        if execution.is_complete or not execution.is_paused:
+            return
+
+        deferred = execution.resume()
+
+        self._store.save(execution)
+        if deferred:
+            self._invoke_execution(execution_arn)
+
+    def _wait_until_idle(
+        self, execution_arn: str, deadline: float, timeout_message: str
+    ) -> None:
+        """Wait for no invocation to be running. Raise at the deadline."""
+        while self._invocation_gate(execution_arn) is InvocationState.INVOKING:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(timeout_message)
+            time.sleep(min(0.005, remaining))
 
     def _complete_workflow(
         self, execution_arn: str, result: str | None, error: ErrorObject | None
