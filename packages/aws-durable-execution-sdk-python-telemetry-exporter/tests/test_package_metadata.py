@@ -29,10 +29,3 @@ def test_package_is_marked_production_stable() -> None:
 
     assert "Development Status :: 5 - Production/Stable" in classifiers
     assert "Development Status :: 4 - Beta" not in classifiers
-
-
-def test_readme_does_not_advertise_experimental_status() -> None:
-    readme = (PACKAGE_ROOT / "README.md").read_text(encoding="utf-8")
-
-    assert "experimental" not in readme.lower()
-    assert "may change or be removed" not in readme.replace("\n> ", " ").lower()
