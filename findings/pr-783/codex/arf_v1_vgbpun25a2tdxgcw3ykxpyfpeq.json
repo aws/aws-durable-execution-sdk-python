@@ -1,0 +1,1 @@
+{"finding_digest":"a982fa375d06a63b9856de1577e0af24332d461e893c279b1fbeafddb1474f35","finding_id":"arf_v1_vgbpun25a2tdxgcw3ykxpyfpeq","identity_key":"core/state.py::executionstate.create_checkpoint::late-terminal-acknowledgement-lost","pull_request_number":783,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
