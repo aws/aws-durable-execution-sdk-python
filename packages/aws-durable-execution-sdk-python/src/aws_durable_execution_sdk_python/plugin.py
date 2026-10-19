@@ -259,8 +259,8 @@ class InvocationInfo:
     )
     """EXPERIMENTAL: The deserialized execution input, when available.
 
-    Surfaced to instrumentation plugins that need to record it (e.g. Workflow
-    Insight). Mirrors the JS SDK's ``InvocationInfo.executionInput``.
+    Surfaced to instrumentation plugins that need to record it (e.g. Durable
+    Execution Telemetry). Mirrors the JS SDK's ``InvocationInfo.executionInput``.
 
     Excluded from ``repr`` on purpose: instrumentation logs hook infos wholesale
     (the bundled OTel plugins at debug level, the plugin example at info), so
