@@ -22,13 +22,129 @@ Each package maintains its own version in its respective `__about__.py` file:
 - Testing: `packages/aws-durable-execution-sdk-python-testing/src/aws_durable_execution_sdk_python_testing/__about__.py`
 - Telemetry Exporter: `packages/aws-durable-execution-sdk-python-telemetry-exporter/src/aws_durable_execution_sdk_python_telemetry_exporter/__about__.py`
 
-Bump the version in the appropriate `__about__.py` file(s) and merge to `main` before creating a release.
+Set the release version in the appropriate `__about__.py` file(s) and merge to
+`main` before creating a release. Use a new version for an existing distribution,
+or the initial version for a new distribution.
+
+## Publishing a Package for the First Time
+
+Each distribution name needs its own PyPI project and trusted publisher. This
+also applies when renaming a package: the old project's publisher does not
+carry over to the new name. Trusted publishing uses GitHub Actions OIDC, so this
+process does not require a PyPI API token on your machine or in GitHub secrets.
+
+### 1. Prepare the package
+
+Confirm the distribution name in the package's `pyproject.toml` (`[project].name`)
+and its initial version in `__about__.py`. The distribution name is the name used
+by `pip install`; it can differ from the Python import name.
+
+Add the package to **both** matrices in
+[`pypi-publish.yml`](.github/workflows/pypi-publish.yml): its name and path in
+`release-build`, and its name in `pypi-publish`. Add its path and tag prefix to
+the [Packages](#packages) table above. Merge the package and confirm CI passes
+before publishing. Follow [CONTRIBUTING.md](CONTRIBUTING.md) for tests and run
+`hatch build` from the package directory. From the repository root, run
+[`check_dist_legal_files.py`](.github/scripts/check_dist_legal_files.py) with
+`packages/<package-name>` as its argument to verify the wheel and source archive
+include `LICENSE` and `NOTICE`.
+
+### 2. Configure the PyPI publisher
+
+Sign in to the PyPI account that should own the new project. Open
+[Publishing settings](https://pypi.org/manage/account/publishing/), find **Add a
+new pending publisher**, select **GitHub**, and fill in:
+
+| Field | Value |
+|-------|-------|
+| PyPI Project Name | The exact `[project].name` from the new package's `pyproject.toml` |
+| Owner | `aws` |
+| Repository name | `aws-durable-execution-sdk-python` |
+| Workflow name | `pypi-publish.yml` |
+| Environment name | `pypi` |
+
+**Owner** is the GitHub organization, not the PyPI username. **Workflow name**
+is the filename, without `.github/workflows/`; it is not the display name
+`Upload PyPI Package`. Enter `pypi` for the environment even though the form
+marks it optional, because the publishing job uses that GitHub environment.
+
+Click **Add**. The publisher remains pending until the first successful upload,
+which creates the project and converts it to a regular trusted publisher. The
+PyPI account that registered it becomes a project owner. A pending publisher
+**does not reserve the name**. See PyPI's
+[first-project publishing guide](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/).
+
+If you need to claim a name without uploading a release and have access to a
+PyPI organization, use the organization's **Manage → Projects → Create and add
+a new project** action instead ([instructions](https://docs.pypi.org/organization-accounts/actions/project-actions/#create-a-project)).
+Then add the trusted publisher through that project's **Publishing** settings.
+A public PyPI 404 alone does not prove a name is free; a project can exist
+without any releases ([name availability](https://pypi.org/help/#project-name)).
+
+### 3. Publish the first version
+
+For a coordinated release, follow [Cutting a Release](#cutting-a-release) below.
+The initial version only needs to be unused under the new distribution name;
+there is no need to bump it just to create the project.
+
+Check the entire release scope first. The current workflow publishes **all
+packages in both matrices**, regardless of the release's tag prefix. A release
+also triggers [`ecr-release.yml`](.github/workflows/ecr-release.yml), which
+publishes the testing emulator image. Do not create a GitHub release solely to
+claim one name if those other publications are not intended.
+
+To publish only the new package, a maintainer can use a temporary publishing
+branch without changing `main`:
+
+1. Create the branch from the merged commit selected for the first release.
+2. On that branch, edit the existing `.github/workflows/pypi-publish.yml`.
+   Replace its `release` trigger with `workflow_dispatch`, and keep only the
+   new package in **both** matrices. Keep the workflow filename and `pypi`
+   environment so they match the trusted publisher.
+3. Pin the checkout step's `ref` to the selected source commit. Replace the
+   environment URL's `github.event.release.name` expression with the initial
+   version, since a manual dispatch has no release event. Preserve the build,
+   legal-file verification, artifact upload/download, and OIDC publishing
+   steps. The branch must satisfy the `pypi` environment's deployment rules.
+4. Review the diff, push the temporary branch, then dispatch that branch's
+   workflow. For example, for a branch named `first-pypi-publish`:
+
+   ```bash
+   gh workflow run pypi-publish.yml \
+     --repo aws/aws-durable-execution-sdk-python \
+     --ref first-pypi-publish
+   ```
+
+The workflow on `main` currently has no manual-dispatch trigger. The command
+above uses the edited workflow on the temporary branch; omitting `--ref` does
+not select that workflow. A manual dispatch does not trigger the release-event
+workflows.
+
+### 4. Verify the project
+
+Check that the workflow ran on the intended branch and commit, that its checkout
+step used the selected merged source commit, and that both the build and publish
+jobs succeeded. On PyPI, verify the project name, version,
+wheel, and source archive. Compare their SHA-256 hashes with the workflow's
+distribution artifact. Confirm the publisher now appears in the project's
+**Publishing** settings and arrange the team's project ownership as needed.
+
+If publishing reports `invalid-pending-publisher` or `invalid-publisher`, check
+the repository owner, repository name, workflow filename, and environment
+against the form values above. Also check that the built distribution's name
+matches **PyPI Project Name**. Correct the configuration before retrying; adding
+the pending publisher by itself does not finish publication.
+
+After a successful isolated publication, remove the temporary remote branch.
+Do not merge its reduced matrices or manual-only trigger into `main`.
 
 ## Cutting a Release
 
-### 1. Bump the version
+### 1. Set the version
 
-Update the `__version__` string in the relevant `__about__.py` file(s). Commit and merge to `main`.
+For an existing distribution, update `__version__` in the relevant
+`__about__.py` file(s) to a new version. For a new distribution's first release,
+use the initial version prepared above. Commit and merge to `main`.
 
 ### 2. Create a GitHub Release
 
@@ -71,7 +187,11 @@ Creating a GitHub Release triggers the [`pypi-publish.yml`](.github/workflows/py
 
 The workflow runs on the `release: [published]` event, so it fires whenever a release is published on GitHub — no manual intervention is needed beyond creating the release.
 
-> **Note:** The workflow builds and publishes all packages in the matrix. Ensure the version in each package's `__about__.py` is correct before publishing. If only one package has a version bump, PyPI will reject the re-upload of the unchanged package (which is expected and harmless since `fail-fast: false` is set).
+> **Note:** The tag prefix does not select packages. The workflow builds and
+> publishes every package in its matrices, including any unrelated version
+> that has not been published yet. Check every package's version before
+> creating a release. PyPI rejects an already published filename; with
+> `fail-fast: false`, that job can fail while other packages still publish.
 
 Releases containing an `otel-v` tag also trigger the
 [`lambda-layer-publish.yml`](.github/workflows/lambda-layer-publish.yml)
@@ -137,10 +257,13 @@ If only one package is being released, include only that package's section. Each
 
 Before publishing a release:
 
-- [ ] Version bumped in the relevant `__about__.py` file(s)
+- [ ] Release version set in the relevant `__about__.py` file(s)
 - [ ] For a first release of a new distribution name (for example
-      `aws-durable-execution-sdk-python-telemetry-exporter`), PyPI trusted
-      publishing is configured for that name
+      `aws-durable-execution-sdk-python-telemetry-exporter`), follow
+      [Publishing a Package for the First Time](#publishing-a-package-for-the-first-time)
+      and configure its PyPI publisher before uploading
+- [ ] Every unpublished version in the PyPI matrices is intended for this
+      release, along with the testing emulator image publication
 - [ ] OTel layer SDK pin identifies a compatible published SDK, or matches the
       SDK version included in a combined release
 - [ ] Changes merged to `main`
