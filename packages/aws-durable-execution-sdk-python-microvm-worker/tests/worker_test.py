@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import http.client
 import inspect
 import io
@@ -33,6 +34,72 @@ from aws_durable_execution_sdk_python_microvm_worker import worker as worker_mod
 
 RUN = f"{HOOK_PATH_PREFIX}run"
 WAIT = 10.0
+
+
+@functools.cache
+def _has_ipv6_loopback() -> bool:
+    """Whether this host can use ``::1``.
+
+    A host can support IPv6 sockets and still have no ``::1`` address. A
+    Docker container with IPv6 turned off is one example. A connection to
+    ``::1`` then fails with ``EADDRNOTAVAIL``.
+    """
+    if not socket.has_dualstack_ipv6():
+        return False
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+def host_of(worker: MicrovmWorker) -> str:
+    """The loopback address on which a test reaches ``worker``.
+
+    A dual-stack worker binds ``[::]`` with ``SO_REUSEADDR``. On macOS, that
+    bind succeeds on a port that another process holds on ``127.0.0.1``. A
+    connection to ``127.0.0.1`` then reaches the other process, and the test
+    fails with its answer. So the tests connect to ``::1`` when the worker
+    is dual-stack. Linux refuses such a bind, so a MicroVM is not affected.
+    """
+    server = worker._server  # noqa: SLF001
+    if server.address_family == socket.AF_INET6 and _has_ipv6_loopback():
+        return "::1"
+    return "127.0.0.1"
+
+
+def reaches_worker(worker: MicrovmWorker) -> bool:
+    """Whether a connection to ``host_of(worker)`` reaches this worker.
+
+    The port that the kernel picks can be held by another process on one
+    loopback address, ``127.0.0.1`` or ``::1``. The worker's ``[::]`` bind
+    still succeeds on macOS, and a connection then reaches the other
+    process. So a test checks the ``Server`` header, and starts the worker
+    again on another port when it is not the worker's.
+    """
+    connection = http.client.HTTPConnection(host_of(worker), worker.port, timeout=5)
+    try:
+        connection.request("GET", "/__reachability_check__")
+        response = connection.getresponse()
+        response.read()
+        server = response.getheader("Server") or ""
+    except OSError:
+        return False
+    finally:
+        connection.close()
+    return server.startswith("aws-durable-execution-sdk-python-microvm-worker")
+
+
+def start_reachable_worker(start: Callable[[], MicrovmWorker]) -> MicrovmWorker:
+    """Start a worker with ``start`` until a test connection reaches it."""
+    for _ in range(10):
+        worker = start()
+        if reaches_worker(worker):
+            return worker
+        worker.close()
+    msg = "every port that the kernel picked was held by another process"
+    raise RuntimeError(msg)
 
 
 def run_payload(*, with_job: bool = True, **job: Any) -> dict[str, Any]:
@@ -69,9 +136,12 @@ def request(
     raw: Any = None,
     headers: dict[str, str] | None = None,
     chunked: bool = False,
+    host: str | None = None,
 ) -> tuple[int, Any]:
     """Send one request, and return the status and the parsed answer."""
-    connection = http.client.HTTPConnection("127.0.0.1", worker.port, timeout=WAIT)
+    connection = http.client.HTTPConnection(
+        host or host_of(worker), worker.port, timeout=WAIT
+    )
     try:
         data = raw if raw is not None else json.dumps(body).encode()
         connection.request(
@@ -90,7 +160,7 @@ def request(
 
 def raw_request(worker: MicrovmWorker, data: bytes) -> bytes:
     """Send bytes, close the sending side, and return the raw answer."""
-    with socket.create_connection(("127.0.0.1", worker.port), timeout=WAIT) as sock:
+    with socket.create_connection((host_of(worker), worker.port), timeout=WAIT) as sock:
         sock.sendall(data)
         sock.shutdown(socket.SHUT_WR)
         chunks = []
@@ -148,7 +218,9 @@ def start(
         client = client if client is not None else fake_client()
         options.setdefault("create_client", lambda region: client)
         options.setdefault("logger", logger)
-        worker = start_microvm_worker(handler=handler, port=0, **options)
+        worker = start_reachable_worker(
+            lambda: start_microvm_worker(handler=handler, port=0, **options)
+        )
         workers.append(worker)
         return worker, client
 
@@ -606,7 +678,7 @@ def test_answers_expect_100_continue_before_it_reads_the_body(start: Any) -> Non
         f"Content-Length: {len(data)}\r\n\r\n"
     )
 
-    with socket.create_connection(("127.0.0.1", worker.port), timeout=WAIT) as sock:
+    with socket.create_connection((host_of(worker), worker.port), timeout=WAIT) as sock:
         sock.sendall(head.encode())
         interim = sock.recv(65536)
         sock.sendall(data)
@@ -662,7 +734,7 @@ def test_answers_400_instead_of_100_continue_to_a_body_over_the_limit(
         f"Content-Length: {limit + 1}\r\n\r\n"
     )
 
-    with socket.create_connection(("127.0.0.1", worker.port), timeout=WAIT) as sock:
+    with socket.create_connection((host_of(worker), worker.port), timeout=WAIT) as sock:
         sock.sendall(head.encode())
         answer = b""
         while chunk := sock.recv(65536):
@@ -692,7 +764,7 @@ def test_answers_100_continue_when_the_declared_size_is_not_over_a_limit(
         f"{framing}\r\n\r\n"
     )
 
-    with socket.create_connection(("127.0.0.1", worker.port), timeout=WAIT) as sock:
+    with socket.create_connection((host_of(worker), worker.port), timeout=WAIT) as sock:
         sock.sendall(head.encode())
         interim = sock.recv(65536)
 
@@ -713,7 +785,7 @@ def _send_after_the_answer(
         The answer, and the error of the first failed write, or ``None``.
     """
     head = f"POST {RUN} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 999999\r\n\r\n"
-    with socket.create_connection(("127.0.0.1", worker.port), timeout=WAIT) as sock:
+    with socket.create_connection((host_of(worker), worker.port), timeout=WAIT) as sock:
         sock.sendall(head.encode() + b"x" * 100)
         answer = b""
         while chunk := sock.recv(65536):
@@ -1104,7 +1176,7 @@ def test_prints_no_traceback_for_a_client_that_resets_during_the_headers(
 ) -> None:
     worker, _ = start(Held())
 
-    with socket.create_connection(("127.0.0.1", worker.port), timeout=WAIT) as sock:
+    with socket.create_connection((host_of(worker), worker.port), timeout=WAIT) as sock:
         sock.sendall(b"POST /aws/lambda-microvms/runtime/v1/run HTTP/1.1\r\nHo")
         # The reset must arrive while the server waits for the rest of the
         # headers. A probe printed the traceback only then.
@@ -1165,7 +1237,7 @@ def test_listens_on_ipv4_when_ipv6_sockets_start_ipv6_only(
     monkeypatch.setattr(socket, "socket", _IPv6OnlyByDefault)
     worker, _ = start(Held())
 
-    assert request(worker, f"{HOOK_PATH_PREFIX}ready", {})[0] == 200
+    assert request(worker, f"{HOOK_PATH_PREFIX}ready", {}, host="127.0.0.1")[0] == 200
 
 
 def test_runs_a_job_once_when_parallel_requests_deliver_it(start: Any) -> None:
@@ -1416,23 +1488,6 @@ def test_raises_when_the_port_is_taken(start: Any) -> None:
         start_microvm_worker(handler=Held(), port=worker.port)
 
 
-def _has_ipv6_loopback() -> bool:
-    """Whether this host can use ``::1``.
-
-    A host can support IPv6 sockets and still have no ``::1`` address. A
-    Docker container with IPv6 turned off is one example. A connection to
-    ``::1`` then fails with ``EADDRNOTAVAIL``.
-    """
-    if not socket.has_dualstack_ipv6():
-        return False
-    try:
-        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
-            probe.bind(("::1", 0))
-    except OSError:
-        return False
-    return True
-
-
 def test_listens_on_ipv6_and_ipv4(start: Any) -> None:
     if not _has_ipv6_loopback():
         pytest.skip("this host has no IPv6 loopback address")
@@ -1444,7 +1499,7 @@ def test_listens_on_ipv6_and_ipv4(start: Any) -> None:
         assert connection.getresponse().status == 200
     finally:
         connection.close()
-    assert request(worker, f"{HOOK_PATH_PREFIX}ready", {})[0] == 200
+    assert request(worker, f"{HOOK_PATH_PREFIX}ready", {}, host="127.0.0.1")[0] == 200
 
 
 def test_listens_on_ipv4_without_dual_stack(
@@ -1453,7 +1508,9 @@ def test_listens_on_ipv4_without_dual_stack(
     monkeypatch.setattr(worker_module.socket, "has_dualstack_ipv6", lambda: False)
     worker = start_microvm_worker(handler=Held(), port=0)
     try:
-        assert request(worker, f"{HOOK_PATH_PREFIX}ready", {})[0] == 200
+        assert (
+            request(worker, f"{HOOK_PATH_PREFIX}ready", {}, host="127.0.0.1")[0] == 200
+        )
     finally:
         worker.close()
 
