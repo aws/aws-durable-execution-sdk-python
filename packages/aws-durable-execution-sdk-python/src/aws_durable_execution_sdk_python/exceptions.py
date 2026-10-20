@@ -330,6 +330,10 @@ class InvokeError(DurableOperationError):
     """Raised when a durable invoke operation fails."""
 
 
+class DistributedMapError(DurableOperationError):
+    """Raised when a durable map run operation fails."""
+
+
 class ChildContextError(DurableOperationError):
     """Raised when a child context (run_in_child_context, map, parallel) fails."""
 
@@ -404,6 +408,7 @@ _DURABLE_OPERATION_ERROR_REGISTRY: dict[str, type[DurableOperationError]] = {
     for cls in [
         StepError,
         InvokeError,
+        DistributedMapError,
         ChildContextError,
         WaitForConditionError,
         CallbackError,

@@ -17,6 +17,15 @@ Serialization Strategy:
 Wire Formats:
     Plain JSON: 42, "hello", [1, 2, 3]
     Envelope: {"t": "<type_tag>", "v": <encoded_value>}
+
+Context Requirement:
+- A SerDesContext is built from the current invocation and never travels with
+  the payload
+- ctx.distributed_map and ctx.invoke serialize and deserialize in different
+  invocations, so the two sides get different contexts
+- A custom SerDes used with the operations above must write a payload it can
+  read back without the context it was given
+- Every SerDes in this SDK already meets this requirement
 """
 
 from __future__ import annotations
