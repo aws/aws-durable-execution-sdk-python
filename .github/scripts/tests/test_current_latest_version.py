@@ -65,23 +65,3 @@ def test_cli():
     assert result.returncode == 0
     assert result.stdout == "v1.2.3.post1\n"
     assert result.stderr == ""
-
-
-def _run_standalone() -> int:
-    failures = 0
-    for tags, expected in CASES:
-        got = current_latest_version(tags)
-        if got != expected:
-            failures += 1
-            print(
-                f"FAIL: current_latest_version({tags!r}) = {got!r}, expected {expected!r}"
-            )
-    if failures:
-        print(f"{failures} failing case(s)")
-        return 1
-    print(f"all {len(CASES)} cases passed")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(_run_standalone())
