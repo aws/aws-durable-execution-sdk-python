@@ -9,6 +9,7 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - "packages/aws-durable-execution-sdk-python/**"
       - "packages/aws-durable-execution-sdk-python-conformance-tests/**"
@@ -47,7 +48,10 @@ jobs:
     name: discover conformance suites
     # 1. Run for non-PR events, such as scheduled runs and manual invocations
     # 2. For PRs, run only same-repo branches from non-Dependabot actors; forked PRs or Dependabot should not access secrets.
-    if: github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository &&
+       (github.event.action != 'labeled' || github.event.label.name == 'test:plugin-log-stability'))
     # CodeBuild-hosted runner in the Python testing account (Lambda compute,
     # Amazon Linux python3.13 image). Fork PRs are already excluded by the `if:`
     # above, so the plain label is safe here. The label must match the CodeBuild
@@ -163,9 +167,14 @@ jobs:
           --report-file report-${{ matrix.suite }}
 
     - name: Check lifecycle log stability
-      if: ${{ !cancelled() && matrix.suite == 'plugin' && github.event_name == 'workflow_dispatch' && inputs.lifecycle_log_samples != '0' && steps.conformance.outcome != 'skipped' }}
+      # A labeled same-repo PR uses the existing pull_request OIDC trust. Manual
+      # dispatch remains useful on main, where the test role also permits it.
+      if: >-
+        ${{ !cancelled() && matrix.suite == 'plugin' && steps.conformance.outcome != 'skipped' &&
+            ((github.event_name == 'workflow_dispatch' && inputs.lifecycle_log_samples != '0') ||
+             (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'test:plugin-log-stability'))) }}
       env:
-        LIFECYCLE_LOG_SAMPLES: ${{ inputs.lifecycle_log_samples }}
+        LIFECYCLE_LOG_SAMPLES: ${{ inputs.lifecycle_log_samples || '40' }}
       run: |
         python scripts/check_lifecycle_log_stability.py \
           --stack-name conformance-tests-conf-py-plugin \
