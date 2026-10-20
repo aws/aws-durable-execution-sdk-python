@@ -1,0 +1,1 @@
+{"finding_digest":"ba9b45d439d890eb9e6f4d070baf9d41fd561bcd216646ec400788671975a215","finding_id":"arf_v1_xknulvbz3cioxhtpjudqxl45ih","identity_key":"microvm-worker/worker.py::_terminate::report-start-failure-aborts-termination","pull_request_number":782,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
