@@ -24,8 +24,15 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationSubType,
 )
 from aws_durable_execution_sdk_python.operation.invoke import InvokeOperationExecutor
+from aws_durable_execution_sdk_python.plugin import PropagationMetadata
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
 from tests.serdes_test import CustomDictSerDes
+
+
+def _state_without_plugins() -> Mock:
+    state = Mock(spec=ExecutionState)
+    state.provide_propagation_metadata.return_value = PropagationMetadata()
+    return state
 
 
 # Test helper - maintains old handler signature for backward compatibility in tests
@@ -45,7 +52,7 @@ def invoke_handler(function_name, payload, state, operation_identifier, config):
 
 def test_invoke_handler_already_succeeded():
     """Test invoke_handler when operation already succeeded."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     operation = Operation(
@@ -79,7 +86,7 @@ def test_invoke_handler_already_succeeded():
 
 def test_invoke_handler_already_succeeded_none_result():
     """Test invoke_handler when operation succeeded with None result."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     operation = Operation(
@@ -112,7 +119,7 @@ def test_invoke_handler_already_succeeded_none_result():
 
 def test_invoke_handler_already_succeeded_no_chained_invoke_details():
     """Test invoke_handler when operation succeeded but has no chained_invoke_details."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     operation = Operation(
@@ -148,7 +155,7 @@ def test_invoke_handler_already_succeeded_no_chained_invoke_details():
 )
 def test_invoke_handler_already_terminated(kind: OperationStatus):
     """Test invoke_handler when operation already failed."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     error = ErrorObject(
@@ -183,7 +190,7 @@ def test_invoke_handler_already_terminated(kind: OperationStatus):
 
 def test_invoke_handler_already_timed_out():
     """Test invoke_handler when operation already timed out."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     error = ErrorObject(
@@ -219,7 +226,7 @@ def test_invoke_handler_already_timed_out():
 @pytest.mark.parametrize("status", [OperationStatus.STARTED])
 def test_invoke_handler_already_started(status):
     """Test invoke_handler when operation is already started."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     operation = Operation(
@@ -254,7 +261,7 @@ def test_invoke_handler_already_started(status):
 @pytest.mark.parametrize("status", [OperationStatus.STARTED, OperationStatus.PENDING])
 def test_invoke_handler_already_started_suspends(status):
     """Test invoke_handler when operation is already started suspends indefinitely."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     operation = Operation(
@@ -289,7 +296,7 @@ def test_invoke_handler_already_started_suspends(status):
 
 def test_invoke_handler_new_operation():
     """Test invoke_handler when starting a new operation."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     # First call: not found, second call: started (no immediate response)
@@ -337,7 +344,7 @@ def test_invoke_handler_new_operation():
 
 def test_invoke_handler_no_config():
     """Test invoke_handler when no config is provided."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     not_found = CheckpointedResult.create_not_found()
@@ -376,7 +383,7 @@ def test_invoke_handler_no_config():
 
 def test_invoke_handler_custom_serdes():
     """Test invoke_handler with custom serialization."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     operation = Operation(
@@ -416,7 +423,7 @@ def test_invoke_handler_custom_serdes():
 
 def test_invoke_handler_custom_serdes_new_operation():
     """Test invoke_handler with custom serialization for new operation."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     not_found = CheckpointedResult.create_not_found()
@@ -459,7 +466,7 @@ def test_invoke_handler_custom_serdes_new_operation():
 @pytest.mark.parametrize("status", [OperationStatus.STARTED, OperationStatus.PENDING])
 def test_invoke_handler_with_operation_name(status: OperationStatus):
     """Test invoke_handler uses operation name in logs when available."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     operation = Operation(
@@ -492,7 +499,7 @@ def test_invoke_handler_with_operation_name(status: OperationStatus):
 @pytest.mark.parametrize("status", [OperationStatus.STARTED, OperationStatus.PENDING])
 def test_invoke_handler_without_operation_name(status: OperationStatus):
     """Test invoke_handler uses function name in logs when no operation name."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     operation = Operation(
@@ -524,7 +531,7 @@ def test_invoke_handler_without_operation_name(status: OperationStatus):
 
 def test_invoke_handler_with_none_payload():
     """Test invoke_handler when payload is None."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     not_found = CheckpointedResult.create_not_found()
@@ -561,7 +568,7 @@ def test_invoke_handler_with_none_payload():
 
 def test_invoke_handler_already_succeeded_with_none_payload():
     """Test invoke_handler when operation succeeded and original payload was None."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     operation = Operation(
@@ -599,7 +606,7 @@ def test_invoke_handler_already_succeeded_with_none_payload():
 def test_invoke_handler_suspend_does_not_raise(mock_suspend):
     """Test invoke_handler when suspend_with_optional_resume_delay doesn't raise an exception."""
 
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     not_found = CheckpointedResult.create_not_found()
@@ -639,7 +646,7 @@ def test_invoke_handler_suspend_does_not_raise(mock_suspend):
 
 def test_invoke_handler_with_tenant_id():
     """Test invoke_handler passes tenant_id to checkpoint."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     not_found = CheckpointedResult.create_not_found()
@@ -680,7 +687,7 @@ def test_invoke_handler_with_tenant_id():
 
 def test_invoke_handler_without_tenant_id():
     """Test invoke_handler without tenant_id doesn't include it in checkpoint."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     not_found = CheckpointedResult.create_not_found()
@@ -721,7 +728,7 @@ def test_invoke_handler_without_tenant_id():
 
 def test_invoke_handler_default_config_no_tenant_id():
     """Test invoke_handler with default config has no tenant_id."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     not_found = CheckpointedResult.create_not_found()
@@ -760,7 +767,7 @@ def test_invoke_handler_default_config_no_tenant_id():
 
 def test_invoke_handler_defaults_to_json_serdes():
     """Test invoke_handler uses DEFAULT_JSON_SERDES when config has no serdes."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     not_found = CheckpointedResult.create_not_found()
@@ -799,7 +806,7 @@ def test_invoke_handler_defaults_to_json_serdes():
 
 def test_invoke_handler_result_defaults_to_json_serdes():
     """Test invoke_handler uses DEFAULT_JSON_SERDES for result deserialization."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     result_data = {"key": "value", "number": 42}
@@ -841,7 +848,7 @@ def test_invoke_handler_result_defaults_to_json_serdes():
 
 def test_invoke_immediate_response_get_checkpoint_result_called_twice():
     """Test that get_checkpoint_result is called twice when checkpoint is created."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     # First call: not found, second call: started (no immediate response)
@@ -877,7 +884,7 @@ def test_invoke_immediate_response_get_checkpoint_result_called_twice():
 
 def test_invoke_immediate_response_create_checkpoint_with_is_sync_true():
     """Test that create_checkpoint is called with is_sync=True."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     # First call: not found, second call: started
@@ -919,7 +926,7 @@ def test_invoke_immediate_response_immediate_success():
     When checkpoint returns SUCCEEDED on second check, operation returns result
     without suspend.
     """
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     # First call: not found, second call: succeeded (immediate response)
@@ -961,7 +968,7 @@ def test_invoke_immediate_response_immediate_success():
 
 def test_invoke_immediate_response_immediate_success_with_none_result():
     """Test immediate success with None result."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     # First call: not found, second call: succeeded with None result
@@ -1006,7 +1013,7 @@ def test_invoke_immediate_response_immediate_failure(status: OperationStatus):
     When checkpoint returns a failure status on second check, operation raises error
     without suspend.
     """
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     # First call: not found, second call: failed (immediate response)
@@ -1052,7 +1059,7 @@ def test_invoke_immediate_response_no_immediate_response():
 
     When checkpoint returns STARTED on second check, operation suspends normally.
     """
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     # First call: not found, second call: started (no immediate response)
@@ -1095,7 +1102,7 @@ def test_invoke_immediate_response_already_completed():
     When checkpoint is already SUCCEEDED on first check, no checkpoint is created
     and result is returned immediately.
     """
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     # First call: already succeeded
@@ -1136,7 +1143,7 @@ def test_invoke_immediate_response_already_completed():
 
 def test_invoke_immediate_response_with_custom_serdes():
     """Test immediate success with custom serialization."""
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     # First call: not found, second call: succeeded
@@ -1183,7 +1190,7 @@ def test_invoke_suspends_when_second_check_returns_started():
 
     Validates: Requirements 8.1, 8.2
     """
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     # First call: checkpoint doesn't exist
@@ -1227,7 +1234,7 @@ def test_invoke_suspends_when_second_check_returns_started_duplicate():
     """Test backward compatibility: when the second checkpoint check returns
     STARTED (not terminal), the invoke operation suspends normally.
     """
-    mock_state = Mock(spec=ExecutionState)
+    mock_state = _state_without_plugins()
     mock_state.durable_execution_arn = "test_arn"
 
     # First call: checkpoint doesn't exist

@@ -78,6 +78,10 @@ Releases containing an `otel-v` tag also trigger the
 workflow. It builds the SDK and OTel plugin into Lambda layers for each
 supported Python runtime and architecture, then publishes public versions of the
 `aws-durable-execution-sdk-python-otel-plugin` layer.
+The archive resolves and includes the selected Core wheel's runtime dependencies,
+including boto3/botocore, so it does not depend on the Lambda runtime already
+having the required service model. The plugin wheel is installed without its
+optional provider dependencies; ADOT/community layers continue to own those.
 For OTel-only releases, the workflow downloads the exact SDK version pinned by
 `layer.sdk-version` in `.github/lambda-layer-publish.toml`; that version must
 already be published to PyPI. Combined SDK and OTel releases require the pin to

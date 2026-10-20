@@ -71,11 +71,13 @@ def _install_layer_distributions(config: BuildConfig, target_dir: Path) -> None:
         "--only-binary",
         ":all:",
         "--no-compile",
-        "--no-deps",
-        str(config.sdk_distribution),
-        str(config.otel_distribution),
     ]
-    subprocess.run(command, check=True)
+    # The Core wheel's requirements also apply to layer deployments, including
+    # the botocore service model needed by its public Lambda operations.
+    subprocess.run([*command, str(config.sdk_distribution)], check=True)
+    # Telemetry providers belong to the ADOT/community layer. Do not resolve
+    # plugin dependencies here and accidentally shadow that distribution.
+    subprocess.run([*command, "--no-deps", str(config.otel_distribution)], check=True)
 
 
 def _write_zip(output: Path, layer_root: Path) -> None:
