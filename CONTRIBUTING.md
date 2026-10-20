@@ -70,14 +70,24 @@ hatch run dev-otel:typecheck   # type check otel only
 hatch run dev-examples:test    # run examples tests only
 ```
 
-### PyPI release testing
+### Installed package compatibility testing
 
-To verify packages work against the published PyPI version of the core SDK (rather than the local workspace):
+Build the core and OTel distributions with `hatch build` in each package, then run
+these commands from the repository root:
 
 ```bash
-hatch run test-pypi-otel:test       # test otel against PyPI core SDK
-hatch run test-pypi-examples:test   # test examples against PyPI core SDK
+hatch run test-wheel-otel:test        # full OTel suite and lifecycle tests on built wheels
+hatch run test-wheel-otel-legacy:test # verify Core 3 rejects released OTel 1.0.0
+hatch run test-pypi-examples:test     # examples against the published core
 ```
+
+The wheel lanes have no editable workspace members. They verify installed source
+bytes and artifact hashes before exercising public handlers. OTel 2 requires
+core 3.x and its per-invocation factory API. Publish core first; building both
+wheels lets CI validate the coordinated pair before core 3 is available on PyPI.
+The legacy-plugin lane verifies that core 3 clearly rejects actual released
+OTel 1.x plugin instances and entry points. Workspace tests cover the complete
+current implementation with `hatch run dev-otel:test`.
 
 ### Package-level commands
 
@@ -382,6 +392,18 @@ Place test files in the `tests/` directory, using file names that end with `_tes
 Mimic the package structure in the src/aws_durable_execution_sdk_python directory.
 Name your module so that src/mypackage/mymodule.py has a dedicated unit test file
 tests/mypackage/mymodule_test.py
+
+### JS SDK examples against the local runner
+
+If you change the testing package, also run the JS SDK's example tests
+against its local runner. You need Node.js 22 or newer:
+
+```
+hatch run dev-testing:js-examples
+```
+
+CI runs the same command on pull requests that change the testing package.
+See [.github/scripts/js_examples/README.md](.github/scripts/js_examples/README.md).
 
 ### Conformance tests
 

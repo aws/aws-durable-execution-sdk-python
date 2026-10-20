@@ -33,15 +33,13 @@ So the binding is per invocation, not per filter:
       concurrent invocation. The claim is a weak reference, so a pool thread
       that is never used again cannot pin a finished invocation's plugin.
     - ``unbind_invocation`` marks the invocation closed.
-    - The claim reaches the thread running the handler body because the SDK
-      submits that work with a copy of the invocation thread's context, taken
-      after the invocation-start hook has run. Records from top-level handler
-      code therefore resolve to their own invocation, including the first
-      statement of the handler, before any durable operation has claimed the
-      thread directly.
-    - A branch of a map or parallel runs on a pool thread the invocation's
-      context was not copied into, so the plugins claim that thread from the
-      hooks that run on it before the branch body does.
+    - Invocation Start and the handler body run in the same worker Context,
+      initialized from the host's bindings. Start establishes the claim before
+      the handler's first statement, so top-level records resolve to their own
+      invocation without changing the host thread's context.
+    - Each SDK-managed map or parallel callback enters its own copy of the
+      coordinator's Context, carrying the invocation claim. Plugins also
+      reaffirm the claim from hooks that run before user code on that thread.
     - A record emitted on a thread that carries no live claim is left unstamped,
       whatever the number of open invocations. Two threads carry no claim: the
       SDK's background checkpointing thread, and a thread customer code starts
@@ -127,10 +125,9 @@ _install_lock = threading.Lock()
 def bind_invocation(provider: _SpanContextProvider) -> None:
     """Mark ``provider``'s invocation open and claim this thread/task for it.
 
-    Called by a plugin when it takes control on a thread: at invocation start on
-    the Lambda handler thread, and again from the hooks that run on the threads
-    executing user code. Idempotent, so a plugin can call it from every such
-    hook without tracking which threads it has already claimed.
+    Called at Start on the invocation worker and again from hooks on SDK-managed
+    user-code workers. Idempotent, so copied callback contexts can reaffirm the
+    claim without tracking which threads have already inherited it.
 
     A thread that already carries this provider's claim returns before taking the
     registry lock. Every operation-start and user-function-start hook calls this,

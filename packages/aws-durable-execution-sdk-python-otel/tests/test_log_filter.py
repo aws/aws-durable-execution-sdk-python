@@ -627,7 +627,10 @@ class _SpanProcessorFailingOnEnd(SpanProcessor):
         pass
 
     def on_end(self, span) -> None:
-        raise RuntimeError("span processor on_end failed")
+        # The fallback root is exported during Start. Fail the later shutdown
+        # path that this regression is intended to exercise.
+        if span.name != "DurableExecutionRoot":
+            raise RuntimeError("span processor on_end failed")
 
 
 @pytest.mark.parametrize(
@@ -807,13 +810,24 @@ def test_install_log_filter_returns_none_without_handlers():
     assert install_log_filter(target_logger=target) is None
 
 
-def test_plugin_installs_filter_on_root_logger_at_construction():
-    """The plugin installs the filter on the root logger when constructed."""
+def test_plugin_preserves_constructor_filter_and_invocation_reuse():
+    """Constructor behavior is preserved; invocation start does not duplicate it."""
     root = logging.getLogger()
     handler = logging.NullHandler()
     root.addHandler(handler)
     try:
-        _create_plugin(enrich_logger=True)
+        plugin, _ = _create_plugin(enrich_logger=True)
+        assert any(isinstance(f, OtelContextLogFilter) for f in handler.filters)
+        plugin.on_invocation_start(_invocation_start_info())
+        plugin.on_invocation_end(
+            InvocationEndInfo(
+                request_id="request-1",
+                execution_arn=EXECUTION_ARN,
+                execution_start_time=START_TIME,
+                is_first_invocation=True,
+                status=InvocationStatus.SUCCEEDED,
+            )
+        )
 
         assert any(isinstance(f, OtelContextLogFilter) for f in handler.filters)
     finally:

@@ -14,6 +14,7 @@ from aws_durable_execution_sdk_python.plugin import (
     InvocationStartInfo,
     OperationEndInfo,
     OperationStartInfo,
+    OperationStatus,
     OperationType,
     UserFunctionEndInfo,
     UserFunctionOutcome,
@@ -54,6 +55,7 @@ from aws_durable_execution_sdk_python_otel.durable_sampling import (
 from aws_durable_execution_sdk_python_otel.durable_parent_span import (
     DurableParentSpan,
 )
+from aws_durable_execution_sdk_python_otel.execution_root import ExecutionRoot
 from aws_durable_execution_sdk_python_otel.execution_trace_context import (
     ExecutionTraceContext,
     canonical_trace_id,
@@ -65,6 +67,7 @@ from aws_durable_execution_sdk_python_otel.log_filter import (
 )
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 from aws_durable_execution_sdk_python_otel.provider import create_tracer_provider
+from aws_durable_execution_sdk_python_otel.timestamps import to_otel_timestamp
 
 
 logger = logging.getLogger(__name__)
@@ -73,6 +76,7 @@ _TERMINAL_INVOCATION_STATUSES = frozenset(
     {InvocationStatus.SUCCEEDED, InvocationStatus.FAILED}
 )
 _TIMESTAMP_STEP_NANOS = 1_000
+_INVOCATION_CONTEXT_KEY = "__invocation_context__"
 
 _SpanAttributes = dict[str, str | bool | int]
 
@@ -81,7 +85,7 @@ def _to_otel_timestamp(dt: datetime.datetime | None) -> int:
     """Convert a datetime to OTel timestamp (nanoseconds since epoch)."""
     if dt is None:
         dt = datetime.datetime.now(datetime.UTC)
-    return int(dt.timestamp() * 1_000_000_000)
+    return to_otel_timestamp(dt)
 
 
 class InvocationOtelPlugin(DurableInstrumentationPlugin):
@@ -131,9 +135,8 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         When ``enrich_logger`` is enabled (default), the plugin installs a
         logging filter that stamps the active OTel trace context onto every
         emitted log record. The filter is installed on the root logger's
-        handlers, which outlive this instance, so installing rebinds an
-        already-present filter to this invocation's plugin rather than stacking a
-        second one.
+        handlers, which outlive this instance. The shared filter resolves a
+        per-invocation claim instead of retaining this plugin instance.
         """
         self._config = config or OtelPluginConfig()
         self._context_extractor: ContextExtractor = (
@@ -312,11 +315,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
            it wins. Unrelated ambient spans are ignored so logs stay correlated
            to the durable execution trace.
         2. The invocation span from the plugin registry. This is the path used
-           for top-level handler code: the invocation span is never attached to
-           the worker thread's context, so the registry is the only way to
-           resolve it. It also covers code between top-level operations, where
-           detaching the operation scope restores a context with no durable
-           span.
+           when another plugin has changed the active context, or when the
+           invocation retained a same-trace ambient parent. It also covers code
+           between top-level operations after their scopes have detached.
 
         The span that enclosed this invocation is deliberately excluded from
         step 1. Under X-Ray active tracing with the ADOT layer, the layer's
@@ -634,6 +635,14 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             root_sampled=lambda: is_sampled(sampling_result),
         )
 
+        # Materialize the fallback anchor before user code can suspend or fail.
+        # Repeated invocations retain the same SDK-owned identity and timing.
+        ExecutionRoot(
+            execution_arn=self._execution_arn,
+            ancestor=self._execution_trace_context.execution_ancestor,
+            start_time=info.execution_start_time,
+        ).export(self._tracer, self._id_generator, self._sampling_intent)
+
         self._start_workflow_span(info)
 
         self._start_span(
@@ -643,7 +652,21 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         )
 
         # Last, so that everything this hook makes current is accounted for.
+        # Start and End now run in the same worker Context. Attach the
+        # invocation fallback for user-created spans when no execution-trace
+        # ambient parent exists, and release it from that owner at End.
+        ambient = trace.get_current_span().get_span_context()
+        invocation_span = self._get_span(None)
+        if invocation_span is not None and (
+            not ambient.is_valid or ambient.trace_id != self._execution_trace_id
+        ):
+            self._attach_context(
+                _INVOCATION_CONTEXT_KEY, trace.set_span_in_context(invocation_span)
+            )
+
         self._record_enclosing_span()
+        if self._config.enrich_logger:
+            install_log_filter()
 
     def _start_workflow_span(self, info: InvocationStartInfo) -> None:
         """Install a non-recording placeholder for the execution-scoped Workflow span.
@@ -730,6 +753,9 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             return
 
         try:
+            # Start and End share the owner Context. Release its bindings before
+            # span processors run while closing this invocation's spans.
+            self._detach_remaining_contexts()
             self._end_invocation_spans(info)
         finally:
             self._release_invocation_scope()
@@ -759,7 +785,10 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         invocation_span = self._get_span(None)
         if invocation_span:
             invocation_span.set_attribute(
-                "durable.invocation.status", info.status.value
+                "durable.invocation.status",
+                "RETRYING"
+                if info.status is InvocationStatus.RETRY
+                else info.status.value,
             )
             # Span status mapping: SUCCEEDED/PENDING -> OK, FAILED -> ERROR,
             # RETRY -> UNSET. RETRY is left UNSET because the plugin interface
@@ -889,7 +918,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             span.record_exception(
                 Exception(info.error.message or info.error.type or "Unknown error")
             )
-        else:
+        elif info.status is OperationStatus.SUCCEEDED:
             span.set_status(StatusCode.OK)
 
         self._end_span(info.operation_id, info.end_time)

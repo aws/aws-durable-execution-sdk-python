@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling!=1.32.1,<1.33"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aws-durable-execution-sdk-python-telemetry-exporter"
+dynamic = ["version"]
+description = 'Durable Execution Telemetry instrumentation plugin for the AWS Durable Execution SDK for Python'
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+keywords = ["observability", "durable-execution-telemetry", "durable-execution"]
+authors = [{ name = "AWS durable-execution-dev", email = "durable-execution-dev@amazon.com" }]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+dependencies = [
+  # >=3.0.0,<4: 3.0.0 is the first release whose `plugins` argument takes
+  # factories, and the ceiling is the same reasoning applied forwards -- the next
+  # core major that changes the plugin contract would install and then fail at
+  # handler initialization exactly as 2.x does below.
+  # `durable_execution_telemetry()` returns a factory, which core 2.x cannot call, so an
+  # install resolved against 2.x fails at handler initialization. 3.0.0 also
+  # carries the invocation-hook fields this plugin reads
+  # (InvocationInfo.execution_input / InvocationEndInfo.execution_result).
+  "aws-durable-execution-sdk-python>=3.0.0,<4",
+]
+
+[project.optional-dependencies]
+# boto3 is provided by the Lambda runtime; declared as an extra for local dev
+# (e.g. the S3Exporter) without vendoring it into deployments.
+s3 = ["boto3>=1.26.0"]
+
+[project.urls]
+Documentation = "https://github.com/aws/aws-durable-execution-sdk-python#readme"
+Issues = "https://github.com/aws/aws-durable-execution-sdk-python/issues"
+Source = "https://github.com/aws/aws-durable-execution-sdk-python"
+
+[tool.hatch.build.targets.sdist.force-include]
+"../../LICENSE" = "LICENSE"
+"../../NOTICE" = "NOTICE"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aws_durable_execution_sdk_python_telemetry_exporter"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"../../LICENSE" = "aws_durable_execution_sdk_python_telemetry_exporter/LICENSE"
+"../../NOTICE" = "aws_durable_execution_sdk_python_telemetry_exporter/NOTICE"
+
+[tool.hatch.version]
+path = "src/aws_durable_execution_sdk_python_telemetry_exporter/__about__.py"
+
+[tool.hatch.publish.index]
+disable = true
+
+[tool.coverage.run]
+source_pkgs = ["aws_durable_execution_sdk_python_telemetry_exporter"]
+branch = true
+parallel = true
+omit = ["src/aws_durable_execution_sdk_python_telemetry_exporter/__about__.py"]
+
+[tool.coverage.report]
+exclude_lines = ["no cov", "if __name__ == .__main__.:", "if TYPE_CHECKING:"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+preview = true
+select = ["E4", "E7", "E9", "F", "TID252"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["aws_durable_execution_sdk_python_telemetry_exporter"]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ARG001", "ARG002", "ARG005", "S101", "PLR2004", "PLR6301", "SIM117", "TRY301"]

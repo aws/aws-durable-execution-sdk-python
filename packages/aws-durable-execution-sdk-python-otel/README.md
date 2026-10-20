@@ -62,6 +62,25 @@ discovers the selected package entry point at cold start and calls its
 `create_plugin` once per invocation, so the handler does not need to import or
 explicitly register the plugin.
 
+OTel 2.0 requires core SDK 3.x and the per-invocation factory contract. Publish
+the coordinated core release before the plugin. Core 2.x plugin instances and
+OTel 1.x entry points are rejected by core 3 at handler initialization.
+
+Configure one OTel view: `InvocationOtelPluginFactory` shows work within each
+Lambda invocation; `ExecutionOtelPluginFactory` shows logical operations across
+the execution. Their factories declare the same exclusive group, so registering
+both raises `PluginLoadError` at cold start, before any plugin is constructed.
+Keep one view across `plugins=[...]` and `DURABLE_EXECUTION_PLUGINS`. Unrelated
+plugin factories may accompany it. Repeating the same factory object through an
+entry point is deduplicated by identity.
+
+Factory classes can opt into registration metadata with
+`__durable_registration_api__ = 1`. Each opted-in class in the MRO contributes its
+`exclusive_group`; inherited groups remain in force when a subclass adds another
+group. The closest explicit unsupported marker disables the contract. Unmarked
+legacy fields and callbacks are ignored. An optional `on_registration_result`
+callback receives acceptance or rejection without constructing invocation plugins.
+
 ### 1. ADOT Lambda Layer
 
 This plugin requires the [AWS Distro for OpenTelemetry (ADOT) Lambda layer](https://aws-otel.github.io/docs/getting-started/lambda) to export traces from your Lambda function.
@@ -162,6 +181,37 @@ lambda_.Function(
     tracing=lambda_.Tracing.ACTIVE,
 )
 ```
+
+### Handler context propagation
+
+The core runs the existing Start hooks, handler, output preparation, resource
+cleanup and End hooks on one invocation worker. Start finishes before checkpoint
+processing begins. End follows registered-branch joins and checkpoint shutdown,
+and output serialization or checkpoint errors retain their normal classification.
+There is no separate handler-context plugin API.
+
+During Start, Invocation view preserves a valid active span on the canonical
+execution trace; when it is absent or unrelated, it attaches the Invocation span.
+Execution view attaches the Workflow span, including when an incoming span is on
+the same trace. The Invocation span's own ambient parenting is separate from the
+active context supplied to handler instrumentation. Both views preserve baggage.
+
+Start hooks run in registration order. A later successful plugin that deliberately
+sets or clears the active span wins; OTel does not apply a second correction pass.
+Place OTel after a span-replacing plugin when OTel's view-specific context is
+desired. Baggage-only plugins that extend the current context can appear on either
+side. The SDK also copies the coordinator's current bindings for each `map` or
+`parallel` branch admission/resume when plugins are registered. Baggage and
+other successful bindings reach these SDK-managed callbacks, while a branch's
+changes cannot leak into siblings, the coordinator or a reused worker.
+End hooks also retain registration order and reset tokens in their owning
+Context; they do not promise a reverse-stack observation of other plugins' spans.
+The factory list is handler-scoped; each invocation owns fresh plugin instances.
+Checkpoint formats are unchanged.
+
+Use the coordinated core 3.x / OTel 2.x pair for this factory API. CI tests both
+packages as installed wheels and verifies that legacy OTel 1.x registration is
+rejected clearly by core 3.
 
 ### 3. In your Lambda handler (index.py)
 
@@ -266,8 +316,8 @@ Both bundled plugins use the same execution ancestor:
 
 - a propagated backend parent when `_X_AMZN_TRACE_ID` contains a valid `Root`
   and `Parent`
-- otherwise a deterministic, non-recording synthetic root derived from the
-  durable execution ARN
+- otherwise a deterministic `DurableExecutionRoot` span derived from the
+  durable execution ARN, with `durable.execution.synthetic_root=true`
 
 `InvocationOtelPlugin` keeps durable operation spans under the Invocation span
 and links operations to Workflow:
@@ -296,10 +346,46 @@ Invocation span uses that ambient span as its parent. Ambient spans on a
 different trace are ignored for durable parenting so Invocation remains on the
 execution trace.
 
+### Synthetic fallback anchor
+
+Each sampled fallback invocation creates and ends `DurableExecutionRoot` at
+invocation start and attempts to flush it through the normal invocation-end
+lifecycle, including when it returns `PENDING` or `RETRY`. A successfully
+delivered copy supplies ancestry if the execution is later stopped or times out
+without resuming. Export and flush failures, or termination before flushing,
+do not provide a delivery guarantee.
+
+The anchor uses the existing execution-scoped span ID and the stable execution
+start timestamp for both its start and end. It carries no terminal outcome;
+`Workflow` remains the span for execution duration and success/failure. Retries
+of the first invocation and later invocations may re-export the same anchor to
+recover lost telemetry; export is not exactly once. Two executions sharing a
+propagated trace ID retain distinct ARN-scoped anchor IDs.
+The anchor is intentionally zero-duration, so its descendants end after it;
+trace viewers may flag that timing relationship even though the ancestry is valid.
+
+The anchor uses the same configured tracer, provider resource and processors as
+other durable spans, but carries only the resolved sampling decision. Its SDK
+attributes are `durable.execution.arn` and `durable.execution.synthetic_root`;
+sampler-added attributes and tracestate are omitted from this repeated identity.
+Ordinary durable spans retain the complete resolved sampler metadata. SDK-added
+IDs, timestamps and anchor attributes stay stable across recovery exports;
+provider resources and custom processor enrichment may vary. The SDK does not
+replace configured service identity or freeze detector fields.
+
+Complete remote parents are externally owned and are never materialized by the
+SDK. Unsampled invocations emit no anchor. Sampling remains resolved per
+invocation: a later sampled fallback invocation also emits the anchor even if
+an earlier invocation was unsampled. Missing execution start time continues to
+disable telemetry; no wall-clock timestamp is invented for the anchor.
+
 ### Sampling
 
 Sampling is resolved once per invocation and carried to every durable span in
-that invocation. Precedence is:
+that invocation. Each span consumes its private sampling intent before processors
+run. Processor-created spans use their own configured sampling policy and normal
+parent-context semantics, including when a processor forwards the supplied parent
+context. Precedence is:
 
 1. `Sampled=1` or `Sampled=0` from `_X_AMZN_TRACE_ID`
 2. a same-trace ambient span's recording/sampled state
@@ -308,6 +394,26 @@ that invocation. Precedence is:
 The resolved decision is applied to Workflow, Invocation, operation, and attempt
 spans. This avoids independently querying stateful or ratio-based samplers for
 each durable span in the same invocation.
+
+### Status attributes
+
+`durable.invocation.status` uses `RETRYING` when the core plugin hook reports
+`InvocationStatus.RETRY`. The core enum remains unchanged. Operation spans use
+OTel `OK` only for `SUCCEEDED`, `ERROR` when error details are delivered, and
+`UNSET` for other outcomes without error details, including `FAILED`,
+`CANCELLED`, `TIMED_OUT`, and `STOPPED`. The original durable operation status
+remains in `durable.operation.status`.
+
+### Invocation context isolation
+
+With core 3.x, invocation hooks and the handler run on one worker in an
+invocation-local Context initialized from the host's bindings. Successful Start
+bindings are visible to later hooks, the handler and resource cleanup. The host's
+bindings remain unchanged after return, even if a plugin fails during Start or
+End. A failed Start's bindings are discarded for subsequent work, while End runs
+in that Start's original Context to preserve token ownership. This isolates
+context-variable bindings; it does not undo mutations to shared objects or
+external side effects. The isolation applies when plugins are registered.
 
 ### Log Correlation
 
@@ -431,6 +537,11 @@ than carried in memory.
 ### `DeterministicIdGenerator`
 
 A custom OpenTelemetry `IdGenerator` that produces reproducible trace and span IDs from execution metadata. Exported for advanced use cases.
+
+`use_ids` retains its existing scope-wide trace override by default. The
+synthetic-root implementation uses a separate internal one-span override,
+preventing processor-created roots from inheriting that internal ID. Existing
+`use_ids` signatures and default behavior remain unchanged.
 
 ### `xray_context_extractor`
 

@@ -1,0 +1,3 @@
+# Example test files that are expected to fail against the local runner.
+# One path per line, relative to the JS examples package, then "#" and the reason.
+# A listed file that passes also fails the run, so this list stays accurate.

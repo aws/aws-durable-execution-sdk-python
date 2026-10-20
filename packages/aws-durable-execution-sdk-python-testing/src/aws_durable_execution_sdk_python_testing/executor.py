@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
+import time
 import uuid
+from concurrent.futures import wait
 from datetime import datetime
 from typing import TYPE_CHECKING, assert_never
 
@@ -54,6 +57,7 @@ from aws_durable_execution_sdk_python_testing.checkpoint.transformer import (
 )
 from aws_durable_execution_sdk_python_testing.exceptions import (
     IllegalStateException,
+    InvalidInvocationOutputError,
     InvalidParameterValueException,
     ResourceNotFoundException,
 )
@@ -126,6 +130,11 @@ class Executor(ExecutionObserver):
     # target and creating a durable child. Each takes milliseconds.
     QUICK_DISPATCH_WORKERS: int = 8
     MAX_CONSECUTIVE_FAILED_ATTEMPTS: int = 5
+    # The service fails an execution on an invalid invocation output at
+    # once, except PENDING with no pending operations. An SDK race that
+    # resolves on replay can produce that one, so it gets this many
+    # consecutive attempts.
+    MAX_CONSECUTIVE_INVALID_PENDING_ATTEMPTS: int = 3
     RETRY_BACKOFF_SECONDS: int = 5
     # GetDurableExecutionState page-count bounds, mirroring the service
     # (default 100, hard cap 1000 operations per page).
@@ -351,7 +360,7 @@ class Executor(ExecutionObserver):
         try:
             return self._store.load(execution_arn)
         except KeyError as e:
-            msg: str = f"Execution {execution_arn} not found"
+            msg: str = "Durable Execution does not exist"
             raise ResourceNotFoundException(msg) from e
 
     def get_execution_details(self, execution_arn: str) -> GetDurableExecutionResponse:
@@ -1454,15 +1463,22 @@ class Executor(ExecutionObserver):
                 )
 
             case InvocationStatus.PENDING:
-                # An operation the handler waited on may complete between
-                # the handler's return and this check. A change the
-                # handler has not seen, after the invocation's input was
-                # built, earns a re-invoke, so PENDING is valid; only a
-                # handler that waited on nothing is in error.
-                if not execution.has_pending_operations(execution) and not (
-                    invocation_seq is not None
-                    and execution.has_changes_after(
-                        max(invocation_seq, execution.handler_seen_seq)
+                # A paused execution answers the running invocation's
+                # checkpoint without a token and defers its next invocation;
+                # that invocation must stop as PENDING even with nothing
+                # pending, and resume re-invokes it. Any other PENDING needs
+                # pending operations or a change the handler has not seen
+                # since its input was built. The unseen-change case happens
+                # when an operation completes after this invocation's input
+                # was built but before this response is validated.
+                if (
+                    not execution.has_deferred_invocation
+                    and not execution.has_pending_operations(execution)
+                    and not (
+                        invocation_seq is not None
+                        and execution.has_changes_after(
+                            max(invocation_seq, execution.handler_seen_seq)
+                        )
                     )
                 ):
                     msg_pending_ops: str = (
@@ -1521,6 +1537,15 @@ class Executor(ExecutionObserver):
             )
             return None
 
+        if execution.is_paused:
+            execution.defer_invocation()
+            self._store.save(execution)
+            logger.debug(
+                "[%s] Holding back scheduled invocation while paused",
+                execution_arn,
+            )
+            return None
+
         # Claim the gate: at most one handler invocation per
         # execution in flight.
         self._set_invocation_gate(execution_arn, InvocationState.INVOKING)
@@ -1540,8 +1565,8 @@ class Executor(ExecutionObserver):
     ) -> None:
         """Apply a completed handler invocation.
 
-        Records the attempt, validates the response (completing or
-        retrying), resets the retry counter on a clean run, and releases
+        Records the attempt, validates the response (completing, failing
+        or retrying), resets the retry counter on a clean run, and releases
         the gate to PRE_INVOKE (re-invoking if a trigger was deferred) or
         COMPLETED.
         """
@@ -1574,11 +1599,20 @@ class Executor(ExecutionObserver):
             logger.warning(
                 "[%s] Lambda output validation failure: %s", execution_arn, e
             )
-            error_obj = ErrorObject.from_exception(e)
+            error_obj = self._invalid_output_error(str(e))
             # Release the gate before retry scheduling so the retry's
             # invoke finds PRE_INVOKE.
             self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
-            self._retry_invocation(execution, error_obj)
+            # Only PENDING with no pending operations is retried; every
+            # other invalid output fails the execution at once.
+            if response.status is InvocationStatus.PENDING:
+                self._retry_invocation(
+                    execution,
+                    error_obj,
+                    max_attempts=self.MAX_CONSECUTIVE_INVALID_PENDING_ATTEMPTS,
+                )
+            else:
+                self._fail_workflow(execution_arn, error_obj)
             return
 
         # A clean invocation resets the retry counter.
@@ -1613,6 +1647,37 @@ class Executor(ExecutionObserver):
     def _fail_invocation_not_found(
         self, execution_arn: str, error: ErrorObject
     ) -> None:
+        self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
+        self._fail_workflow(execution_arn, error)
+
+    @staticmethod
+    def _invalid_output_error(message: str) -> ErrorObject:
+        """The error the service fails an execution with for an invalid output."""
+        return ErrorObject(
+            message=message,
+            type="InvalidParameterValueException",
+            data=None,
+            stack_trace=None,
+        )
+
+    def _fail_after_invalid_output(
+        self,
+        execution_arn: str,
+        error: ErrorObject,
+        invocation_start: datetime,
+        invocation_end: datetime,
+        request_id: str | None,
+    ) -> None:
+        """Fail the execution for an output the invoker could not parse."""
+        execution = self._store.load(execution_arn)
+        execution.record_invocation_completion(
+            invocation_start, invocation_end, request_id or str(uuid.uuid4())
+        )
+        self._store.save(execution)
+        if execution.is_complete:
+            # A stop or timeout landed during the invocation and stands.
+            self._set_invocation_gate(execution_arn, InvocationState.COMPLETED)
+            return
         self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
         self._fail_workflow(execution_arn, error)
 
@@ -1721,6 +1786,32 @@ class Executor(ExecutionObserver):
                     )
                 )
 
+            except InvalidInvocationOutputError as err:
+                if self._closing:
+                    return
+                # The handler ran, but the service cannot parse its output,
+                # so it fails the execution without invoking it again.
+                invocation_end = self._clock.now()
+                logger.warning(
+                    "[%s] Lambda output validation failure: %s", execution_arn, err
+                )
+                error_obj = self._invalid_output_error(str(err))
+                request_id = err.request_id
+                await asyncio.wrap_future(
+                    self._registry.submit(
+                        execution_arn,
+                        CallableTask(
+                            lambda: self._fail_after_invalid_output(
+                                execution_arn,
+                                error_obj,
+                                invocation_start,
+                                invocation_end,
+                                request_id,
+                            )
+                        ),
+                    )
+                )
+
             except asyncio.TimeoutError:
                 if self._closing:
                     return
@@ -1776,6 +1867,107 @@ class Executor(ExecutionObserver):
             completion_event=completion_event,
         )
 
+    def pause_execution(self, execution_arn: str, timeout: float = 60) -> None:
+        """Experimental; may change or be removed in a future release.
+
+        Pause an execution and wait for its current invocation to stop.
+
+        If a running invocation sends another checkpoint after the pause is
+        applied, its updates are accepted and saved. The response omits the
+        checkpoint token, causing the SDK to end the invocation with PENDING.
+        Further checkpoints from that invocation are rejected.
+
+        Returns once the pause request is applied and no invocation is running.
+        A running step is not interrupted.
+
+        Repeated calls leave an existing pause unchanged and wait again for
+        the running invocation to stop. Completed executions are unchanged.
+
+        If this call times out, the pause request is not cancelled.
+
+        Args:
+            execution_arn: Execution to pause.
+            timeout: Maximum wait in real seconds. Must be finite and positive.
+
+        Raises:
+            InvalidParameterValueException: If the ARN is blank.
+            ResourceNotFoundException: If the execution does not exist.
+            ValueError: If timeout is not finite and positive.
+            TimeoutError: If the pause wait times out.
+        """
+
+        if not math.isfinite(timeout) or timeout <= 0:
+            msg = "timeout must be finite and positive"
+            raise ValueError(msg)
+        deadline = time.monotonic() + timeout
+
+        self._validate_execution_arn(execution_arn)
+        pause = self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._set_paused(execution_arn)),
+        )
+
+        timeout_message = (
+            f"Execution {execution_arn} did not become idle within {timeout:g} seconds "
+            "of requesting pause. The pause request has not been cancelled."
+        )
+
+        done, _ = wait([pause], timeout=max(0, deadline - time.monotonic()))
+        if not done:
+            raise TimeoutError(timeout_message)
+        pause.result()
+
+        self._wait_until_idle(execution_arn, deadline, timeout_message)
+
+    def resume_execution(self, execution_arn: str) -> None:
+        """Experimental; may change or be removed in a future release.
+
+        Make the local checkpoint server answer this execution's
+        checkpoints with a token again.
+
+        Starts the invocation that pause_execution(arn) held back, if any.
+
+        Repeated calls leave an execution that is not paused unchanged.
+        Completed executions are unchanged.
+
+        Raises:
+            InvalidParameterValueException: If the ARN is blank.
+            ResourceNotFoundException: If the execution does not exist.
+        """
+        self._validate_execution_arn(execution_arn)
+        self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._resume_execution(execution_arn)),
+        ).result()
+
+    def _set_paused(self, execution_arn: str) -> None:
+        execution = self.get_execution(execution_arn)
+        if execution.is_complete or execution.is_paused:
+            return
+        execution.pause()
+        self._store.save(execution)
+
+    def _resume_execution(self, execution_arn: str) -> None:
+        execution = self.get_execution(execution_arn)
+        if execution.is_complete or not execution.is_paused:
+            return
+
+        deferred = execution.resume()
+
+        self._store.save(execution)
+        if deferred:
+            self._invoke_execution(execution_arn)
+
+    def _wait_until_idle(
+        self, execution_arn: str, deadline: float, timeout_message: str
+    ) -> None:
+        """Wait for no invocation to be running. Raise at the deadline."""
+        while self._invocation_gate(execution_arn) is InvocationState.INVOKING:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(timeout_message)
+            time.sleep(min(0.005, remaining))
+
     def _complete_workflow(
         self, execution_arn: str, result: str | None, error: ErrorObject | None
     ):
@@ -1803,22 +1995,26 @@ class Executor(ExecutionObserver):
 
         self.fail_execution(execution_arn, error)
 
-    def _retry_invocation(self, execution: Execution, error: ErrorObject):
+    def _retry_invocation(
+        self,
+        execution: Execution,
+        error: ErrorObject,
+        max_attempts: int | None = None,
+    ) -> None:
         """Handle retry logic or fail execution if retries exhausted.
 
-        Budget: ``MAX_CONSECUTIVE_FAILED_ATTEMPTS`` attempts
-        per ``RETRY_BACKOFF_SECONDS`` backoff. Increments the counter
-        BEFORE the threshold check so an attempt-N failure that
-        reaches the ceiling fails the execution rather than scheduling
-        a pointless retry.
+        Budget: ``max_attempts`` attempts, by default
+        ``MAX_CONSECUTIVE_FAILED_ATTEMPTS``, per ``RETRY_BACKOFF_SECONDS``
+        backoff. Increments the counter BEFORE the threshold check so an
+        attempt-N failure that reaches the ceiling fails the execution
+        rather than scheduling a pointless retry.
         """
+        if max_attempts is None:
+            max_attempts = self.MAX_CONSECUTIVE_FAILED_ATTEMPTS
         execution.consecutive_failed_invocation_attempts += 1
         self._store.save(execution)
 
-        if (
-            execution.consecutive_failed_invocation_attempts
-            >= self.MAX_CONSECUTIVE_FAILED_ATTEMPTS
-        ):
+        if execution.consecutive_failed_invocation_attempts >= max_attempts:
             # Budget exhausted — fail the execution with the last
             # observed error.
             self._fail_workflow(

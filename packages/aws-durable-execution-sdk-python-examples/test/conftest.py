@@ -30,6 +30,14 @@ examples_src = Path(__file__).parent.parent / "src"
 if str(examples_src) not in sys.path:
     sys.path.insert(0, str(examples_src))
 
+# CI runners on Lambda/CodeBuild compute set both AWS_LAMBDA_FUNCTION_NAME and
+# _X_AMZN_TRACE_ID. botocore's recursion-detection handler then adds the
+# runner's X-Amzn-Trace-Id header to every request, so the invoked functions
+# join the runner's (unsampled) X-Ray trace instead of starting their own, and
+# the X-Ray span assertions cannot find them. Drop the header source before any
+# client is created; the local tests never need it.
+os.environ.pop("_X_AMZN_TRACE_ID", None)
+
 
 logger = logging.getLogger(__name__)
 

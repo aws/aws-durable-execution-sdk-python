@@ -14,8 +14,16 @@ mypy --install-types --non-interactive \
   packages/aws-durable-execution-sdk-python-otel/tests
 
 mypy --install-types --non-interactive \
-  packages/aws-durable-execution-sdk-python-insight/src/aws_durable_execution_sdk_python_insight \
-  packages/aws-durable-execution-sdk-python-insight/tests
+  packages/aws-durable-execution-sdk-python-telemetry-exporter/src/aws_durable_execution_sdk_python_telemetry_exporter \
+  packages/aws-durable-execution-sdk-python-telemetry-exporter/tests
+
+mypy --install-types --non-interactive \
+  packages/aws-durable-execution-sdk-python-microvm-worker/src/aws_durable_execution_sdk_python_microvm_worker \
+  packages/aws-durable-execution-sdk-python-microvm-worker/tests
+
+mypy --install-types --non-interactive \
+  packages/aws-durable-execution-sdk-python-extras/src/aws_durable_execution_sdk_python_extras \
+  packages/aws-durable-execution-sdk-python-extras/tests
 
 # comment out this for now as there are many type check errors in this package
 #mypy --install-types --non-interactive \

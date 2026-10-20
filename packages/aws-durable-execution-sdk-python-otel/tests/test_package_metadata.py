@@ -2,6 +2,7 @@ import re
 import tomllib
 from pathlib import Path
 
+from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
@@ -70,7 +71,7 @@ def test_test_environments_install_layer_provided_dependencies() -> None:
         "test",
         "dev-otel",
         "dev-examples",
-        "test-pypi-otel",
+        "test-wheel-otel",
         "test-pypi-examples",
     ):
         assert TEST_OTEL_DEPENDENCIES <= set(
@@ -79,10 +80,19 @@ def test_test_environments_install_layer_provided_dependencies() -> None:
     assert TEST_OTEL_DEPENDENCIES <= set(environments["types"]["extra-dependencies"])
 
 
-def test_pypi_compatibility_environment_uses_compatible_core_sdk() -> None:
-    dependencies = _load_pyproject(REPOSITORY_ROOT / "pyproject.toml")["tool"]["hatch"][
-        "envs"
-    ]["test-pypi-otel"]["dependencies"]
+def test_core_dependency_requires_worker_lifecycle_release() -> None:
+    dependencies = _load_pyproject(PACKAGE_ROOT / "pyproject.toml")["project"][
+        "dependencies"
+    ]
+    requirement = next(
+        Requirement(value)
+        for value in dependencies
+        if Requirement(value).name == "aws-durable-execution-sdk-python"
+    )
+    assert not requirement.specifier.contains("2.0.0")
+    assert not requirement.specifier.contains("2.0.1")
+    assert not requirement.specifier.contains("2.1.0")
+    assert requirement.specifier.contains("3.0.0")
 
     assert CORE_DEPENDENCY in dependencies
 

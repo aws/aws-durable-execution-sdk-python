@@ -75,29 +75,6 @@ class OperationType(Enum):
     CALLBACK = "CALLBACK"
     CHAINED_INVOKE = "CHAINED_INVOKE"
 
-    @classmethod
-    def from_sub_type(cls, sub_type: OperationSubType) -> OperationType:
-        match sub_type:
-            case OperationSubType.STEP | OperationSubType.WAIT_FOR_CONDITION:
-                return OperationType.STEP
-            case OperationSubType.WAIT:
-                return OperationType.WAIT
-            case OperationSubType.CHAINED_INVOKE:
-                return OperationType.CHAINED_INVOKE
-            case OperationSubType.CALLBACK:
-                return OperationType.CALLBACK
-            case (
-                OperationSubType.WAIT_FOR_CALLBACK
-                | OperationSubType.RUN_IN_CHILD_CONTEXT
-                | OperationSubType.MAP
-                | OperationSubType.MAP_ITERATION
-                | OperationSubType.PARALLEL
-                | OperationSubType.PARALLEL_BRANCH
-            ):
-                return OperationType.CONTEXT
-            case _:
-                raise ValueError(f"Unknown operation sub-type {sub_type}")
-
 
 class CallbackTimeoutType(Enum):
     TIMEOUT = "Callback.Timeout"
@@ -180,6 +157,11 @@ class DurableExecutionInvocationOutput:
     def create_retry(cls, error: ErrorObject) -> DurableExecutionInvocationOutput:
         """Create a failed invocation output."""
         return cls(status=InvocationStatus.RETRY, error=error)
+
+    @classmethod
+    def create_pending(cls) -> DurableExecutionInvocationOutput:
+        """Create a pending invocation output without a result or error."""
+        return cls(status=InvocationStatus.PENDING)
 
 
 @dataclass(frozen=True)

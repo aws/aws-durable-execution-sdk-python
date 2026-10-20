@@ -18,6 +18,7 @@ terminal SUCCEEDED end exactly once.
 """
 
 import json
+from threading import Lock
 from typing import Any
 
 from aws_durable_execution_sdk_python.config import Duration, ParallelConfig
@@ -31,13 +32,19 @@ from aws_durable_execution_sdk_python.plugin import (
 )
 
 
+_log_lock = Lock()
+
+
 def _emit(record: dict[str, Any], execution_arn: str | None) -> None:
     # Prefix every plugin record with the execution ARN as a top-level field so
     # the conformance runner's CloudWatch JSON filter can scope logs to a single
     # execution. Omit the field when the ARN is unset (never invent a value).
     if execution_arn:
         record = {"durableExecutionArn": execution_arn, **record}
-    print(json.dumps(record), flush=True)
+    # Start and end hooks can run on different threads. Keep print's separate
+    # body/newline writes together so the runner receives one JSON per line.
+    with _log_lock:
+        print(json.dumps(record), flush=True)
 
 
 class WaitReplayFlagPlugin(DurableInstrumentationPlugin):

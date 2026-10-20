@@ -6,10 +6,9 @@ carries -- set by a plugin in ``on_invocation_start``, or by customer code
 around the decorator -- is only visible to top-level handler code if the
 invocation thread's context is carried into that worker.
 
-Log-correlating plugins depend on this: a plugin that claims the invocation for
-the calling thread at invocation start has no hook that runs on the worker
-before the handler body, so the claim reaches top-level handler code by context
-propagation or not at all.
+With plugins registered, Start and End run on the handler worker in an isolated
+copy of the host context. These tests preserve caller bindings, successful Start
+bindings and checkpoint-worker isolation under the factory contract.
 """
 
 from __future__ import annotations
@@ -158,9 +157,8 @@ class _ContextvarSettingPlugin(DurableInstrumentationPlugin):
 def test_handler_body_sees_a_contextvar_set_by_a_plugin_at_invocation_start():
     """The invocation-start hook's contextvar reaches top-level handler code.
 
-    The hook runs on the invocation thread and the handler body runs on a worker
-    thread, and no hook runs on that worker before the handler's first
-    statement, so this only holds if the invocation's context is propagated.
+    Start and the handler share one invocation worker, whose context does not
+    leak back into the host thread.
     """
     plugin = _ContextvarSettingPlugin("claimed-by-plugin")
     seen: list[str] = []
@@ -176,7 +174,7 @@ def test_handler_body_sees_a_contextvar_set_by_a_plugin_at_invocation_start():
     assert seen == ["claimed-by-plugin"]
 
 
-def test_handler_body_sees_a_contextvar_set_by_the_caller():
+def test_instrumented_handler_body_sees_a_contextvar_set_by_the_caller():
     """A contextvar set before the handler is visible inside the handler body.
 
     This matches ``asyncio.to_thread``, which also runs the callable in a copy
@@ -184,7 +182,7 @@ def test_handler_body_sees_a_contextvar_set_by_the_caller():
     """
     seen: list[str] = []
 
-    @durable_execution
+    @durable_execution(plugins=[plugin_factory(DurableInstrumentationPlugin())])
     def my_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
         seen.append(_probe.get())
         return "ok"

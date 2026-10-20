@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import copy
 import datetime
 import functools
@@ -256,8 +257,8 @@ class InvocationInfo:
     )
     """EXPERIMENTAL: The deserialized execution input, when available.
 
-    Surfaced to instrumentation plugins that need to record it (e.g. Workflow
-    Insight). Mirrors the JS SDK's ``InvocationInfo.executionInput``.
+    Surfaced to instrumentation plugins that need to record it (e.g. Durable
+    Execution Telemetry). Mirrors the JS SDK's ``InvocationInfo.executionInput``.
 
     Excluded from ``repr`` on purpose: instrumentation logs hook infos wholesale
     (the bundled OTel plugins at debug level, the plugin example at info), so
@@ -470,6 +471,12 @@ class DurableInstrumentationPluginFactory(Protocol):
     who wrote such a check. :func:`plugin_discovery._is_plugin_factory` performs
     the check instead.
 
+    Optional registration metadata belongs to the factory class, so the SDK can
+    validate it without constructing an invocation plugin. A class declaring
+    ``__durable_registration_api__ = 1`` may declare ``exclusive_group`` and an
+    ``on_registration_result(registered)`` callback. Unmarked same-named fields
+    are ignored; inherited opted-in groups continue to apply.
+
     Register the factory, not a plugin::
 
         class MyPluginFactory:
@@ -619,12 +626,12 @@ class PluginExecutor:
 
     Scoped to a single invocation, not to the handler. Everything mutable here --
     the instances built for this invocation, the start info the end hook derives
-    from, the operations provider, the dispatch pool -- describes one invocation,
+    from, the operations provider and startup contexts -- describes one invocation,
     so a single instance shared by two of them would let each overwrite the
     other's state. Concurrent executions in one environment (Lambda Managed
     Instances) are exactly that case: they run in separate threads of one
-    process, against one decorated handler. :class:`PluginHost` therefore builds
-    a fresh executor per invocation and holds it only in that invocation's frame.
+    process, against one decorated handler. The decorator and :class:`PluginHost`
+    therefore build a fresh executor in each invocation's frame.
 
     Single-use by construction: :meth:`run` refuses a second entry, so the
     lifetime is an invariant of the class rather than a convention its callers
@@ -645,6 +652,13 @@ class PluginExecutor:
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
         self._run_entered = False
+        self._startup_context: contextvars.Context | None = None
+        self._invocation_contexts: list[contextvars.Context | None] = []
+
+    @property
+    def has_plugins(self) -> bool:
+        """Whether this invocation has any registered plugin factories."""
+        return bool(self._plugin_factories)
 
     @contextlib.contextmanager
     def run(self):
@@ -673,6 +687,8 @@ class PluginExecutor:
             # work still holding one.
             self._plugins = []
             self._started = []
+            self._startup_context = None
+            self._invocation_contexts.clear()
 
     def _create_plugins(self, info: InvocationStartInfo) -> None:
         """Build this invocation's plugin instances from its start info.
@@ -732,14 +748,12 @@ class PluginExecutor:
         self._plugins = plugins
 
     @staticmethod
-    def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> None:
-        """Invoke the appropriate plugin callback. Runs inside the thread pool.
+    def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> bool:
+        """Invoke a plugin on the calling thread and report contained failures.
 
-        Contains every ``BaseException`` except the parts that instruct the calling
-        thread to stop, the same rule the factory boundary uses. The thread here
-        is the executor's own single worker, which nothing outside this class
-        cancels or interrupts, so an exception outside the ``Exception`` hierarchy
-        arriving here was raised by the plugin.
+        Thread-control exceptions propagate; other failures are contained using
+        the same rule as factory creation. Start uses the result to restore the
+        pre-hook Context when a failed hook leaves thread-affine bindings behind.
         """
         try:
             match info:
@@ -765,6 +779,8 @@ class PluginExecutor:
             )
             if control is not None:
                 raise control from None
+            return False
+        return True
 
     def execute_plugins(self, info):
         """Dispatch one hook to this invocation's plugins.
@@ -785,7 +801,7 @@ class PluginExecutor:
         The invocation-end hook is the one hook that finishes dispatching even
         when a plugin raises one of those. Every plugin it reaches has already
         started, so cutting the loop short costs a plugin its only chance to
-        finish: Insight would not drain, and OTel would leave spans unended. The
+        finish: Telemetry would not drain, and OTel would leave spans unended. The
         first such exception is held and re-raised once every plugin has been
         called, so the thread still stops and nothing is swallowed. No other hook
         defers: stopping a start-hook loop early leaves later plugins with nothing
@@ -812,20 +828,50 @@ class PluginExecutor:
             return
         starting = isinstance(info, InvocationStartInfo)
         ending = isinstance(info, InvocationEndInfo)
+        if starting:
+            self._startup_context = None
+            self._invocation_contexts.clear()
         deferred_control: BaseException | None = None
-        for plugin in self._plugins if starting else self._started:
+        for index, plugin in enumerate(self._plugins if starting else self._started):
             if starting:
+                owner = self._startup_context
+                before = (
+                    owner.copy() if owner is not None else contextvars.copy_context()
+                )
+                # Count a hook before dispatch: even a failed Start can own state
+                # that only its End hook can release.
                 self._started.append(plugin)
+                self._invocation_contexts.append(owner)
+                succeeded = (
+                    owner.run(self._dispatch_plugin, plugin, info)
+                    if owner is not None
+                    else self._dispatch_plugin(plugin, info)
+                )
+                if not succeeded:
+                    self._startup_context = before
+                continue
             if not ending:
                 self._dispatch_plugin(plugin, info)
                 continue
+            # End resets tokens in the Context that created them. A failed Start
+            # may have moved later hooks and handler execution to a snapshot.
+            owner = self._invocation_contexts[index]
             try:
-                self._dispatch_plugin(plugin, info)
+                if owner is not None:
+                    owner.run(self._dispatch_plugin, plugin, info)
+                else:
+                    self._dispatch_plugin(plugin, info)
             except BaseException as control:  # noqa: BLE001 - held and re-raised below
                 if deferred_control is None:
                     deferred_control = control
         if deferred_control is not None:
             raise deferred_control
+
+    def _run_in_invocation_context(self, invoke: Callable[[], Any]) -> Any:
+        """Continue in the pre-hook Context only after a failed Start hook."""
+        if self._startup_context is not None:
+            return self._startup_context.run(invoke)
+        return invoke()
 
     def _snapshot_operation_infos(
         self,
@@ -1075,7 +1121,9 @@ class PluginExecutor:
             operations: full operation map after the update, when available.
             previous_operations: operation map before the update, when available.
         """
-        if operation_or_operations is None:
+        # Only plugins read the info built below, and the change info converts
+        # every operation. So without a plugin, return before building any of it.
+        if operation_or_operations is None or not self.has_plugins:
             return
 
         updated_operations: list[Operation] = (
@@ -1221,7 +1269,7 @@ class PluginHost:
                         # cancelled task, most simply -- leaves the invocation by
                         # a BaseException, and an invocation that ends without
                         # its end hook costs the plugins the only point at which
-                        # they can finish: Insight never drains, so the records it
+                        # they can finish: Telemetry never drains, so the records it
                         # holds for this execution are dropped, and OTel never
                         # ends the spans it opened, so they are never exported.
                         # The teardown below still runs either way, which is why

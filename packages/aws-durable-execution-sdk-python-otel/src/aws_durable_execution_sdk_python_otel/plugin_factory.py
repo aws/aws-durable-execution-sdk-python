@@ -25,7 +25,7 @@ one of its own that the tracer would never consult.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from aws_durable_execution_sdk_python_otel.execution_plugin import (
     ExecutionOtelPlugin,
@@ -59,6 +59,9 @@ class InvocationOtelPluginFactory:
             enrichment on).
     """
 
+    __durable_registration_api__: ClassVar[int] = 1
+    exclusive_group: ClassVar[str | None] = "aws-durable-execution-otel-view"
+
     def __init__(self, config: OtelPluginConfig | None = None) -> None:
         self.config = config
 
@@ -79,6 +82,9 @@ class ExecutionOtelPluginFactory:
         config: Shared plugin configuration handed to every plugin this factory
             builds. When omitted, each plugin uses defaults.
     """
+
+    __durable_registration_api__: ClassVar[int] = 1
+    exclusive_group: ClassVar[str | None] = "aws-durable-execution-otel-view"
 
     def __init__(self, config: OtelPluginConfig | None = None) -> None:
         self.config = config
