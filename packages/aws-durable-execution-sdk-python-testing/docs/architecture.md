@@ -430,14 +430,23 @@ retry budget cannot be bypassed.
 
 ### Retry budget
 
-A handler exception or an output validation failure increases the
-execution's `consecutive_failed_invocation_attempts`. At
+A handler exception increases the execution's
+`consecutive_failed_invocation_attempts`. At
 `MAX_CONSECUTIVE_FAILED_ATTEMPTS` the execution is failed with the last
 observed error. Below that, a retry is scheduled through
 `_invoke_execution` after `RETRY_BACKOFF_SECONDS`. Any clean invocation
 resets the counter. A clean invocation is one that succeeded or returned
 PENDING. So a transient failure followed by a success does not count
 against future budget.
+
+An invalid output is handled as the service handles it. A FAILED output
+with a Result, a SUCCEEDED output with an Error, a missing or unknown
+Status, or an output that cannot be parsed fails the execution at once.
+The error has type `InvalidParameterValueException` and the validation
+message. The only invalid output that is retried is PENDING with no
+pending operations, because an SDK race that resolves on replay can
+produce it. It counts against the same counter, with a cap of
+`MAX_CONSECUTIVE_INVALID_PENDING_ATTEMPTS`.
 
 ### Invocation timeout
 

@@ -19,6 +19,7 @@ def _write_test_wheel(
     distribution: str,
     package_files: tuple[str, ...],
     dependencies: tuple[str, ...] = (),
+    package_sources: dict[str, str] | None = None,
 ) -> Path:
     normalized_distribution = distribution.replace("-", "_")
     wheel = directory / f"{normalized_distribution}-1.0.0-py3-none-any.whl"
@@ -33,7 +34,9 @@ def _write_test_wheel(
 
     with zipfile.ZipFile(wheel, "w") as archive:
         for package_file in package_files:
-            archive.writestr(package_file, "")
+            archive.writestr(
+                package_file, (package_sources or {}).get(package_file, "")
+            )
         archive.writestr(f"{dist_info}/METADATA", "\n".join(metadata))
         archive.writestr(
             f"{dist_info}/WHEEL",
@@ -67,12 +70,13 @@ def test_build_layer_installs_distributions_and_zips_lambda_layout(
     def fake_run(command: list[str], check: bool) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         target = Path(command[command.index("--target") + 1])
-        (target / "aws_durable_execution_sdk_python").mkdir()
-        (target / "aws_durable_execution_sdk_python" / "__init__.py").write_text("")
-        (target / "aws_durable_execution_sdk_python_otel").mkdir()
-        (target / "aws_durable_execution_sdk_python_otel" / "__init__.py").write_text(
-            ""
-        )
+        for wheel, package in (
+            (sdk_wheel, "aws_durable_execution_sdk_python"),
+            (otel_wheel, "aws_durable_execution_sdk_python_otel"),
+        ):
+            if str(wheel) in command:
+                (target / package).mkdir(exist_ok=True)
+                (target / package / "__init__.py").write_text("")
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -86,13 +90,15 @@ def test_build_layer_installs_distributions_and_zips_lambda_layout(
     )
 
     assert output == tmp_path / "layer.zip"
-    assert "--no-compile" in commands[0]
-    assert "--no-deps" in commands[0]
-    assert "--platform" not in commands[0]
-    assert "--python-version" not in commands[0]
-    assert "--abi" not in commands[0]
-    assert str(sdk_wheel) in commands[0]
-    assert str(otel_wheel) in commands[0]
+    sdk_command = next(command for command in commands if str(sdk_wheel) in command)
+    otel_command = next(command for command in commands if str(otel_wheel) in command)
+    assert "--no-deps" not in sdk_command
+    assert "--no-deps" in otel_command
+    for command in commands:
+        assert "--no-compile" in command
+        assert "--platform" not in command
+        assert "--python-version" not in command
+        assert "--abi" not in command
 
     with zipfile.ZipFile(output) as archive:
         assert (
@@ -104,7 +110,7 @@ def test_build_layer_installs_distributions_and_zips_lambda_layout(
         )
 
 
-def test_build_layer_excludes_adot_and_runtime_dependencies(
+def test_build_layer_includes_sdk_dependencies_without_shadowing_adot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -120,7 +126,16 @@ def test_build_layer_excludes_adot_and_runtime_dependencies(
         ("aws_durable_execution_sdk_python_otel/__init__.py",),
         ("aws-opentelemetry-distro", "opentelemetry-api"),
     )
-    _write_test_wheel(tmp_path, "boto3", ("boto3/__init__.py",))
+    # Minimal offline wheel fixtures exercise dependency resolution and layer
+    # import precedence. They contain no service model or simulated wire API.
+    _write_test_wheel(
+        tmp_path,
+        "boto3",
+        ("boto3/__init__.py",),
+        ("botocore",),
+        package_sources={"boto3/__init__.py": '__version__ = "layer-dependency"\n'},
+    )
+    _write_test_wheel(tmp_path, "botocore", ("botocore/__init__.py",))
     _write_test_wheel(
         tmp_path,
         "aws-opentelemetry-distro",
@@ -148,8 +163,27 @@ def test_build_layer_excludes_adot_and_runtime_dependencies(
     assert "python/aws_durable_execution_sdk_python/__init__.py" in names
     assert "python/aws_durable_execution_sdk_python_otel/__init__.py" in names
     assert not any(name.startswith("python/amazon/") for name in names)
-    assert not any(name.startswith("python/boto3/") for name in names)
+    assert "python/boto3/__init__.py" in names
+    assert "python/botocore/__init__.py" in names
     assert not any(name.startswith("python/opentelemetry/") for name in names)
+
+    layer_root = tmp_path / "unpacked"
+    with zipfile.ZipFile(output) as archive:
+        archive.extractall(layer_root)
+    runtime = tmp_path / "older-runtime"
+    (runtime / "boto3").mkdir(parents=True)
+    (runtime / "boto3" / "__init__.py").write_text('__version__ = "older-runtime"\n')
+    # Lambda searches the layer before its runtime SDK. An omitted dependency
+    # would silently import the older runtime package instead.
+    probe = (
+        "import pathlib,sys; "
+        f"layer=pathlib.Path({str(layer_root / 'python')!r}); "
+        f"sys.path[:0]=[str(layer),{str(runtime)!r}]; "
+        "import boto3; "
+        "assert boto3.__version__ == 'layer-dependency'; "
+        "assert pathlib.Path(boto3.__file__).is_relative_to(layer)"
+    )
+    subprocess.run([sys.executable, "-I", "-c", probe], check=True)
 
 
 def test_build_layer_requires_built_distributions(tmp_path: Path) -> None:

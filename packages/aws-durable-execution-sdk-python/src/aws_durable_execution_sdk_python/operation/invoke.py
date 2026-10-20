@@ -123,12 +123,18 @@ class InvokeOperationExecutor(OperationExecutor[R]):
                 operation_id=self.operation_identifier.operation_id,
                 durable_execution_arn=self.state.durable_execution_arn,
             )
+            # Only a new START contributes outbound context. Replayed pending or
+            # terminal invokes keep their checkpointed identity and outcome.
+            propagation = self.state.provide_propagation_metadata(
+                self.operation_identifier, self.function_name
+            )
             start_operation: OperationUpdate = OperationUpdate.create_invoke_start(
                 identifier=self.operation_identifier,
                 payload=serialized_payload,
                 chained_invoke_options=ChainedInvokeOptions(
                     function_name=self.function_name,
                     tenant_id=self.config.tenant_id,
+                    x_amzn_trace_id=propagation.x_amzn_trace_id,
                 ),
             )
             # Checkpoint invoke START with blocking (is_sync=True).

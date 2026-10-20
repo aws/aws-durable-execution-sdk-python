@@ -57,6 +57,7 @@ from aws_durable_execution_sdk_python_testing.checkpoint.transformer import (
 )
 from aws_durable_execution_sdk_python_testing.exceptions import (
     IllegalStateException,
+    InvalidInvocationOutputError,
     InvalidParameterValueException,
     ResourceNotFoundException,
 )
@@ -129,6 +130,11 @@ class Executor(ExecutionObserver):
     # target and creating a durable child. Each takes milliseconds.
     QUICK_DISPATCH_WORKERS: int = 8
     MAX_CONSECUTIVE_FAILED_ATTEMPTS: int = 5
+    # The service fails an execution on an invalid invocation output at
+    # once, except PENDING with no pending operations. An SDK race that
+    # resolves on replay can produce that one, so it gets this many
+    # consecutive attempts.
+    MAX_CONSECUTIVE_INVALID_PENDING_ATTEMPTS: int = 3
     RETRY_BACKOFF_SECONDS: int = 5
     # GetDurableExecutionState page-count bounds, mirroring the service
     # (default 100, hard cap 1000 operations per page).
@@ -1559,8 +1565,8 @@ class Executor(ExecutionObserver):
     ) -> None:
         """Apply a completed handler invocation.
 
-        Records the attempt, validates the response (completing or
-        retrying), resets the retry counter on a clean run, and releases
+        Records the attempt, validates the response (completing, failing
+        or retrying), resets the retry counter on a clean run, and releases
         the gate to PRE_INVOKE (re-invoking if a trigger was deferred) or
         COMPLETED.
         """
@@ -1593,11 +1599,20 @@ class Executor(ExecutionObserver):
             logger.warning(
                 "[%s] Lambda output validation failure: %s", execution_arn, e
             )
-            error_obj = ErrorObject.from_exception(e)
+            error_obj = self._invalid_output_error(str(e))
             # Release the gate before retry scheduling so the retry's
             # invoke finds PRE_INVOKE.
             self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
-            self._retry_invocation(execution, error_obj)
+            # Only PENDING with no pending operations is retried; every
+            # other invalid output fails the execution at once.
+            if response.status is InvocationStatus.PENDING:
+                self._retry_invocation(
+                    execution,
+                    error_obj,
+                    max_attempts=self.MAX_CONSECUTIVE_INVALID_PENDING_ATTEMPTS,
+                )
+            else:
+                self._fail_workflow(execution_arn, error_obj)
             return
 
         # A clean invocation resets the retry counter.
@@ -1632,6 +1647,37 @@ class Executor(ExecutionObserver):
     def _fail_invocation_not_found(
         self, execution_arn: str, error: ErrorObject
     ) -> None:
+        self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
+        self._fail_workflow(execution_arn, error)
+
+    @staticmethod
+    def _invalid_output_error(message: str) -> ErrorObject:
+        """The error the service fails an execution with for an invalid output."""
+        return ErrorObject(
+            message=message,
+            type="InvalidParameterValueException",
+            data=None,
+            stack_trace=None,
+        )
+
+    def _fail_after_invalid_output(
+        self,
+        execution_arn: str,
+        error: ErrorObject,
+        invocation_start: datetime,
+        invocation_end: datetime,
+        request_id: str | None,
+    ) -> None:
+        """Fail the execution for an output the invoker could not parse."""
+        execution = self._store.load(execution_arn)
+        execution.record_invocation_completion(
+            invocation_start, invocation_end, request_id or str(uuid.uuid4())
+        )
+        self._store.save(execution)
+        if execution.is_complete:
+            # A stop or timeout landed during the invocation and stands.
+            self._set_invocation_gate(execution_arn, InvocationState.COMPLETED)
+            return
         self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
         self._fail_workflow(execution_arn, error)
 
@@ -1735,6 +1781,32 @@ class Executor(ExecutionObserver):
                         CallableTask(
                             lambda: self._fail_invocation_not_found(
                                 execution_arn, error_obj
+                            )
+                        ),
+                    )
+                )
+
+            except InvalidInvocationOutputError as err:
+                if self._closing:
+                    return
+                # The handler ran, but the service cannot parse its output,
+                # so it fails the execution without invoking it again.
+                invocation_end = self._clock.now()
+                logger.warning(
+                    "[%s] Lambda output validation failure: %s", execution_arn, err
+                )
+                error_obj = self._invalid_output_error(str(err))
+                request_id = err.request_id
+                await asyncio.wrap_future(
+                    self._registry.submit(
+                        execution_arn,
+                        CallableTask(
+                            lambda: self._fail_after_invalid_output(
+                                execution_arn,
+                                error_obj,
+                                invocation_start,
+                                invocation_end,
+                                request_id,
                             )
                         ),
                     )
@@ -1923,22 +1995,26 @@ class Executor(ExecutionObserver):
 
         self.fail_execution(execution_arn, error)
 
-    def _retry_invocation(self, execution: Execution, error: ErrorObject):
+    def _retry_invocation(
+        self,
+        execution: Execution,
+        error: ErrorObject,
+        max_attempts: int | None = None,
+    ) -> None:
         """Handle retry logic or fail execution if retries exhausted.
 
-        Budget: ``MAX_CONSECUTIVE_FAILED_ATTEMPTS`` attempts
-        per ``RETRY_BACKOFF_SECONDS`` backoff. Increments the counter
-        BEFORE the threshold check so an attempt-N failure that
-        reaches the ceiling fails the execution rather than scheduling
-        a pointless retry.
+        Budget: ``max_attempts`` attempts, by default
+        ``MAX_CONSECUTIVE_FAILED_ATTEMPTS``, per ``RETRY_BACKOFF_SECONDS``
+        backoff. Increments the counter BEFORE the threshold check so an
+        attempt-N failure that reaches the ceiling fails the execution
+        rather than scheduling a pointless retry.
         """
+        if max_attempts is None:
+            max_attempts = self.MAX_CONSECUTIVE_FAILED_ATTEMPTS
         execution.consecutive_failed_invocation_attempts += 1
         self._store.save(execution)
 
-        if (
-            execution.consecutive_failed_invocation_attempts
-            >= self.MAX_CONSECUTIVE_FAILED_ATTEMPTS
-        ):
+        if execution.consecutive_failed_invocation_attempts >= max_attempts:
             # Budget exhausted — fail the execution with the last
             # observed error.
             self._fail_workflow(

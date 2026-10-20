@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
@@ -15,12 +15,14 @@ from aws_durable_execution_sdk_python.execution import (
     DurableExecutionInvocationOutput,
     InitialExecutionState,
 )
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 
 from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
     DEFAULT_MAX_INVOCATION_PAGE_BYTES,
 )
 from aws_durable_execution_sdk_python_testing.exceptions import (
     DurableFunctionsTestError,
+    InvalidInvocationOutputError,
     InvalidParameterValueException,
     ResourceNotFoundException,
 )
@@ -106,6 +108,45 @@ class InvokeResponse:
 
     invocation_output: DurableExecutionInvocationOutput
     request_id: str
+
+    @classmethod
+    def from_output(cls, output: Any, request_id: str) -> InvokeResponse:
+        """Create from the value a handler returned.
+
+        Raises:
+            InvalidInvocationOutputError: If the value is not an object with
+                a known ``Status`` and, if present, an object ``Error``.
+        """
+        try:
+            invocation_output = DurableExecutionInvocationOutput.from_dict(output)
+            # from_dict treats any falsey Error as absent, but only a missing
+            # or null Error is. An empty object is kept, so SUCCEEDED with it
+            # fails validation; a value that is not an object raises here.
+            error: Any = output.get("Error")
+            if error is not None and invocation_output.error is None:
+                invocation_output = replace(
+                    invocation_output, error=ErrorObject.from_dict(error)
+                )
+        except (AttributeError, TypeError, ValueError) as e:
+            msg: str = f"Invalid invocation output: {e}"
+            raise InvalidInvocationOutputError(msg, request_id) from e
+        return cls(invocation_output=invocation_output, request_id=request_id)
+
+    @classmethod
+    def from_payload(cls, payload: bytes, request_id: str) -> InvokeResponse:
+        """Create from the payload a Lambda invocation returned.
+
+        Raises:
+            InvalidInvocationOutputError: If the payload is not UTF-8 JSON or
+                not a valid invocation output.
+        """
+        try:
+            # UnicodeDecodeError is a ValueError.
+            output: Any = json.loads(payload.decode("utf-8"))
+        except ValueError as e:
+            msg: str = f"Invalid invocation output: {e}"
+            raise InvalidInvocationOutputError(msg, request_id) from e
+        return cls.from_output(output, request_id)
 
 
 # Values the in-process Lambda context reports when the caller gives none.
@@ -261,10 +302,7 @@ class InProcessInvoker(Invoker):
         )
         handler: Callable = self._resolve_handler(function_name)
         response_dict = handler(input_with_client, context)
-        output = DurableExecutionInvocationOutput.from_dict(response_dict)
-        return InvokeResponse(
-            invocation_output=output, request_id=context.aws_request_id
-        )
+        return InvokeResponse.from_output(response_dict, context.aws_request_id)
 
     def update_endpoint(self, endpoint_url: str, region_name: str) -> None:
         """No-op for in-process invoker."""
@@ -459,6 +497,7 @@ class LambdaInvoker(Invoker):
         Raises:
             ResourceNotFoundException: If function does not exist
             InvalidParameterValueException: If parameters are invalid
+            InvalidInvocationOutputError: If the function's output cannot be parsed
             DurableFunctionsTestError: For other invocation failures
         """
 
@@ -496,21 +535,22 @@ class LambdaInvoker(Invoker):
                 msg = f"Lambda invocation failed with status {status_code}: {error_payload}"
                 raise DurableFunctionsTestError(msg)
 
-            # Parse response payload
-            response_payload = response["Payload"].read().decode("utf-8")
-            response_dict = json.loads(response_payload)
+            # Read response payload; from_payload decodes it, below
+            response_payload: bytes = response["Payload"].read()
 
-            # Extract request ID from response headers (x-amzn-RequestId or x-amzn-request-id)
-            headers = response.get("ResponseMetadata", {}).get("HTTPHeaders", {})
-            request_id = (
-                headers.get("x-amzn-RequestId")
+            # botocore puts the request ID in ResponseMetadata and keeps the
+            # response headers with lowercased names.
+            metadata: dict[str, Any] = response.get("ResponseMetadata", {})
+            headers: dict[str, str] = {
+                name.lower(): value
+                for name, value in metadata.get("HTTPHeaders", {}).items()
+            }
+            request_id: str = (
+                metadata.get("RequestId")
+                or headers.get("x-amzn-requestid")
                 or headers.get("x-amzn-request-id")
                 or f"local-{uuid4()}"
             )
-
-            # Convert to DurableExecutionInvocationOutput
-            output = DurableExecutionInvocationOutput.from_dict(response_dict)
-            return InvokeResponse(invocation_output=output, request_id=request_id)
 
         except client.exceptions.ResourceNotFoundException as e:
             msg = f"Function not found: {function_name}"
@@ -565,3 +605,7 @@ class LambdaInvoker(Invoker):
                 raise DurableFunctionsTestError(msg) from e
             msg = f"Unexpected error during Lambda invocation: {e}"
             raise DurableFunctionsTestError(msg) from e
+
+        # Parsed outside the try: an output the service cannot parse fails
+        # the execution, so it must not be reported as a failed invocation.
+        return InvokeResponse.from_payload(response_payload, request_id)
