@@ -1287,19 +1287,6 @@ def test_should_retry_invocation_when_under_limit_through_public_api(
     executor, mock_store, mock_scheduler, mock_invoker, start_input
 ):
     """Test that invocation retries when under limit through public API with final outcome verification."""
-    # Arrange - Set up execution that will trigger retry logic
-    mock_execution = Mock()
-    mock_execution.is_paused = False
-    mock_execution.durable_execution_arn = "test-arn"
-    mock_execution.is_complete = False
-    mock_execution.start_input = start_input
-    # Under limit (3 is max for PENDING with no pending operations)
-    mock_execution.consecutive_failed_invocation_attempts = 1
-    mock_execution.seq_counter = 0
-    mock_execution.has_pending_operations.return_value = False
-    mock_execution.handler_seen_seq = 0
-    mock_execution.has_changes_after.return_value = False
-
     # Configure invoker to fail initially with validation error, then succeed on retry
     mock_invocation_input = Mock()
     mock_invoker.create_invocation_input.return_value = mock_invocation_input
@@ -1321,42 +1308,38 @@ def test_should_retry_invocation_when_under_limit_through_public_api(
         ),
     ]
 
-    # Mock execution creation and store behavior
-    with patch(
-        "aws_durable_execution_sdk_python_testing.executor.Execution"
-    ) as mock_execution_class:
-        mock_execution_class.new.return_value = mock_execution
-        mock_store.load.return_value = mock_execution
+    # Start a real execution so pause flags and completion follow its lifecycle.
+    executor.start_execution(start_input)
+    execution: Execution = mock_store.save.call_args.args[0]
+    # Under limit (3 is max for PENDING with no pending operations)
+    execution.consecutive_failed_invocation_attempts = 1
+    mock_store.load.return_value = execution
 
-        # Act - trigger the retry scenario through public API
-        executor.start_execution(start_input)
+    # Simulate scheduler executing the initial invocation handler
+    initial_handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+    asyncio.run(initial_handler())
 
-        # Simulate scheduler executing the initial invocation handler
-        initial_handler = mock_scheduler.call_later.call_args_list[-1][0][0]
-        import asyncio
+    # Verify retry was scheduled due to validation error
+    assert execution.consecutive_failed_invocation_attempts == 2
+    assert not execution.is_complete
+    mock_invoker.invoke.assert_called_once()
+    assert mock_scheduler.call_later.call_count == 3  # timeout + initial + retry
+    retry_call = mock_scheduler.call_later.call_args_list[2]
+    retry_handler = retry_call[0][0]
+    retry_delay = retry_call[1]["delay"]
+    assert retry_delay == Executor.RETRY_BACKOFF_SECONDS
 
-        asyncio.run(initial_handler())
+    # Execute the retry handler to complete the scenario
+    asyncio.run(retry_handler())
 
-        # Verify retry was scheduled due to validation error
-        assert mock_scheduler.call_later.call_count == 3  # timeout + initial + retry
-        retry_call = mock_scheduler.call_later.call_args_list[
-            2
-        ]  # Third call is the retry
-        retry_handler = retry_call[0][0]
-        retry_delay = retry_call[1]["delay"]
-
-        # Execute the retry handler to complete the scenario
-        asyncio.run(retry_handler())
-
-    # Assert - verify final outcome after retry sequence
-    # Counter resets to 0 on a clean invocation. The first
-    # attempt failed validation (1 -> 2), the second attempt succeeded
-    # (2 -> 0). Previously this was 2 because the counter only ever
-    # grew; that was a bug.
-    assert mock_execution.consecutive_failed_invocation_attempts == 0
-    assert retry_delay == Executor.RETRY_BACKOFF_SECONDS  # Correct backoff delay used
-    mock_store.save.assert_called_with(mock_execution)  # Execution state saved
+    # A clean second invocation resets previous failures and completes execution.
+    assert execution.consecutive_failed_invocation_attempts == 0
+    assert execution.is_complete
+    assert execution.current_status() is ExecutionStatus.SUCCEEDED
+    assert execution.result == success_response
+    mock_store.save.assert_called_with(execution)  # Execution state saved
     assert mock_invoker.invoke.call_count == 2  # Initial + retry invocation
+    assert mock_scheduler.call_later.call_count == 3  # No retry after success
 
 
 def test_should_fail_workflow_when_retry_limit_exceeded(
@@ -1647,6 +1630,7 @@ def test_invoke_handler_fails_execution_when_output_cannot_be_parsed(
     )
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1674,6 +1658,7 @@ def test_invoke_handler_fails_execution_when_output_cannot_be_parsed(
                 "Invalid invocation output: Expecting value: line 1 column 1 (char 0)"
             ),
         )
+        mock_invoker.invoke.assert_called_once()
         mock_execution.record_invocation_completion.assert_called_once()
         assert mock_execution.consecutive_failed_invocation_attempts == 0
         # timeout + initial invocation, no retry
@@ -1690,6 +1675,7 @@ def test_invoke_handler_unparsed_output_leaves_a_stop_during_invocation(
     )
 
     incomplete_execution = Mock(spec=Execution)
+    incomplete_execution.is_paused = False
     incomplete_execution.is_complete = False
     incomplete_execution.start_input = start_input
     incomplete_execution.consecutive_failed_invocation_attempts = 0
@@ -1720,6 +1706,7 @@ def test_invoke_handler_unparsed_output_leaves_a_stop_during_invocation(
             asyncio.run(handler())
 
     mock_fail.assert_not_called()
+    mock_invoker.invoke.assert_called_once()
     stopped_execution.record_invocation_completion.assert_called_once()
     # No retry is scheduled either: timeout + initial invocation only.
     assert mock_scheduler.call_later.call_count == 2
