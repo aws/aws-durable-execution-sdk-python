@@ -47,7 +47,8 @@ import datetime
 import json
 import math
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from aws_durable_execution_sdk_python.plugin import (
@@ -176,13 +177,28 @@ def _apply_result_override(
         return None
 
 
+@dataclass(frozen=True)
+class _EmissionSnapshot:
+    """One admitted build's stable operation map and ordering token.
+
+    The plugin owns the map: adoption copies the SDK snapshot and only rebinds
+    ``_operations`` afterwards, so an in-flight build keeps its original map.
+    Values retain their existing shallow-snapshot semantics; customer data is
+    never deep-copied while holding the invocation lock.
+    """
+
+    operations: Mapping[str, OperationInfo]
+    revision: int
+    closing: bool
+
+
 class _HookFrames(threading.local):
     """Nested plugin hook frames on one thread, and the drains they owe.
 
-    Per thread, and shared by every plugin instance on that thread. A hook runs
-    customer code while holding a plugin's ``_lock``, and that code can call a
-    hook on *any* live instance, so the frame that must run a deferred drain is
-    the outermost one on the thread whatever instance it belongs to.
+    Per thread, and shared by every plugin instance on that thread. Customer
+    callbacks can reach hooks on any live instance. Nested hooks defer drains
+    until the outermost callback has finished building or discarding its record,
+    and until references displaced by locked hand-offs can be released safely.
 
     ``threading.local`` runs ``__init__`` once per thread, so each thread gets its
     own counter and its own list.
@@ -221,7 +237,8 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
     other's fields:
 
     * ``_lock`` guards ``_closed``, ``_build_revision``, the ``_operations``
-      rebind and record emission.
+      rebind and the snapshot-admission/scheduler-handoff boundaries. Record
+      building and customer transforms run outside this lock.
     * ``_ExportScheduler._condition``'s lock guards the export bookkeeping this
       instance carries for the scheduler; nothing outside the scheduler reads or
       writes those fields, and the scheduler never touches the fields above.
@@ -263,46 +280,20 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
         # operation-change for a checkpoint that completed just before the end)
         # must emit nothing (mirrors the Java ExecutionState.closed flag).
         self._closed = False
-        # Counts the record builds this instance has started. Never decremented.
-        #
-        # A record is a complete snapshot of one execution, so the scheduler's
-        # per-execution slot takes whichever record is handed over last and never
-        # compares ages. The build that hands its record over last is not the
-        # build that started last: `_emit` runs customer code (the input/output
-        # transforms and the operation result overrides) between the snapshot it
-        # takes and the hand-off, and that code can re-enter a hook on this thread
-        # and complete a newer build first. Without a comparison of build ages the
-        # outer frame's older snapshot then replaces the newer one in the slot, or
-        # is exported after it. Every non-terminal build takes the next value here
-        # before it starts, and `_emit` hands the record over only while that value
-        # is still the newest (mirrors the JS `buildRevision` and the Java
-        # `AtomicLong buildRevision`).
-        #
-        # A plain int, not an atomic: every read and every increment happens under
-        # `_lock`, so the read-modify-write cannot interleave, and the two builds
-        # this counter distinguishes are nested frames on one thread rather than
-        # two threads. Java needs an AtomicLong because its two builds really can
-        # run at once.
+        # A duplicate End must wait for the admitted closing build before its
+        # drain captures scheduler state. Nested callbacks defer that wait to
+        # their outermost hook frame, after their own builds have unwound.
+        self._closing_complete = threading.Event()
+        # Every non-closing build reserves its revision together with its
+        # operation snapshot. Customer callbacks can start a newer build on this
+        # or another thread, so the hand-off must reject an overtaken snapshot.
         self._build_revision = 0
-        # Guards `_closed`, `_build_revision`, the operations rebind and record
-        # emission, so a late hook can never slip a RUNNING record in after the
-        # terminal one.
-        #
-        # What it protects against is reentrancy, not two threads. The SDK
-        # dispatches every hook synchronously on the thread that produced the
-        # event, and it joins the checkpoint thread and the branch pools before
-        # the invocation-end hook is dispatched, so a checkpoint-path
-        # operation-change cannot overlap `on_invocation_end` -- an earlier
-        # version of this comment claimed it could. The lock still earns its place
-        # for the reason below, and it stays because a guard whose correctness
-        # rests on the SDK's join ordering is one refactor away from being wrong.
-        #
-        # Reentrant on purpose: `_emit` runs the scheduler's `schedule()` inside
-        # this hold, and `schedule()` releases the record it displaces, which can
-        # run a customer finalizer that re-enters a hook for this same execution
-        # on this same thread. A plain lock self-deadlocks the invocation thread
-        # there. (Java holds no such lock: its ExecutionState carries no
-        # operations map, and `cachedInput` is a bare volatile field.)
+        # Only snapshot admission and the checked scheduler hand-off are locked.
+        # Holding this lock across a customer callback deadlocks two invocations
+        # whose transforms synchronously call each other's plugin hooks.
+        # Reentrancy is still needed for schedule()'s synchronous worker-start
+        # failure diagnostic: a logging handler can re-enter a hook while the
+        # checked hand-off is on this thread's stack.
         self._lock = threading.RLock()
 
     # -- state ----------------------------------------------------------------
@@ -312,33 +303,34 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
         # never aliases the SDK-owned map, and rebind the attribute so a
         # concurrent reader holding the prior reference iterates a stable dict.
         # Callers hold self._lock.
+        # Keep the replaced map alive until no plugin lock is held: an operation
+        # can retain customer objects whose finalizers re-enter another hook.
+        _hook_frames.releases.append(self._operations)
         self._operations = dict(operations)
+
+    def _snapshot_emission_locked(self, *, closing: bool = False) -> _EmissionSnapshot:
+        """Reserve the build while holding the same lock used to adopt its map."""
+        revision = 0
+        if not closing:
+            self._build_revision += 1
+            revision = self._build_revision
+        return _EmissionSnapshot(self._operations, revision, closing)
 
     # -- hooks ----------------------------------------------------------------
 
     @contextlib.contextmanager
     def _hook_frame(self) -> Iterator[None]:
-        """Mark a hook frame on this thread and run the drains it owes on exit.
+        """Defer nested End drains and customer-reference release to hook exit.
 
-        A hook runs customer code -- the input/output transforms, a result
-        override, ``__del__`` on an object a displaced record carried -- while
-        holding ``_lock``, which is reentrant so that such code re-entering a hook
-        on this thread does not self-deadlock. A re-entrant
-        ``on_invocation_end`` therefore used to run its drain while the outer
-        frame still held ``_lock``. A drain waits for the export worker, and an
-        exporter that re-enters a hook blocks that worker on the very ``_lock``
-        the waiting thread holds, so neither side can proceed and the invocation
-        hangs until Lambda times it out.
+        A transform can re-enter End before its outer build has finished. That
+        End's drain belongs at the outermost frame, after the closing record is
+        scheduled and any stale outer record is discarded. Displaced records and
+        operation maps are retained until then so their customer finalizers never
+        run while a plugin or scheduler lock is held.
 
-        A drain a nested frame asks for is therefore deferred to the outermost
-        frame, which runs it after every ``_lock`` hold on this thread has been
-        released. The unnested case is unchanged: the frame is the outermost one,
-        so its drain runs at the same point it always did.
-
-        The frame state is per thread and shared by every instance, because
-        customer code inside one execution's build can call a hook on another
-        execution's instance, and a drain deferred to the outer frame of a
-        *different* instance is still a drain outside every lock.
+        Frames are shared by every plugin on this thread: a callback may re-enter
+        a different invocation, whose drain and retained references follow the
+        same ordering rule.
         """
         state = _hook_frames
         state.depth += 1
@@ -364,38 +356,56 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
             pending.append(self)
 
     def _drain(self) -> None:
-        self._shared._scheduler.drain(self)
+        scheduler = self._shared._scheduler
+        with self._lock:
+            closing = self._closed
+        # The export worker cannot wait on customer code that may itself be
+        # waiting for an export. Let the scheduler retain its existing refusal
+        # and deferred-flush behavior for exporter-driven hook reentry.
+        if closing and not scheduler._is_export_worker():
+            self._closing_complete.wait()
+        scheduler.drain(self)
 
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         if not self._sampled_in:
             return
-        with self._hook_frame(), self._lock:
-            if self._closed:
-                return
-            # Seed the operation map from the full snapshot. On a cold resume
-            # this rebuilds prior (terminal) operations that a fresh instance
-            # never saw via per-operation hooks.
-            self._adopt_operations_locked(info.operations)
-            if self._shared._emit_mode == EmitMode.ON_CHANGE:
-                self._emit(status="RUNNING", end_time=None, output_raw=None, error=None)
+        snapshot: _EmissionSnapshot | None = None
+        with self._hook_frame():
+            with self._lock:
+                if self._closed:
+                    return
+                # A cold resume adopts the service's complete operation map.
+                self._adopt_operations_locked(info.operations)
+                if self._shared._emit_mode == EmitMode.ON_CHANGE:
+                    snapshot = self._snapshot_emission_locked()
+            if snapshot is not None:
+                self._emit(
+                    snapshot,
+                    status="RUNNING",
+                    end_time=None,
+                    output_raw=None,
+                    error=None,
+                )
 
     def on_operation_change(self, info: OperationChangeInfo) -> None:
-        # No ARN to resolve: this instance belongs to the invocation the change
-        # was raised in, so the hook's `execution_arn` is this execution's by
-        # construction. A change hook can no longer fabricate state for an
-        # execution whose invocation has ended -- there is no registry to
-        # fabricate it in, and the instance it reaches is its own.
         if not self._sampled_in:
             return
-        with self._hook_frame(), self._lock:
-            if self._closed:
-                return
-            # Replace state with the full operations snapshot carried by the hook.
-            self._adopt_operations_locked(info.operations)
-            # on-change mode exports an updated RUNNING record on each change so
-            # mid-invocation progress is observable, not only at start/end.
-            if self._shared._emit_mode == EmitMode.ON_CHANGE:
-                self._emit(status="RUNNING", end_time=None, output_raw=None, error=None)
+        snapshot: _EmissionSnapshot | None = None
+        with self._hook_frame():
+            with self._lock:
+                if self._closed:
+                    return
+                self._adopt_operations_locked(info.operations)
+                if self._shared._emit_mode == EmitMode.ON_CHANGE:
+                    snapshot = self._snapshot_emission_locked()
+            if snapshot is not None:
+                self._emit(
+                    snapshot,
+                    status="RUNNING",
+                    end_time=None,
+                    output_raw=None,
+                    error=None,
+                )
 
     def on_invocation_end(self, info: InvocationEndInfo) -> None:
         if not self._sampled_in:
@@ -415,44 +425,46 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
             # here costs nothing when the hook succeeds: the frame runs the drain
             # once, on the way out, either way.
             self._request_drain()
-            with self._lock:
-                if not self._closed:
-                    # Close the gate before emitting so a concurrent late hook for
-                    # this execution cannot append a RUNNING record after the
-                    # terminal one.
-                    self._closed = True
-                    # Refresh from the fresh end-of-invocation snapshot before
-                    # emitting so the terminal record reflects the final operation
-                    # map.
-                    self._adopt_operations_locked(info.operations)
-                    status = _STATUS_MAP.get(info.status, "RUNNING")
-                    is_terminal = status in ("SUCCEEDED", "FAILED")
-                    is_failure = status == "FAILED"
+            owns_closing = False
+            try:
+                snapshot: _EmissionSnapshot | None = None
+                end_time: datetime.datetime | None = None
+                with self._lock:
+                    if not self._closed:
+                        owns_closing = True
+                        # Close admission before running any customer code. The
+                        # closing snapshot alone may pass the now-closed gate.
+                        self._closed = True
+                        self._adopt_operations_locked(info.operations)
+                        status = _STATUS_MAP.get(info.status, "RUNNING")
+                        is_terminal = status in ("SUCCEEDED", "FAILED")
+                        is_failure = status == "FAILED"
 
-                    if emit_mode == EmitMode.ON_CHANGE:
-                        should_emit = True
-                    elif emit_mode == EmitMode.ON_FAILURE:
-                        should_emit = is_failure
-                    else:  # on-complete
-                        should_emit = is_terminal
+                        if emit_mode == EmitMode.ON_CHANGE:
+                            should_emit = True
+                        elif emit_mode == EmitMode.ON_FAILURE:
+                            should_emit = is_failure
+                        else:
+                            should_emit = is_terminal
 
-                    if should_emit:
-                        # Only terminal (SUCCEEDED/FAILED) records carry an end time;
-                        # a PENDING/RETRY invocation end maps to RUNNING (still in
-                        # flight) and must omit endTime/durationMs. Passing
-                        # end_time=None makes _emit drop both fields. Output and
-                        # error likewise belong only to a terminal record.
-                        self._emit(
-                            status=status,
-                            end_time=datetime.datetime.now(datetime.UTC)
-                            if is_terminal
-                            else None,
-                            output_raw=info.execution_result if is_terminal else None,
-                            error=info.error if is_terminal else None,
-                            # This is the emit that closed the gate, so it always runs
-                            # with `_closed` already set and must never drop itself.
-                            closing=True,
-                        )
+                        if should_emit:
+                            snapshot = self._snapshot_emission_locked(closing=True)
+                            if is_terminal:
+                                end_time = datetime.datetime.now(datetime.UTC)
+                if snapshot is not None:
+                    self._emit(
+                        snapshot,
+                        status=status,
+                        end_time=end_time,
+                        output_raw=info.execution_result if is_terminal else None,
+                        error=info.error if is_terminal else None,
+                    )
+
+            finally:
+                if owns_closing:
+                    # Also release duplicate Ends when a customer build fails:
+                    # earlier records still get their normal end-of-hook drain.
+                    self._closing_complete.set()
 
             # Nothing has to be cleared after an invocation end, including a
             # PENDING/RETRY one: this instance IS the state, and the SDK drops it
@@ -467,24 +479,20 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
             # may still be holding records another execution handed it). A sampled-out
             # execution returns above, so it neither exports nor flushes.
             #
-            # The drain covers this execution only -- it names this instance, which
-            # carries its own export bookkeeping: it returns once this execution's
-            # own record, if any, reached the exporters and a flush that completed
-            # after this call is done, without waiting on records scheduled after the
-            # call by other executions.
+            # The drain captures a finite snapshot of work already scheduled,
+            # including this invocation's record. A newer snapshot coalesced into
+            # an existing pending slot fulfills that slot's older obligation;
+            # later work on a slot the worker already took cannot extend it.
             #
-            # Asked for rather than performed, so it runs when the outermost hook
-            # frame on this thread unwinds and every `_lock` hold is released. See
-            # `_hook_frame`: an invocation end that customer code re-entered from
-            # inside another hook's build would otherwise wait for the export
-            # worker while holding the lock that worker may need. The request
-            # itself is made at the top of this hook, so a failure in the build
-            # below cannot skip it.
+            # Defer the drain until the outermost callback unwinds, its stale
+            # builds are discarded and retained customer references are released.
+            # Registering it before the build ensures callback failures cannot
+            # skip the invocation's flush.
 
     # -- emission -------------------------------------------------------------
 
     def _build_operations(
-        self, operations: dict[str, OperationInfo]
+        self, operations: Mapping[str, OperationInfo]
     ) -> list[dict[str, Any]]:
         shared = self._shared
         records: list[dict[str, Any]] = []
@@ -528,32 +536,19 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
 
     def _emit(
         self,
+        snapshot: _EmissionSnapshot,
         *,
         status: str,
         end_time: Any,
         output_raw: str | None,
         error: Any,
-        closing: bool = False,
     ) -> None:
         arn = self._parsed_arn
         start_time = self._start_time
         duration = _duration_ms(start_time, end_time)
-        # Snapshot the operations reference once so a concurrent adopt() rebind
-        # cannot change the map mid-build.
-        operations = self._operations
-
-        # The revision is taken here, before the build, never after. Customer code
-        # runs inside the build below and can re-enter a hook on this thread,
-        # which starts and finishes a newer build. A value read after the build
-        # would already be that newer build's, so this older record would pass the
-        # check and replace the newer one. Callers hold self._lock, so the
-        # increment cannot interleave with another build's.
-        #
-        # The closing emit takes no revision; see the hand-off below.
-        revision = 0
-        if not closing:
-            self._build_revision += 1
-            revision = self._build_revision
+        # The immutable invocation identity and this admitted map remain stable
+        # while customer callbacks run without holding either internal lock.
+        operations = snapshot.operations
 
         content = self._shared._content
         record: dict[str, Any] = {
@@ -600,69 +595,21 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
             record["error"] = {"name": error.type, "message": error.message}
         record["operations"] = self._build_operations(operations)
 
-        # INVARIANT: no record for an execution reaches the scheduler after that
-        # execution's closing record -- the exporters never see a RUNNING record
-        # follow the terminal one for the same execution.
-        #
-        # Re-check the gate here, because each hook's own `if self._closed` is a
-        # check-then-act and this is the act. One instance per invocation removed
-        # one of the two windows this used to cover -- state can no longer be
-        # discarded and recreated underneath a hook, because there is no registry
-        # to recreate it in -- but not the other: everything between the two runs
-        # customer code while holding self._lock (the input/output transforms
-        # above, a result override in _build_operations, and __del__ on any object
-        # the record carries), and self._lock is a reentrant RLock on purpose (so
-        # that customer code re-entering a hook on this thread does not
-        # self-deadlock). Such a re-entrant call can therefore run
-        # on_invocation_end all the way through -- set `_closed`, emit the
-        # terminal record and drain -- and then return here. Without this
-        # re-check the outer frame hands its already-built RUNNING record to the
-        # scheduler afterwards, and one execution exports
-        # ['SUCCEEDED', 'RUNNING'] from a single hook call, no concurrency
-        # required.
-        #
-        # `closing` marks the emit that set the gate (on_invocation_end's own),
-        # which by construction always runs with `_closed` set and must not drop
-        # itself. It is not the same test as "the record is terminal": in
-        # on-change mode a PENDING/RETRY invocation end legitimately emits a
-        # RUNNING record, and that record is the closing one.
-        #
-        # INVARIANT: the record handed to the scheduler below is the newest build
-        # this instance has started -- an exporter never stores an older snapshot
-        # over a newer one for the same execution.
-        #
-        # A build that customer code started from inside this one has already
-        # handed its own, newer record over by the time control returns here, so
-        # this record is superseded. Dropping it loses nothing: a record is a
-        # complete snapshot of one execution, so the newer record carries
-        # everything this one carries. That is the same property that makes the
-        # scheduler's per-execution coalescing sound.
-        #
-        # The check and the hand-off are one critical section. self._lock is held
-        # across both -- schedule() is called inside this hold -- and every build
-        # takes that same lock, so no build can start, finish and queue its record
-        # between this check and the schedule() below. A record that passes
-        # therefore cannot be queued after the record that supersedes it. (Java
-        # revalidates inside the scheduler's monitor instead, because there the
-        # scheduler's monitor is what guards `closed` and the record slot; here
-        # both facts already belong to self._lock.)
-        #
-        # The closing record is exempt from the revision check. Customer code
-        # inside its build can start a newer non-terminal build, which would make a
-        # revision taken here stale, and a checked hand-off would then drop the
-        # closing record and leave a RUNNING snapshot as this execution's last
-        # exported state. The exemption cannot let a stale record win, because
-        # `_closed` was set in the same self._lock hold that queues this record and
-        # every later non-terminal record is rejected above.
-        if not closing and (self._closed or revision != self._build_revision):
-            return
-        # The records this hand-off displaces are released by the hook frame, not
-        # here: this runs inside `_lock`, and a displaced record can carry a
-        # customer object whose `__del__` re-enters a hook. Re-entering *this*
-        # execution's hook is safe because `_lock` is reentrant; re-entering
-        # another execution's is not, and two threads doing it to each other at
-        # once would hang both invocations. See `_hook_frame`.
-        _hook_frames.releases.extend(self._shared._scheduler.schedule(self, record))
+        # Admission and hand-off use one lock, but building does not. A newer
+        # build or End may have overtaken these customer callbacks. Check and
+        # schedule atomically so a stale RUNNING record cannot replace a newer
+        # snapshot or follow the closing record.
+        with self._lock:
+            if not snapshot.closing and (
+                self._closed or snapshot.revision != self._build_revision
+            ):
+                _hook_frames.releases.append(record)
+                return
+            # The closing build is admitted exactly once after setting _closed.
+            # It must reach the scheduler even though that gate is now closed.
+            # schedule() returns displaced references rather than releasing them
+            # under either lock; the outer hook frame releases them before drain.
+            _hook_frames.releases.extend(self._shared._scheduler.schedule(self, record))
 
 
 class DurableExecutionTelemetryPluginFactory:

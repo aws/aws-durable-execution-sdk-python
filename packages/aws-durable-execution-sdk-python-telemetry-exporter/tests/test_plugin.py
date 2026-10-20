@@ -23,6 +23,7 @@ import asyncio
 import datetime
 import gc
 import itertools
+import json
 import threading
 import time
 from typing import Any
@@ -754,7 +755,7 @@ def test_failed_end_is_terminal_with_end_time_and_duration():
 class ConcurrentCaptureExporter:
     """CaptureExporter for multi-threaded drives; appends under a lock."""
 
-    max_record_size_bytes = None
+    max_record_size_bytes: int | None = None
 
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
@@ -942,18 +943,16 @@ def test_reentrant_finalizer_in_a_hook_does_not_deadlock():
 # -- late hooks after the invocation ended (closed gate) ----------------------
 
 
-def test_change_hook_reaching_the_lock_after_invocation_end_emits_nothing():
-    # A change hook for a checkpoint that completed just before the invocation
-    # ended can reach the execution's lock while on_invocation_end still holds it.
-    # It must find the gate closed and emit nothing, so no RUNNING record can
-    # follow the terminal one.
+def test_late_change_during_terminal_build_returns_without_emitting() -> None:
+    # End closes admission before calling customer transforms. A late change
+    # returns without waiting for that transform and emits no newer RUNNING record.
     exporter = ConcurrentCaptureExporter()
     in_terminal_emit = threading.Event()
     release_terminal = threading.Event()
 
     def blocking_output(value: Any) -> Any:
-        # Runs inside _emit, which runs inside the execution's lock, and only for
-        # a terminal record (a RUNNING record carries no output).
+        # Only a terminal record carries output. Hold its customer transform
+        # while another thread attempts a late operation-change hook.
         in_terminal_emit.set()
         release_terminal.wait(10.0)
         return value
@@ -976,8 +975,7 @@ def test_change_hook_reaching_the_lock_after_invocation_end_emits_nothing():
 
     end_thread = threading.Thread(target=end, daemon=True)
     end_thread.start()
-    # on_invocation_end has closed the gate and is building the terminal record,
-    # still holding the execution's lock.
+    # End has closed the gate and is building the terminal record outside it.
     assert in_terminal_emit.wait(5.0)
 
     change_returned = threading.Event()
@@ -992,12 +990,13 @@ def test_change_hook_reaching_the_lock_after_invocation_end_emits_nothing():
 
     change_thread = threading.Thread(target=change, daemon=True)
     change_thread.start()
-    # It cannot get past the execution's lock while the end hook holds it.
-    assert not change_returned.wait(0.25)
-
-    release_terminal.set()
-    end_thread.join(5.0)
-    change_thread.join(5.0)
+    try:
+        assert change_returned.wait(5.0), "late hook waited for customer transform"
+        assert not end_returned.is_set()
+    finally:
+        release_terminal.set()
+        end_thread.join(5.0)
+        change_thread.join(5.0)
     assert end_returned.is_set()
     assert change_returned.is_set()
     _force_drain(factory)
@@ -1008,16 +1007,24 @@ def test_change_hook_reaching_the_lock_after_invocation_end_emits_nothing():
     assert statuses[statuses.index("SUCCEEDED") + 1 :] == []
 
 
-def test_invocation_end_waits_for_an_in_flight_change_hook_emit():
-    # The mirror interleaving: a change hook is already inside its emit, holding
-    # the execution's lock, when the invocation ends. Closing the gate and
-    # emitting the terminal record has to wait for it, otherwise the change hook
-    # finishes afterwards and appends a RUNNING record after the terminal one.
+def test_invocation_end_supersedes_an_in_flight_change_build() -> None:
+    # An older change build can be paused in customer code when End builds and
+    # flushes its final snapshot. Releasing the stale build afterwards must not
+    # let it replace or follow the terminal record.
     exporter = ConcurrentCaptureExporter()
     in_change_emit = threading.Event()
     release_change = threading.Event()
     calls = itertools.count()
     lock = threading.Lock()
+    released_outside_locks: list[tuple[bool, bool]] = []
+
+    class StalePayload:
+        def __del__(self) -> None:
+            plugin_free = _free_for_another_thread(plugin._lock)
+            scheduler_free = factory._scheduler._condition.acquire(blocking=False)
+            if scheduler_free:
+                factory._scheduler._condition.release()
+            released_outside_locks.append((plugin_free, scheduler_free))
 
     def blocking_input(value: Any) -> Any:
         # Runs inside _emit for every record. Block only on the change hook's
@@ -1027,6 +1034,7 @@ def test_invocation_end_waits_for_an_in_flight_change_hook_emit():
         if index == 1:
             in_change_emit.set()
             release_change.wait(10.0)
+            return StalePayload()
         return value
 
     factory = durable_execution_telemetry(
@@ -1061,19 +1069,30 @@ def test_invocation_end_waits_for_an_in_flight_change_hook_emit():
 
     end_thread = threading.Thread(target=end, daemon=True)
     end_thread.start()
-    # The terminal record cannot be emitted while the change hook holds the lock.
-    assert not end_returned.wait(0.25)
-
-    release_change.set()
-    change_thread.join(5.0)
-    end_thread.join(10.0)
+    try:
+        assert end_returned.wait(5.0), "End waited for the stale customer transform"
+        assert not change_returned.is_set()
+        assert exporter.snapshot()[-1]["status"] == "SUCCEEDED"
+        # With its worker idle, the stale payload's finalizer can check both
+        # locks without racing an unrelated scheduler critical section.
+        assert _wait_until(lambda: not factory._scheduler._worker_alive())
+    finally:
+        release_change.set()
+        change_thread.join(5.0)
+        end_thread.join(5.0)
     assert change_returned.is_set()
     assert end_returned.is_set()
     _force_drain(factory)
 
     statuses = [record["status"] for record in exporter.snapshot()]
-    assert "SUCCEEDED" in statuses
-    assert statuses[statuses.index("SUCCEEDED") + 1 :] == []
+    try:
+        assert "SUCCEEDED" in statuses
+        assert statuses[statuses.index("SUCCEEDED") + 1 :] == []
+        assert released_outside_locks == [(True, True)]
+    finally:
+        # Also release a wrongly exported probe during negative controls.
+        assert _wait_until(lambda: not factory._scheduler._worker_alive())
+        exporter.records.clear()
 
 
 def test_operation_change_after_invocation_end_emits_nothing():
@@ -1149,9 +1168,8 @@ def test_invocation_start_after_the_gate_closed_changes_nothing():
 
 def test_reentrant_invocation_end_stops_the_outer_running_record():
     # The gate at the top of each hook is a check-then-act, and _emit is the act.
-    # Between them _emit runs customer code while holding the execution's lock --
-    # here a content transform -- and the lock is reentrant, so that customer code
-    # can run on_invocation_end to completion on this same thread: `_closed` set,
+    # Between them _emit runs a customer content transform outside the lock. It
+    # can re-enter on_invocation_end on this same thread: `_closed` is set,
     # terminal record scheduled and drained. The outer frame then resumes with a
     # fully built RUNNING record, which must NOT reach the exporters after the
     # terminal one. One hook call, one instance, no concurrency.
@@ -1505,7 +1523,7 @@ def _newer_change() -> OperationChangeInfo:
 def test_a_build_overtaken_by_a_nested_one_does_not_coalesce_the_newer_away():
     # _emit runs customer code -- here the content.input transform -- between the
     # operation snapshot it takes and the hand-off to the scheduler, and the
-    # execution's lock is reentrant, so that code can run on_operation_change to
+    # build runs unlocked, so that code can run on_operation_change to
     # completion on this same thread. The nested hook adopts a newer operation map
     # and schedules its record first. The outer frame then hands over the older
     # snapshot it built, and the pending slot takes whichever record arrives last,
@@ -1681,3 +1699,229 @@ def test_the_closing_record_is_exempt_from_the_build_age_check():
     )
     assert [op["name"] for op in records[0]["operations"]] == ["s1"]
     assert sorted(op["name"] for op in records[1]["operations"]) == ["s1", "s2"]
+
+
+@pytest.mark.parametrize("transform_kind", ["input", "output", "result"])
+@pytest.mark.parametrize("nested_hook", ["change", "end"])
+def test_reciprocal_transforms_reenter_other_invocation_without_deadlock(
+    transform_kind: str,
+    nested_hook: str,
+) -> None:
+    """Two customer callbacks may each reach the other's public plugin hooks."""
+    exporter = ConcurrentCaptureExporter()
+    inside_transforms = threading.Barrier(3)
+    plugins: dict[str, DurableExecutionTelemetryPlugin] = {}
+    entered: list[str] = []
+    errors: list[BaseException] = []
+
+    def transform(value: Any) -> Any:
+        owner = value["owner"]
+        entered.append(owner)
+        # Both Ends have closed their invocation before either callback reaches
+        # the other instance. Holding either plugin lock here causes a cycle.
+        inside_transforms.wait(timeout=5.0)
+        other = ARN_B if owner == ARN else ARN
+        if nested_hook == "end":
+            plugins[other].on_invocation_end(_end(arn=other, operations={}))
+        else:
+            plugins[other].on_operation_change(
+                OperationChangeInfo(
+                    execution_arn=other, updated_operations={}, operations={}
+                )
+            )
+        return value
+
+    if transform_kind == "input":
+        content = ContentConfig(input=transform)
+    elif transform_kind == "output":
+        content = ContentConfig(output=transform)
+    else:
+        content = ContentConfig(
+            operations=ContentOperations(
+                overrides=[OperationOverride(operation_name="work", result=transform)]
+            )
+        )
+    factory = durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(exporters=[exporter], content=content)
+    )
+    operations = {
+        arn: _ops(_step("work", result=json.dumps({"owner": arn})))
+        for arn in (ARN, ARN_B)
+    }
+    for arn in (ARN, ARN_B):
+        info = _start(arn=arn, operations=operations[arn], input_value={"owner": arn})
+        plugins[arn] = _invocation(factory, info)
+
+    def end(arn: str) -> None:
+        try:
+            plugins[arn].on_invocation_end(
+                _end(
+                    arn=arn,
+                    operations=operations[arn],
+                    result=json.dumps({"owner": arn}),
+                )
+            )
+        except BaseException as error:  # noqa: BLE001 - report worker failures to the test
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=end, args=(arn,), daemon=True) for arn in plugins
+    ]
+    for thread in threads:
+        thread.start()
+    inside_transforms.wait(timeout=5.0)
+    deadline = time.monotonic() + 5.0
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    assert not any(thread.is_alive() for thread in threads), (
+        "reciprocal hooks deadlocked"
+    )
+    assert errors == []
+    assert sorted(entered) == sorted([ARN, ARN_B])
+    records = exporter.snapshot()
+    assert sorted(record["executionArn"] for record in records) == sorted([ARN, ARN_B])
+    assert all(record["status"] == "SUCCEEDED" for record in records)
+    assert all(
+        [op["name"] for op in record["operations"]] == ["work"] for record in records
+    )
+
+
+def test_duplicate_end_waits_for_the_admitted_terminal_build() -> None:
+    exporter = ConcurrentCaptureExporter()
+    building = threading.Event()
+    release_build = threading.Event()
+    second_started = threading.Event()
+    first_returned = threading.Event()
+    second_returned = threading.Event()
+    errors: list[BaseException] = []
+
+    def output(value: Any) -> Any:
+        building.set()
+        assert release_build.wait(10.0)
+        return value
+
+    factory = durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(
+            exporters=[exporter], content=ContentConfig(output=output)
+        )
+    )
+    plugin = _invocation(factory, _start())
+
+    def end(first: bool) -> None:
+        try:
+            if not first:
+                second_started.set()
+            plugin.on_invocation_end(_end(result='"first"' if first else '"second"'))
+            (first_returned if first else second_returned).set()
+        except BaseException as error:  # noqa: BLE001 - surface thread failures
+            errors.append(error)
+
+    first = threading.Thread(target=end, args=(True,), daemon=True)
+    second = threading.Thread(target=end, args=(False,), daemon=True)
+    first.start()
+    assert building.wait(5.0)
+    second.start()
+    assert second_started.wait(5.0)
+    try:
+        assert not second_returned.wait(0.25), "duplicate End missed the terminal build"
+        assert exporter.snapshot() == []
+    finally:
+        release_build.set()
+        first.join(5.0)
+        second.join(5.0)
+    assert errors == []
+    assert first_returned.is_set() and second_returned.is_set()
+    assert [record["output"] for record in exporter.snapshot()] == ["first"]
+
+
+def test_export_worker_reentry_does_not_wait_for_a_terminal_transform() -> None:
+    building = threading.Event()
+    worker_returned = threading.Event()
+    end_returned = threading.Event()
+    errors: list[BaseException] = []
+    holder: dict[str, DurableExecutionTelemetryPlugin] = {}
+
+    class ReenteringExporter(ConcurrentCaptureExporter):
+        def export(self, record: dict[str, Any]) -> None:
+            if record["status"] == "RUNNING":
+                assert building.wait(5.0)
+                holder["plugin"].on_invocation_end(_end())
+                worker_returned.set()
+            super().export(record)
+
+    def output(value: Any) -> Any:
+        building.set()
+        # Waiting on the closing build from the export worker would prevent
+        # this callback from finishing that very build.
+        assert worker_returned.wait(5.0)
+        return value
+
+    exporter = ReenteringExporter()
+    factory = durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(
+            exporters=[exporter],
+            emit_mode="on-change",
+            content=ContentConfig(output=output),
+        )
+    )
+    plugin = factory.create_plugin(_start())
+    holder["plugin"] = plugin
+    plugin.on_invocation_start(_start())
+
+    def end() -> None:
+        try:
+            plugin.on_invocation_end(_end(result='"finished"'))
+            end_returned.set()
+        except BaseException as error:  # noqa: BLE001 - surface thread failures
+            errors.append(error)
+
+    thread = threading.Thread(target=end, daemon=True)
+    thread.start()
+    thread.join(10.0)
+    assert not thread.is_alive(), "export worker and closing transform deadlocked"
+    assert errors == []
+    assert end_returned.is_set() and worker_returned.is_set()
+    records = exporter.snapshot()
+    assert [record["status"] for record in records] == ["RUNNING", "SUCCEEDED"]
+    assert records[-1]["output"] == "finished"
+
+
+@pytest.mark.parametrize(
+    "failure_site", ["_adopt_operations_locked", "_snapshot_emission_locked"]
+)
+def test_failed_closing_admission_releases_duplicate_end(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_site: str,
+) -> None:
+    exporter = ConcurrentCaptureExporter()
+    factory = durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(exporters=[exporter], emit_mode="on-change")
+    )
+    plugin = _invocation(factory, _start())
+    failure = asyncio.CancelledError("closing admission interrupted")
+    observed: list[BaseException] = []
+
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise failure
+
+    monkeypatch.setattr(plugin, failure_site, fail)
+
+    def end() -> None:
+        try:
+            plugin.on_invocation_end(_end())
+        except BaseException as error:  # noqa: BLE001 - verify the original failure
+            observed.append(error)
+
+    first = threading.Thread(target=end, daemon=True)
+    first.start()
+    first.join(5.0)
+    assert not first.is_alive(), "failed primary End did not release closing ownership"
+    assert observed == [failure]
+
+    duplicate = threading.Thread(target=end, daemon=True)
+    duplicate.start()
+    duplicate.join(5.0)
+    assert not duplicate.is_alive(), "duplicate End waited for a failed closing build"
+    assert observed == [failure]
+    assert [record["status"] for record in exporter.snapshot()] == ["RUNNING"]
+    assert exporter.flushes >= 1
