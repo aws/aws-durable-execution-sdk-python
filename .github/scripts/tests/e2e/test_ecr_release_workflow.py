@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -65,8 +66,8 @@ import os
 import sys
 from pathlib import Path
 
-name = Path(sys.argv[0]).name
-args = sys.argv[1:]
+name = sys.argv[1]
+args = sys.argv[2:]
 if name == "python":
     if args[:3] == ["-m", "pip", "install"]:
         raise SystemExit(0)
@@ -167,7 +168,7 @@ else:
 
 
 class ReleaseWorkflow:
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, interpreter: Path | None = None) -> None:
         self.directory = directory
         self.workflow: dict[str, Any] = yaml.safe_load(WORKFLOW.read_text())
         self.state_path = directory / "registry.json"
@@ -176,9 +177,13 @@ class ReleaseWorkflow:
         self.summary_path = directory / "summary"
         binaries = directory / "bin"
         binaries.mkdir()
+        stub = directory / "stub.py"
+        stub.write_text(CLI)
         for name in ("aws", "docker", "python", "sleep"):
             binary = binaries / name
-            binary.write_text(f"#!{sys.executable}\n" + CLI)
+            # CodeBuild interpreter paths can exceed the kernel's shebang limit.
+            command = shlex.join([str(interpreter or sys.executable), str(stub), name])
+            binary.write_text(f'#!/bin/sh\nexec {command} "$@"\n')
             binary.chmod(0o755)
         self.env = {
             **os.environ,
@@ -275,6 +280,39 @@ def release(tmp_path: Path) -> ReleaseWorkflow:
 
 def assert_success(result: subprocess.CompletedProcess[str]) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_cli_launchers_support_long_interpreter_paths(tmp_path: Path) -> None:
+    interpreter = tmp_path / ("runner" * 20) / ("workspace" * 14) / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.symlink_to(sys.executable)
+    assert len(os.fsencode(interpreter)) > 255
+    directory = tmp_path / "fixture with spaces and 'quotes'"
+    directory.mkdir()
+    release = ReleaseWorkflow(directory, interpreter=interpreter)
+
+    assert_success(
+        release.run("preflight", "Check whether the image tag already exists")
+    )
+    assert release.outputs["exists"] == "true"
+    assert release.commands[0][:3] == ["aws", "ecr-public", "describe-images"]
+
+    arguments = ["argument with spaces", "'literal quotes'"]
+    result = subprocess.run(
+        [
+            str(directory / "bin/python"),
+            "-c",
+            "import json, sys; print(json.dumps(sys.argv[1:]))",
+            *arguments,
+        ],
+        env=release.env,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert_success(result)
+    assert json.loads(result.stdout) == arguments
 
 
 def test_non_testing_release_skips_without_contacting_registry(
