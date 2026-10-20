@@ -2027,3 +2027,74 @@ def test_retries_a_rejected_call_when_a_resume_hook_came_during_it(
     h.settle()
     h.advance(IDLE)
     assert eventually(lambda: h.microvms.suspended == ["mvm-1", "mvm-1"])
+
+
+def thread_start_that(
+    monkeypatch: pytest.MonkeyPatch, prefix: str, before_failing: Callable[[], None]
+) -> None:
+    """Make the thread named ``prefix`` run ``before_failing``, then fail to
+    start."""
+    original = threading.Thread.start
+
+    def start(self: threading.Thread) -> None:
+        if self.name.startswith(prefix):
+            before_failing()
+            msg = "can't start new thread"
+            raise RuntimeError(msg)
+        original(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+
+
+def test_keeps_a_hook_refusal_when_the_suspend_thread_cannot_start(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = start()
+    h.run_hook(IDLE)
+    thread_start_that(monkeypatch, "microvm-suspend", lambda: h.hook("suspend"))
+
+    h.advance(IDLE)
+    monkeypatch.undo()
+
+    assert h.job("cb-1") == 503
+    h.hook("resume")
+    assert h.job("cb-1") == 202
+
+
+def test_starts_the_idle_time_after_a_resume_during_a_suspend_thread_that_failed(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = start()
+    h.run_hook(IDLE)
+    thread_start_that(monkeypatch, "microvm-suspend", lambda: h.hook("resume"))
+
+    h.advance(IDLE)
+    monkeypatch.undo()
+
+    assert not h.listener._idle_after_call  # noqa: SLF001
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+
+
+@pytest.mark.parametrize("then", ["client-fails", "call-rejected"])
+def test_keeps_a_hook_refusal_that_arrives_while_the_client_is_created(
+    start: Any, then: str
+) -> None:
+    holder: dict[str, Harness] = {}
+
+    def create(region: str) -> Any:
+        holder["h"].hook("suspend")
+        if then == "client-fails":
+            raise RuntimeError("no client")
+        holder["h"].microvms.failure = suspend_error("AccessDeniedException", 403)
+        return holder["h"].microvms
+
+    h = start(create_microvms_client=create)
+    holder["h"] = h
+    h.run_hook(IDLE)
+
+    h.advance(IDLE)
+
+    assert h.job("cb-1") == 503
+    h.hook("resume")
+    assert h.job("cb-1") == 202

@@ -1342,37 +1342,60 @@ class MicrovmWorkerListener:
             self._cancel_idle_timer = None
             self._suspending = True
             self._suspend_calls += 1
+            # A suspend hook can arrive at any point from here on: while the
+            # thread starts, while the client is created, or during the call.
+            # Each path that ends the refusal compares with this count.
+            hooks_before = self._suspend_hooks
         try:
             threading.Thread(
                 target=self._suspend_self,
-                args=(auto_suspend,),
+                args=(auto_suspend, hooks_before),
                 name="microvm-suspend",
                 daemon=True,
             ).start()
         except Exception as error:  # noqa: BLE001
-            # No call was made. So jobs can run again at once.
+            # No call was made. So jobs can run again at once, unless a
+            # suspend hook started its own refusal meanwhile.
             self._logger.error(
                 "could not start the suspend of the idle MicroVM",
                 extra={"microvmId": auto_suspend.microvm_id, "error": describe(error)},
             )
             with self._changed:
-                self._suspend_calls -= 1
-                deferred = self._stop_refusing()
-                self._changed.notify_all()
+                deferred = self._end_own_refusal(hooks_before)
+                self._suspend_call_ended()
             self._launch_deferred(deferred)
 
-    def _suspend_self(self, auto_suspend: _AutoSuspend) -> None:
+    def _suspend_self(self, auto_suspend: _AutoSuspend, hooks_before: int) -> None:
         try:
-            self._call_suspend(auto_suspend)
+            self._call_suspend(auto_suspend, hooks_before)
         finally:
             with self._changed:
-                self._suspend_calls -= 1
-                if self._idle_after_call:
-                    self._idle_after_call = False
-                    self._start_idle_time()
-                self._changed.notify_all()
+                self._suspend_call_ended()
 
-    def _call_suspend(self, auto_suspend: _AutoSuspend) -> None:
+    def _end_own_refusal(
+        self, hooks_before: int
+    ) -> list[tuple[MicrovmJobDocument, str]]:
+        """End the refusal that the worker's own suspend started.
+
+        A suspend hook that arrived since the idle time ended means that
+        Lambda is freezing the MicroVM. Its refusal then stays. The caller
+        holds the lock, and starts the returned jobs after it releases it.
+        """
+        if self._suspend_hooks != hooks_before:
+            return []
+        return self._stop_refusing()
+
+    def _suspend_call_ended(self) -> None:
+        """Count a SuspendMicrovm call as ended, and start the idle time that
+        a resume hook or a job asked for during it. The caller holds the
+        lock."""
+        self._suspend_calls -= 1
+        if self._idle_after_call:
+            self._idle_after_call = False
+            self._start_idle_time()
+        self._changed.notify_all()
+
+    def _call_suspend(self, auto_suspend: _AutoSuspend, hooks_before: int) -> None:
         target = auto_suspend.microvm_id
         fields = {"microvmId": target}
         # The listener closes only a client that it created itself. A client
@@ -1385,21 +1408,20 @@ class MicrovmWorkerListener:
                 else self._create_microvms_client(auto_suspend.region)
             )
         except Exception as error:  # noqa: BLE001
-            # No call was made. So jobs can run again at once.
+            # No call was made. So jobs can run again at once, unless a
+            # suspend hook started its own refusal meanwhile.
             self._logger.error(
                 "could not create the Lambda MicroVMs client",
                 extra={**fields, "error": describe(error)},
             )
             with self._lock:
-                deferred = self._stop_refusing()
+                deferred = self._end_own_refusal(hooks_before)
             self._launch_deferred(deferred)
             return
         self._logger.info(
             "suspending the idle MicroVM",
             extra={**fields, "idleSeconds": auto_suspend.idle_seconds},
         )
-        with self._lock:
-            hooks_before = self._suspend_hooks
         try:
             suspend_microvm(client, target, SUSPEND_CALL_TIMEOUT_SECONDS)
         except Exception as error:  # noqa: BLE001
@@ -1421,8 +1443,8 @@ class MicrovmWorkerListener:
                         extra={**fields, "error": describe(error)},
                     )
                 # The service did nothing. So jobs can run again at once. A
-                # suspend hook that arrived during the call means that the
-                # MicroVM is suspending anyway, so its refusal stays.
+                # suspend hook that arrived since the idle time ended means
+                # that the MicroVM is suspending anyway, so its refusal stays.
                 with self._lock:
                     deferred = []
                     if self._suspend_hooks == hooks_before:
