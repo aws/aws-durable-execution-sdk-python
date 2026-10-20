@@ -1290,6 +1290,7 @@ def test_should_retry_invocation_when_under_limit_through_public_api(
     # Arrange - Set up execution that will trigger retry logic
     mock_execution = Mock()
     mock_execution.is_paused = False
+    mock_execution.has_deferred_invocation = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1647,6 +1648,7 @@ def test_invoke_handler_fails_execution_when_output_cannot_be_parsed(
     )
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1690,6 +1692,7 @@ def test_invoke_handler_unparsed_output_leaves_a_stop_during_invocation(
     )
 
     incomplete_execution = Mock(spec=Execution)
+    incomplete_execution.is_paused = False
     incomplete_execution.is_complete = False
     incomplete_execution.start_input = start_input
     incomplete_execution.consecutive_failed_invocation_attempts = 0
