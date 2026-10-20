@@ -69,6 +69,39 @@ def host_of(worker: MicrovmWorker) -> str:
     return "127.0.0.1"
 
 
+def reaches_worker(worker: MicrovmWorker) -> bool:
+    """Whether a connection to ``host_of(worker)`` reaches this worker.
+
+    The port that the kernel picks can be held by another process on one
+    loopback address, ``127.0.0.1`` or ``::1``. The worker's ``[::]`` bind
+    still succeeds on macOS, and a connection then reaches the other
+    process. So a test checks the ``Server`` header, and starts the worker
+    again on another port when it is not the worker's.
+    """
+    connection = http.client.HTTPConnection(host_of(worker), worker.port, timeout=5)
+    try:
+        connection.request("GET", "/__reachability_check__")
+        response = connection.getresponse()
+        response.read()
+        server = response.getheader("Server") or ""
+    except OSError:
+        return False
+    finally:
+        connection.close()
+    return server.startswith("aws-durable-execution-sdk-python-microvm-worker")
+
+
+def start_reachable_worker(start: Callable[[], MicrovmWorker]) -> MicrovmWorker:
+    """Start a worker with ``start`` until a test connection reaches it."""
+    for _ in range(10):
+        worker = start()
+        if reaches_worker(worker):
+            return worker
+        worker.close()
+    msg = "every port that the kernel picked was held by another process"
+    raise RuntimeError(msg)
+
+
 def run_payload(*, with_job: bool = True, **job: Any) -> dict[str, Any]:
     """A run hook payload with one job, whose fields ``job`` replaces."""
     payload: dict[str, Any] = {"version": 1, "region": "us-east-1"}
@@ -185,7 +218,9 @@ def start(
         client = client if client is not None else fake_client()
         options.setdefault("create_client", lambda region: client)
         options.setdefault("logger", logger)
-        worker = start_microvm_worker(handler=handler, port=0, **options)
+        worker = start_reachable_worker(
+            lambda: start_microvm_worker(handler=handler, port=0, **options)
+        )
         workers.append(worker)
         return worker, client
 
@@ -1473,7 +1508,9 @@ def test_listens_on_ipv4_without_dual_stack(
     monkeypatch.setattr(worker_module.socket, "has_dualstack_ipv6", lambda: False)
     worker = start_microvm_worker(handler=Held(), port=0)
     try:
-        assert request(worker, f"{HOOK_PATH_PREFIX}ready", {})[0] == 200
+        assert (
+            request(worker, f"{HOOK_PATH_PREFIX}ready", {}, host="127.0.0.1")[0] == 200
+        )
     finally:
         worker.close()
 

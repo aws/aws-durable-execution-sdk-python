@@ -92,6 +92,39 @@ def host_of(worker: MicrovmWorker) -> str:
     return "127.0.0.1"
 
 
+def reaches_worker(worker: MicrovmWorker) -> bool:
+    """Whether a connection to ``host_of(worker)`` reaches this worker.
+
+    The port that the kernel picks can be held by another process on one
+    loopback address, ``127.0.0.1`` or ``::1``. The worker's ``[::]`` bind
+    still succeeds on macOS, and a connection then reaches the other
+    process. So a test checks the ``Server`` header, and starts the worker
+    again on another port when it is not the worker's.
+    """
+    connection = http.client.HTTPConnection(host_of(worker), worker.port, timeout=5)
+    try:
+        connection.request("GET", "/__reachability_check__")
+        response = connection.getresponse()
+        response.read()
+        server = response.getheader("Server") or ""
+    except OSError:
+        return False
+    finally:
+        connection.close()
+    return server.startswith("aws-durable-execution-sdk-python-microvm-worker")
+
+
+def start_reachable_worker(start: Callable[[], MicrovmWorker]) -> MicrovmWorker:
+    """Start a worker with ``start`` until a test connection reaches it."""
+    for _ in range(10):
+        worker = start()
+        if reaches_worker(worker):
+            return worker
+        worker.close()
+    msg = "every port that the kernel picked was held by another process"
+    raise RuntimeError(msg)
+
+
 def url_of(worker: MicrovmWorker) -> str:
     """The worker's endpoint URL for the durable function."""
     host = host_of(worker)
@@ -181,13 +214,17 @@ def composed(fake_client: Any) -> Iterator[Callable[..., Any]]:
         runner = DurableFunctionTestRunner(handler=handler, poll_interval=0.05)
         closers.append(runner.close)
         callbacks = RunnerCallbacks(runner)
-        worker = start_microvm_worker(
-            handler=job,
-            routes=fields.pop("routes", None),
-            # The double has the three callback methods that the worker calls.
-            create_client=lambda region: callbacks,  # type: ignore[arg-type, return-value]
-            heartbeat_interval_seconds=fields.pop("heartbeat_interval", None),
-            port=0,
+        routes = fields.pop("routes", None)
+        heartbeat_interval = fields.pop("heartbeat_interval", None)
+        worker = start_reachable_worker(
+            lambda: start_microvm_worker(
+                handler=job,
+                routes=routes,
+                # The double has the three callback methods that the worker calls.
+                create_client=lambda region: callbacks,  # type: ignore[arg-type, return-value]
+                heartbeat_interval_seconds=heartbeat_interval,
+                port=0,
+            )
         )
         closers.append(worker.close)
         client = fake_client(
@@ -306,10 +343,12 @@ def test_runs_two_session_jobs_in_one_worker(fake_client: Any, tmp_path: Any) ->
 
     runner = DurableFunctionTestRunner(handler=handler, poll_interval=0.05)
     callbacks = RunnerCallbacks(runner)
-    worker = start_microvm_worker(
-        handler=job,
-        create_client=lambda region: callbacks,  # type: ignore[arg-type, return-value]
-        port=0,
+    worker = start_reachable_worker(
+        lambda: start_microvm_worker(
+            handler=job,
+            create_client=lambda region: callbacks,  # type: ignore[arg-type, return-value]
+            port=0,
+        )
     )
     try:
         client = fake_client(
@@ -459,12 +498,14 @@ def test_resumes_a_worker_that_suspended_itself_between_two_session_jobs(
     runner = DurableFunctionTestRunner(handler=handler, poll_interval=0.05)
     callbacks = RunnerCallbacks(runner)
     logger = RecordingLogger()
-    worker = start_microvm_worker(
-        handler=job,
-        create_client=lambda region: callbacks,  # type: ignore[arg-type, return-value]
-        create_microvms_client=lambda region: worker_microvms,  # type: ignore[arg-type, return-value]
-        logger=logger,
-        port=0,
+    worker = start_reachable_worker(
+        lambda: start_microvm_worker(
+            handler=job,
+            create_client=lambda region: callbacks,  # type: ignore[arg-type, return-value]
+            create_microvms_client=lambda region: worker_microvms,  # type: ignore[arg-type, return-value]
+            logger=logger,
+            port=0,
+        )
     )
     holder["worker"] = worker
     try:

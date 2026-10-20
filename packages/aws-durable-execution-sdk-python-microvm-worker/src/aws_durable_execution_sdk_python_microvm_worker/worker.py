@@ -304,8 +304,8 @@ class MicrovmWorkerListener:
     8. A call whose outcome is unknown, such as a timeout, a conflict, a
        server error, or an error after a retried attempt, is handled like a
        successful call. The service may have suspended the MicroVM anyway.
-       The listener waits for the call for at most 10 seconds, and no
-       attempt starts after that.
+       No attempt of the call starts after 10 seconds. An attempt already in
+       flight runs until it ends, and the refusal lasts at least until then.
 
     When the image enables the ``suspend`` and ``terminate`` hooks, the
     listener acts on them:
@@ -565,10 +565,10 @@ class MicrovmWorkerListener:
     def idle(self, timeout: float | None = None) -> bool:
         """Wait until every job started so far has ended.
 
-        The wait also covers the failure reports of invalid requests, and the
-        worker's wait for its own SuspendMicrovm call. That wait takes at most
-        10 seconds, and no attempt of the call starts after it. An attempt
-        already in flight then can run until its read timeout.
+        The wait also covers the failure reports of invalid requests, and a
+        running SuspendMicrovm call. No attempt of that call starts after 10
+        seconds. With the default client, an attempt in flight then ends
+        within 15 seconds.
 
         Args:
             timeout: The longest wait in seconds. ``None`` waits until the
@@ -631,11 +631,16 @@ class MicrovmWorkerListener:
             # otherwise accept a job between the answer and the change. The
             # change only takes the lock, so the answer is not delayed. A
             # suspend hook that runs past its timeout terminates the MicroVM.
+            deferred: list[tuple[MicrovmJobDocument, str]] = []
             if hook == "suspend":
                 self._handle_suspend_hook()
             elif hook == "resume":
-                self._handle_resume_hook()
+                deferred = self._handle_resume_hook()
             exchange.respond(200, {})
+            # The deferred jobs are registered, and start after the answer. A
+            # job whose thread cannot start fails its callback in this thread,
+            # which can take minutes. The resume hook must not wait for that.
+            self._launch_deferred(deferred)
             return
         handler = self._job_handler(path)
         if handler is not None and exchange.method == "POST":
@@ -655,19 +660,18 @@ class MicrovmWorkerListener:
             self._suspending = True
             self._start_grace()
 
-    def _handle_resume_hook(self) -> None:
+    def _handle_resume_hook(self) -> list[tuple[MicrovmJobDocument, str]]:
         """Accept jobs again, and start the idle time.
 
         A resume without a job would otherwise leave the MicroVM running
-        until the next job ends.
+        until the next job ends. Returns the deferred run hook jobs,
+        registered. The caller starts them after the answer.
         """
         with self._lock:
             if self._suspending:
-                deferred = self._end_suspending()
-            else:
-                deferred = []
-                self._start_idle_time()
-        self._launch_deferred(deferred)
+                return self._end_suspending()
+            self._start_idle_time()
+            return []
 
     def _handle_terminate_hook(self, exchange: _Exchange) -> None:
         """Fail the callback of every running job, then answer the hook.
@@ -1569,8 +1573,8 @@ class MicrovmWorker:
         return int(self._server.server_address[1])
 
     def idle(self, timeout: float | None = None) -> bool:
-        """Wait until every job started so far has ended, and the wait for a
-        running SuspendMicrovm call has ended.
+        """Wait until every job started so far has ended, and a running
+        SuspendMicrovm call has returned.
 
         Returns:
             ``True`` when no job runs. ``False`` when the timeout ended first.

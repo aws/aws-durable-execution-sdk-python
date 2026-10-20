@@ -79,6 +79,39 @@ def host_of(worker: MicrovmWorker) -> str:
     return "127.0.0.1"
 
 
+def reaches_worker(worker: MicrovmWorker) -> bool:
+    """Whether a connection to ``host_of(worker)`` reaches this worker.
+
+    The port that the kernel picks can be held by another process on one
+    loopback address, ``127.0.0.1`` or ``::1``. The worker's ``[::]`` bind
+    still succeeds on macOS, and a connection then reaches the other
+    process. So a test checks the ``Server`` header, and starts the worker
+    again on another port when it is not the worker's.
+    """
+    connection = http.client.HTTPConnection(host_of(worker), worker.port, timeout=5)
+    try:
+        connection.request("GET", "/__reachability_check__")
+        response = connection.getresponse()
+        response.read()
+        server = response.getheader("Server") or ""
+    except OSError:
+        return False
+    finally:
+        connection.close()
+    return server.startswith("aws-durable-execution-sdk-python-microvm-worker")
+
+
+def start_reachable_worker(start: Callable[[], MicrovmWorker]) -> MicrovmWorker:
+    """Start a worker with ``start`` until a test connection reaches it."""
+    for _ in range(10):
+        worker = start()
+        if reaches_worker(worker):
+            return worker
+        worker.close()
+    msg = "every port that the kernel picked was held by another process"
+    raise RuntimeError(msg)
+
+
 def eventually(condition: Callable[[], bool]) -> bool:
     deadline = time.monotonic() + WAIT
     while not condition():
@@ -421,13 +454,15 @@ def start(logger: Any, timers: FakeTimers) -> Iterator[Callable[..., Harness]]:
             return client
 
         options.setdefault("logger", logger)
-        worker = start_microvm_worker(
-            handler=jobs,
-            routes={"/job": jobs},
-            create_client=create_client,
-            create_microvms_client=create_microvms_client,
-            port=0,
-            **options,
+        worker = start_reachable_worker(
+            lambda: start_microvm_worker(
+                handler=jobs,
+                routes={"/job": jobs},
+                create_client=create_client,
+                create_microvms_client=create_microvms_client,
+                port=0,
+                **options,
+            )
         )
         harness = Harness(
             worker=worker,
@@ -931,20 +966,31 @@ def test_keeps_a_hook_refusal_after_a_refusal_for_now_of_the_own_call(
     assert h.job("cb-1") == 503
 
 
-def test_treats_a_call_that_outlasts_its_timeout_as_an_unknown_outcome(
-    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+def test_keeps_refusing_jobs_until_a_call_past_its_deadline_has_ended(
+    start: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # botocore cannot cancel an attempt in flight, so the attempt can reach
+    # the service after the deadline. The refusal and its 30 seconds start
+    # only when the call has ended.
     monkeypatch.setattr(worker_module, "SUSPEND_CALL_TIMEOUT_SECONDS", 0.05)
     h = start()
     h.microvms.hold = True
 
     h.run_hook(IDLE)
     h.advance(IDLE)
-    h.settle()
-
-    assert "unknown outcome" in logger.messages("warning")[0]
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    # The deadline passes while the call is held.
+    time.sleep(0.3)
+    h.advance(GRACE * 3)
     assert h.job("cb-1") == 503
+    assert not h.worker.idle(0.05)
+
     h.microvms.finish()
+    h.settle()
+    h.advance(GRACE - 0.001)
+    assert h.job("cb-1") == 503
+    h.advance(0.001)
+    assert h.job("cb-1") == 202
 
 
 def test_accepts_jobs_at_once_when_the_microvms_client_cannot_be_created(
@@ -1895,3 +1941,25 @@ def test_terminate_waits_for_and_does_not_repeat_a_heartbeat_start_failure(
         ("cb-1", "RuntimeError")
     ]
     assert not h.started("cb-1")
+
+
+def test_answers_the_resume_hook_before_it_reports_a_deferred_job_that_cannot_start(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A deferred job whose thread cannot start fails its callback, which can
+    # take minutes. Lambda allows the resume hook about 10 seconds.
+    h = start()
+    run = slow_run_hook(h)
+    h.hook("suspend")
+    assert run.finish() == 200
+    h.lambda_client.hold = True
+    failing_thread_start(monkeypatch, "microvm-job-")
+
+    answer = h.hook_in_background("resume")
+
+    assert answer.result(WAIT) == 200
+    assert eventually(lambda: h.lambda_client.waiting() == 1)
+    monkeypatch.undo()
+    h.lambda_client.finish()
+    assert eventually(lambda: len(h.lambda_client.recorded()) == 1)
+    assert h.lambda_client.recorded()[0]["errorType"] == "RuntimeError"

@@ -10,6 +10,8 @@ import threading
 import time
 from typing import Any
 
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import boto3
 import pytest
 from botocore.config import Config
@@ -145,15 +147,15 @@ def test_raises_the_call_s_own_timeout_error() -> None:
         suspend_microvm(client, "mvm-1", 5.0)
 
 
-def test_stops_waiting_for_a_stalled_call_after_the_timeout() -> None:
-    client: Any = _Client(delay=10.0)
+def test_returns_only_when_a_call_in_flight_at_the_deadline_has_ended() -> None:
+    # botocore cannot cancel an attempt in flight. So the call returns only
+    # when the attempt ends, and the worker refuses jobs until then.
+    client: Any = _Client(delay=0.3)
     started = time.monotonic()
 
-    with pytest.raises(TimeoutError, match="longer than 0.05 seconds"):
-        suspend_microvm(client, "mvm-1", 0.05)
+    suspend_microvm(client, "mvm-1", 0.05)
 
-    assert time.monotonic() - started < 2.0
-    client.release.set()
+    assert time.monotonic() - started >= 0.29
 
 
 def test_the_default_client_ends_a_read_at_the_call_timeout() -> None:
@@ -202,25 +204,36 @@ class _SilentService:
         self._server.close()
 
 
-def test_starts_no_attempt_after_the_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # botocore retries a read timeout. Without the deadline handler, it went
-    # on retrying in the call's thread after the wait had ended.
+def _microvms_client(url: str, read_timeout: float = 5.0) -> Any:
+    return boto3.session.Session().client(
+        "lambda-microvms",
+        region_name="us-east-1",
+        endpoint_url=url,
+        config=Config(
+            connect_timeout=1,
+            read_timeout=read_timeout,
+            retries={"mode": "standard", "total_max_attempts": 5},
+        ),
+    )
+
+
+def _deadline_handlers(client: Any) -> list[str]:
+    handlers = client.meta.events._emitter._unique_id_handlers  # noqa: SLF001
+    return [key for key in handlers if "microvm-worker-deadline" in key]
+
+
+@pytest.fixture
+def credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
+
+
+def test_starts_no_attempt_after_the_deadline(credentials: None) -> None:
+    # botocore retries a read timeout. Without the deadline handler, it went
+    # on retrying after the deadline.
     service = _SilentService()
     try:
-        client = boto3.session.Session().client(
-            "lambda-microvms",
-            region_name="us-east-1",
-            endpoint_url=service.url,
-            config=Config(
-                connect_timeout=1,
-                read_timeout=0.3,
-                retries={"mode": "standard", "total_max_attempts": 5},
-            ),
-        )
+        client = _microvms_client(service.url, read_timeout=0.3)
         # Runs after the deadline handler, so it records only the attempts
         # that the handler let through.
         sent: list[float] = []
@@ -228,38 +241,74 @@ def test_starts_no_attempt_after_the_deadline(
             "before-send.lambda-microvms.SuspendMicrovm",
             lambda **_: sent.append(time.monotonic()),
         )
-        call = client.suspend_microvm
-        ended = threading.Event()
-
-        def tracked(**kwargs: Any) -> Any:
-            try:
-                return call(**kwargs)
-            finally:
-                ended.set()
-
-        client.suspend_microvm = tracked  # type: ignore[method-assign]
         started = time.monotonic()
 
-        # The call ends with the wait's TimeoutError, or with
-        # SuspendDeadlineError when botocore meets the handler first.
-        with pytest.raises(TimeoutError):
+        # The attempt in flight at the deadline ends at its read timeout.
+        # botocore then waits its backoff, and meets the deadline handler.
+        with pytest.raises(SuspendDeadlineError):
             suspend_microvm(client, "mvm-1", 0.5)
 
-        # The attempt in flight at the deadline ends at its read timeout.
-        # botocore then waits its backoff, up to a few seconds, and meets
-        # the deadline handler, which ends the call.
-        assert ended.wait(15)
-        handlers = client.meta.events._emitter._unique_id_handlers  # type: ignore[attr-defined]  # noqa: SLF001
-        # The call's thread removes the handler right after the call ends.
-        deadline = time.monotonic() + 5
-        while [key for key in handlers if "microvm-worker-deadline" in key]:
-            assert time.monotonic() < deadline
-            time.sleep(0.01)
         assert service.attempts
         assert sent
         # The handler and this recorder run back to back. The margin covers
         # a thread switch between them on a loaded machine.
         assert all(at - started < 0.55 for at in sent)
+        assert _deadline_handlers(client) == []
+        client.close()
+    finally:
+        service.close()
+
+
+class _AnsweringService:
+    """A local HTTP service that answers every request with ``200 {}``."""
+
+    def __init__(self) -> None:
+        self.requests = 0
+        service = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                service.requests += 1
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args: Any) -> None:
+                return
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self._server.server_address[1]}"
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def test_a_caller_client_keeps_no_expired_handler_after_a_failed_call(
+    credentials: None,
+) -> None:
+    # A client from create_microvms_client can serve every suspend. An
+    # expired handler left on it would fail every later call before it
+    # sends.
+    service = _AnsweringService()
+    try:
+        client = _microvms_client(service.url)
+
+        with pytest.raises(SuspendDeadlineError):
+            suspend_microvm(client, "mvm-1", 0)
+        assert _deadline_handlers(client) == []
+        assert service.requests == 0
+
+        suspend_microvm(client, "mvm-1", 5.0)
+        assert service.requests == 1
+        assert _deadline_handlers(client) == []
         client.close()
     finally:
         service.close()

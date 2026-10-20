@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import threading
 import time
-from concurrent.futures import Future
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -31,9 +29,9 @@ else:
 
 
 SUSPEND_CALL_TIMEOUT_SECONDS = 10.0
-"""The longest time the worker waits for its own SuspendMicrovm call.
+"""No attempt of the worker's own SuspendMicrovm call starts after this time.
 
-No attempt of the call starts after this time. The call measured 75 to 94
+An attempt in flight then runs until it ends. The call measured 75 to 94
 milliseconds from inside a MicroVM in us-east-1.
 """
 
@@ -85,8 +83,7 @@ class SuspendDeadlineError(TimeoutError):
     """The SuspendMicrovm deadline passed before an attempt could start.
 
     botocore retries only its own connection and HTTP client errors. So it
-    does not retry this one. The call can end with it just before the wait
-    ends, so it is a ``TimeoutError`` too.
+    does not retry this one.
     """
 
 
@@ -112,63 +109,52 @@ def create_microvms_client(region: str) -> LambdaMicrovmsClient:
 
 
 def suspend_microvm(
-    client: LambdaMicrovmsClient, microvm_id: str, timeout: float
+    client: LambdaMicrovmsClient, microvm_id: str, deadline_seconds: float
 ) -> None:
-    """Call SuspendMicrovm, and stop waiting after ``timeout`` seconds.
+    """Call SuspendMicrovm in this thread, and start no attempt after
+    ``deadline_seconds``.
 
     botocore has no deadline for a whole call. Its read timeout limits one
     socket read, and it covers neither credential resolution nor its own
-    retries. So the call needs two limits:
+    retries. So a ``before-send`` handler on the client raises
+    :class:`SuspendDeadlineError` when an attempt would start after the
+    deadline. botocore does not retry that error. Without the handler,
+    botocore went on retrying, and an attempt started 22.5 seconds after the
+    first one.
 
-    1. The call runs in a daemon thread, and this function waits for the
-       thread for at most ``timeout``.
-    2. A ``before-send`` handler on the client raises
-       :class:`SuspendDeadlineError` when an attempt would start after
-       ``timeout``. botocore does not retry that error. So no attempt starts
-       after this function has stopped waiting. Without the handler, botocore
-       went on retrying in the thread, and an attempt started 22.5 seconds
-       after the first one.
+    botocore emits ``before-send`` before it opens the connection, and it
+    cannot cancel an attempt in flight. So an attempt that started before
+    the deadline can still reach the service after it. This function
+    returns only when that attempt has ended, so that the caller keeps
+    refusing jobs until then. The client's connect and read timeouts bound
+    the attempt: 5 and 10 seconds for the default client.
 
-    An attempt that is already in flight at the deadline still runs until
-    its read timeout. The service receives its request before the deadline.
-    The handler is removed when the call ends. So a client from the caller
-    keeps no handler.
+    The handler is removed when the call ends, also when it raises. So a
+    client from the caller keeps no handler.
 
     Raises:
-        TimeoutError: When the call takes longer than ``timeout``.
+        SuspendDeadlineError: When an attempt would start after the
+            deadline.
         Exception: The call's own error.
     """
-    future: Future[None] = Future()
-    deadline = time.monotonic() + timeout
-    unique_id = f"aws-durable-execution-microvm-worker-deadline-{id(future)}"
+    deadline = time.monotonic() + deadline_seconds
+    unique_id = f"aws-durable-execution-microvm-worker-deadline-{id(object())}"
     events = safe_get(lambda: client.meta.events)
 
     def stop_after_deadline(**_: object) -> None:
         if time.monotonic() >= deadline:
-            msg = f"the SuspendMicrovm deadline of {timeout} seconds has passed"
+            msg = (
+                f"the SuspendMicrovm deadline of {deadline_seconds} seconds has passed"
+            )
             raise SuspendDeadlineError(msg)
 
     if events is not None:
         events.register_first(_BEFORE_SEND, stop_after_deadline, unique_id=unique_id)
-
-    def run() -> None:
-        try:
-            client.suspend_microvm(microvmIdentifier=microvm_id)
-            future.set_result(None)
-        except BaseException as error:  # noqa: BLE001
-            future.set_exception(error)
-        finally:
-            if events is not None:
-                events.unregister(_BEFORE_SEND, unique_id=unique_id)
-
-    threading.Thread(target=run, name="microvm-suspend-call", daemon=True).start()
     try:
-        future.result(timeout)
-    except TimeoutError as error:
-        if future.done():
-            raise
-        msg = f"the SuspendMicrovm call took longer than {timeout} seconds"
-        raise TimeoutError(msg) from error
+        client.suspend_microvm(microvmIdentifier=microvm_id)
+    finally:
+        if events is not None:
+            events.unregister(_BEFORE_SEND, unique_id=unique_id)
 
 
 def classify_suspend_error(error: BaseException) -> SuspendOutcome:
