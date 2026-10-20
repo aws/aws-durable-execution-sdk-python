@@ -225,24 +225,24 @@ Behavior is validated cross-SDK by the `telemetry` conformance suite
 > `flush()` run on one lazy background worker per registered factory. Checkpoint
 > hooks only replace the latest pending snapshot and wake the worker. Consecutive
 > `on-change` snapshots may coalesce while an export is in flight. Every
-> sampled-in invocation end drains the latest snapshot and flushes exporters
-> before it returns, including an end that emitted no record: a buffering
-> exporter therefore sees one flush per sampled-in invocation end, which is the
-> cadence the JS and Java plugins have. Only a sampled-out execution neither
-> exports nor flushes.
+> sampled-in invocation end waits for a covering flush to complete after its
+> drain starts, including an end that emitted no record. Overlapping ends may
+> share a flush when it covers both entry snapshots. Only a sampled-out execution
+> neither exports nor flushes. Exporter failures are logged and isolated; this is
+> best-effort telemetry, not a guarantee of delivery to the destination.
 
 > **Note (invocation-end latency under concurrency).** The drain an invocation
-> end performs waits for every record any execution had pending when it was
-> called, and one worker serializes all exports and all flushes, so every
-> concurrently ending invocation is released together at the slowest one. The wait
-> therefore grows with the number of executions the environment is running, not
-> just with this execution's own work: measured with a 30 ms exporter, one
-> execution ended in ~72 ms and 48 concurrent executions in ~1.8 s each. That is
-> the deliberate trade against the alternative — releasing an end before its
-> record reached the exporters, which is what silently lost terminal records
-> before. It matters for an exporter that makes a network call per record: budget
-> invocation-end time against the environment's concurrency, not against one
-> execution.
+> end performs captures a finite snapshot of work already scheduled across the
+> factory's executions. It waits until those records have been offered to the
+> exporters and a covering flush completes. If a pending record is coalesced, its
+> replacement satisfies the earlier obligation. Once the worker takes that
+> replacement, later records for the same execution belong to a new queue slot.
+> Later drains cannot extend an earlier flush target: they share a covering
+> target or queue a subsequent one. Thus continuing arrivals do not move an
+> earlier drain's finish line. One worker serializes exports and flushes, so
+> invocation-end latency still includes other executions' work present at entry
+> and any earlier flushes. Budget for that finite backlog, especially when an
+> exporter makes a network call per record.
 
 ## Requirements
 

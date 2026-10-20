@@ -78,9 +78,15 @@ class TelemetryExporter(Protocol):
 
         * Once per sampled-in invocation end, after that invocation's own record
           -- if the emit mode produced one -- has been handed to every exporter.
+          The drain also captures work already scheduled by other executions,
+          including when this invocation emitted no record. A pending record may
+          coalesce into a newer snapshot before it is offered, but work arriving
+          after the worker takes that queue slot cannot extend the drain.
           An execution that is sampled out neither exports nor flushes.
           Invocation ends that overlap in one environment may share a single
-          flush, so the call count is at most one per sampled-in invocation end.
+          flush when its coverage includes both entry snapshots; otherwise a
+          subsequent fixed target is queued without extending the earlier one.
+          The call count is at most one per sampled-in invocation end.
         * Never concurrently with ``export()`` on the same plugin instance: one
           worker thread runs both, one call at a time.
 

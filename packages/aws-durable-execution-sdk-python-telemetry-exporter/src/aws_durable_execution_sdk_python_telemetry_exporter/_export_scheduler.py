@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 from typing import Any
 
 from aws_durable_execution_sdk_python_telemetry_exporter.truncation import (
@@ -81,10 +82,13 @@ class _ExportState:
         # which is what per-execution coalescing means; the scheduler's queue
         # holds this object exactly while this field is set.
         self._pending_record: dict[str, Any] | None = None
+        # Oldest schedule represented by this pending slot. Replacing its record
+        # keeps the slot's obligation to a drain that already captured it.
+        self._pending_since_seq = 0
         # Newest sequence number already handed to every exporter.
         self._exported_seq = 0
-        # Value of the scheduler's export counter when that export finished, so
-        # a waiter can tell whether a completed flush covered its own record.
+        # Value of the scheduler's export counter when that export finished,
+        # retained with the per-execution progress bookkeeping.
         self._exported_at = 0
         # drain() calls currently parked on this execution. Nothing depends on
         # it: a waiter holds this object directly, so the bookkeeping it waits
@@ -116,6 +120,9 @@ class _ExportScheduler:
         self._export_count = 0
         # Highest export counter value covered by a completed flush.
         self._flushed_through = 0
+        # Global schedule sequence covered by a completed flush. Export counts
+        # alone cannot account for another execution's still-pending record.
+        self._flushed_schedule_through = 0
         # Completed flushes, monotonic. Export coverage alone cannot express
         # "a flush ran for this invocation end": a drain with nothing of its own
         # to export -- an invocation end that emitted no record -- is trivially
@@ -138,14 +145,13 @@ class _ExportScheduler:
         # a flush, so a waiter woken while that flush runs -- before its coverage
         # reaches _flushed_through -- can tell it is already covered.
         self._flush_in_flight: int | None = None
-        # Value of the global schedule counter (_seq) when a flush was requested.
-        # The worker defers the flush until no record scheduled at or before that
-        # point is still pending. That is deliberately wider than the requester's
-        # own record: a drain therefore also waits for records other executions
-        # had pending when it was called. It excludes records scheduled after the
-        # request, so a steady stream of other executions cannot starve a waiting
-        # drain.
+        self._flush_in_flight_schedule: int | None = None
+        # Immutable entry snapshots, oldest first. Never widen the first barrier:
+        # later drains queue a subsequent one, so continuing arrivals cannot move
+        # an earlier drain's finish line. Calls covered by an existing target
+        # share it. The worker promotes the next target when it starts a flush.
         self._flush_barrier = 0
+        self._following_flush_barriers: deque[int] = deque()
         self._worker: threading.Thread | None = None
         self._disabled = False
         # Export workers that died without completing any work, counted since the
@@ -181,6 +187,8 @@ class _ExportScheduler:
             self._seq += 1
             execution._scheduled_seq = self._seq
             displaced = execution._pending_record
+            if displaced is None:
+                execution._pending_since_seq = self._seq
             execution._pending_record = record
             # Re-queuing an execution that is already queued is a no-op that
             # keeps its arrival position.
@@ -196,11 +204,14 @@ class _ExportScheduler:
         return [item for item in (displaced, failed_pending) if item is not None]
 
     def drain(self, execution: _ExportState) -> None:
-        """Wait until this execution's latest record is exported and exporters flush.
+        """Wait for a flush covering the finite schedule snapshot at entry.
 
-        Returns once the calling execution's own record has reached every exporter
-        and a flush covering it has completed; a flush triggered by another
-        execution never releases a waiter whose record is still pending.
+        The calling execution's own record and every other record pending when
+        this call starts must be offered to every exporter before a covering
+        flush completes. A replacement in an already-pending slot discharges that
+        slot's older obligation; a new slot scheduled after it is taken does not
+        extend this call's snapshot. Exporter failures remain best effort: they
+        are logged and do not prevent the remaining exporters from being called.
 
         Every call waits for a flush that completed after the call started, so an
         invocation end that emitted no record still flushes -- the cadence JS and
@@ -259,6 +270,7 @@ class _ExportScheduler:
             execution._waiters += 1
             try:
                 want_seq = execution._scheduled_seq
+                want_schedule = self._seq
                 # A drain always flushes, so require a flush that covers every
                 # export completed before this call as well as our own.
                 want_flush = self._export_count
@@ -267,38 +279,20 @@ class _ExportScheduler:
                 # riding on a flush that finished before it started.
                 want_flushes = self._flushes_completed
                 while not self._disabled:
-                    # Export counter value a flush has to cover to release us:
-                    # our own record's export plus everything already exported
-                    # when this call started. Recomputed every pass, because
-                    # execution._exported_at only becomes ours once our record is
-                    # out.
-                    need = max(execution._exported_at, want_flush)
+                    # Sequence coverage includes our entry-time record. Reading
+                    # the execution's latest _exported_at here could instead
+                    # chase exports scheduled after this drain's fixed snapshot.
                     if (
                         execution._exported_seq >= want_seq
-                        and self._flushed_through >= need
+                        and self._flushed_through >= want_flush
+                        and self._flushed_schedule_through >= want_schedule
                         and self._flushes_completed > want_flushes
                     ):
                         break
-                    # A flush already in flight whose coverage reaches `need` was
-                    # committed after our record was handed to the exporters, so
-                    # its completion releases us. Requesting another one here --
-                    # which is what a waiter woken inside that flush would do,
-                    # since the coverage is not published yet and the request it
-                    # made has already been consumed -- runs an extra flush after
-                    # this drain, and the invocation, returned.
-                    #
-                    # `_flush_in_flight` is None exactly while no flush is
-                    # running, so a flush that covers zero exports is still a
-                    # flush in flight. That case is the common one, not a corner:
-                    # `need` is 0 for a drain whose invocation emitted no record,
-                    # and the flush it asks for covers 0 exports when nothing has
-                    # ever been exported. Two such drains at once both see the
-                    # other's flush and neither asks for a second.
-                    in_flight = self._flush_in_flight
-                    covered = in_flight is not None and in_flight >= need
-                    if not self._flush_requested and not covered:
-                        self._flush_requested = True
-                        self._flush_barrier = max(self._flush_barrier, self._seq)
+                    # Coverage includes pending work, even for a recordless
+                    # invocation. A narrower queued/in-flight flush cannot
+                    # release us, but its target must not be extended either.
+                    self._request_flush_locked(want_schedule)
                     failed_pending, start_error = self._ensure_worker_locked()
                     if start_error is not None:
                         break
@@ -316,6 +310,24 @@ class _ExportScheduler:
 
     # -- internals ------------------------------------------------------------
 
+    def _request_flush_locked(self, target: int) -> None:
+        """Share a covering flush or queue a fixed target without moving others."""
+        in_flight = self._flush_in_flight_schedule
+        if in_flight is not None and in_flight >= target:
+            return
+        if self._flush_requested:
+            if self._flush_barrier >= target:
+                return
+            if (
+                self._following_flush_barriers
+                and self._following_flush_barriers[-1] >= target
+            ):
+                return
+            self._following_flush_barriers.append(target)
+            return
+        self._flush_requested = True
+        self._flush_barrier = target
+
     def _is_export_worker(self) -> bool:
         """Report whether the calling thread is this scheduler's export worker.
 
@@ -328,9 +340,9 @@ class _ExportScheduler:
     def _request_flush_for_pending_records(self) -> None:
         """Ask the worker for a flush, unless a flush already in flight covers it.
 
-        Returns without waiting, so it is safe to call from the worker itself. The
-        barrier is raised to the current schedule counter, which is what makes the
-        flush cover a record queued moments ago rather than running before it.
+        Returns without waiting, so it is safe to call from the worker itself.
+        The current schedule counter is captured as a finite flush target. An
+        older request keeps its barrier and a subsequent request covers new work.
 
         The condition separates the two ways a refused drain is reached, because
         they need opposite answers. Re-entered from an exporter's ``export()``,
@@ -348,8 +360,7 @@ class _ExportScheduler:
                 return
             if not self._pending and self._flush_in_flight is not None:
                 return
-            self._flush_requested = True
-            self._flush_barrier = max(self._flush_barrier, self._seq)
+            self._request_flush_locked(self._seq)
             self._condition.notify_all()
 
     def _disable_locked(self) -> _Dropped:
@@ -375,10 +386,13 @@ class _ExportScheduler:
         ]
         for execution, _ in dropped:
             execution._pending_record = None
+            execution._pending_since_seq = 0
         self._pending = {}
         self._flush_requested = False
         self._flush_barrier = 0
+        self._following_flush_barriers.clear()
         self._flush_in_flight = None
+        self._flush_in_flight_schedule = None
         self._condition.notify_all()
         return dropped
 
@@ -401,7 +415,9 @@ class _ExportScheduler:
     def _blocking_pending_locked(self) -> bool:
         """True while a record scheduled at or before the flush barrier is pending."""
         barrier = self._flush_barrier
-        return any(execution._scheduled_seq <= barrier for execution in self._pending)
+        return any(
+            execution._pending_since_seq <= barrier for execution in self._pending
+        )
 
     def _run(self) -> None:
         # The worker slot must be empty whenever no worker is running, or
@@ -464,11 +480,32 @@ class _ExportScheduler:
             seq = 0
             record: dict[str, Any] | None = None
             flush_covers = 0
+            flush_schedule_covers = 0
             with self._condition:
                 while True:
                     if self._flush_requested and not self._blocking_pending_locked():
-                        self._flush_requested = False
-                        self._flush_barrier = 0
+                        # Coalescing may have discharged several later targets
+                        # with the same replacement. Publish the actual completed
+                        # prefix, without claiming any still-pending slot, so
+                        # those drains share this flush rather than enqueueing
+                        # redundant empty flushes.
+                        flush_schedule_covers = (
+                            min(item._pending_since_seq for item in self._pending) - 1
+                            if self._pending
+                            else self._seq
+                        )
+                        while (
+                            self._following_flush_barriers
+                            and self._following_flush_barriers[0]
+                            <= flush_schedule_covers
+                        ):
+                            self._following_flush_barriers.popleft()
+                        self._flush_requested = bool(self._following_flush_barriers)
+                        self._flush_barrier = (
+                            self._following_flush_barriers.popleft()
+                            if self._flush_requested
+                            else 0
+                        )
                         flush_covers = self._export_count
                         # Publish what this flush will cover before releasing the
                         # lock, so a waiter that wakes while it runs can see that
@@ -477,12 +514,14 @@ class _ExportScheduler:
                         # flush covers every export so far, of which there are
                         # none, and it is still a flush in flight.
                         self._flush_in_flight = flush_covers
+                        self._flush_in_flight_schedule = flush_schedule_covers
                         break
                     if self._pending:
                         execution = next(iter(self._pending))
                         del self._pending[execution]
                         record = execution._pending_record
                         execution._pending_record = None
+                        execution._pending_since_seq = 0
                         seq = execution._scheduled_seq
                         break
                     self._condition.wait()
@@ -535,10 +574,14 @@ class _ExportScheduler:
                     # every later waiter that trusted this flush to cover it. Only
                     # a flush that ran to completion publishes its coverage.
                     self._flush_in_flight = None
+                    self._flush_in_flight_schedule = None
                     if flushed:
                         self._flushes_completed += 1
                         if flush_covers > self._flushed_through:
                             self._flushed_through = flush_covers
+                        self._flushed_schedule_through = max(
+                            self._flushed_schedule_through, flush_schedule_covers
+                        )
                         self._worker_faults = 0
                     self._condition.notify_all()
             with self._condition:

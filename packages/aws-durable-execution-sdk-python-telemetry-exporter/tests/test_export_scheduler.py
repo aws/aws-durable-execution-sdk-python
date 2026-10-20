@@ -9,6 +9,8 @@ import threading
 import time
 from typing import Any
 
+import pytest
+
 from aws_durable_execution_sdk_python_telemetry_exporter._export_scheduler import (
     _MAX_CONSECUTIVE_WORKER_FAULTS,
     _ExportScheduler,
@@ -1015,3 +1017,202 @@ def test_a_drain_refused_from_inside_an_export_still_flushes() -> None:
     )
     assert ("export", "r1") in exporter.calls
     assert _wait_until(lambda: not scheduler._worker_alive())
+
+
+class EntrySnapshotExporter(CaptureExporter):
+    """Gate exports and flushes so drains cannot pass by scheduler timing."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.export_started = {
+            value: threading.Event()
+            for value in ("before", "entry", "replacement", "after-take")
+        }
+        self.export_release = {
+            value: threading.Event() for value in self.export_started
+        }
+        self.flush_started = {index: threading.Event() for index in (1, 2, 3)}
+        self.flush_release = {index: threading.Event() for index in (1, 2, 3)}
+        self.flush_count = 0
+        self.flushed_values: list[list[str]] = []
+
+    def export(self, record: dict[str, Any]) -> None:
+        value = record["value"]
+        if value in self.export_started:
+            self.export_started[value].set()
+            self.export_release[value].wait(5.0)
+        super().export(record)
+
+    def flush(self) -> None:
+        self.flush_count += 1
+        self.flushed_values.append(
+            [
+                value
+                for kind, value in self.calls
+                if kind == "export" and value is not None
+            ]
+        )
+        if self.flush_count in self.flush_started:
+            self.flush_started[self.flush_count].set()
+            self.flush_release[self.flush_count].wait(5.0)
+        super().flush()
+
+    def release_all(self) -> None:
+        for event in [*self.export_release.values(), *self.flush_release.values()]:
+            event.set()
+
+
+@pytest.mark.parametrize("earlier_flush", ["queued", "in-flight"])
+def test_recordless_drain_covers_its_entry_snapshot_without_extending_an_earlier_drain(
+    earlier_flush: str,
+) -> None:
+    exporter = EntrySnapshotExporter()
+    scheduler = _ArnScheduler([exporter])
+    later_arn = ARN.format("recordless")
+    first_returned = threading.Event()
+    later_returned = threading.Event()
+
+    def drain(arn: str, returned: threading.Event) -> None:
+        scheduler.drain(arn)
+        returned.set()
+
+    first = threading.Thread(target=drain, args=(ARN_A, first_returned), daemon=True)
+    later = threading.Thread(
+        target=drain, args=(later_arn, later_returned), daemon=True
+    )
+    try:
+        if earlier_flush == "queued":
+            scheduler.schedule(ARN_A, _record("before"))
+            assert exporter.export_started["before"].wait(5.0)
+        first.start()
+        if earlier_flush == "queued":
+            assert _wait_until(lambda: _drain_waiters(scheduler, ARN_A) == 1)
+        else:
+            # This older flush covers zero exports. A zero coverage is still
+            # an in-flight flush, but cannot cover records queued after it began.
+            assert exporter.flush_started[1].wait(5.0)
+        scheduler.schedule(ARN_B, _record("entry"))
+        later.start()
+        assert _wait_until(lambda: _drain_waiters(scheduler, later_arn) == 1)
+        if earlier_flush == "queued":
+            exporter.export_release["before"].set()
+            assert exporter.flush_started[1].wait(5.0)
+            assert not exporter.export_started["entry"].is_set(), (
+                "the later drain extended the earlier drain's fixed barrier"
+            )
+        exporter.flush_release[1].set()
+        assert exporter.export_started["entry"].wait(5.0)
+        assert first_returned.wait(5.0), (
+            "later work prevented the earlier drain finishing"
+        )
+        assert not later_returned.wait(0.1), (
+            "recordless drain returned before a record pending at its entry was exported"
+        )
+        exporter.export_release["entry"].set()
+        assert exporter.flush_started[2].wait(5.0)
+        assert not later_returned.is_set(), (
+            "recordless drain did not wait for its covering flush"
+        )
+        exporter.flush_release[2].set()
+        assert later_returned.wait(5.0)
+        assert "entry" not in exporter.flushed_values[0]
+        assert "entry" in exporter.flushed_values[1]
+    finally:
+        exporter.release_all()
+        for thread in (first, later):
+            if thread.ident is not None:
+                thread.join(5.0)
+        scheduler.drain(ARN_B)
+    assert not first.is_alive() and not later.is_alive()
+
+
+def test_entry_snapshot_follows_a_coalesced_replacement_but_not_a_reschedule_after_take() -> (
+    None
+):
+    exporter = EntrySnapshotExporter()
+    scheduler = _ArnScheduler([exporter])
+    returned = threading.Event()
+
+    def drain() -> None:
+        scheduler.drain(ARN_A)
+        returned.set()
+
+    thread = threading.Thread(target=drain, daemon=True)
+    try:
+        scheduler.schedule(ARN_B, _record("before"))
+        assert exporter.export_started["before"].wait(5.0)
+        scheduler.schedule(ARN_A, _record("superseded"))
+        thread.start()
+        assert _wait_until(lambda: _drain_waiters(scheduler, ARN_A) == 1)
+        # This replacement inherits the obligation of the pending record that
+        # was in the snapshot, despite receiving a newer schedule sequence.
+        scheduler.schedule(ARN_A, _record("replacement"))
+        exporter.export_release["before"].set()
+        assert _wait_until(
+            lambda: exporter.export_started["replacement"].is_set()
+            or exporter.flush_started[1].is_set()
+        )
+        assert exporter.export_started["replacement"].is_set(), (
+            "coalescing let the entry snapshot flush before the replacement was offered"
+        )
+        # Once the replacement is taken by the worker, later emissions start a
+        # new slot. Even repeatedly replacing that slot must not move the older
+        # drain's target or keep its flush behind this newer work.
+        for _ in range(20):
+            scheduler.schedule(ARN_A, _record("after-take"))
+        exporter.export_release["replacement"].set()
+        assert exporter.flush_started[1].wait(5.0)
+        assert not exporter.export_started["after-take"].is_set()
+        exporter.flush_release[1].set()
+        assert exporter.export_started["after-take"].wait(5.0)
+        assert returned.wait(5.0), (
+            "the drain chased records scheduled after its snapshot"
+        )
+        assert exporter.flushed_values[0] == ["before", "replacement"]
+    finally:
+        exporter.release_all()
+        if thread.ident is not None:
+            thread.join(5.0)
+        scheduler.drain(ARN_A)
+    assert not thread.is_alive()
+
+
+def test_coalesced_replacement_lets_different_entry_snapshots_share_one_flush() -> None:
+    exporter = EntrySnapshotExporter()
+    scheduler = _ArnScheduler([exporter])
+    returned = [threading.Event(), threading.Event()]
+    arns = [ARN.format("first-empty"), ARN.format("second-empty")]
+
+    def drain(arn: str, done: threading.Event) -> None:
+        scheduler.drain(arn)
+        done.set()
+
+    threads = [
+        threading.Thread(target=drain, args=(arn, done), daemon=True)
+        for arn, done in zip(arns, returned, strict=True)
+    ]
+    try:
+        scheduler.schedule(ARN_B, _record("before"))
+        assert exporter.export_started["before"].wait(5.0)
+        scheduler.schedule(ARN_A, _record("superseded"))
+        threads[0].start()
+        assert _wait_until(lambda: _drain_waiters(scheduler, arns[0]) == 1)
+        scheduler.schedule(ARN_A, _record("replacement"))
+        threads[1].start()
+        assert _wait_until(lambda: _drain_waiters(scheduler, arns[1]) == 1)
+        exporter.export_release["before"].set()
+        assert exporter.export_started["replacement"].wait(5.0)
+        exporter.export_release["replacement"].set()
+        assert exporter.flush_started[1].wait(5.0)
+        assert not any(done.is_set() for done in returned)
+        exporter.flush_release[1].set()
+        assert all(done.wait(5.0) for done in returned)
+        assert _wait_until(lambda: not scheduler._worker_alive())
+        assert exporter.flushed_values == [["before", "replacement"]]
+        assert not exporter.flush_started[2].is_set()
+    finally:
+        exporter.release_all()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(5.0)
+        scheduler.drain(ARN_A)
