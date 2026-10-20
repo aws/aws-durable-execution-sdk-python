@@ -267,9 +267,11 @@ class ReleaseWorkflow:
             "update-latest-manifest", "Advance latest to this version when it is newer"
         )
 
-    def verify(self) -> subprocess.CompletedProcess[str]:
+    def verify(self, *, latest: bool = True) -> subprocess.CompletedProcess[str]:
         return self.run(
-            "verify-publish", "Verify the version and latest tags on public ECR"
+            "verify-publish",
+            "Verify the version and latest tags on public ECR",
+            VERIFY_LATEST=str(latest).lower(),
         )
 
 
@@ -602,9 +604,115 @@ def test_post_release_version_is_promoted_and_recognized(
         )
     )
     assert release.outputs["tag_version"] == version
+    assert_success(
+        release.run(
+            "preflight", "Emit release plan", TAG_VERSION=version, EXISTS="true"
+        )
+    )
+    assert release.outputs["should_update_latest"] == "true"
     assert_success(release.advance_latest())
     assert release.state["tags"]["latest"] == RELEASE_DIGEST
     assert_success(release.verify())
+
+
+@pytest.mark.parametrize("version", ["2.1.0a1", "2.1.0b1", "2.1.0rc1", "2.1.0.dev1"])
+def test_prerelease_plan_preserves_version_publication(
+    release: ReleaseWorkflow, version: str
+) -> None:
+    release.env["VERSION"] = version
+    assert_success(
+        release.run(
+            "preflight", "Emit release plan", TAG_VERSION=version, EXISTS="false"
+        )
+    )
+    assert release.outputs == {
+        "should_build": "true",
+        "should_update_latest": "false",
+        "version": version,
+    }
+
+
+@pytest.mark.parametrize("already_published", [False, True])
+@pytest.mark.parametrize("latest_exists", [False, True])
+def test_prerelease_publication_and_recovery_leave_latest_untouched(
+    release: ReleaseWorkflow, already_published: bool, latest_exists: bool
+) -> None:
+    version = VERSION + "rc1"
+    release.env["VERSION"] = version
+    tags = {"v1.2.2": OLD_DIGEST}
+    if latest_exists:
+        tags["latest"] = OLD_DIGEST
+    if already_published:
+        tags[f"v{version}"] = RELEASE_DIGEST
+    else:
+        tags[f"v{version}-arm64"] = RELEASE_DIGEST
+        tags[f"v{version}-x86_64"] = OTHER_DIGEST
+    release.registry(tags)
+
+    assert_success(
+        release.run("preflight", "Check whether the image tag already exists")
+    )
+    exists = release.outputs["exists"]
+    assert exists == str(already_published).lower()
+    assert_success(
+        release.run(
+            "preflight", "Emit release plan", TAG_VERSION=version, EXISTS=exists
+        )
+    )
+    assert release.outputs == {
+        "should_build": str(not already_published).lower(),
+        "should_update_latest": "false",
+        "version": version,
+    }
+    assert_success(
+        release.run(
+            "create-ecr-manifest-per-arch",
+            "Create the version manifest",
+            BUILT_THIS_RUN=str(not already_published).lower(),
+        )
+    )
+    assert_success(release.verify(latest=False))
+    assert release.state["tags"].get("latest") == tags.get("latest")
+    assert set(release.state["tags"]) == set(tags) | {f"v{version}"}
+    assert release.writes == (
+        []
+        if already_published
+        else [["docker", "manifest", "push", f"{REGISTRY}/{REPOSITORY}:v{version}"]]
+    )
+    assert all("imageTag=latest" not in command for command in release.commands)
+
+
+def test_prerelease_verification_requires_its_version_image(
+    release: ReleaseWorkflow,
+) -> None:
+    release.env["VERSION"] = VERSION + "rc1"
+    release.registry({"v1.2.2": OLD_DIGEST, "latest": OLD_DIGEST})
+    assert release.verify(latest=False).returncode != 0
+    assert release.writes == []
+    assert all("imageTag=latest" not in command for command in release.commands)
+
+
+def test_verification_rejects_missing_latest_policy(release: ReleaseWorkflow) -> None:
+    release.env.pop("VERIFY_LATEST", None)
+    result = release.run(
+        "verify-publish", "Verify the version and latest tags on public ECR"
+    )
+    assert result.returncode != 0
+    assert release.commands == []
+
+
+def test_stable_verification_rejects_a_newer_prerelease_latest(
+    release: ReleaseWorkflow,
+) -> None:
+    release.registry(
+        {
+            f"v{VERSION}": RELEASE_DIGEST,
+            "v2.0.0rc1": OTHER_DIGEST,
+            "latest": OTHER_DIGEST,
+        }
+    )
+    assert release.verify().returncode != 0
+    assert release.writes == []
 
 
 def test_entire_release_is_serialized_without_dropping_pending_runs(
@@ -627,12 +735,48 @@ def test_entire_release_is_serialized_without_dropping_pending_runs(
         "build-and-upload-image-to-ecr",
     }
     assert "!cancelled()" in jobs["create-ecr-manifest-per-arch"]["if"]
-    assert "should_update_latest" in jobs["create-ecr-manifest-per-arch"]["if"]
+    assert (
+        "needs.preflight.outputs.version != ''"
+        in jobs["create-ecr-manifest-per-arch"]["if"]
+    )
+    assert "should_update_latest" not in jobs["create-ecr-manifest-per-arch"]["if"]
     assert (
         "needs.create-ecr-manifest-per-arch.result == 'success'"
         in jobs["update-latest-manifest"]["if"]
     )
     assert (
+        "needs.preflight.outputs.should_update_latest == 'true'"
+        in jobs["update-latest-manifest"]["if"]
+    )
+    assert set(jobs["verify-publish"]["needs"]) == {
+        "preflight",
+        "create-ecr-manifest-per-arch",
+        "update-latest-manifest",
+    }
+    # An explicit status check allows verification after the latest job is skipped.
+    assert "!cancelled()" in jobs["verify-publish"]["if"]
+    assert (
+        "needs.create-ecr-manifest-per-arch.result == 'success'"
+        in jobs["verify-publish"]["if"]
+    )
+    assert (
         "needs.update-latest-manifest.result == 'success'"
         in jobs["verify-publish"]["if"]
+    )
+    assert (
+        "needs.preflight.outputs.should_update_latest == 'false'"
+        in jobs["verify-publish"]["if"]
+    )
+    assert (
+        "needs.update-latest-manifest.result == 'skipped'"
+        in jobs["verify-publish"]["if"]
+    )
+    verify_step = next(
+        step
+        for step in jobs["verify-publish"]["steps"]
+        if step.get("name") == "Verify the version and latest tags on public ECR"
+    )
+    assert (
+        verify_step["env"]["VERIFY_LATEST"]
+        == "${{ needs.preflight.outputs.should_update_latest }}"
     )

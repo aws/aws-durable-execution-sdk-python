@@ -131,14 +131,20 @@ jobs:
           echo "- testing version: $VERSION" >> "$GITHUB_STEP_SUMMARY"
           if [[ "$EXISTS" == "true" ]]; then
             echo "- image tag v$VERSION: already present in public ECR" >> "$GITHUB_STEP_SUMMARY"
-            echo "- decision: **skip build**, reconcile latest and verify (version already published)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- decision: **skip build**, verify the published version" >> "$GITHUB_STEP_SUMMARY"
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
             echo "- image tag v$VERSION: not present in public ECR" >> "$GITHUB_STEP_SUMMARY"
             echo "- decision: **publish**" >> "$GITHUB_STEP_SUMMARY"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "should_update_latest=true" >> "$GITHUB_OUTPUT"
+          should_update_latest="$(python -c "import os; from packaging.version import Version; print(str(not Version(os.environ['VERSION']).is_prerelease).lower())")"
+          echo "should_update_latest=$should_update_latest" >> "$GITHUB_OUTPUT"
+          if [[ "$should_update_latest" == "true" ]]; then
+            echo "- latest: reconcile for this stable release" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- latest: leave unchanged (prerelease); publish and verify only v$VERSION" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
   build-and-upload-image-to-ecr:
@@ -215,7 +221,7 @@ jobs:
       contents: read
       id-token: write
     needs: [preflight, build-and-upload-image-to-ecr]
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.preflight.outputs.should_update_latest == 'true' && (needs.build-and-upload-image-to-ecr.result == 'success' || needs.build-and-upload-image-to-ecr.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.preflight.outputs.version != '' && (needs.build-and-upload-image-to-ecr.result == 'success' || needs.build-and-upload-image-to-ecr.result == 'skipped') }}
     steps:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -271,7 +277,7 @@ jobs:
       contents: read
       id-token: write
     needs: [preflight, create-ecr-manifest-per-arch]
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.create-ecr-manifest-per-arch.result == 'success' }}
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.preflight.outputs.should_update_latest == 'true' && needs.create-ecr-manifest-per-arch.result == 'success' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -397,8 +403,8 @@ jobs:
           echo "latest now points at v$VERSION." >> "$GITHUB_STEP_SUMMARY"
 
   verify-publish:
-    needs: [preflight, update-latest-manifest]
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.preflight.outputs.should_update_latest == 'true' && needs.update-latest-manifest.result == 'success' }}
+    needs: [preflight, create-ecr-manifest-per-arch, update-latest-manifest]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.create-ecr-manifest-per-arch.result == 'success' && ((needs.preflight.outputs.should_update_latest == 'true' && needs.update-latest-manifest.result == 'success') || (needs.preflight.outputs.should_update_latest == 'false' && needs.update-latest-manifest.result == 'skipped')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -427,8 +433,13 @@ jobs:
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           ECR_REPOSITORY: ${{ env.ecr_repository_name }}
+          VERIFY_LATEST: ${{ needs.preflight.outputs.should_update_latest }}
         run: |
           repo_name="${ECR_REPOSITORY##*/}"
+          case "$VERIFY_LATEST" in
+            true|false) ;;
+            *) echo "::error::Missing or invalid latest verification policy."; exit 1 ;;
+          esac
           digest_for() {
             aws ecr-public describe-images \
               --region "${{ env.aws_region }}" \
@@ -443,11 +454,12 @@ jobs:
               --image-ids imageDigest="$1" \
               --query 'imageDetails[0].imageTags[]' --output text 2>/dev/null || true
           }
-          # latest must resolve to a version at least this release. It is only
-          # ever advanced forward, so a newer latest is a valid pass too.
+          # Every release must have its version tag. Only stable releases also
+          # require latest to resolve to this stable version or a newer one.
           publish_verified() {
             local v; v="$(digest_for "v${VERSION}")"
             [[ -z "$v" || "$v" == "None" ]] && return 1
+            [[ "$VERIFY_LATEST" == "false" ]] && return 0
             local latest_digest; latest_digest="$(digest_for latest)"
             [[ -z "$latest_digest" || "$latest_digest" == "None" ]] && return 1
             local latest_version
@@ -462,16 +474,24 @@ jobs:
             if python -c "import sys; from packaging.version import Version; sys.exit(0 if Version('${latest_version#v}') == Version('${VERSION}') else 1)"; then
               [[ "$latest_digest" == "$v" ]] || return 1
             fi
-            python -c "import sys; from packaging.version import Version; sys.exit(0 if Version('${latest_version#v}') >= Version('${VERSION}') else 1)"
+            python -c "import sys; from packaging.version import Version; latest = Version('${latest_version#v}'); sys.exit(0 if not latest.is_prerelease and latest >= Version('${VERSION}') else 1)"
           }
           for attempt in $(seq 1 10); do
             if publish_verified; then
-              echo "v$VERSION published and latest points at v$VERSION or newer in public ECR."
+              if [[ "$VERIFY_LATEST" == "true" ]]; then
+                echo "v$VERSION published and latest points at this stable version or newer in public ECR."
+              else
+                echo "Prerelease v$VERSION published in public ECR; latest left unchanged."
+              fi
               exit 0
             fi
             echo "attempt $attempt: v$VERSION not fully visible in public ECR yet, retrying."
             sleep 15
           done
+          if [[ "$VERIFY_LATEST" == "false" ]]; then
+            echo "::error::Prerelease v$VERSION did not become visible in public ECR after publishing."
+            exit 1
+          fi
           final_version="$(digest_for "v${VERSION}")"
           if [[ -z "$final_version" || "$final_version" == "None" ]]; then
             echo "::error::v$VERSION did not become visible in public ECR after publishing."
@@ -479,6 +499,6 @@ jobs:
             latest_digest="$(digest_for latest)"
             read -r -a latest_tags <<< "$(tags_on "$latest_digest")"
             latest_version="$(python .github/scripts/current_latest_version.py "${latest_tags[@]}")"
-            echo "::error::v$VERSION is published but latest resolves to ${latest_version:-no recognized version}, not this release or newer."
+            echo "::error::v$VERSION is published but latest resolves to ${latest_version:-no recognized version}, not this stable release or a newer stable version."
           fi
           exit 1
