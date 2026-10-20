@@ -88,7 +88,7 @@ _EXPIRED_CREDENTIAL_CODES = frozenset({"ExpiredTokenException", "ExpiredToken"})
 # signature rejected because of a clock offset, and throttling. The credential
 # provider refreshes expired credentials. So a later attempt can succeed,
 # although the service answered 403.
-_TRANSIENT_4XX_CODES = _EXPIRED_CREDENTIAL_CODES | frozenset(
+TRANSIENT_4XX_CODES = _EXPIRED_CREDENTIAL_CODES | frozenset(
     {
         # Clock skew.
         "AuthFailure",
@@ -248,7 +248,7 @@ def is_permanent_error(error: BaseException) -> bool:
     """
     if is_terminal_callback_error(error):
         return True
-    if error_code(error) in _TRANSIENT_4XX_CODES:
+    if error_code(error) in TRANSIENT_4XX_CODES:
         return False
     status = _http_status(error)
     return status is not None and 400 <= status < 500 and status not in {408, 409, 429}

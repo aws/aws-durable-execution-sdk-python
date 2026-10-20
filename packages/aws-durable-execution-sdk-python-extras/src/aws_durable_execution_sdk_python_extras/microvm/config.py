@@ -289,9 +289,9 @@ class MicrovmSessionConfig(MicrovmBaseConfig):
     not extend the MicroVM's lifetime.
 
     The worker must be a version that supports the setting. The JavaScript
-    worker ``@aws/durable-execution-sdk-js-microvm-worker`` does. The Python
-    worker in this repository does not yet: it accepts the setting, and its
-    MicroVM keeps running.
+    worker ``@aws/durable-execution-sdk-js-microvm-worker`` and the Python
+    worker ``aws-durable-execution-sdk-python-microvm-worker`` in this
+    repository both do.
     """
 
     auto_suspend_idle_time: Duration | None = None

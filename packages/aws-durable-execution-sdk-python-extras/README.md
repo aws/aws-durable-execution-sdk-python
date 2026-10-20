@@ -249,7 +249,7 @@ Suspending is off by default, because it needs more permissions and changes what
 - With `auto_suspend_on_idle`, the MicroVM's role needs `lambda:SuspendMicrovm` on the image. That permission lets code in any MicroVM of the image suspend any other. So use one image per trust boundary.
 - Background processes that an earlier job started stop while the MicroVM is suspended. The worker counts only its running jobs.
 
-The worker must support `auto_suspend_on_idle`. The JavaScript worker [`@aws/durable-execution-sdk-js-microvm-worker`](https://github.com/aws/aws-durable-execution-sdk-js/tree/main/packages/aws-durable-execution-sdk-js-microvm-worker) does. The Python worker in this repository does not yet. It accepts the setting, and its MicroVM keeps running. `idle_policy` works with both workers.
+The worker must support `auto_suspend_on_idle`. The JavaScript worker [`@aws/durable-execution-sdk-js-microvm-worker`](https://github.com/aws/aws-durable-execution-sdk-js/tree/main/packages/aws-durable-execution-sdk-js-microvm-worker) and the Python worker [`aws-durable-execution-sdk-python-microvm-worker`](../aws-durable-execution-sdk-python-microvm-worker) both do. `idle_policy` works with both workers. Enable the `suspend` and `resume` hooks in the image. The worker then refuses jobs while the MicroVM freezes, and accepts them again as soon as it resumes. Without the `resume` hook, the first job after a resume can wait a little over 30 seconds, until the worker's refusal ends and the request step delivers again.
 
 ### Session permissions
 
