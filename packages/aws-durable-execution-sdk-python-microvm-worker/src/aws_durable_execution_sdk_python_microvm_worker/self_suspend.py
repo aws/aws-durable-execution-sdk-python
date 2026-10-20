@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -138,7 +139,9 @@ def suspend_microvm(
         Exception: The call's own error.
     """
     deadline = time.monotonic() + deadline_seconds
-    unique_id = f"aws-durable-execution-microvm-worker-deadline-{id(object())}"
+    # A fresh ID per call. botocore ignores a second registration with an ID
+    # it already has. id() of a temporary object can repeat at once.
+    unique_id = f"aws-durable-execution-microvm-worker-deadline-{uuid.uuid4().hex}"
     events = safe_get(lambda: client.meta.events)
 
     def stop_after_deadline(**_: object) -> None:

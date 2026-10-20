@@ -1963,3 +1963,67 @@ def test_answers_the_resume_hook_before_it_reports_a_deferred_job_that_cannot_st
     h.lambda_client.finish()
     assert eventually(lambda: len(h.lambda_client.recorded()) == 1)
     assert h.lambda_client.recorded()[0]["errorType"] == "RuntimeError"
+
+
+def test_starts_no_second_suspend_call_while_one_runs(start: Any) -> None:
+    # A resume hook during the call ends the refusal. A second call started
+    # then would share the grace period with the first one, and that period
+    # could end the refusal while the second call can still freeze the
+    # MicroVM.
+    h = start()
+    h.microvms.hold = True
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+
+    h.hook("resume")
+    h.advance(IDLE * 3)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    # The idle time starts when the call ends.
+    h.microvms.finish()
+    h.settle()
+    h.advance(IDLE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.advance(0.001)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1", "mvm-1"])
+
+
+def test_starts_the_idle_time_after_the_call_when_a_job_ended_during_it(
+    start: Any,
+) -> None:
+    h = start()
+    h.microvms.hold = True
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    h.hook("resume")
+    assert h.job("cb-1") == 202
+    h.finish_job("cb-1")
+    h.advance(IDLE * 2)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.microvms.finish()
+    h.settle()
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1", "mvm-1"])
+
+
+def test_retries_a_rejected_call_when_a_resume_hook_came_during_it(
+    start: Any,
+) -> None:
+    # A resume hook starts the idle time. During the call, the idle time
+    # waits for the call to end. The JS worker also retries in this case,
+    # because its resume hook starts the idle time too.
+    h = start()
+    h.microvms.hold = True
+    h.microvms.failure = suspend_error("AccessDeniedException", 403)
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    h.hook("resume")
+
+    h.microvms.finish()
+    h.settle()
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1", "mvm-1"])

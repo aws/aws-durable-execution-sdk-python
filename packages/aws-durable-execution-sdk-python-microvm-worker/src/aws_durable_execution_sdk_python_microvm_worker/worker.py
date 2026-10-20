@@ -400,8 +400,13 @@ class MicrovmWorkerListener:
         # worker's own that the service rejected must not end a refusal that
         # a suspend hook started meanwhile.
         self._suspend_hooks = 0
-        # SuspendMicrovm calls in flight. idle() waits for them.
+        # SuspendMicrovm calls in flight. idle() waits for them. At most one
+        # runs at a time.
         self._suspend_calls = 0
+        # Set when the idle time could not start because a call was in
+        # flight, for example after a resume hook during the call. The idle
+        # time then starts when the call ends.
+        self._idle_after_call = False
         # Run hook jobs that arrived during a refusal. The durable function
         # cannot deliver a run hook job again. So the listener starts it when
         # the refusal ends, instead of refusing it.
@@ -1294,6 +1299,12 @@ class MicrovmWorkerListener:
             or self._jobs
         ):
             return
+        if self._suspend_calls:
+            # A second call could start while the first one runs. The first
+            # call's grace period could then end the refusal while the second
+            # call can still freeze the MicroVM.
+            self._idle_after_call = True
+            return
         generation = self._idle_generation
         try:
             self._cancel_idle_timer = _start_timer(
@@ -1325,6 +1336,7 @@ class MicrovmWorkerListener:
                 or self._closed
                 or self._terminating
                 or self._suspending
+                or self._suspend_calls
             ):
                 return
             self._cancel_idle_timer = None
@@ -1355,6 +1367,9 @@ class MicrovmWorkerListener:
         finally:
             with self._changed:
                 self._suspend_calls -= 1
+                if self._idle_after_call:
+                    self._idle_after_call = False
+                    self._start_idle_time()
                 self._changed.notify_all()
 
     def _call_suspend(self, auto_suspend: _AutoSuspend) -> None:

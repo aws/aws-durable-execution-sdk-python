@@ -320,3 +320,68 @@ def test_skips_the_deadline_handler_for_a_client_without_events() -> None:
     suspend_microvm(client, "mvm-1", 5.0)
 
     assert client.calls == [{"microvmIdentifier": "mvm-1"}]
+
+
+class _RecordingEvents:
+    """Records deadline handlers, and keeps one per ID, as botocore does."""
+
+    def __init__(self) -> None:
+        self.handlers: dict[str, Any] = {}
+        self.ids: list[str] = []
+        self._lock = threading.Lock()
+
+    def register_first(self, event: str, handler: Any, unique_id: str) -> None:
+        with self._lock:
+            self.ids.append(unique_id)
+            self.handlers.setdefault(unique_id, handler)
+
+    def unregister(self, event: str, unique_id: str) -> None:
+        with self._lock:
+            self.handlers.pop(unique_id, None)
+
+
+class _HeldClient:
+    """A client whose calls wait until two of them run at once."""
+
+    def __init__(self, events: _RecordingEvents) -> None:
+        self.meta = type("Meta", (), {"events": events})()
+        self.both_running = threading.Barrier(2, timeout=5)
+        self.release = threading.Event()
+
+    def suspend_microvm(self, **kwargs: Any) -> dict[str, Any]:
+        self.both_running.wait()
+        self.release.wait(5)
+        return {}
+
+
+def test_overlapping_calls_on_one_client_each_keep_their_handler() -> None:
+    # botocore ignores a second registration with an ID it already has. So
+    # each call needs its own ID, or the first call to end would remove the
+    # other call's deadline.
+    events = _RecordingEvents()
+    client: Any = _HeldClient(events)
+    threads = [
+        threading.Thread(target=suspend_microvm, args=(client, "mvm-1", 5.0))
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    assert eventually_true(
+        lambda: client.both_running.n_waiting == 0 and len(events.ids) == 2
+    )
+
+    assert len(set(events.ids)) == 2
+    assert len(events.handlers) == 2
+    client.release.set()
+    for thread in threads:
+        thread.join(5)
+    assert events.handlers == {}
+
+
+def eventually_true(condition: Any) -> bool:
+    deadline = time.monotonic() + 5
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.005)
+    return True

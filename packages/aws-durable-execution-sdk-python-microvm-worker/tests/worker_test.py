@@ -1237,7 +1237,7 @@ def test_listens_on_ipv4_when_ipv6_sockets_start_ipv6_only(
     monkeypatch.setattr(socket, "socket", _IPv6OnlyByDefault)
     worker, _ = start(Held())
 
-    assert request(worker, f"{HOOK_PATH_PREFIX}ready", {})[0] == 200
+    assert request(worker, f"{HOOK_PATH_PREFIX}ready", {}, host="127.0.0.1")[0] == 200
 
 
 def test_runs_a_job_once_when_parallel_requests_deliver_it(start: Any) -> None:
