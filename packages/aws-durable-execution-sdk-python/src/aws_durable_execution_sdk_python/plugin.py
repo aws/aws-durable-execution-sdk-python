@@ -717,6 +717,9 @@ class PluginExecutor:
         for factory in self._plugin_factories:
             try:
                 plugin = factory.create_plugin(info)
+                # isinstance can call a proxy's __class__ descriptor. Its failures
+                # belong to the same customer-code boundary as factory creation.
+                is_plugin = isinstance(plugin, DurableInstrumentationPlugin)
             except BaseException as error:  # noqa: BLE001 - a factory must not fail the execution
                 control = _contain_plugin_failure(
                     error, "Plugin factory %s exception ignored", _factory_name(factory)
@@ -736,7 +739,7 @@ class PluginExecutor:
             # _dispatch_plugin, so registering it would produce one logged error
             # per hook per invocation for the life of the function while
             # providing no telemetry. Reject it once instead.
-            if not isinstance(plugin, DurableInstrumentationPlugin):
+            if not is_plugin:
                 logger.error(
                     "Plugin factory %s returned %s, which is not a "
                     "DurableInstrumentationPlugin; plugin ignored",

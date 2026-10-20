@@ -1,5 +1,6 @@
 """Tests for execution."""
 
+import asyncio
 import datetime
 import inspect
 import json
@@ -8,7 +9,7 @@ import time
 import warnings
 from collections.abc import Sequence
 from copy import deepcopy
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -4602,3 +4603,141 @@ def test_worker_lifecycle_notifies_end_once_and_preserves_handler_failure(
     assert caught.value is expected
     status = "RETRY" if handler_fails else "SUCCEEDED"
     assert received == [("first", status), ("second", status)]
+
+
+def _proxy_with_raising_class(error: BaseException) -> DurableInstrumentationPlugin:
+    def raising_class(_instance: object) -> type[DurableInstrumentationPlugin]:
+        raise error
+
+    # A dynamic descriptor models a proxy without claiming a nominal subtype.
+    proxy = type("RaisingClassProxy", (), {"__class__": property(raising_class)})()
+    return cast(DurableInstrumentationPlugin, proxy)
+
+
+@pytest.mark.parametrize(
+    "error_type", [RuntimeError, asyncio.CancelledError, BaseException]
+)
+def test_factory_return_validation_failure_keeps_healthy_plugins_and_handler(
+    error_type: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    failure = error_type("factory return class lookup failed")
+    healthy = _RecordingPlugin()
+    handler_calls: list[bool] = []
+
+    def body(event: Any, context: DurableContext) -> str:
+        handler_calls.append(True)
+        return "ok"
+
+    handler = durable_execution(
+        body,
+        plugins=[
+            plugin_factory(_proxy_with_raising_class(failure)),
+            plugin_factory(healthy),
+        ],
+    )
+    result = handler(
+        _make_invocation_input(Mock(spec=DurableServiceClient)),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert json.loads(result["Result"]) == "ok"
+    assert handler_calls == [True]
+    assert healthy.calls == ["invocation_start", "invocation_end:SUCCEEDED"]
+    assert any(
+        record.exc_info and record.exc_info[1] is failure for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_factory_return_validation_preserves_thread_control(
+    error_type: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    failure = error_type("factory return control signal")
+    healthy = _RecordingPlugin()
+    handler_calls: list[bool] = []
+
+    def body(event: Any, context: DurableContext) -> None:
+        handler_calls.append(True)
+
+    handler = durable_execution(
+        body,
+        plugins=[
+            plugin_factory(_proxy_with_raising_class(failure)),
+            plugin_factory(healthy),
+        ],
+    )
+    with pytest.raises(error_type) as caught:
+        handler(
+            _make_invocation_input(Mock(spec=DurableServiceClient)),
+            _make_lambda_context(),
+        )
+
+    assert caught.value is failure
+    assert handler_calls == []
+    assert healthy.calls == []
+
+
+def test_factory_return_validation_partitions_mixed_control_group(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    control = SystemExit("proxy control")
+    failure = BaseExceptionGroup(
+        "proxy group", [RuntimeError("proxy ordinary failure"), control]
+    )
+    healthy = _RecordingPlugin()
+
+    def body(event: Any, context: DurableContext) -> None:
+        raise AssertionError("the control signal must stop invocation startup")
+
+    handler = durable_execution(
+        body,
+        plugins=[
+            plugin_factory(_proxy_with_raising_class(failure)),
+            plugin_factory(healthy),
+        ],
+    )
+    with pytest.raises(BaseExceptionGroup) as caught:
+        handler(
+            _make_invocation_input(Mock(spec=DurableServiceClient)),
+            _make_lambda_context(),
+        )
+
+    assert caught.value.exceptions == (control,)
+    assert healthy.calls == []
+    assert "proxy ordinary failure" in caplog.text
+
+
+def test_factory_return_validation_retains_supported_proxy_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    target = _RecordingPlugin()
+    proxy = type(
+        "PluginProxy",
+        (),
+        {
+            "__class__": property(lambda _instance: _RecordingPlugin),
+            "__getattr__": lambda _instance, name: getattr(target, name),
+        },
+    )()
+
+    def body(event: Any, context: DurableContext) -> str:
+        return "ok"
+
+    handler = durable_execution(
+        body, plugins=[plugin_factory(cast(DurableInstrumentationPlugin, proxy))]
+    )
+    result = handler(
+        _make_invocation_input(Mock(spec=DurableServiceClient)), _make_lambda_context()
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert target.calls == ["invocation_start", "invocation_end:SUCCEEDED"]
