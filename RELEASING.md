@@ -73,6 +73,56 @@ The workflow runs on the `release: [published]` event, so it fires whenever a re
 
 > **Note:** The workflow builds and publishes all packages in the matrix. Ensure the version in each package's `__about__.py` is correct before publishing. If only one package has a version bump, PyPI will reject the re-upload of the unchanged package (which is expected and harmless since `fail-fast: false` is set).
 
+The [`ecr-release.yml`](.github/workflows/ecr-release.yml) workflow publishes the
+testing emulator image only when the release tag names `testing-v<version>`,
+either alone or in a comma-separated release tag. That version must match the
+testing package's `__about__.py`. An SDK-only tag does not publish an image, even
+if the testing package also has an unpublished version bump. Image versions need
+three numeric release components and may have PEP 440 suffixes such as `rc1`,
+`.post1`, or `.dev1`; epochs, local versions containing `+`, and duplicate testing
+components are rejected before publication.
+
+### Emulator images
+
+Every testing release publishes its explicit version tag. `latest` is reserved
+for stable testing package versions because SAM CLI uses it by default.
+Stability is determined from the testing package's PEP 440 version: alpha
+(`a1`), beta (`b1`), release candidate (`rc1`), and development (`.dev1`) versions
+are prereleases; final versions and their post releases (`.post1`) are stable.
+
+| Testing release tag | Multi-platform image tags |
+| --- | --- |
+| `testing-v2.1.0` | `v2.1.0`, and `latest` when newer than the current stable version |
+| `testing-v2.1.0.post1` | `v2.1.0.post1`, and `latest` when newer than the current stable version |
+| `testing-v2.2.0rc1` | `v2.2.0rc1`; `latest` is unchanged |
+| `testing-v2.2.0.dev1` | `v2.2.0.dev1`; `latest` is unchanged |
+
+Published version manifests are never overwritten. Prereleases still build and
+publish their versioned images, and the workflow verifies those tags even though
+the `latest` job is skipped. To test a prerelease with SAM CLI, select it explicitly:
+
+```bash
+DURABLE_EXECUTIONS_EMULATOR_IMAGE_TAG=v2.2.0rc1 sam local invoke MyFunction
+```
+
+The workflow requires the `ECR_UPLOAD_IAM_ROLE_ARN` secret and a role that trusts
+this repository's release OIDC identity and permits ECR Public image reads and
+publishing. Merge the workflow changes before creating a new testing release;
+rerunning an older release uses its original workflow and tagged source.
+
+Release runs queue through preflight, publication, and verification so retries
+cannot overlap another release's writes. An existing version manifest is kept
+unchanged. For stable releases, recovery copies that manifest by digest to
+`latest` when it is newer than the version already there, then verifies the
+digest and stable version in ECR. Older stable releases and all prereleases leave
+`latest` unchanged. Registry read errors fail the workflow
+instead of being treated as a missing image. ECR visibility is polled for up to
+150 seconds; retry a failed run after resolving the reported error. An existing
+`latest` without a recognized version tag, or pointing to a prerelease ahead of
+the stable release being published, requires manual inspection.
+
+### Lambda layers
+
 Releases containing an `otel-v` tag also trigger the
 [`lambda-layer-publish.yml`](.github/workflows/lambda-layer-publish.yml)
 workflow. It builds the SDK and OTel plugin into Lambda layers for each
