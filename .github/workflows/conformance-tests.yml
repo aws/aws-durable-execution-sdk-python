@@ -20,6 +20,11 @@ on:
         required: false
         default: us-west-2
         type: string
+      lifecycle_log_samples:
+        description: "Repeat plugin lifecycle log validation this many times (0 disables)"
+        required: false
+        default: "0"
+        type: string
 
 env:
   AWS_REGION: ${{ github.event.inputs.region || 'us-west-2' }}
@@ -140,6 +145,7 @@ jobs:
         echo "SUITE_SLUG=$(echo '${{ matrix.suite }}' | tr '_' '-')" >> "$GITHUB_ENV"
 
     - name: Run conformance suite
+      id: conformance
       run: |
         # Stable per-suite stack name (no run id): every workflow run updates
         # the same stack, and --no-cleanup leaves it deployed afterwards so
@@ -156,6 +162,17 @@ jobs:
           --report junit \
           --report-file report-${{ matrix.suite }}
 
+    - name: Check lifecycle log stability
+      if: ${{ !cancelled() && matrix.suite == 'plugin' && github.event_name == 'workflow_dispatch' && inputs.lifecycle_log_samples != '0' && steps.conformance.outcome != 'skipped' }}
+      env:
+        LIFECYCLE_LOG_SAMPLES: ${{ inputs.lifecycle_log_samples }}
+      run: |
+        python scripts/check_lifecycle_log_stability.py \
+          --stack-name conformance-tests-conf-py-plugin \
+          --region "$AWS_REGION" \
+          --samples "$LIFECYCLE_LOG_SAMPLES" \
+          --output-dir lifecycle-log-stability
+
     - name: Upload conformance report
       if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -164,4 +181,5 @@ jobs:
         path: |
           packages/aws-durable-execution-sdk-python-conformance-tests/report-${{ matrix.suite }}.xml
           packages/aws-durable-execution-sdk-python-conformance-tests/history-${{ matrix.suite }}/
+          packages/aws-durable-execution-sdk-python-conformance-tests/lifecycle-log-stability/
         if-no-files-found: warn
