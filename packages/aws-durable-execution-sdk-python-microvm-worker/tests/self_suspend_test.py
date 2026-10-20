@@ -5,21 +5,25 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
+from email.utils import formatdate
 from typing import Any
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import boto3
 import pytest
+from botocore.awsrequest import AWSResponse, HTTPHeaders
 from botocore.config import Config
 from botocore.exceptions import (
     ClientError,
     EndpointConnectionError,
     NoCredentialsError,
 )
+from botocore.retries.standard import ExponentialBackoff
 
 from aws_durable_execution_sdk_python_microvm_worker.self_suspend import (
     SUSPEND_CALL_TIMEOUT_SECONDS,
@@ -166,6 +170,89 @@ def test_the_default_client_ends_a_read_at_the_call_timeout() -> None:
         assert config.read_timeout == SUSPEND_CALL_TIMEOUT_SECONDS
         assert config.connect_timeout == 5
         assert config.retries == {"mode": "standard", "total_max_attempts": 3}
+    finally:
+        client.close()
+
+
+class _Body:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def stream(self, **_: Any) -> Any:
+        yield self._data
+
+
+def _answer_every_attempt(
+    client: Any, status: int, code: str, **headers: str
+) -> list[int]:
+    """Answer each attempt of the client with one error, instead of HTTP.
+
+    botocore's retry handler still runs on each answer, because a
+    ``before-send`` handler replaces only the send. Returns the attempt
+    list, which grows by one per attempt.
+    """
+    attempts: list[int] = []
+    answer_headers = HTTPHeaders()
+    answer_headers["Content-Type"] = "application/json"
+    answer_headers["x-amzn-ErrorType"] = code
+    for name, value in headers.items():
+        answer_headers[name] = value
+
+    def send(**_: Any) -> AWSResponse:
+        attempts.append(1)
+        return AWSResponse(
+            "https://lambda-microvms.us-east-1.amazonaws.com",
+            status,
+            answer_headers,
+            _Body(json.dumps({"message": f"{code} message"}).encode()),
+        )
+
+    client.meta.events.register("before-send.lambda-microvms.SuspendMicrovm", send)
+    return attempts
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "headers", "attempts", "outcome"),
+    [
+        # A throttle is retried. So its error reports 2 retries, and an
+        # earlier attempt may have reached the service.
+        (429, "ThrottlingException", {}, 3, SuspendOutcome.UNKNOWN),
+        # A signature error with a clock offset is not retried. botocore does
+        # not correct the clock from the server's Date header.
+        (
+            403,
+            "InvalidSignatureException",
+            {"Date": formatdate(time.time() + 600, usegmt=True)},
+            1,
+            SuspendOutcome.REFUSED_FOR_NOW,
+        ),
+        (403, "InvalidSignatureException", {}, 1, SuspendOutcome.REFUSED_FOR_NOW),
+        (403, "ExpiredTokenException", {}, 1, SuspendOutcome.REFUSED_FOR_NOW),
+    ],
+    ids=["throttle", "signature-clock-offset", "signature-mismatch", "expired-token"],
+)
+def test_the_default_client_retries_a_throttle_and_no_signature_or_token_error(
+    credentials: None,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    code: str,
+    headers: dict[str, str],
+    attempts: int,
+    outcome: SuspendOutcome,
+) -> None:
+    # No backoff, so that the retries do not slow the test.
+    monkeypatch.setattr(ExponentialBackoff, "delay_amount", lambda self, context: 0)
+    client = create_microvms_client("us-east-1")
+    try:
+        sent = _answer_every_attempt(client, status, code, **headers)
+
+        with pytest.raises(ClientError) as raised:
+            suspend_microvm(client, "mvm-1", 5.0)
+
+        assert len(sent) == attempts
+        metadata = raised.value.response["ResponseMetadata"]
+        assert metadata["RetryAttempts"] == attempts - 1
+        assert classify_suspend_error(raised.value) is outcome
     finally:
         client.close()
 

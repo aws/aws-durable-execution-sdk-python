@@ -298,9 +298,12 @@ class MicrovmWorkerListener:
        for a missing permission, ends the refusal at once. The MicroVM keeps
        running, and the listener does not retry the call until a job ends.
     7. A call that the service refused for now on its first attempt, such
-       as a throttle, expired credentials, or a clock offset, ends the
-       refusal at once too. The idle time then starts again, so the listener
-       tries the call again.
+       as expired credentials or a signature error, ends the refusal at
+       once too. The idle time then starts again, so the listener tries the
+       call again. The default client retries a throttle. So a throttle
+       from it usually ends as an unknown outcome, as in item 8. A throttle
+       is refused for now only from a caller's client that does not retry
+       it.
     8. A call whose outcome is unknown, such as a timeout, a conflict, a
        server error, or an error after a retried attempt, is handled like a
        successful call. The service may have suspended the MicroVM anyway.
@@ -451,7 +454,13 @@ class MicrovmWorkerListener:
                 idle, once per suspend. It never closes a client that this
                 function returns. Defaults to a client of its own per
                 suspend, from the default credential chain. The listener
-                closes that client after the call.
+                closes that client after the call. A client that retries
+                must report its retries in ``ResponseMetadata.RetryAttempts``
+                of the error that it raises. The listener otherwise counts a
+                retried call as a first attempt. An earlier attempt of that
+                call may have suspended the MicroVM. A retried throttle would
+                then count as refused for now, and the listener would accept
+                a job that then freezes with the MicroVM.
             heartbeat_interval_seconds: The heartbeat interval. Defaults to a
                 third of the job's heartbeat timeout, at most 15 minutes. It
                 is cut to a third of the job's heartbeat timeout.

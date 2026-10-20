@@ -914,7 +914,7 @@ def test_accepts_jobs_at_once_after_a_rejection(
         suspend_error("ExpiredTokenException", 403),
         suspend_error("SignatureDoesNotMatch", 403),
     ],
-    ids=["throttle", "throttle-400", "expired-token", "clock-offset"],
+    ids=["throttle", "throttle-400", "expired-token", "signature-error"],
 )
 def test_accepts_jobs_at_once_and_retries_after_a_refusal_for_now(
     start: Any, logger: Any, failure: BaseException
