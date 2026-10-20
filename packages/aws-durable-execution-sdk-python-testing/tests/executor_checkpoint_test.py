@@ -15,7 +15,10 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 import pytest
-from aws_durable_execution_sdk_python.execution import InvocationStatus
+from aws_durable_execution_sdk_python.execution import (
+    DurableExecutionInvocationOutput,
+    InvocationStatus,
+)
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     Operation as SvcOperation,
@@ -31,8 +34,12 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
 )
-from aws_durable_execution_sdk_python_testing.execution import Execution
+from aws_durable_execution_sdk_python_testing.execution import (
+    Execution,
+    ExecutionStatus,
+)
 from aws_durable_execution_sdk_python_testing.executor import Executor, InvocationState
+from aws_durable_execution_sdk_python_testing.invoker import InvokeResponse
 from aws_durable_execution_sdk_python_testing.model import StartDurableExecutionInput
 from aws_durable_execution_sdk_python_testing.stores.memory import (
     InMemoryExecutionStore,
@@ -581,6 +588,129 @@ def test_exhausted_retries_fail_the_execution():
     assert final.close_status is not None
     # Final close_status is FAILED (not SUCCEEDED / STOPPED / TIMED_OUT)
     assert final.close_status.value == "FAILED"
+
+
+def _invoke_response(
+    status: InvocationStatus, result: str | None = None
+) -> InvokeResponse:
+    return InvokeResponse(
+        invocation_output=DurableExecutionInvocationOutput(
+            status=status, result=result
+        ),
+        request_id="req",
+    )
+
+
+def test_pending_without_pending_operations_fails_after_three_attempts():
+    """PENDING with nothing pending is the one invalid output the service
+    retries, because an SDK race that a replay resolves can produce it.
+    It allows three consecutive attempts, then fails the execution with
+    an InvalidParameterValueException error."""
+    store = InMemoryExecutionStore()
+    scheduler = Mock()
+    invoker = Mock()
+    invoker.create_invocation_input.return_value = Mock()
+    invoker.invoke.return_value = _invoke_response(InvocationStatus.PENDING)
+
+    execution = Execution.new(_make_start_input())
+    execution.start()
+    store.save(execution)
+    arn = execution.durable_execution_arn
+
+    executor = Executor(store, scheduler, invoker, Mock())
+
+    for attempt in (1, 2):
+        asyncio.run(executor._invoke_handler(arn)())  # noqa: SLF001
+        retrying = store.load(arn)
+        assert retrying.is_complete is False
+        assert retrying.consecutive_failed_invocation_attempts == attempt
+        assert scheduler.call_later.call_count == attempt
+        assert (
+            scheduler.call_later.call_args.kwargs["delay"]
+            == Executor.RETRY_BACKOFF_SECONDS
+        )
+
+    asyncio.run(executor._invoke_handler(arn)())  # noqa: SLF001
+
+    final = store.load(arn)
+    assert invoker.invoke.call_count == 3
+    assert scheduler.call_later.call_count == 2
+    assert final.close_status is ExecutionStatus.FAILED
+    assert final.result is not None
+    assert final.result.error == ErrorObject(
+        message="Cannot return PENDING status with no pending operations.",
+        type="InvalidParameterValueException",
+        data=None,
+        stack_trace=None,
+    )
+
+
+def test_pending_without_pending_operations_recovers_on_a_valid_output():
+    """A retried PENDING followed by a valid output completes the
+    execution and resets the attempt counter."""
+    store = InMemoryExecutionStore()
+    invoker = Mock()
+    invoker.create_invocation_input.return_value = Mock()
+    invoker.invoke.side_effect = [
+        _invoke_response(InvocationStatus.PENDING),
+        _invoke_response(InvocationStatus.SUCCEEDED, result="ok"),
+    ]
+
+    execution = Execution.new(_make_start_input())
+    execution.start()
+    store.save(execution)
+    arn = execution.durable_execution_arn
+
+    executor = Executor(store, Mock(), invoker, Mock())
+
+    asyncio.run(executor._invoke_handler(arn)())  # noqa: SLF001
+    assert store.load(arn).consecutive_failed_invocation_attempts == 1
+
+    asyncio.run(executor._invoke_handler(arn)())  # noqa: SLF001
+    final = store.load(arn)
+    assert final.close_status is ExecutionStatus.SUCCEEDED
+    assert final.result is not None
+    assert final.result.result == "ok"
+    assert final.consecutive_failed_invocation_attempts == 0
+
+
+@pytest.mark.parametrize(
+    "parse",
+    [
+        pytest.param(
+            lambda request_id: InvokeResponse.from_output(["SUCCEEDED"], request_id),
+            id="from-output",
+        ),
+        pytest.param(
+            lambda request_id: InvokeResponse.from_payload(b"not json", request_id),
+            id="from-payload",
+        ),
+        pytest.param(
+            lambda request_id: InvokeResponse.from_payload(b"\xff", request_id),
+            id="from-payload-not-utf-8",
+        ),
+    ],
+)
+def test_unparsed_output_keeps_the_request_id(parse):
+    """An output the invoker cannot parse fails the execution, and the
+    recorded invocation keeps the request ID of that invocation."""
+    store = InMemoryExecutionStore()
+    invoker = Mock()
+    invoker.create_invocation_input.return_value = Mock()
+    invoker.invoke.side_effect = lambda *_args, **_kwargs: parse("request-1")
+
+    execution = Execution.new(_make_start_input())
+    execution.start()
+    store.save(execution)
+    arn = execution.durable_execution_arn
+
+    executor = Executor(store, Mock(), invoker, Mock())
+
+    asyncio.run(executor._invoke_handler(arn)())  # noqa: SLF001
+
+    final = store.load(arn)
+    assert final.close_status is ExecutionStatus.FAILED
+    assert [c.request_id for c in final.invocation_completions] == ["request-1"]
 
 
 # endregion
