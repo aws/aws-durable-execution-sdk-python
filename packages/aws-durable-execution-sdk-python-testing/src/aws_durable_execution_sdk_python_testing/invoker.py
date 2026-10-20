@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
@@ -15,17 +15,22 @@ from aws_durable_execution_sdk_python.execution import (
     DurableExecutionInvocationOutput,
     InitialExecutionState,
 )
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 
 from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
     DEFAULT_MAX_INVOCATION_PAGE_BYTES,
 )
 from aws_durable_execution_sdk_python_testing.exceptions import (
     DurableFunctionsTestError,
+    InvalidInvocationOutputError,
     InvalidParameterValueException,
     ResourceNotFoundException,
 )
 from aws_durable_execution_sdk_python_testing.execution import OperationPaginatorState
-from aws_durable_execution_sdk_python_testing.model import LambdaContext
+from aws_durable_execution_sdk_python_testing.model import (
+    LambdaContext,
+    executed_version,
+)
 
 
 if TYPE_CHECKING:
@@ -35,24 +40,66 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python_testing.execution import Execution
 
 
-# Max Lambda function timeout is 15 minutes (900s); we give headroom for
-# network round-trip and RIE startup.
-_LAMBDA_READ_TIMEOUT_SECONDS = 960
-_LAMBDA_CLIENT_CONFIG = Config(
-    read_timeout=_LAMBDA_READ_TIMEOUT_SECONDS,
-    retries={"max_attempts": 0},
+# Every Invoke the runner sends is one Lambda invocation: a handler
+# invocation, or a chained invoke of a non-durable target. The client
+# waits for it to return, so the read timeout exceeds the emulated
+# function timeout (``--invocation-timeout``, default 900 s) by a fixed
+# headroom for the network round-trip and RIE startup.
+DEFAULT_INVOCATION_TIMEOUT_SECONDS = 900
+LAMBDA_READ_TIMEOUT_HEADROOM_SECONDS = 60
+
+
+def read_timeout_for(invocation_timeout_seconds: int) -> int:
+    """Client read timeout that outlasts one invocation of ``invocation_timeout_seconds``."""
+    return invocation_timeout_seconds + LAMBDA_READ_TIMEOUT_HEADROOM_SECONDS
+
+
+DEFAULT_LAMBDA_READ_TIMEOUT_SECONDS = read_timeout_for(
+    DEFAULT_INVOCATION_TIMEOUT_SECONDS
 )
 
+# Request header on every handler invocation. To a Lambda-compatible
+# endpoint, a caller's Invoke of a durable function starts a new
+# execution. A handler invocation is an Invoke of that function whose
+# payload is a durable invocation input; the endpoint must run the
+# handler once with it and return the handler's output. This header is
+# how the runner says so. Endpoints that never start executions ignore it.
+INVOCATION_MARKER_HEADER = "X-Dex-Handler-Invoke"
+INVOCATION_MARKER_VALUE = "true"
 
-def create_lambda_client(endpoint_url: str | None, region_name: str) -> Any:
-    """Create a boto3 Lambda client configured for durable function invocations."""
 
-    return boto3.client(
+def _add_invocation_marker(params: dict[str, Any], **_kwargs: Any) -> None:
+    """botocore ``before-call`` hook: mark the request as a handler invocation."""
+    params.setdefault("headers", {})[INVOCATION_MARKER_HEADER] = INVOCATION_MARKER_VALUE
+
+
+def create_lambda_client(
+    endpoint_url: str | None,
+    region_name: str,
+    read_timeout_seconds: int = DEFAULT_LAMBDA_READ_TIMEOUT_SECONDS,
+    *,
+    mark_invocations: bool = True,
+) -> Any:
+    """Create a boto3 Lambda client for the runner's Invoke calls.
+
+    ``read_timeout_seconds`` bounds one Invoke. With ``mark_invocations``
+    every Invoke carries :data:`INVOCATION_MARKER_HEADER`; the client
+    that invokes non-durable chained targets passes ``False`` so those
+    look like any caller's Invoke.
+    """
+
+    client: Any = boto3.client(
         "lambda",
         endpoint_url=endpoint_url,
         region_name=region_name,
-        config=_LAMBDA_CLIENT_CONFIG,
+        config=Config(
+            read_timeout=read_timeout_seconds,
+            retries={"max_attempts": 0},
+        ),
     )
+    if mark_invocations:
+        client.meta.events.register("before-call.lambda.Invoke", _add_invocation_marker)
+    return client
 
 
 @dataclass(frozen=True)
@@ -62,8 +109,74 @@ class InvokeResponse:
     invocation_output: DurableExecutionInvocationOutput
     request_id: str
 
+    @classmethod
+    def from_output(cls, output: Any, request_id: str) -> InvokeResponse:
+        """Create from the value a handler returned.
 
-def create_test_lambda_context() -> LambdaContext:
+        Raises:
+            InvalidInvocationOutputError: If the value is not an object with
+                a known ``Status`` and, if present, an object ``Error``.
+        """
+        try:
+            invocation_output = DurableExecutionInvocationOutput.from_dict(output)
+            # from_dict treats any falsey Error as absent, but only a missing
+            # or null Error is. An empty object is kept, so SUCCEEDED with it
+            # fails validation; a value that is not an object raises here.
+            error: Any = output.get("Error")
+            if error is not None and invocation_output.error is None:
+                invocation_output = replace(
+                    invocation_output, error=ErrorObject.from_dict(error)
+                )
+        except (AttributeError, TypeError, ValueError) as e:
+            msg: str = f"Invalid invocation output: {e}"
+            raise InvalidInvocationOutputError(msg, request_id) from e
+        return cls(invocation_output=invocation_output, request_id=request_id)
+
+    @classmethod
+    def from_payload(cls, payload: bytes, request_id: str) -> InvokeResponse:
+        """Create from the payload a Lambda invocation returned.
+
+        Raises:
+            InvalidInvocationOutputError: If the payload is not UTF-8 JSON or
+                not a valid invocation output.
+        """
+        try:
+            # UnicodeDecodeError is a ValueError.
+            output: Any = json.loads(payload.decode("utf-8"))
+        except ValueError as e:
+            msg: str = f"Invalid invocation output: {e}"
+            raise InvalidInvocationOutputError(msg, request_id) from e
+        return cls.from_output(output, request_id)
+
+
+# Values the in-process Lambda context reports when the caller gives none.
+DEFAULT_TEST_REGION = "us-west-2"
+DEFAULT_TEST_ACCOUNT_ID = "123456789012"
+DEFAULT_TEST_FUNCTION_NAME = "test-function"
+
+
+def create_test_lambda_context(
+    *,
+    region: str = DEFAULT_TEST_REGION,
+    account_id: str = DEFAULT_TEST_ACCOUNT_ID,
+    function_name: str = DEFAULT_TEST_FUNCTION_NAME,
+    tenant_id: str | None = None,
+) -> LambdaContext:
+    """Build the Lambda context handed to an in-process handler.
+
+    ``function_name`` is the identifier the function is invoked by:
+    ``name`` or ``name:qualifier``. Lambda fills ``function_name`` with
+    the bare name, ``function_version`` with the version that runs, and
+    ``invoked_function_arn`` with the ARN as invoked, so target code that
+    reads them sees the same values here. The runner keeps no versions:
+    a numeric qualifier is reported as the version, anything else
+    (no qualifier, ``$LATEST``, an alias) as ``$LATEST``.
+
+    ``tenant_id`` is the execution's or invoke's tenant; ``None`` means
+    the invocation had none, as in Lambda.
+    """
+    bare_name, _, qualifier = function_name.partition(":")
+    function_version: str = executed_version(qualifier)
     # Create client context as a dictionary, not as objects
     # LambdaContext.__init__ expects dictionaries and will create the objects internally
     client_context_dict = {
@@ -87,8 +200,12 @@ def create_test_lambda_context() -> LambdaContext:
         aws_request_id="test-invoke-12345",
         client_context=client_context_dict,
         identity=cognito_identity_dict,
-        invoked_function_arn="arn:aws:lambda:us-west-2:123456789012:function:test-function",
-        tenant_id="test-tenant-789",
+        function_name=bare_name,
+        function_version=function_version,
+        invoked_function_arn=(
+            f"arn:aws:lambda:{region}:{account_id}:function:{function_name}"
+        ),
+        tenant_id=tenant_id,
     )
 
 
@@ -102,10 +219,17 @@ class Invoker(Protocol):
         function_name: str,
         input: DurableExecutionInvocationInput,
         endpoint_url: str | None = None,
+        tenant_id: str | None = None,
+        account_id: str | None = None,
+        region_name: str | None = None,
     ) -> InvokeResponse: ...  # pragma: no cover
 
     def update_endpoint(
         self, endpoint_url: str, region_name: str
+    ) -> None: ...  # pragma: no cover
+
+    def inherit_endpoint(
+        self, child_execution_arn: str, parent_execution_arn: str
     ) -> None: ...  # pragma: no cover
 
 
@@ -115,10 +239,31 @@ class InProcessInvoker(Invoker):
         handler: Callable,
         service_client: InMemoryServiceClient,
         max_page_bytes: int = DEFAULT_MAX_INVOCATION_PAGE_BYTES,
+        region: str = DEFAULT_TEST_REGION,
     ):
         self.handler = handler
+        self._region = region
         self.service_client = service_client
         self._max_page_bytes = max_page_bytes
+        # Named handlers for chained-invoke targets. The root handler
+        # remains the fallback for the execution under test.
+        self._handlers: dict[str, Callable] = {}
+
+    def register(self, function_name: str, handler: Callable) -> None:
+        """Register ``handler`` to be resolved by ``function_name``."""
+        self._handlers[function_name] = handler
+
+    def _resolve_handler(self, function_name: str) -> Callable:
+        """The handler for ``function_name``, which may carry a qualifier.
+
+        A registration under the qualified identifier wins; otherwise
+        the bare name's registration serves every qualifier; otherwise
+        the runner's own handler.
+        """
+        handler: Callable | None = self._handlers.get(function_name)
+        if handler is None:
+            handler = self._handlers.get(function_name.split(":", 1)[0])
+        return handler if handler is not None else self.handler
 
     def create_invocation_input(
         self, execution: Execution
@@ -139,23 +284,33 @@ class InProcessInvoker(Invoker):
 
     def invoke(
         self,
-        function_name: str,  # noqa: ARG002
+        function_name: str,
         input: DurableExecutionInvocationInput,
         endpoint_url: str | None = None,  # noqa: ARG002
+        tenant_id: str | None = None,
+        account_id: str | None = None,
+        region_name: str | None = None,  # noqa: ARG002 — the context reports the runner's
     ) -> InvokeResponse:
-        # TODO: reasses if function_name will be used in future
         input_with_client = DurableExecutionInvocationInputWithClient.from_durable_execution_invocation_input(
             input, self.service_client
         )
-        context = create_test_lambda_context()
-        response_dict = self.handler(input_with_client, context)
-        output = DurableExecutionInvocationOutput.from_dict(response_dict)
-        return InvokeResponse(
-            invocation_output=output, request_id=context.aws_request_id
+        context = create_test_lambda_context(
+            region=self._region,
+            account_id=account_id or DEFAULT_TEST_ACCOUNT_ID,
+            function_name=function_name,
+            tenant_id=tenant_id,
         )
+        handler: Callable = self._resolve_handler(function_name)
+        response_dict = handler(input_with_client, context)
+        return InvokeResponse.from_output(response_dict, context.aws_request_id)
 
     def update_endpoint(self, endpoint_url: str, region_name: str) -> None:
         """No-op for in-process invoker."""
+
+    def inherit_endpoint(
+        self, child_execution_arn: str, parent_execution_arn: str
+    ) -> None:
+        """No-op for in-process invoker: there is no endpoint to inherit."""
 
 
 class LambdaInvoker(Invoker):
@@ -163,14 +318,35 @@ class LambdaInvoker(Invoker):
         self,
         lambda_client: Any,
         max_page_bytes: int = DEFAULT_MAX_INVOCATION_PAGE_BYTES,
+        read_timeout_seconds: int = DEFAULT_LAMBDA_READ_TIMEOUT_SECONDS,
+        endpoint_url: str = "",
+        region_name: str = "",
     ) -> None:
+        """``endpoint_url`` and ``region_name`` describe ``lambda_client``."""
         self.lambda_client = lambda_client
         self._max_page_bytes = max_page_bytes
-        # Maps execution_arn -> endpoint for that execution
-        # Maps endpoint -> client to reuse clients across executions
-        self._execution_endpoints: dict[str, str] = {}
-        self._endpoint_clients: dict[str, Any] = {}
-        self._current_endpoint: str = ""  # Track current endpoint for new executions
+        # Applied to every client this invoker creates for another endpoint.
+        self._read_timeout_seconds = read_timeout_seconds
+        # Clients are keyed by (endpoint URL, region): the region is the
+        # signing region, so the same URL in another region is another
+        # client. Marked clients invoke handlers; unmarked clients invoke
+        # non-durable chained targets.
+        self._endpoint_clients: dict[tuple[str, str], Any] = {}
+        self._unmarked_clients: dict[tuple[str, str], Any] = {}
+        # An execution without its own endpoint is pinned, at its first
+        # invocation, to the endpoint current at that moment. Every later
+        # handler invocation and every chained target it dispatches use
+        # the pinned endpoint, so an update_endpoint call while it runs
+        # does not split it across endpoints. A child it starts inherits
+        # the pin (inherit_endpoint). An execution with its own endpoint
+        # is pinned at its first chained dispatch instead: the pin then
+        # covers only its chained targets and children, and its own
+        # endpoint is signed in the execution's region.
+        self._execution_endpoints: dict[str, tuple[str, str]] = {}
+        # Endpoint and region for executions not yet pinned.
+        self._current: tuple[str, str] = (endpoint_url, region_name)
+        if endpoint_url:
+            self._endpoint_clients[self._current] = lambda_client
         self._lock = Lock()
 
     @staticmethod
@@ -178,26 +354,79 @@ class LambdaInvoker(Invoker):
         endpoint_url: str,
         region_name: str,
         max_page_bytes: int = DEFAULT_MAX_INVOCATION_PAGE_BYTES,
+        read_timeout_seconds: int = DEFAULT_LAMBDA_READ_TIMEOUT_SECONDS,
     ) -> LambdaInvoker:
         """Create with the boto lambda client."""
-        invoker = LambdaInvoker(
-            create_lambda_client(endpoint_url, region_name),
+        return LambdaInvoker(
+            create_lambda_client(endpoint_url, region_name, read_timeout_seconds),
             max_page_bytes=max_page_bytes,
+            read_timeout_seconds=read_timeout_seconds,
+            endpoint_url=endpoint_url,
+            region_name=region_name,
         )
-        invoker._current_endpoint = endpoint_url
-        invoker._endpoint_clients[endpoint_url] = invoker.lambda_client
-        return invoker
 
     def update_endpoint(self, endpoint_url: str, region_name: str) -> None:
-        """Update the Lambda client endpoint."""
-        # Cache client by endpoint to reuse across executions
+        """Update the Lambda endpoint and region for executions not yet pinned."""
+        key: tuple[str, str] = (endpoint_url, region_name)
         with self._lock:
-            if endpoint_url not in self._endpoint_clients:
-                self._endpoint_clients[endpoint_url] = create_lambda_client(
-                    endpoint_url, region_name
+            self.lambda_client = self._marked_client(key)
+            self._current = key
+
+    def _marked_client(self, key: tuple[str, str]) -> Any:
+        """Client that marks its invokes as handler invocations. Caller holds the lock."""
+        client: Any = self._endpoint_clients.get(key)
+        if client is None:
+            client = create_lambda_client(
+                key[0] or None, key[1], self._read_timeout_seconds
+            )
+            self._endpoint_clients[key] = client
+        return client
+
+    def _pinned_endpoint(self, durable_execution_arn: str) -> tuple[str, str]:
+        """The (endpoint, region) ``durable_execution_arn`` is pinned to, pinning it now if needed."""
+        with self._lock:
+            pinned: tuple[str, str] | None = self._execution_endpoints.get(
+                durable_execution_arn
+            )
+            if pinned is None:
+                pinned = self._current
+                self._execution_endpoints[durable_execution_arn] = pinned
+            return pinned
+
+    def inherit_endpoint(
+        self, child_execution_arn: str, parent_execution_arn: str
+    ) -> None:
+        """Pin a chained child to the endpoint its parent's chained targets go to.
+
+        The parent is pinned now if it has no pin yet. So the parent's
+        plain targets, the child's handler invocations, and the child's
+        own chained dispatches all use one endpoint and region, whatever
+        update_endpoint sets for executions started later.
+        """
+        pinned: tuple[str, str] = self._pinned_endpoint(parent_execution_arn)
+        with self._lock:
+            self._execution_endpoints[child_execution_arn] = pinned
+
+    def unmarked_client_for(self, durable_execution_arn: str) -> Any:
+        """Client for invoking the non-durable chained targets of one execution.
+
+        The client targets the endpoint and region the execution is
+        pinned to, so a target goes where the execution's own handler
+        invocations go. It carries no invocation marker, so the endpoint
+        runs the target as any caller's Invoke.
+        """
+        key: tuple[str, str] = self._pinned_endpoint(durable_execution_arn)
+        with self._lock:
+            client: Any = self._unmarked_clients.get(key)
+            if client is None:
+                client = create_lambda_client(
+                    key[0] or None,
+                    key[1],
+                    self._read_timeout_seconds,
+                    mark_invocations=False,
                 )
-            self.lambda_client = self._endpoint_clients[endpoint_url]
-        self._current_endpoint = endpoint_url
+                self._unmarked_clients[key] = client
+            return client
 
     def _get_client_for_execution(
         self,
@@ -205,30 +434,28 @@ class LambdaInvoker(Invoker):
         lambda_endpoint: str | None = None,
         region_name: str | None = None,
     ) -> Any:
-        """Get the appropriate client for this execution."""
-        # Use provided endpoint or fall back to cached endpoint for this execution
+        """Get the appropriate client for this execution.
+
+        An execution with its own ``lambda_endpoint`` is invoked there,
+        signed in ``region_name``, the execution's region. That endpoint
+        serves the execution's function alone (under sam it is the
+        function's own container), so it is never recorded as the
+        execution's pin: the execution's chained targets are other
+        functions and go to the pinned endpoint, which routes by name.
+        Any other execution is invoked at the endpoint it is pinned to.
+        """
         if lambda_endpoint:
-            if lambda_endpoint not in self._endpoint_clients:
-                self._endpoint_clients[lambda_endpoint] = create_lambda_client(
-                    lambda_endpoint, region_name or "us-east-1"
-                )
-            return self._endpoint_clients[lambda_endpoint]
-
-        # Fallback to cached endpoint
-        if durable_execution_arn not in self._execution_endpoints:
             with self._lock:
-                if durable_execution_arn not in self._execution_endpoints:
-                    self._execution_endpoints[durable_execution_arn] = (
-                        self._current_endpoint
-                    )
+                return self._marked_client(
+                    (lambda_endpoint, region_name or "us-east-1")
+                )
 
-        endpoint = self._execution_endpoints[durable_execution_arn]
-
-        # If no endpoint configured, fall back to default client
-        if not endpoint:
+        key: tuple[str, str] = self._pinned_endpoint(durable_execution_arn)
+        if not key[0]:
+            # Built with a client and no endpoint: nothing else to pick.
             return self.lambda_client
-
-        return self._endpoint_clients[endpoint]
+        with self._lock:
+            return self._marked_client(key)
 
     def create_invocation_input(
         self, execution: Execution
@@ -250,13 +477,19 @@ class LambdaInvoker(Invoker):
         function_name: str,
         input: DurableExecutionInvocationInput,
         endpoint_url: str | None = None,
+        tenant_id: str | None = None,
+        account_id: str | None = None,  # noqa: ARG002 — identity is the endpoint's
+        region_name: str | None = None,
     ) -> InvokeResponse:
         """Invoke AWS Lambda function and return durable execution result.
 
         Args:
             function_name: Name of the Lambda function to invoke
             input: Durable execution invocation input
-            endpoint_url: Lambda endpoint url
+            endpoint_url: The execution's own Lambda endpoint, if it has one
+            tenant_id: The execution's tenant, sent as the Invoke TenantId
+            account_id: The execution's account; unused, the endpoint owns identity
+            region_name: The execution's region; signs an Invoke at ``endpoint_url``
 
         Returns:
             InvokeResponse: Response containing invocation output and request ID
@@ -264,6 +497,7 @@ class LambdaInvoker(Invoker):
         Raises:
             ResourceNotFoundException: If function does not exist
             InvalidParameterValueException: If parameters are invalid
+            InvalidInvocationOutputError: If the function's output cannot be parsed
             DurableFunctionsTestError: For other invocation failures
         """
 
@@ -274,16 +508,20 @@ class LambdaInvoker(Invoker):
 
         # Get the client for this execution
         client = self._get_client_for_execution(
-            input.durable_execution_arn, endpoint_url
+            input.durable_execution_arn, endpoint_url, region_name
         )
+
+        invoke_kwargs: dict[str, Any] = {
+            "FunctionName": function_name,
+            "InvocationType": "RequestResponse",  # Synchronous invocation
+            "Payload": json.dumps(input.to_json_dict()),
+        }
+        if tenant_id is not None:
+            invoke_kwargs["TenantId"] = tenant_id
 
         try:
             # Invoke AWS Lambda function using standard invoke method
-            response = client.invoke(
-                FunctionName=function_name,
-                InvocationType="RequestResponse",  # Synchronous invocation
-                Payload=json.dumps(input.to_json_dict()),
-            )
+            response = client.invoke(**invoke_kwargs)
 
             # Check HTTP status code
             status_code = response.get("StatusCode")
@@ -297,21 +535,22 @@ class LambdaInvoker(Invoker):
                 msg = f"Lambda invocation failed with status {status_code}: {error_payload}"
                 raise DurableFunctionsTestError(msg)
 
-            # Parse response payload
-            response_payload = response["Payload"].read().decode("utf-8")
-            response_dict = json.loads(response_payload)
+            # Read response payload; from_payload decodes it, below
+            response_payload: bytes = response["Payload"].read()
 
-            # Extract request ID from response headers (x-amzn-RequestId or x-amzn-request-id)
-            headers = response.get("ResponseMetadata", {}).get("HTTPHeaders", {})
-            request_id = (
-                headers.get("x-amzn-RequestId")
+            # botocore puts the request ID in ResponseMetadata and keeps the
+            # response headers with lowercased names.
+            metadata: dict[str, Any] = response.get("ResponseMetadata", {})
+            headers: dict[str, str] = {
+                name.lower(): value
+                for name, value in metadata.get("HTTPHeaders", {}).items()
+            }
+            request_id: str = (
+                metadata.get("RequestId")
+                or headers.get("x-amzn-requestid")
                 or headers.get("x-amzn-request-id")
                 or f"local-{uuid4()}"
             )
-
-            # Convert to DurableExecutionInvocationOutput
-            output = DurableExecutionInvocationOutput.from_dict(response_dict)
-            return InvokeResponse(invocation_output=output, request_id=request_id)
 
         except client.exceptions.ResourceNotFoundException as e:
             msg = f"Function not found: {function_name}"
@@ -366,3 +605,7 @@ class LambdaInvoker(Invoker):
                 raise DurableFunctionsTestError(msg) from e
             msg = f"Unexpected error during Lambda invocation: {e}"
             raise DurableFunctionsTestError(msg) from e
+
+        # Parsed outside the try: an output the service cannot parse fails
+        # the execution, so it must not be reported as a failed invocation.
+        return InvokeResponse.from_payload(response_payload, request_id)

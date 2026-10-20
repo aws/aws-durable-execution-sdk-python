@@ -4,6 +4,7 @@ import json
 
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
+    ChainedInvokeOptions,
     ErrorObject,
     Operation,
     OperationAction,
@@ -15,6 +16,9 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python_testing.checkpoint.validators.checkpoint import (
     MAX_ERROR_PAYLOAD_SIZE_BYTES,
     CheckpointValidator,
+)
+from aws_durable_execution_sdk_python_testing.child_dispatcher import (
+    MAX_CHAINED_INVOKE_PAYLOAD_BYTES,
 )
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
@@ -164,6 +168,71 @@ def test_validate_payload_sizes_error_within_limit():
         )
     ]
     CheckpointValidator.validate_input(updates, execution)
+
+
+def _chained_invoke_start(payload: str) -> OperationUpdate:
+    return OperationUpdate(
+        operation_id="invoke-1",
+        operation_type=OperationType.CHAINED_INVOKE,
+        action=OperationAction.START,
+        payload=payload,
+        chained_invoke_options=ChainedInvokeOptions(
+            function_name="child", tenant_id=None
+        ),
+    )
+
+
+def test_chained_invoke_input_at_the_limit_is_accepted():
+    execution = _create_test_execution()
+    CheckpointValidator.validate_input(
+        [_chained_invoke_start("x" * MAX_CHAINED_INVOKE_PAYLOAD_BYTES)], execution
+    )
+
+
+def test_chained_invoke_input_over_the_limit_is_rejected():
+    """The input limit counts UTF-8 bytes, so a multi-byte payload trips it sooner."""
+    execution = _create_test_execution()
+    over_by_chars = "x" * (MAX_CHAINED_INVOKE_PAYLOAD_BYTES + 1)
+    over_by_bytes = "\u00e9" * (MAX_CHAINED_INVOKE_PAYLOAD_BYTES // 2 + 1)
+    for payload in (over_by_chars, over_by_bytes):
+        with pytest.raises(InvalidParameterValueException) as exc_info:
+            CheckpointValidator.validate_input(
+                [_chained_invoke_start(payload)], execution
+            )
+        assert str(exc_info.value) == (
+            "CHAINED_INVOKE input payload size must be less than or equal to "
+            "1048576 bytes."
+        )
+
+
+def _execution_succeed(payload: str) -> OperationUpdate:
+    return OperationUpdate(
+        operation_id="exec-1",
+        operation_type=OperationType.EXECUTION,
+        action=OperationAction.SUCCEED,
+        payload=payload,
+    )
+
+
+def test_child_execution_output_over_the_limit_is_rejected():
+    """A child of a chained invoke returns at most 1 MiB to its parent."""
+    execution = _create_test_execution()
+    execution.parent_execution_arn = "parent-arn"
+    with pytest.raises(InvalidParameterValueException) as exc_info:
+        CheckpointValidator.validate_input(
+            [_execution_succeed("x" * (MAX_CHAINED_INVOKE_PAYLOAD_BYTES + 1))],
+            execution,
+        )
+    assert str(exc_info.value) == (
+        "Execution output payload size must be less than or equal to 1048576 bytes."
+    )
+
+
+def test_top_level_execution_output_is_not_bound_by_the_chained_invoke_limit():
+    execution = _create_test_execution()
+    CheckpointValidator.validate_input(
+        [_execution_succeed("x" * (MAX_CHAINED_INVOKE_PAYLOAD_BYTES + 1))], execution
+    )
 
 
 def test_validate_duplicate_operation_ids():
@@ -371,7 +440,8 @@ def test_validate_operation_status_transition_invoke():
             action=OperationAction.CANCEL,
         )
     ]
-    CheckpointValidator.validate_input(updates, execution)
+    with pytest.raises(InvalidParameterValueException):
+        CheckpointValidator.validate_input(updates, execution)
 
 
 def test_validate_operation_status_transition_execution():

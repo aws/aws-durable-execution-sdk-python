@@ -138,7 +138,13 @@ def test_log_info_creation_minimal():
 
 def test_log_info_from_operation_identifier():
     """Test LogInfo.from_operation_identifier."""
-    op_id = OperationIdentifier("op123", OperationSubType.STEP, "parent456", "op_name")
+    op_id = OperationIdentifier(
+        "op123",
+        OperationSubType.STEP,
+        "parent456",
+        "op_name",
+        operation_type=OperationType.STEP,
+    )
     log_info = LogInfo.from_operation_identifier(EXECUTION_STATE, op_id, 3)
     assert log_info.execution_state.durable_execution_arn == "arn:aws:test"
     assert log_info.parent_id == "parent456"
@@ -149,7 +155,13 @@ def test_log_info_from_operation_identifier():
 
 def test_log_info_from_operation_identifier_no_attempt():
     """Test LogInfo.from_operation_identifier without attempt."""
-    op_id = OperationIdentifier("op123", OperationSubType.STEP, "parent456", "op_name")
+    op_id = OperationIdentifier(
+        "op123",
+        OperationSubType.STEP,
+        "parent456",
+        "op_name",
+        operation_type=OperationType.STEP,
+    )
     log_info = LogInfo.from_operation_identifier(EXECUTION_STATE, op_id)
     assert log_info.execution_state.durable_execution_arn == "arn:aws:test"
     assert log_info.parent_id == "parent456"

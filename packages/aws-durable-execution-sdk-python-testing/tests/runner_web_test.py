@@ -12,11 +12,20 @@ from aws_durable_execution_sdk_python_testing.cli import CliApp
 from aws_durable_execution_sdk_python_testing.exceptions import (
     DurableFunctionsLocalRunnerError,
 )
-from aws_durable_execution_sdk_python_testing.invoker import _LAMBDA_CLIENT_CONFIG
+from aws_durable_execution_sdk_python_testing.child_dispatcher import (
+    EndpointChildDispatcher,
+    FunctionConfigs,
+    UnconfiguredChildDispatcher,
+)
+from aws_durable_execution_sdk_python_testing.invoker import (
+    DEFAULT_LAMBDA_READ_TIMEOUT_SECONDS,
+    read_timeout_for,
+)
 from aws_durable_execution_sdk_python_testing.runner import (
     WebRunner,
     WebRunnerConfig,
 )
+from aws_durable_execution_sdk_python_testing.stores.base import StoreType
 from aws_durable_execution_sdk_python_testing.web.server import WebServiceConfig
 
 
@@ -416,12 +425,18 @@ def test_should_handle_boto3_client_creation_with_custom_config():
         # Act - Test public behavior
         runner.start()
 
-        # Assert - Verify boto3 client was called with correct parameters
-        mock_boto3_client.assert_called_once_with(
-            "lambda",
-            endpoint_url="http://custom-endpoint:8080",
-            region_name="eu-west-1",
-            config=_LAMBDA_CLIENT_CONFIG,
+        # Assert - Without a chained-invoke configuration only the
+        # handler-invocation client exists; it targets the configured
+        # endpoint and region.
+        assert len(mock_boto3_client.call_args_list) == 1
+        kwargs = mock_boto3_client.call_args.kwargs
+        assert mock_boto3_client.call_args.args == ("lambda",)
+        assert kwargs["endpoint_url"] == "http://custom-endpoint:8080"
+        assert kwargs["region_name"] == "eu-west-1"
+        assert kwargs["config"].read_timeout == DEFAULT_LAMBDA_READ_TIMEOUT_SECONDS
+        assert isinstance(
+            runner._executor._child_dispatcher,  # noqa: SLF001
+            UnconfiguredChildDispatcher,
         )
 
         # Verify public behavior works
@@ -442,15 +457,52 @@ def test_should_handle_boto3_client_creation_with_defaults():
         # Act - Test public behavior
         runner.start()
 
-        # Assert - Verify boto3 client was called with default parameters
-        mock_boto3_client.assert_called_once_with(
-            "lambda",
-            endpoint_url="http://127.0.0.1:3001",  # Default lambda_endpoint value
-            region_name="us-west-2",  # Default value
-            config=_LAMBDA_CLIENT_CONFIG,
-        )
+        # Assert - The client uses the default endpoint and region
+        assert len(mock_boto3_client.call_args_list) == 1
+        kwargs = mock_boto3_client.call_args.kwargs
+        assert kwargs["endpoint_url"] == "http://127.0.0.1:3001"  # Default value
+        assert kwargs["region_name"] == "us-west-2"  # Default value
 
         # Verify public behavior works
+        runner.stop()
+
+
+def test_should_dispatch_plain_targets_with_the_invoker_unmarked_client():
+    """With function configurations, non-durable chained targets use the
+    invoker's unmarked client for the current endpoint, and the read
+    timeout follows the emulated function timeout."""
+    runner_config = WebRunnerConfig(
+        web_service=WebServiceConfig(host="localhost", port=5000),
+        function_configs=FunctionConfigs.from_value(
+            '{"ProcessPayment": {"DurableConfig": {}}, "LookupPrice": {}}'
+        ),
+        invocation_timeout_seconds=5400,
+    )
+    runner = WebRunner(runner_config)
+
+    with patch("boto3.client") as mock_boto3_client:
+        handler_client, dispatch_client = Mock(), Mock()
+        mock_boto3_client.side_effect = [handler_client, dispatch_client]
+
+        runner.start()
+
+        dispatcher = runner._executor._child_dispatcher  # noqa: SLF001
+        assert isinstance(dispatcher, EndpointChildDispatcher)
+        configs = dispatcher._function_configs.by_name  # noqa: SLF001
+        assert configs["ProcessPayment"].is_durable
+        assert not configs["LookupPrice"].is_durable
+        # The dispatch client is created on first use, for the same endpoint
+        # and region as the handler client, with the same read timeout.
+        assert dispatcher._client_provider("arn:parent") is dispatch_client  # noqa: SLF001
+        assert len(mock_boto3_client.call_args_list) == 2
+        for c in mock_boto3_client.call_args_list:
+            assert c.kwargs["endpoint_url"] == runner_config.lambda_endpoint
+            assert c.kwargs["region_name"] == runner_config.local_runner_region
+            assert c.kwargs["config"].read_timeout == read_timeout_for(5400) == 5460
+        # The handler client marks its invokes; the dispatch client does not.
+        handler_client.meta.events.register.assert_called_once()
+        dispatch_client.meta.events.register.assert_not_called()
+
         runner.stop()
 
 
@@ -484,8 +536,9 @@ def test_should_create_boto3_client_during_start():
         # Act - Test public behavior
         runner.start()
 
-        # Assert - Verify boto3 client was created
-        mock_boto3_client.assert_called_once()
+        # Assert - One client, for handler invocations. (A dispatch client
+        # exists only with a chained-invoke configuration.)
+        assert mock_boto3_client.call_count == 1
 
         # Verify public behavior works
         runner.stop()
@@ -682,7 +735,11 @@ def test_should_create_all_required_dependencies_during_start():
         mock_store_class.assert_called_once()
         mock_scheduler_class.assert_called_once()
         mock_invoker_class.assert_called_once_with(
-            mock_client, max_page_bytes=5 * 1024 * 1024
+            mock_client,
+            max_page_bytes=5 * 1024 * 1024,
+            read_timeout_seconds=DEFAULT_LAMBDA_READ_TIMEOUT_SECONDS,
+            endpoint_url=runner_config.lambda_endpoint,
+            region_name=runner_config.local_runner_region,
         )
         # Verify Executor was called with the expected parameters including checkpoint_processor
         assert mock_executor_class.call_count == 1
@@ -768,17 +825,19 @@ def test_should_pass_correct_boto3_client_to_lambda_invoker():
         # Act
         runner.start()
 
-        # Assert - Verify boto3 client was created with correct parameters
-        mock_boto3_client.assert_called_once_with(
-            "lambda",
-            endpoint_url="http://test-endpoint:7777",
-            region_name="ap-southeast-2",
-            config=_LAMBDA_CLIENT_CONFIG,
-        )
-
-        # Verify LambdaInvoker was created with the client
+        # Assert - The handler-invocation client is the one handed to
+        # LambdaInvoker, along with the read timeout it must apply to any
+        # per-endpoint client it creates later.
+        kwargs = mock_boto3_client.call_args.kwargs
+        assert mock_boto3_client.call_args.args == ("lambda",)
+        assert kwargs["endpoint_url"] == "http://test-endpoint:7777"
+        assert kwargs["region_name"] == "ap-southeast-2"
         mock_invoker_class.assert_called_once_with(
-            mock_client, max_page_bytes=5 * 1024 * 1024
+            mock_client,
+            max_page_bytes=5 * 1024 * 1024,
+            read_timeout_seconds=DEFAULT_LAMBDA_READ_TIMEOUT_SECONDS,
+            endpoint_url=runner_config.lambda_endpoint,
+            region_name=runner_config.local_runner_region,
         )
 
         # Cleanup
@@ -1755,3 +1814,24 @@ def test_state_transitions_prevent_invalid_operations():
             DurableFunctionsLocalRunnerError, match="Server not started"
         ):
             runner.serve_forever()
+
+
+def test_web_runner_config_positional_construction_is_unchanged():
+    """function_configs is the last field, so a caller that built the
+    config positionally before it existed gets the same values."""
+    config = WebRunnerConfig(
+        WebServiceConfig(host="h", port=1),
+        "http://lambda:3001",
+        "http://runner:5000",
+        "eu-west-1",
+        "local",
+        StoreType.MEMORY,
+        None,
+        60,
+        True,
+        1024,
+    )
+
+    assert config.skip_time is True
+    assert config.max_invocation_page_bytes == 1024
+    assert config.function_configs is None

@@ -3,24 +3,26 @@
 from __future__ import annotations
 
 import functools
+import heapq
+import itertools
 import json
 import logging
 import queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from threading import Lock
 from typing import TYPE_CHECKING, Callable, NoReturn
 
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
-    CheckpointError,
     DurableExecutionsError,
     DurableOperationError,
     GetExecutionStateError,
     OrphanedChildException,
+    SuspendExecution,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -36,6 +38,8 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.plugin import (
     PluginExecutor,
+    PropagationInput,
+    PropagationMetadata,
     UserFunctionOutcome,
 )
 from aws_durable_execution_sdk_python.threading import CompletionEvent
@@ -47,6 +51,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Longest wait on an empty queue before re-checking the shutdown signal.
+_STOP_SIGNAL_POLL_SECONDS = 0.1
+
+# Longest wait on an empty queue when a caller is already blocked on the batch.
+# Long enough for sibling branch threads to arrive. Short enough that the
+# blocked caller stays fast.
+_BLOCKED_CALLER_WAIT_SECONDS = 0.001
+
 
 @dataclass(frozen=True)
 class CheckpointBatcherConfig:
@@ -54,7 +66,10 @@ class CheckpointBatcherConfig:
 
     Attributes:
         max_batch_size_bytes: Maximum batch size in bytes (default: 750KB)
-        max_batch_time_seconds: Maximum time to wait before flushing batch (default: 1.0 second)
+        max_batch_time_seconds: Longest a batch keeps accumulating (default:
+            1.0 second). The collector flushes as soon as a wait on the queue
+            finds it empty. So this value only matters while operations keep
+            arriving.
         max_batch_operations: Maximum number of operations per batch (default: 250)
     """
 
@@ -74,6 +89,82 @@ class QueuedOperation:
 
     operation_update: OperationUpdate | None
     completion_event: CompletionEvent | None = None
+
+
+class _Signal(Enum):
+    """Control items that travel through the checkpoint queue, never sent."""
+
+    # A refresh was scheduled. The collector re-reads the heap and its timeout.
+    REFRESH_WAKE = "refresh_wake"
+
+
+@dataclass(frozen=True)
+class ScheduledRefresh:
+    """Handle for a delayed empty checkpoint from ExecutionState.schedule_refresh.
+
+    Internal to the SDK. Not part of the public API.
+
+    A response fetched before earliest_check_time cannot show the wait complete,
+    so the collector holds the checkpoint until then. wait() blocks until it has
+    been sent and the operations reloaded, or raises the error that stopped
+    checkpointing. cancel() drops it if it has not been sent yet. One already in
+    flight completes normally.
+    """
+
+    earliest_check_time: float
+    completion_event: CompletionEvent
+    cancelled: threading.Event = field(default_factory=threading.Event)
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self.completion_event.wait(timeout)
+
+    def is_set(self) -> bool:
+        return self.completion_event.is_set()
+
+    def is_cancelled(self) -> bool:
+        return self.cancelled.is_set()
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+
+
+class _BatchAccumulator:
+    """The operations of one checkpoint request, with the limit accounting.
+
+    Empty checkpoints carry no bytes. The first one counts toward the operation
+    limit and later ones do not, so a resume wave of any width fits one request.
+    """
+
+    def __init__(self, config: CheckpointBatcherConfig) -> None:
+        self._config = config
+        self.operations: list[QueuedOperation] = []
+        self.total_size = 0
+        self.effective_count = 0
+        self.has_empty = False
+        # A sync checkpoint's caller is blocked until the batch persists, so it
+        # cannot queue more work. Waiting long for more work is then pointless.
+        self.has_blocked_caller = False
+
+    def is_empty(self) -> bool:
+        return not self.operations
+
+    def is_full(self) -> bool:
+        return self.effective_count >= self._config.max_batch_operations
+
+    def fits(self, size: int) -> bool:
+        return self.total_size + size <= self._config.max_batch_size_bytes
+
+    def add(self, op: QueuedOperation, size: int = 0) -> None:
+        self.operations.append(op)
+        if op.completion_event is not None:
+            self.has_blocked_caller = True
+        if op.operation_update is None:
+            if not self.has_empty:
+                self.effective_count += 1
+                self.has_empty = True
+            return
+        self.total_size += size
+        self.effective_count += 1
 
 
 # Statuses indicating an operation has finished and will not change on a later
@@ -266,7 +357,10 @@ class ReplayStatus(Enum):
 
 
 class ExecutionState:
-    """Get, set and maintain execution state. This is mutable. Create and check checkpoints."""
+    """Get, set and maintain execution state. This is mutable. Create and check checkpoints.
+
+    Internal to the SDK. Not part of the public API.
+    """
 
     def __init__(
         self,
@@ -291,13 +385,23 @@ class ExecutionState:
         )
 
         # Checkpoint batching components
-        self._checkpoint_queue: queue.Queue[QueuedOperation] = queue.Queue()
+        self._checkpoint_queue: queue.Queue[QueuedOperation | _Signal] = queue.Queue()
         self._overflow_queue: queue.Queue[QueuedOperation] = queue.Queue()
+        # Refreshes not yet sent, ordered by earliest_check_time. Producers push
+        # and the collector pops, so every access holds _completion_lock.
+        self._pending_refreshes: list[tuple[float, int, ScheduledRefresh]] = []
+        self._pending_refresh_seq = itertools.count()
+        # True while a REFRESH_WAKE is in the queue, so many refreshes make one.
+        self._refresh_wake_enqueued = False
         self._checkpointing_stopped: threading.Event = threading.Event()
         self._checkpointing_failed: CompletionEvent = CompletionEvent()
-        # Set once the service confirms the execution has completed (a checkpoint
-        # response with no token). No further checkpoint can succeed afterward.
+        # Set when a batch carrying the execution's terminal update receives
+        # a response with no token. No further checkpoint can succeed afterward.
         self._execution_completed: threading.Event = threading.Event()
+        # Set once a checkpoint response omits the token without carrying the
+        # execution's own terminal update: this invocation must stop
+        # checkpointing and report PENDING.
+        self._checkpoint_token_revoked: threading.Event = threading.Event()
         # Serializes the execution-completed check with enqueueing so a checkpoint
         # is never enqueued after _settle_after_execution_completed drains the queue.
         self._completion_lock: Lock = Lock()
@@ -491,6 +595,19 @@ class ExecutionState:
 
         self._plugin_executor.on_operation_replay(operation)
 
+    def provide_propagation_metadata(
+        self, identifier: OperationIdentifier, target_function_name: str
+    ) -> PropagationMetadata:
+        """Collect metadata for a new operation before its START is checkpointed."""
+        return self._plugin_executor.provide_propagation_metadata(
+            PropagationInput(
+                execution_arn=self.durable_execution_arn,
+                operation_id=identifier.operation_id,
+                parent_operation_id=identifier.parent_id,
+                target_function_name=target_function_name,
+            )
+        )
+
     def emit_child_context_end_hook(
         self,
         operation_identifier: OperationIdentifier,
@@ -561,6 +678,19 @@ class ExecutionState:
             operation_id=operation_update.operation_id,
         )
 
+    @property
+    def is_checkpoint_token_revoked(self) -> bool:
+        """Return whether the service has withdrawn this invocation's checkpoint token."""
+        return self._checkpoint_token_revoked.is_set()
+
+    def _reject_if_checkpoint_token_revoked(self) -> None:
+        """Raise SuspendExecution if the checkpoint token is gone."""
+        if not self._checkpoint_token_revoked.is_set():
+            return
+        raise SuspendExecution(
+            "Checkpoint token revoked by the service; ending invocation with PENDING."
+        )
+
     def create_checkpoint(
         self,
         operation_update: OperationUpdate | None = None,
@@ -616,6 +746,8 @@ class ExecutionState:
                 the stored failure is re-raised to the caller. For a synchronous
                 checkpoint, a later background failure also surfaces here through
                 the completion event.
+            SuspendExecution: If a checkpoint response did not include a
+                checkpoint token and this invocation must stop and answer PENDING.
 
         Examples:
             # Synchronous checkpoint (default, safe)
@@ -670,6 +802,10 @@ class ExecutionState:
         # orphaned operation does not emit a START with no matching completion
         # (mirrors the parent-done check above). The _completion_lock block below
         # re-checks to close the race with a concurrent completion.
+        #
+        # Check token revocation before execution completion. Parent completion
+        # and background checkpoint failure have already been checked above.
+        self._reject_if_checkpoint_token_revoked()
         self._reject_if_execution_completed(operation_update)
 
         # Conditionally create completion event based on is_sync parameter
@@ -678,11 +814,15 @@ class ExecutionState:
         )
 
         if operation_update is not None:
+            # Read the one entry under the lock. self.operations would copy the
+            # whole map on every checkpoint to look up a single operation.
+            with self._operations_lock:
+                previous_operation = self._operations.get(operation_update.operation_id)
             # Dispatch before queueing so START strictly precedes any user
             # function attempt, regardless of checkpoint synchronization mode.
             self._plugin_executor.on_operation_action(
                 operation_update,
-                previous_operation=self.operations.get(operation_update.operation_id),
+                previous_operation=previous_operation,
             )
 
         # Create wrapper object for queue
@@ -699,6 +839,7 @@ class ExecutionState:
             if self._checkpointing_failed.is_set():
                 # Raises the stored BackgroundThreadError.
                 self._checkpointing_failed.wait()
+            self._reject_if_checkpoint_token_revoked()
             self._reject_if_execution_completed(operation_update)
             if operation_update is None:
                 self._checkpoint_queue.put(queued_op)
@@ -719,6 +860,82 @@ class ExecutionState:
             completion_event.wait()
         else:
             logger.debug("Enqueued checkpoint operation for asynchronous processing")
+
+    def schedule_refresh(self, earliest_check_time: float) -> ScheduledRefresh:
+        """Enqueue a delayed empty checkpoint and return at once.
+
+        The collector holds it until earliest_check_time, then sends it with
+        every other one due at that time in one request, however far apart they
+        were requested. One requested after its time joins the next batch. The
+        caller waits on the handle when it needs the refreshed operations, and
+        cancels it if it stops needing them.
+
+        Raises:
+            SuspendExecution: If a checkpoint response did not include a
+                checkpoint token and this invocation must stop and answer PENDING.
+        """
+        refresh = ScheduledRefresh(earliest_check_time, CompletionEvent())
+        with self._completion_lock:
+            if self._checkpointing_failed.is_set():
+                self._checkpointing_failed.wait()
+            self._reject_if_checkpoint_token_revoked()
+            self._reject_if_execution_completed(None)
+            if self._checkpointing_stopped.is_set():
+                raise OrphanedChildException(
+                    "Checkpointing stopped. The refresh will not be processed.",
+                    operation_id="",
+                )
+            heapq.heappush(
+                self._pending_refreshes,
+                (earliest_check_time, next(self._pending_refresh_seq), refresh),
+            )
+            if not self._refresh_wake_enqueued:
+                self._refresh_wake_enqueued = True
+                self._checkpoint_queue.put(_Signal.REFRESH_WAKE)
+        return refresh
+
+    def _consume_refresh_wake(self) -> None:
+        with self._completion_lock:
+            self._refresh_wake_enqueued = False
+
+    @staticmethod
+    def _settle_cancelled_refresh(refresh: ScheduledRefresh) -> None:
+        # Nobody waits on a cancelled refresh by contract. Setting the event
+        # keeps a waiter that broke the contract from blocking forever.
+        refresh.completion_event.set()
+
+    def _seconds_until_next_refresh(self, now: float) -> float | None:
+        # A cancelled refresh must not set the wake time. Each needless wake
+        # would extend the collection by one more read.
+        with self._completion_lock:
+            while (
+                self._pending_refreshes and self._pending_refreshes[0][2].is_cancelled()
+            ):
+                self._settle_cancelled_refresh(
+                    heapq.heappop(self._pending_refreshes)[2]
+                )
+            if not self._pending_refreshes:
+                return None
+            return self._pending_refreshes[0][0] - now
+
+    def _add_due_refreshes(self, batch: _BatchAccumulator, now: float) -> int:
+        """Move every refresh whose time has come into the batch. Returns how many."""
+        added = 0
+        with self._completion_lock:
+            while self._pending_refreshes and self._pending_refreshes[0][0] <= now:
+                refresh = heapq.heappop(self._pending_refreshes)[2]
+                if refresh.is_cancelled():
+                    self._settle_cancelled_refresh(refresh)
+                    continue
+                batch.add(QueuedOperation(None, refresh.completion_event))
+                added += 1
+        return added
+
+    def _drain_pending_refreshes(self) -> list[ScheduledRefresh]:
+        """Take every unsent refresh. The caller holds _completion_lock."""
+        drained = [entry[2] for entry in self._pending_refreshes]
+        self._pending_refreshes.clear()
+        return drained
 
     def create_checkpoint_sync(
         self,
@@ -804,15 +1021,20 @@ class ExecutionState:
         waiters. The checkpoint token is held locally and advanced after each
         successful batch.
 
-        The loop stops on any of three conditions: shutdown is signaled
-        (stop_checkpointing), the service reports the execution has completed (a
-        terminal batch whose response omits the token), or a batch fails. On
-        completion or failure the remaining queued operations are drained and their
-        waiters settled - with OrphanedChildException on completion, or the wrapped
-        BackgroundThreadError on failure - so no waiter blocks forever. On a plain
-        shutdown signal the queue is not drained: only non-essential asynchronous
-        checkpoints can remain, since the main thread blocks on every synchronous
-        one.
+        The loop stops when shutdown is signaled (stop_checkpointing), the
+        execution completes, the checkpoint token is revoked, or a batch fails.
+
+        A response without a token means completion only when the submitted
+        batch carries the execution's terminal update. Otherwise, it means
+        token revocation, and this invocation must report PENDING.
+
+        Completion, revocation, and failure drain remaining queued operations.
+        Their waiters receive OrphanedChildException on completion,
+        SuspendExecution on revocation, or BackgroundThreadError on failure.
+
+        On a plain shutdown signal the queue is not drained: only non-essential
+        asynchronous checkpoints can remain, since the main thread blocks on
+        every synchronous one.
         """
         # Keep checkpoint token as local variable in the loop
         current_checkpoint_token: str = self._current_checkpoint_token
@@ -850,24 +1072,32 @@ class ExecutionState:
 
                     logger.debug("Checkpoint batch processed successfully")
 
-                    # The service omits the token only when there is no next
-                    # checkpoint, i.e. the execution has reached a terminal state
-                    # - completed, or failed (for example on a quota limit). A
-                    # batch that sent updates and gets no token back is therefore
-                    # terminal: stop and settle. An empty checkpoint always gets a
-                    # fresh token, so a missing token with no updates is malformed.
+                    # A checkpoint response can omit the token for several reasons.
+                    # 1. If the accepted batch carries the execution's own terminal update (operation type
+                    #   EXECUTION), the execution is already finished.
+                    # 2. The execution failed because a quota limit was exceeded. The invocation
+                    #   will harmlessly report PENDING and the execution will remain FAILED.
+                    # 3. Otherwise, the missing token means this invocation
+                    #   must stop checkpointing and report PENDING instead.
+                    #   This applies whether the batch carries other, non-terminal updates or none
+                    #   at all (e.g. an all-refresh batch).
                     execution_completed: bool = False
                     if output.checkpoint_token:
                         current_checkpoint_token = output.checkpoint_token
-                    elif updates:
+                    elif any(
+                        update.operation_type is OperationType.EXECUTION
+                        for update in updates
+                    ):
                         execution_completed = True
                     else:
-                        raise CheckpointError(
-                            "Checkpoint response omitted the token for an empty "
-                            "checkpoint."
-                        )
+                        self._handle_revoked_checkpoint_token(batch)
+                        break
 
-                    previous_operations = self.operations
+                    # Each read of self.operations copies the whole map, and only
+                    # plugins use these copies. So take the snapshots, and call
+                    # the hook, only when a plugin is registered.
+                    has_plugins = self._plugin_executor.has_plugins
+                    previous_operations = self.operations if has_plugins else None
 
                     # Fetch new operations from the API before unblocking sync
                     # waiters. On completion the token is consumed, so skip
@@ -883,11 +1113,12 @@ class ExecutionState:
                         current_checkpoint_token,
                         fetch_marker,
                     )
-                    self._plugin_executor.on_operation_update(
-                        updated_operations,
-                        self.operations,
-                        previous_operations,
-                    )
+                    if has_plugins:
+                        self._plugin_executor.on_operation_update(
+                            updated_operations,
+                            self.operations,
+                            previous_operations,
+                        )
 
                     # Signal completion for any synchronous operations
                     for queued_op in batch:
@@ -921,21 +1152,12 @@ class ExecutionState:
                     # failure and raises, or has its operation drained here - never
                     # enqueued after the drain and left blocked.
                     with self._completion_lock:
-                        while not self._overflow_queue.empty():
-                            try:
-                                item = self._overflow_queue.get_nowait()
-                                if item.completion_event:
-                                    item.completion_event.set(bg_error)
-                            except queue.Empty:
-                                break
+                        for queued_op in self._drain_unsent_operations():
+                            if queued_op.completion_event is not None:
+                                queued_op.completion_event.set(bg_error)
 
-                        while not self._checkpoint_queue.empty():
-                            try:
-                                item = self._checkpoint_queue.get_nowait()
-                                if item.completion_event:
-                                    item.completion_event.set(bg_error)
-                            except queue.Empty:
-                                break
+                        for refresh in self._drain_pending_refreshes():
+                            refresh.completion_event.set(bg_error)
 
                         # Future checkpoint attempts fail immediately.
                         self._checkpointing_failed.set(bg_error)
@@ -943,7 +1165,33 @@ class ExecutionState:
                     # Exit the loop - error has been signaled to main thread via completion events
                     break
 
+        # A refresh still pending at shutdown will never be sent. Its caller, if
+        # one is waiting, must not block forever. Settle it as orphaned. The lock
+        # orders this against schedule_refresh, which refuses once stopped.
+        with self._completion_lock:
+            unsent_refreshes = self._drain_pending_refreshes()
+        for refresh in unsent_refreshes:
+            refresh.completion_event.set(
+                OrphanedChildException(
+                    "Checkpointing stopped before the refresh time.",
+                    operation_id="",
+                )
+            )
+
         logger.debug("Background checkpoint processing stopped")
+
+    def _drain_unsent_operations(self) -> list[QueuedOperation]:
+        """Take queued operations, overflow first. The caller holds _completion_lock."""
+        unsent: list[QueuedOperation] = []
+        for pending_queue in (self._overflow_queue, self._checkpoint_queue):
+            while not pending_queue.empty():
+                try:
+                    item = pending_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if isinstance(item, QueuedOperation):
+                    unsent.append(item)
+        return unsent
 
     def _settle_after_execution_completed(self) -> None:
         """Stop checkpointing and settle queued operations after the execution ends.
@@ -959,24 +1207,57 @@ class ExecutionState:
             self._execution_completed.set()
             self._checkpointing_stopped.set()
 
-            for pending_queue in (self._overflow_queue, self._checkpoint_queue):
-                while not pending_queue.empty():
-                    try:
-                        queued_op: QueuedOperation = pending_queue.get_nowait()
-                    except queue.Empty:
-                        break
-                    if queued_op.completion_event is not None:
-                        operation_id: str = (
-                            queued_op.operation_update.operation_id
-                            if queued_op.operation_update is not None
-                            else ""
+            orphaned = OrphanedChildException(
+                "Execution already completed; checkpoint will not be processed.",
+                operation_id="",
+            )
+            for refresh in self._drain_pending_refreshes():
+                refresh.completion_event.set(orphaned)
+            for queued_op in self._drain_unsent_operations():
+                if queued_op.completion_event is not None:
+                    operation_id: str = (
+                        queued_op.operation_update.operation_id
+                        if queued_op.operation_update is not None
+                        else ""
+                    )
+                    queued_op.completion_event.set(
+                        OrphanedChildException(
+                            "Execution already completed; checkpoint will not be processed.",
+                            operation_id=operation_id,
                         )
-                        queued_op.completion_event.set(
-                            OrphanedChildException(
-                                "Execution already completed; checkpoint will not be processed.",
-                                operation_id=operation_id,
-                            )
-                        )
+                    )
+
+    def _handle_revoked_checkpoint_token(self, batch: list[QueuedOperation]) -> None:
+        """Stop checkpointing after a checkpoint response omits the token.
+
+        Called when a checkpoint response omits the token on a batch that does
+        not carry the execution's own terminal update: this invocation must
+        stop checkpointing and report PENDING rather than treat the missing
+        token as completion.
+        """
+        logger.warning(
+            "Checkpoint token revoked by the service mid-invocation for %s. Ending "
+            "this invocation with PENDING; %d accepted update(s) in this batch "
+            "remain durable, unsent work is abandoned.",
+            self.durable_execution_arn,
+            sum(1 for queued_op in batch if queued_op.operation_update is not None),
+        )
+        with self._completion_lock:
+            self._checkpoint_token_revoked.set()
+            self._checkpointing_stopped.set()
+
+            suspend = SuspendExecution(
+                "Checkpoint token revoked by the service; ending invocation "
+                "with PENDING."
+            )
+
+            for refresh in self._drain_pending_refreshes():
+                refresh.completion_event.set(suspend)
+
+            unsent = self._drain_unsent_operations()
+            for queued_op in [*batch, *unsent]:
+                if queued_op.completion_event is not None:
+                    queued_op.completion_event.set(suspend)
 
     def stop_checkpointing(self) -> None:
         """Signal background thread to stop checkpointing.
@@ -1018,134 +1299,116 @@ class ExecutionState:
             return True
 
     def _collect_checkpoint_batch(self) -> list[QueuedOperation]:
-        """Collect multiple checkpoint operations into a batch for API efficiency.
+        """Collect the operations for one checkpoint request.
 
-        Processes overflow queue first to maintain FIFO order, then collects from main queue.
-        Respects configured size, time, and operation count limits. Blocks for the first
-        operation if queues are empty, then collects additional operations within the time
-        window.
+        Intake order is the overflow queue, then refreshes whose time has come,
+        then the main queue. The first read blocks until an operation arrives, a
+        refresh comes due, or shutdown is signalled. Later reads wait
+        _BLOCKED_CALLER_WAIT_SECONDS once the batch holds a sync checkpoint,
+        because that caller is blocked and cannot add work, and otherwise up to
+        max_batch_time_seconds.
 
-        Empty checkpoints (operation_update=None) are coalesced: the first empty checkpoint
-        counts toward the batch operation limit, but subsequent empty checkpoints do not.
-        All empty checkpoints remain in the batch so their completion events are signaled.
-        This avoids unnecessary batches when many concurrent map/parallel branches resume
-        simultaneously and each queues an empty checkpoint.
+        A refresh waits in the heap until its earliest_check_time, so refreshes
+        due at the same time share one request. The final due check seals the
+        batch. A refresh scheduled after it joins the next batch.
 
-        Returns:
-            List of QueuedOperation objects ready for batch processing. Returns empty list
-            if no operations are available.
+        Returns the operations for the request, or an empty list at shutdown.
         """
-        batch: list[QueuedOperation] = []
-        has_empty_checkpoint = False
-        total_size = 0
-        effective_operation_count = 0  # Operations that count toward batch limit
+        batch = _BatchAccumulator(self._batcher_config)
+        self._drain_overflow(batch)
+        self._add_due_refreshes(batch, time.time())
 
-        # First, drain overflow queue (FIFO order preserved)
+        if batch.is_empty() and not self._wait_for_first_operation(batch):
+            return []
+
+        deadline = time.time() + self._batcher_config.max_batch_time_seconds
+        while not batch.is_full() and not self._checkpointing_stopped.is_set():
+            now = time.time()
+            self._add_due_refreshes(batch, now)
+            timeout = self._read_timeout(batch, now, deadline)
+            if timeout <= 0:
+                break
+            try:
+                item = self._checkpoint_queue.get(timeout=timeout)
+            except queue.Empty:
+                # A due refresh can end the read early. Keep collecting only if one
+                # joined, so refreshes due within one wait share the batch.
+                if self._add_due_refreshes(batch, time.time()):
+                    continue
+                break
+            self._checkpoint_queue.task_done()
+            if isinstance(item, _Signal):
+                self._consume_refresh_wake()
+                continue
+            size = self._calculate_operation_size(item)
+            if not batch.fits(size):
+                self._overflow_queue.put(item)
+                logger.debug(
+                    "Batch size limit reached, moving operation to overflow queue"
+                )
+                break
+            batch.add(item, size)
+
+        self._add_due_refreshes(batch, time.time())
+
+        empty_count = sum(1 for q in batch.operations if q.operation_update is None)
+        logger.debug(
+            "Collected batch of %d operations (%d effective, %d non-empty, %d empty), total size: %d bytes",
+            len(batch.operations),
+            batch.effective_count,
+            len(batch.operations) - empty_count,
+            empty_count,
+            batch.total_size,
+        )
+        return batch.operations
+
+    def _drain_overflow(self, batch: _BatchAccumulator) -> None:
+        """Take operations left over from earlier batches, oldest first."""
         try:
-            while effective_operation_count < self._batcher_config.max_batch_operations:
-                overflow_op = self._overflow_queue.get_nowait()
-
-                if overflow_op.operation_update is None:  # Empty checkpoint
-                    batch.append(overflow_op)
-                    if not has_empty_checkpoint:
-                        effective_operation_count += (
-                            1  # First empty counts toward limit
-                        )
-                        has_empty_checkpoint = True
-                    # Subsequent empties don't count toward limit
-                else:
-                    op_size = self._calculate_operation_size(overflow_op)
-                    if total_size + op_size > self._batcher_config.max_batch_size_bytes:
-                        # Put back and stop
-                        self._overflow_queue.put(overflow_op)
-                        break
-                    batch.append(overflow_op)
-                    total_size += op_size
-                    effective_operation_count += 1
+            while not batch.is_full():
+                op = self._overflow_queue.get_nowait()
+                size = self._calculate_operation_size(op)
+                if not batch.fits(size):
+                    self._overflow_queue.put(op)
+                    break
+                batch.add(op, size)
         except queue.Empty:
             pass
 
-        # If batch is empty, get first operation from main queue
-        if not batch:
-            # Block for first operation, checking stop signal periodically
-            while not self._checkpointing_stopped.is_set():
-                try:
-                    first_op = self._checkpoint_queue.get(
-                        timeout=0.1
-                    )  # Check stop signal every 100ms
-                    self._checkpoint_queue.task_done()
-                    batch.append(first_op)
-
-                    if first_op.operation_update is None:
-                        has_empty_checkpoint = True
-                    else:
-                        total_size += self._calculate_operation_size(first_op)
-
-                    effective_operation_count = 1
-                    break
-                except queue.Empty:
-                    continue
-
-            # If stopped and no operation retrieved, return empty batch
-            if not batch:
-                return batch
-
-        # Start batching window using configured time
-        batch_deadline = time.time() + self._batcher_config.max_batch_time_seconds
-
-        # Collect additional operations within the time window
-        while (
-            time.time() < batch_deadline
-            and effective_operation_count < self._batcher_config.max_batch_operations
-            and not self._checkpointing_stopped.is_set()
-        ):
-            remaining_time = min(
-                batch_deadline - time.time(),
-                0.1,  # Check stop signal every 100ms
-            )
-
-            if remaining_time <= 0:
-                break
-
+    def _wait_for_first_operation(self, batch: _BatchAccumulator) -> bool:
+        """Block until the batch has an operation. Returns False at shutdown."""
+        while not self._checkpointing_stopped.is_set():
+            now = time.time()
+            timeout = _STOP_SIGNAL_POLL_SECONDS
+            until_refresh = self._seconds_until_next_refresh(now)
+            if until_refresh is not None:
+                timeout = max(0.0, min(timeout, until_refresh))
             try:
-                additional_op = self._checkpoint_queue.get(timeout=remaining_time)
-                self._checkpoint_queue.task_done()
-
-                if additional_op.operation_update is None:  # Empty checkpoint
-                    batch.append(additional_op)
-                    if not has_empty_checkpoint:
-                        effective_operation_count += (
-                            1  # First empty counts toward limit
-                        )
-                        has_empty_checkpoint = True
-                    # Subsequent empties don't count toward limit
-                else:
-                    op_size = self._calculate_operation_size(additional_op)
-                    # Check if adding this operation would exceed size limit
-                    if total_size + op_size > self._batcher_config.max_batch_size_bytes:
-                        # Put in overflow queue for next batch
-                        self._overflow_queue.put(additional_op)
-                        logger.debug(
-                            "Batch size limit reached, moving operation to overflow queue"
-                        )
-                        break
-                    batch.append(additional_op)
-                    total_size += op_size
-                    effective_operation_count += 1
-
+                item = self._checkpoint_queue.get(timeout=timeout)
             except queue.Empty:
-                break
+                if self._add_due_refreshes(batch, time.time()):
+                    return True
+                continue
+            self._checkpoint_queue.task_done()
+            if isinstance(item, _Signal):
+                self._consume_refresh_wake()
+                continue
+            # The first operation is never refused for size. It could not be
+            # sent otherwise.
+            batch.add(item, self._calculate_operation_size(item))
+            return True
+        return False
 
-        empty_count = sum(1 for q in batch if q.operation_update is None)
-        logger.debug(
-            "Collected batch of %d operations (%d effective, %d non-empty, %d empty), total size: %d bytes",
-            len(batch),
-            effective_operation_count,
-            len(batch) - empty_count,
-            empty_count,
-            total_size,
-        )
-        return batch
+    def _read_timeout(
+        self, batch: _BatchAccumulator, now: float, deadline: float
+    ) -> float:
+        timeout = min(deadline - now, _STOP_SIGNAL_POLL_SECONDS)
+        until_refresh = self._seconds_until_next_refresh(now)
+        if until_refresh is not None:
+            timeout = min(timeout, until_refresh)
+        if batch.has_blocked_caller:
+            timeout = min(timeout, _BLOCKED_CALLER_WAIT_SECONDS)
+        return timeout
 
     @staticmethod
     def _calculate_operation_size(queued_op: QueuedOperation) -> int:

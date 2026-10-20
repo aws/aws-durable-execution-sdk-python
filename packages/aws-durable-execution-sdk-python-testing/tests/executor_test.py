@@ -1,6 +1,7 @@
 """Unit tests for executor module."""
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from unittest.mock import ANY, Mock, patch
 
@@ -28,11 +29,15 @@ from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
     ResourceNotFoundException,
 )
+from aws_durable_execution_sdk_python_testing.child_dispatcher import KnownOutcome
 from aws_durable_execution_sdk_python_testing.execution import (
     ExecutionStatus,
     Execution,
 )
-from aws_durable_execution_sdk_python_testing.executor import Executor, InvocationState
+from aws_durable_execution_sdk_python_testing.executor import (
+    Executor,
+    InvocationState,
+)
 from aws_durable_execution_sdk_python_testing.invoker import InvokeResponse
 from aws_durable_execution_sdk_python_testing.model import (
     ListDurableExecutionsResponse,
@@ -45,12 +50,18 @@ from aws_durable_execution_sdk_python_testing.model import (
 from aws_durable_execution_sdk_python_testing.observer import (
     ExecutionObserver,
 )
+from aws_durable_execution_sdk_python_testing.stores.filesystem import (
+    FileSystemExecutionStore,
+)
 from aws_durable_execution_sdk_python_testing.stores.memory import (
     InMemoryExecutionStore,
 )
 from aws_durable_execution_sdk_python_testing.token import (
     CallbackToken,
     CheckpointToken,
+)
+from aws_durable_execution_sdk_python_testing.worker.checkpoint_tasks import (
+    CallableTask,
 )
 
 
@@ -63,6 +74,7 @@ class MockExecutionObserver(ExecutionObserver):
         self.wait_timers = {}
         self.retry_schedules = {}
         self.callback_creations = {}
+        self.chained_invoke_starts = {}
 
     def on_completed(self, execution_arn: str, result: str | None = None) -> None:
         """Capture completion events."""
@@ -83,6 +95,22 @@ class MockExecutionObserver(ExecutionObserver):
         self.callback_creations[execution_arn] = {
             "operation_id": operation_id,
             "callback_id": callback_token.to_str(),
+        }
+
+    def on_chained_invoke_started(
+        self,
+        execution_arn: str,
+        operation_id: str,
+        function_name: str,
+        tenant_id: str | None,
+        payload: str | None,
+    ) -> None:
+        """Capture chained invoke dispatch events."""
+        self.chained_invoke_starts[execution_arn] = {
+            "operation_id": operation_id,
+            "function_name": function_name,
+            "tenant_id": tenant_id,
+            "payload": payload,
         }
 
     def on_callback_completed(
@@ -145,12 +173,23 @@ def start_input():
 @pytest.fixture
 def mock_execution():
     execution = Mock(spec=Execution)
+    execution.is_paused = False
     execution.durable_execution_arn = "arn:aws:lambda:us-east-1:123456789012:function:test-function:execution:test-execution"
     execution.is_complete = False
     execution.consecutive_failed_invocation_attempts = 0
     execution.start_input = Mock()
     execution.start_input.function_name = "test-function"
     return execution
+
+
+def _invalid_output_error(message: str) -> ErrorObject:
+    """The error the service fails an execution with for an invalid output."""
+    return ErrorObject(
+        message=message,
+        type="InvalidParameterValueException",
+        data=None,
+        stack_trace=None,
+    )
 
 
 def test_init(mock_store, mock_scheduler, mock_invoker, mock_checkpoint_processor):
@@ -172,6 +211,7 @@ def test_start_execution(
     mock_execution_class, executor, start_input, mock_store, mock_scheduler
 ):
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution_class.new.return_value = mock_execution
     mock_event = Mock()
@@ -239,6 +279,7 @@ def test_start_execution_with_provided_invocation_id(
     )
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution_class.new.return_value = mock_execution
     mock_event = Mock()
@@ -256,6 +297,7 @@ def test_start_execution_with_provided_invocation_id(
     assert result.execution_arn == "test-arn"
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_store.load.return_value = mock_execution
 
     result = executor.get_execution("test-arn")
@@ -270,6 +312,7 @@ def test_should_complete_workflow_with_error_when_invocation_fails(
     """Test that failed invocation responses trigger workflow completion with error."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -352,6 +395,7 @@ def test_should_complete_workflow_with_result_when_invocation_succeeds(
     """Test that successful invocation responses trigger workflow completion with result."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -398,6 +442,8 @@ def test_should_handle_pending_status_when_operations_exist(
     """Test that pending invocation responses are handled when operations exist."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
+    mock_execution.has_deferred_invocation = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -441,6 +487,7 @@ def test_should_ignore_response_when_execution_already_complete(
     """Test that responses are ignored when execution is already complete."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = True  # Already complete
     mock_execution.start_input = start_input
@@ -476,12 +523,13 @@ def test_should_ignore_response_when_execution_already_complete(
     mock_invoker.invoke.assert_not_called()
 
 
-def test_should_retry_when_response_has_no_status(
+def test_should_fail_when_response_has_no_status(
     executor, mock_store, mock_scheduler, mock_invoker, start_input
 ):
-    """Test that invocation responses without status trigger retry logic."""
+    """Test that invocation responses without status fail the execution without a retry."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -502,29 +550,33 @@ def test_should_retry_when_response_has_no_status(
         mock_execution_class.new.return_value = mock_execution
         mock_store.load.return_value = mock_execution
 
-        # Act - trigger invocation through public start_execution method
-        executor.start_execution(start_input)
+        with patch.object(executor, "fail_execution") as mock_fail:
+            # Act - trigger invocation through public start_execution method
+            executor.start_execution(start_input)
 
-        # Get the handler that was passed to the scheduler and execute it manually
-        assert mock_scheduler.call_later.call_count >= 1
-        handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+            # Get the handler that was passed to the scheduler and execute it manually
+            assert mock_scheduler.call_later.call_count >= 1
+            handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
-        # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+            # Execute the handler to trigger the invocation logic
+            asyncio.run(handler())
 
-        # Assert - verify retry was triggered due to validation error
-        assert mock_execution.consecutive_failed_invocation_attempts == 1
-        mock_store.save.assert_called_with(mock_execution)
-        # Verify retry was scheduled (call_later should be called 3 times: timeout + initial + retry)
-        assert mock_scheduler.call_later.call_count == 3
+        # Assert - verify the execution failed at once, as the service does
+        mock_fail.assert_called_once_with(
+            "test-arn", _invalid_output_error("Response status is required")
+        )
+        assert mock_execution.consecutive_failed_invocation_attempts == 0
+        # Verify no retry was scheduled (call_later is called 2 times: timeout + initial)
+        assert mock_scheduler.call_later.call_count == 2
 
 
-def test_should_retry_when_failed_response_has_result(
+def test_should_fail_when_failed_response_has_result(
     executor, mock_store, mock_scheduler, mock_invoker, start_input
 ):
-    """Test that failed responses with result trigger retry logic."""
+    """Test that failed responses with result fail the execution without a retry."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -547,29 +599,34 @@ def test_should_retry_when_failed_response_has_result(
         mock_execution_class.new.return_value = mock_execution
         mock_store.load.return_value = mock_execution
 
-        # Act - trigger invocation through public start_execution method
-        executor.start_execution(start_input)
+        with patch.object(executor, "fail_execution") as mock_fail:
+            # Act - trigger invocation through public start_execution method
+            executor.start_execution(start_input)
 
-        # Get the handler that was passed to the scheduler and execute it manually
-        assert mock_scheduler.call_later.call_count >= 1
-        handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+            # Get the handler that was passed to the scheduler and execute it manually
+            assert mock_scheduler.call_later.call_count >= 1
+            handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
-        # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+            # Execute the handler to trigger the invocation logic
+            asyncio.run(handler())
 
-        # Assert - verify retry was triggered due to validation error
-        assert mock_execution.consecutive_failed_invocation_attempts == 1
-        mock_store.save.assert_called_with(mock_execution)
-        # Verify retry was scheduled (call_later should be called 3 times: timeout + initial + retry)
-        assert mock_scheduler.call_later.call_count == 3
+        # Assert - verify the execution failed at once, as the service does
+        mock_fail.assert_called_once_with(
+            "test-arn",
+            _invalid_output_error("Cannot provide a Result for FAILED status."),
+        )
+        assert mock_execution.consecutive_failed_invocation_attempts == 0
+        # Verify no retry was scheduled (call_later is called 2 times: timeout + initial)
+        assert mock_scheduler.call_later.call_count == 2
 
 
-def test_should_retry_when_success_response_has_error(
+def test_should_fail_when_success_response_has_error(
     executor, mock_store, mock_scheduler, mock_invoker, start_input
 ):
-    """Test that successful responses with error trigger retry logic."""
+    """Test that successful responses with error fail the execution without a retry."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -593,21 +650,25 @@ def test_should_retry_when_success_response_has_error(
         mock_execution_class.new.return_value = mock_execution
         mock_store.load.return_value = mock_execution
 
-        # Act - trigger invocation through public start_execution method
-        executor.start_execution(start_input)
+        with patch.object(executor, "fail_execution") as mock_fail:
+            # Act - trigger invocation through public start_execution method
+            executor.start_execution(start_input)
 
-        # Get the handler that was passed to the scheduler and execute it manually
-        assert mock_scheduler.call_later.call_count >= 1
-        handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+            # Get the handler that was passed to the scheduler and execute it manually
+            assert mock_scheduler.call_later.call_count >= 1
+            handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
-        # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+            # Execute the handler to trigger the invocation logic
+            asyncio.run(handler())
 
-        # Assert - verify retry was triggered due to validation error
-        assert mock_execution.consecutive_failed_invocation_attempts == 1
-        mock_store.save.assert_called_with(mock_execution)
-        # Verify retry was scheduled (call_later should be called 3 times: timeout + initial + retry)
-        assert mock_scheduler.call_later.call_count == 3
+        # Assert - verify the execution failed at once, as the service does
+        mock_fail.assert_called_once_with(
+            "test-arn",
+            _invalid_output_error("Cannot provide an Error for SUCCEEDED status."),
+        )
+        assert mock_execution.consecutive_failed_invocation_attempts == 0
+        # Verify no retry was scheduled (call_later is called 2 times: timeout + initial)
+        assert mock_scheduler.call_later.call_count == 2
 
 
 def test_should_retry_when_pending_response_has_no_operations(
@@ -616,11 +677,16 @@ def test_should_retry_when_pending_response_has_no_operations(
     """Test that pending responses without operations trigger retry logic."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
+    mock_execution.has_deferred_invocation = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
     mock_execution.consecutive_failed_invocation_attempts = 0
+    mock_execution.seq_counter = 0
     mock_execution.has_pending_operations.return_value = False  # No pending operations
+    mock_execution.handler_seen_seq = 0
+    mock_execution.has_changes_after.return_value = False
 
     # Mock invoker to return pending response
     mock_invocation_input = Mock()
@@ -654,15 +720,148 @@ def test_should_retry_when_pending_response_has_no_operations(
         assert mock_scheduler.call_later.call_count == 3
 
 
+def test_pending_response_is_valid_when_an_operation_completed_after_the_handler_saw_it(
+    executor, mock_store, mock_scheduler, mock_invoker, start_input
+):
+    """An operation that completes between the handler's return and the
+    response check leaves no pending operation, but a change after the
+    invocation's input was built: PENDING is accepted and the execution
+    is re-invoked instead of counted as a failed attempt."""
+    mock_execution = Mock()
+    mock_execution.is_paused = False
+    mock_execution.has_deferred_invocation = False
+    mock_execution.durable_execution_arn = "test-arn"
+    mock_execution.is_complete = False
+    mock_execution.start_input = start_input
+    mock_execution.consecutive_failed_invocation_attempts = 0
+    mock_execution.seq_counter = 4
+    mock_execution.handler_seen_seq = 2
+    mock_execution.has_pending_operations.return_value = False
+    mock_execution.has_changes_after.side_effect = lambda seq: seq == 4
+    mock_execution.has_unseen_changes.return_value = True
+    mock_execution.needs_reinvoke = True
+
+    mock_invoker.create_invocation_input.return_value = Mock()
+    mock_invoker.invoke.return_value = InvokeResponse(
+        invocation_output=DurableExecutionInvocationOutput(
+            status=InvocationStatus.PENDING
+        ),
+        request_id="test-request-id",
+    )
+
+    with patch(
+        "aws_durable_execution_sdk_python_testing.executor.Execution"
+    ) as mock_execution_class:
+        mock_execution_class.new.return_value = mock_execution
+        mock_store.load.return_value = mock_execution
+
+        executor.start_execution(start_input)
+        handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+        asyncio.run(handler())
+
+        mock_execution.has_changes_after.assert_called_once_with(4)
+        assert mock_execution.consecutive_failed_invocation_attempts == 0
+        # timeout + initial invocation + the re-invoke, with no retry delay
+        assert mock_scheduler.call_later.call_count == 3
+        assert mock_scheduler.call_later.call_args_list[-1].kwargs["delay"] == 0
+
+
+def test_begin_invocation_baseline_predates_a_completion_queued_behind_it(
+    executor, mock_store, mock_invoker, start_input
+):
+    """The baseline is the counter when the input was built. A completion
+    applied to the same object afterward lies past it."""
+    execution = Execution.new(start_input)
+    execution.operations.append(
+        Operation(
+            operation_id="invoke-1",
+            operation_type=OperationType.CHAINED_INVOKE,
+            status=OperationStatus.STARTED,
+        )
+    )
+    mock_store.load.return_value = execution
+    mock_invoker.create_invocation_input.return_value = Mock()
+
+    claim = executor._begin_invocation(execution.durable_execution_arn)  # noqa: SLF001
+    assert claim is not None
+    _, _, baseline = claim
+    assert baseline == execution.seq_counter
+
+    execution.complete_chained_invoke("invoke-1", OperationStatus.SUCCEEDED, result="1")
+    assert execution.seq_counter > baseline
+    assert execution.has_changes_after(baseline)
+
+
+def test_pending_response_with_only_input_time_state_is_still_an_error(
+    executor, mock_store, start_input
+):
+    """Operations the invocation input already delivered lie past the
+    handler's watermark but not past the invocation's baseline, so a
+    no-pending PENDING is rejected rather than accepted without a re-invoke."""
+    execution = Execution.new(start_input)
+    execution.operations.append(
+        Operation(
+            operation_id="invoke-1",
+            operation_type=OperationType.CHAINED_INVOKE,
+            status=OperationStatus.STARTED,
+        )
+    )
+    execution.complete_chained_invoke("invoke-1", OperationStatus.SUCCEEDED, result="1")
+    assert execution.has_unseen_changes()
+    baseline = execution.seq_counter
+
+    with pytest.raises(
+        InvalidParameterValueException,
+        match="no pending operations",
+    ):
+        executor._validate_invocation_response_and_store(  # noqa: SLF001
+            execution.durable_execution_arn,
+            DurableExecutionInvocationOutput(status=InvocationStatus.PENDING),
+            execution,
+            baseline,
+        )
+
+
+def test_pending_response_is_an_error_when_the_handler_saw_the_completion(
+    executor, mock_store, start_input
+):
+    """A completion after the baseline that a checkpoint response already
+    delivered leaves nothing to re-invoke for, so PENDING is rejected."""
+    execution = Execution.new(start_input)
+    execution.operations.append(
+        Operation(
+            operation_id="invoke-1",
+            operation_type=OperationType.CHAINED_INVOKE,
+            status=OperationStatus.STARTED,
+        )
+    )
+    baseline = execution.seq_counter
+    execution.complete_chained_invoke("invoke-1", OperationStatus.SUCCEEDED, result="1")
+    execution.handler_seen_seq = execution.seq_counter
+
+    with pytest.raises(
+        InvalidParameterValueException,
+        match="no pending operations",
+    ):
+        executor._validate_invocation_response_and_store(  # noqa: SLF001
+            execution.durable_execution_arn,
+            DurableExecutionInvocationOutput(status=InvocationStatus.PENDING),
+            execution,
+            baseline,
+        )
+
+
 def test_invoke_handler_success(
     executor, mock_store, mock_scheduler, mock_invoker, start_input
 ):
     """Test successful invocation through public API."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
+    mock_execution.region = "us-west-2"
 
     mock_invocation_input = Mock()
     mock_invoker.create_invocation_input.return_value = mock_invocation_input
@@ -695,7 +894,12 @@ def test_invoke_handler_success(
         execution=mock_execution
     )
     mock_invoker.invoke.assert_called_once_with(
-        "test-function", mock_invocation_input, None
+        "test-function",
+        mock_invocation_input,
+        None,
+        tenant_id=None,
+        account_id="123456789012",
+        region_name="us-west-2",
     )
 
 
@@ -705,6 +909,7 @@ def test_invoke_handler_execution_already_complete(
     """Test that completed executions are handled properly through public API."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = True
     mock_execution.start_input = start_input
@@ -736,6 +941,7 @@ def test_invoke_handler_execution_completed_during_invocation(
     """Test execution completing during invocation through public API."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -749,6 +955,7 @@ def test_invoke_handler_execution_completed_during_invocation(
 
     # Create a completed execution mock
     completed_execution = Mock()
+    completed_execution.is_paused = False
     completed_execution.durable_execution_arn = "test-arn"
     completed_execution.is_complete = True
     completed_execution.start_input = start_input
@@ -786,6 +993,7 @@ def test_invoke_handler_resource_not_found(
     """Test resource not found handling causes workflow failure through public API."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -815,12 +1023,13 @@ def test_invoke_handler_resource_not_found(
 
         # Assert - verify workflow failure was triggered through public API
         mock_fail.assert_called_once()
-        # Verify the error contains the expected message
+        # Verify the error keeps the Lambda API error code and message, so a
+        # parent chained invoke sees ResourceNotFoundException.
         call_args = mock_fail.call_args
         assert call_args[0][0] == "test-arn"  # execution_arn is first positional arg
-        assert "Function not found" in str(
-            call_args[0][1]
-        )  # error is second positional arg
+        error = call_args[0][1]
+        assert error.type == "ResourceNotFoundException"
+        assert error.message == "Function not found"
 
 
 def test_invoke_handler_general_exception(
@@ -829,6 +1038,7 @@ def test_invoke_handler_general_exception(
     """Test general exception handling triggers retry through public API."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -872,6 +1082,7 @@ def test_invoke_execution_through_start_execution(
         "aws_durable_execution_sdk_python_testing.executor.Execution"
     ) as mock_execution_class:
         mock_execution = Mock()
+        mock_execution.is_paused = False
         mock_execution.durable_execution_arn = "test-arn"
         mock_execution_class.new.return_value = mock_execution
 
@@ -949,6 +1160,7 @@ def test_should_fail_execution_when_function_not_found(
     """Test that workflow fails when function is not found during invocation."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -992,6 +1204,7 @@ def test_should_fail_execution_when_retries_exhausted(
     """Test that workflow fails when maximum retry attempts are exhausted."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1035,6 +1248,7 @@ def test_should_prevent_multiple_workflow_failures_on_complete_execution(
     """Test that attempting to fail an already completed execution raises an exception."""
     # Arrange - execution starts incomplete but becomes complete during processing
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False  # Initially incomplete
     mock_execution.start_input = start_input
@@ -1042,6 +1256,7 @@ def test_should_prevent_multiple_workflow_failures_on_complete_execution(
 
     # Create a completed execution for the _fail_workflow call
     completed_execution = Mock()
+    completed_execution.is_paused = False
     completed_execution.is_complete = True
 
     # Mock invoker to raise ResourceNotFoundException (triggers _fail_workflow)
@@ -1072,21 +1287,13 @@ def test_should_retry_invocation_when_under_limit_through_public_api(
     executor, mock_store, mock_scheduler, mock_invoker, start_input
 ):
     """Test that invocation retries when under limit through public API with final outcome verification."""
-    # Arrange - Set up execution that will trigger retry logic
-    mock_execution = Mock()
-    mock_execution.durable_execution_arn = "test-arn"
-    mock_execution.is_complete = False
-    mock_execution.start_input = start_input
-    mock_execution.consecutive_failed_invocation_attempts = 3  # Under limit (5 is max)
-
     # Configure invoker to fail initially with validation error, then succeed on retry
     mock_invocation_input = Mock()
     mock_invoker.create_invocation_input.return_value = mock_invocation_input
 
     # First invocation: invalid response triggers retry
     invalid_response = DurableExecutionInvocationOutput(
-        status=InvocationStatus.FAILED,
-        result="should not have result",  # Invalid: failed response with result
+        status=InvocationStatus.PENDING,  # Invalid: PENDING with nothing pending
     )
     # Second invocation: valid success response
     success_response = DurableExecutionInvocationOutput(
@@ -1101,42 +1308,38 @@ def test_should_retry_invocation_when_under_limit_through_public_api(
         ),
     ]
 
-    # Mock execution creation and store behavior
-    with patch(
-        "aws_durable_execution_sdk_python_testing.executor.Execution"
-    ) as mock_execution_class:
-        mock_execution_class.new.return_value = mock_execution
-        mock_store.load.return_value = mock_execution
+    # Start a real execution so pause flags and completion follow its lifecycle.
+    executor.start_execution(start_input)
+    execution: Execution = mock_store.save.call_args.args[0]
+    # Under limit (3 is max for PENDING with no pending operations)
+    execution.consecutive_failed_invocation_attempts = 1
+    mock_store.load.return_value = execution
 
-        # Act - trigger the retry scenario through public API
-        executor.start_execution(start_input)
+    # Simulate scheduler executing the initial invocation handler
+    initial_handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+    asyncio.run(initial_handler())
 
-        # Simulate scheduler executing the initial invocation handler
-        initial_handler = mock_scheduler.call_later.call_args_list[-1][0][0]
-        import asyncio
+    # Verify retry was scheduled due to validation error
+    assert execution.consecutive_failed_invocation_attempts == 2
+    assert not execution.is_complete
+    mock_invoker.invoke.assert_called_once()
+    assert mock_scheduler.call_later.call_count == 3  # timeout + initial + retry
+    retry_call = mock_scheduler.call_later.call_args_list[2]
+    retry_handler = retry_call[0][0]
+    retry_delay = retry_call[1]["delay"]
+    assert retry_delay == Executor.RETRY_BACKOFF_SECONDS
 
-        asyncio.run(initial_handler())
+    # Execute the retry handler to complete the scenario
+    asyncio.run(retry_handler())
 
-        # Verify retry was scheduled due to validation error
-        assert mock_scheduler.call_later.call_count == 3  # timeout + initial + retry
-        retry_call = mock_scheduler.call_later.call_args_list[
-            2
-        ]  # Third call is the retry
-        retry_handler = retry_call[0][0]
-        retry_delay = retry_call[1]["delay"]
-
-        # Execute the retry handler to complete the scenario
-        asyncio.run(retry_handler())
-
-    # Assert - verify final outcome after retry sequence
-    # Counter resets to 0 on a clean invocation. The first
-    # attempt failed validation (3 -> 4), the second attempt succeeded
-    # (4 -> 0). Previously this was 4 because the counter only ever
-    # grew; that was a bug.
-    assert mock_execution.consecutive_failed_invocation_attempts == 0
-    assert retry_delay == Executor.RETRY_BACKOFF_SECONDS  # Correct backoff delay used
-    mock_store.save.assert_called_with(mock_execution)  # Execution state saved
+    # A clean second invocation resets previous failures and completes execution.
+    assert execution.consecutive_failed_invocation_attempts == 0
+    assert execution.is_complete
+    assert execution.current_status() is ExecutionStatus.SUCCEEDED
+    assert execution.result == success_response
+    mock_store.save.assert_called_with(execution)  # Execution state saved
     assert mock_invoker.invoke.call_count == 2  # Initial + retry invocation
+    assert mock_scheduler.call_later.call_count == 3  # No retry after success
 
 
 def test_should_fail_workflow_when_retry_limit_exceeded(
@@ -1145,6 +1348,7 @@ def test_should_fail_workflow_when_retry_limit_exceeded(
     """Test that workflow fails when retry limit is exceeded through public API."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1187,8 +1391,10 @@ def test_complete_events_through_complete_execution(
 ):
     """Test completion event behavior through public complete_execution method."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.result = "test result"
     mock_store.load.return_value = mock_execution
+    mock_execution.parent_execution_arn = None  # top-level: no parent to notify
 
     # Set up completion event through start_execution
     mock_event = Mock()
@@ -1220,8 +1426,10 @@ def test_complete_events_through_complete_execution(
 def test_complete_events_no_event_through_public_api(executor, mock_store):
     """Test that completing non-existent execution handles missing events gracefully."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.result = "test result"
     mock_store.load.return_value = mock_execution
+    mock_execution.parent_execution_arn = None  # top-level: no parent to notify
 
     # Complete execution without setting up completion event first
     # Should not raise exception when event doesn't exist
@@ -1239,6 +1447,7 @@ def test_wait_until_complete_success(executor, mock_scheduler):
         "aws_durable_execution_sdk_python_testing.executor.Execution"
     ) as mock_execution_class:
         mock_execution = Mock()
+        mock_execution.is_paused = False
         mock_execution.durable_execution_arn = "test-arn"
         mock_execution_class.new.return_value = mock_execution
 
@@ -1263,6 +1472,7 @@ def test_wait_until_complete_timeout(executor, mock_scheduler):
         "aws_durable_execution_sdk_python_testing.executor.Execution"
     ) as mock_execution_class:
         mock_execution = Mock()
+        mock_execution.is_paused = False
         mock_execution.durable_execution_arn = "test-arn"
         mock_execution_class.new.return_value = mock_execution
 
@@ -1361,12 +1571,13 @@ def test_on_failed(executor):
     mock_fail.assert_called_once_with("test-arn", error)
 
 
-def test_should_retry_when_response_has_unexpected_status(
+def test_should_fail_when_response_has_unexpected_status(
     executor, mock_store, mock_scheduler, mock_invoker, start_input
 ):
-    """Test that responses with unexpected status trigger retry logic."""
+    """Test that responses with unexpected status fail the execution without a retry."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1388,21 +1599,117 @@ def test_should_retry_when_response_has_unexpected_status(
         mock_execution_class.new.return_value = mock_execution
         mock_store.load.return_value = mock_execution
 
-        # Act - trigger invocation through public start_execution method
-        executor.start_execution(start_input)
+        with patch.object(executor, "fail_execution") as mock_fail:
+            # Act - trigger invocation through public start_execution method
+            executor.start_execution(start_input)
 
-        # Get the handler that was passed to the scheduler and execute it manually
-        assert mock_scheduler.call_later.call_count >= 1
-        handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+            # Get the handler that was passed to the scheduler and execute it manually
+            assert mock_scheduler.call_later.call_count >= 1
+            handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
-        # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+            # Execute the handler to trigger the invocation logic
+            asyncio.run(handler())
 
-        # Assert - verify retry was triggered due to validation error
-        assert mock_execution.consecutive_failed_invocation_attempts == 1
-        mock_store.save.assert_called_with(mock_execution)
-        # Verify retry was scheduled (call_later should be called 3 times: timeout + initial + retry)
-        assert mock_scheduler.call_later.call_count == 3
+        # Assert - verify the execution failed at once, as the service does
+        mock_fail.assert_called_once_with(
+            "test-arn",
+            _invalid_output_error("Unexpected invocation status: UNKNOWN_STATUS"),
+        )
+        assert mock_execution.consecutive_failed_invocation_attempts == 0
+        # Verify no retry was scheduled (call_later is called 2 times: timeout + initial)
+        assert mock_scheduler.call_later.call_count == 2
+
+
+def test_invoke_handler_fails_execution_when_output_cannot_be_parsed(
+    executor, mock_store, mock_scheduler, mock_invoker, start_input
+):
+    """An output the invoker cannot parse fails the execution at once,
+    without a retry, and the invocation is still recorded."""
+    from aws_durable_execution_sdk_python_testing.exceptions import (
+        InvalidInvocationOutputError,
+    )
+
+    mock_execution = Mock()
+    mock_execution.is_paused = False
+    mock_execution.durable_execution_arn = "test-arn"
+    mock_execution.is_complete = False
+    mock_execution.start_input = start_input
+    mock_execution.consecutive_failed_invocation_attempts = 0
+
+    mock_invoker.create_invocation_input.return_value = Mock()
+    mock_invoker.invoke.side_effect = InvalidInvocationOutputError(
+        "Invalid invocation output: Expecting value: line 1 column 1 (char 0)"
+    )
+
+    with patch(
+        "aws_durable_execution_sdk_python_testing.executor.Execution"
+    ) as mock_execution_class:
+        mock_execution_class.new.return_value = mock_execution
+        mock_store.load.return_value = mock_execution
+
+        with patch.object(executor, "fail_execution") as mock_fail:
+            executor.start_execution(start_input)
+            handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+            asyncio.run(handler())
+
+        mock_fail.assert_called_once_with(
+            "test-arn",
+            _invalid_output_error(
+                "Invalid invocation output: Expecting value: line 1 column 1 (char 0)"
+            ),
+        )
+        mock_invoker.invoke.assert_called_once()
+        mock_execution.record_invocation_completion.assert_called_once()
+        assert mock_execution.consecutive_failed_invocation_attempts == 0
+        # timeout + initial invocation, no retry
+        assert mock_scheduler.call_later.call_count == 2
+
+
+def test_invoke_handler_unparsed_output_leaves_a_stop_during_invocation(
+    executor, mock_store, mock_scheduler, mock_invoker, start_input
+):
+    """A stop that lands while the handler runs stands when its output
+    cannot be parsed: the execution is not failed over it."""
+    from aws_durable_execution_sdk_python_testing.exceptions import (
+        InvalidInvocationOutputError,
+    )
+
+    incomplete_execution = Mock(spec=Execution)
+    incomplete_execution.is_paused = False
+    incomplete_execution.is_complete = False
+    incomplete_execution.start_input = start_input
+    incomplete_execution.consecutive_failed_invocation_attempts = 0
+    incomplete_execution.durable_execution_arn = "test-arn"
+    incomplete_execution.seq_counter = 0
+
+    stopped_execution = Mock(spec=Execution)
+    stopped_execution.is_complete = True
+
+    # Never let the side_effect iterator exhaust: see
+    # test_invoke_handler_execution_completed_during_invocation_async.
+    _loads = iter([incomplete_execution])
+    mock_store.load.side_effect = lambda *a, **k: next(_loads, stopped_execution)
+
+    mock_invoker.create_invocation_input.return_value = Mock()
+    mock_invoker.invoke.side_effect = InvalidInvocationOutputError(
+        "Invalid invocation output: 'str' object has no attribute 'get'"
+    )
+
+    with patch(
+        "aws_durable_execution_sdk_python_testing.executor.Execution"
+    ) as mock_execution_class:
+        mock_execution_class.new.return_value = incomplete_execution
+
+        with patch.object(executor, "fail_execution") as mock_fail:
+            executor.start_execution(start_input)
+            handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+            asyncio.run(handler())
+
+    mock_fail.assert_not_called()
+    mock_invoker.invoke.assert_called_once()
+    stopped_execution.record_invocation_completion.assert_called_once()
+    # No retry is scheduled either: timeout + initial invocation only.
+    assert mock_scheduler.call_later.call_count == 2
 
 
 def test_invoke_handler_execution_completed_during_invocation_async(
@@ -1411,12 +1718,15 @@ def test_invoke_handler_execution_completed_during_invocation_async(
     """Test execution completing during invocation through public API."""
     # First call returns incomplete execution, second call returns completed execution
     incomplete_execution = Mock(spec=Execution)
+    incomplete_execution.is_paused = False
     incomplete_execution.is_complete = False
     incomplete_execution.start_input = start_input
     incomplete_execution.consecutive_failed_invocation_attempts = 0
     incomplete_execution.durable_execution_arn = "test-arn"
+    incomplete_execution.seq_counter = 0
 
     completed_execution = Mock(spec=Execution)
+    completed_execution.is_paused = False
     completed_execution.is_complete = True
 
     # Never let the side_effect iterator exhaust (see the sync twin): an
@@ -1458,6 +1768,7 @@ def test_invoke_handler_resource_not_found_async(
     """Test resource not found handling causes workflow failure through public API (async version)."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1501,6 +1812,7 @@ def test_invoke_handler_general_exception_async(
     """Test general exception handling triggers retry through public API (async version)."""
     # Arrange
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
@@ -1554,6 +1866,7 @@ def test_invoke_execution_no_delay_through_start_execution(executor, mock_schedu
         "aws_durable_execution_sdk_python_testing.executor.Execution"
     ) as mock_execution_class:
         mock_execution = Mock()
+        mock_execution.is_paused = False
         mock_execution.durable_execution_arn = "test-arn"
         mock_execution_class.new.return_value = mock_execution
 
@@ -1617,7 +1930,9 @@ def test_get_execution_details_not_found(executor, mock_store):
     """Test get_execution_details with non-existent execution."""
     mock_store.load.side_effect = KeyError("Execution not found")
 
-    with pytest.raises(ResourceNotFoundException, match="Execution test-arn not found"):
+    with pytest.raises(
+        ResourceNotFoundException, match="^Durable Execution does not exist$"
+    ):
         executor.get_execution_details("test-arn")
 
 
@@ -1720,6 +2035,7 @@ def test_list_executions_with_pagination(executor, mock_store):
     executions_page1 = []
     for i in range(2):
         execution = Mock()
+        execution.is_paused = False
         execution.durable_execution_arn = f"arn{i}"
         execution.start_input.execution_name = f"exec{i}"
         execution.start_input.function_name = "test-function"
@@ -1742,6 +2058,7 @@ def test_list_executions_with_pagination(executor, mock_store):
     executions_page2 = []
     for i in range(2, 4):
         execution = Mock()
+        execution.is_paused = False
         execution.durable_execution_arn = f"arn{i}"
         execution.start_input.execution_name = f"exec{i}"
         execution.start_input.function_name = "test-function"
@@ -1833,6 +2150,7 @@ def test_stop_execution(executor, mock_store):
 def test_stop_execution_already_complete(executor, mock_store):
     """Test stop_execution with already completed execution returns idempotent response."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.is_complete = True
     mock_execution.durable_execution_arn = "test-arn"
 
@@ -1878,7 +2196,9 @@ def test_stop_execution_with_custom_error(executor, mock_store):
 def test_get_execution_not_found(executor, mock_store):
     mock_store.load.side_effect = KeyError("not found")
 
-    with pytest.raises(ResourceNotFoundException):
+    with pytest.raises(
+        ResourceNotFoundException, match="^Durable Execution does not exist$"
+    ):
         executor.get_execution("test-arn")
 
 
@@ -2009,6 +2329,7 @@ def test_get_execution_state_invalid_token(
 def test_get_execution_history(executor, mock_store):
     """Test get_execution_history method."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.operations = []  # Empty operations list
     mock_execution.updates = []
     mock_execution.update_timestamps = []
@@ -2040,6 +2361,7 @@ def test_get_execution_history_with_events(executor, mock_store):
         step_details=StepDetails(result="test_result"),
     )
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.operations = [op1]
     mock_execution.updates = []
     mock_execution.update_timestamps = []
@@ -2068,6 +2390,7 @@ def test_get_execution_history_reverse_order(executor, mock_store):
     )
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.operations = [op1]
     mock_execution.updates = []
     mock_execution.update_timestamps = []
@@ -2100,6 +2423,7 @@ def test_get_execution_history_pagination(executor, mock_store):
         operations.append(op)
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.operations = operations
     mock_execution.updates = []
     mock_execution.update_timestamps = []
@@ -2130,6 +2454,7 @@ def test_get_execution_history_pagination_with_marker(executor, mock_store):
         operations.append(op)
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.operations = operations
     mock_execution.updates = []
     mock_execution.update_timestamps = []
@@ -2149,6 +2474,7 @@ def test_get_execution_history_pagination_with_marker(executor, mock_store):
 def test_get_execution_history_invalid_marker(executor, mock_store):
     """Test get_execution_history with invalid marker."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.operations = []
     mock_execution.updates = []
     mock_execution.update_timestamps = []
@@ -2252,6 +2578,7 @@ def test_send_callback_success(executor, mock_store):
 
     # Create mock execution with callback operation
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_callback_operation.return_value = (0, Mock())
     mock_execution.complete_callback_success.return_value = Mock()
     mock_store.load.return_value = mock_execution
@@ -2291,6 +2618,7 @@ def test_send_callback_success_with_result(executor, mock_store):
 
     # Create mock execution with callback operation
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_callback_operation.return_value = (0, Mock())
     mock_execution.complete_callback_success.return_value = Mock()
     mock_store.load.return_value = mock_execution
@@ -2316,6 +2644,7 @@ def test_send_callback_failure(executor, mock_store):
 
     # Create mock execution with callback operation
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_callback_operation.return_value = (0, Mock())
     mock_execution.complete_callback_failure.return_value = Mock()
     mock_store.load.return_value = mock_execution
@@ -2350,6 +2679,7 @@ def test_send_callback_failure_with_error(executor, mock_store):
 
     # Create mock execution with callback operation
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_callback_operation.return_value = (0, Mock())
     mock_execution.complete_callback_failure.return_value = Mock()
     mock_store.load.return_value = mock_execution
@@ -2374,6 +2704,7 @@ def test_send_callback_heartbeat(executor, mock_store):
 
     # Create mock execution with callback operation
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_operation = Mock()
     mock_operation.status = OperationStatus.STARTED
     mock_execution.find_callback_operation.return_value = (0, mock_operation)
@@ -2407,6 +2738,7 @@ def test_send_callback_heartbeat_none_callback_id(executor):
 def test_complete_execution_no_result(mock_store, executor):
     """Test complete_execution when execution has no result after completion."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.result = None  # No result after completion
     mock_store.load.return_value = mock_execution
 
@@ -2418,6 +2750,7 @@ def test_complete_execution_no_result(mock_store, executor):
 def test_fail_execution_no_result(mock_store, executor):
     """Test fail_execution when execution has no result after failure."""
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.result = None  # No result after failure
     mock_store.load.return_value = mock_execution
     error = ErrorObject.from_message("test error")
@@ -2436,6 +2769,7 @@ def test_send_callback_heartbeat_inactive_callback(mock_store, executor):
 
     # Create mock execution with inactive callback operation
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_operation = Mock()
     mock_operation.status = OperationStatus.SUCCEEDED  # Not STARTED
     mock_execution.find_callback_operation.return_value = (0, mock_operation)
@@ -2471,6 +2805,7 @@ def test_send_callback_heartbeat_invalid_token(executor):
 
 def test_complete_events_no_event(executor):
     """Test _complete_events when no event exists."""
+    executor._store.load.return_value.parent_execution_arn = None  # top-level
     # Should not raise exception when event doesn't exist
     executor._complete_events("nonexistent-arn")  # Should handle gracefully
 
@@ -2521,6 +2856,7 @@ def test_callback_heartbeat_timeout_reset(executor, mock_store, mock_scheduler):
 
     # Create mock execution with callback options
     mock_execution = Mock()
+    mock_execution.is_paused = False
     callback_options = CallbackOptions(heartbeat_timeout_seconds=30)
     update = OperationUpdate(
         operation_id="op-123",
@@ -2553,6 +2889,7 @@ def test_callback_timeout_handlers(executor, mock_store):
 
     # Create mock execution
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.is_complete = False
     mock_store.load.return_value = mock_execution
 
@@ -2587,6 +2924,7 @@ def test_callback_timeout_completed_execution(executor, mock_store):
 
     # Create completed execution
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.is_complete = True
     mock_store.load.return_value = mock_execution
 
@@ -2611,6 +2949,7 @@ def test_schedule_callback_timeouts_no_callback_details(executor, mock_store):
     )
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_operation.return_value = (0, operation)
     mock_store.load.return_value = mock_execution
 
@@ -2634,6 +2973,7 @@ def test_schedule_callback_timeouts_no_callback_options(executor, mock_store):
     )
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_operation.return_value = (0, operation)
     mock_execution.updates = []
     mock_execution.update_timestamps = []  # No updates with callback options
@@ -2659,6 +2999,7 @@ def test_schedule_callback_timeouts_zero_timeouts(executor, mock_store, mock_sch
     )
 
     mock_execution = Mock()
+    mock_execution.is_paused = False
     mock_execution.find_operation.return_value = (0, operation)
 
     # Create update with zero timeouts (disabled)
@@ -2767,3 +3108,646 @@ def test_on_stopped(executor):
         executor.on_stopped("test-arn", error)
 
     mock_fail.assert_called_once_with("test-arn", error)
+
+
+def test_resolve_dispatch_rejects_a_malformed_target_it_was_handed(
+    executor, mock_store, start_input
+):
+    """Checkpoint validation normally rejects a malformed target first; a
+    dispatch that bypassed it still fails with the service's message."""
+    parent = Mock()
+    parent.is_complete = False
+    parent.start_input = start_input
+    mock_store.load.return_value = parent
+    executor._child_dispatcher = Mock()  # noqa: SLF001
+
+    result = executor._resolve_dispatch(  # noqa: SLF001
+        "parent-arn", "op-1", "not a function", None, None
+    )
+
+    assert isinstance(result, KnownOutcome)
+    assert result.outcome.error is not None
+    assert result.outcome.error.message == "Invalid function ARN 'not a function'"
+    executor._child_dispatcher.dispatch.assert_not_called()  # noqa: SLF001
+
+
+def test_resolve_dispatch_carries_name_and_qualifier_separately(
+    executor, mock_store, start_input
+):
+    parent = Mock()
+    parent.is_complete = False
+    parent.start_input = start_input
+    mock_store.load.return_value = parent
+    executor._child_dispatcher = Mock()  # noqa: SLF001
+
+    executor._resolve_dispatch(  # noqa: SLF001
+        "parent-arn",
+        "op-1",
+        "arn:aws:lambda:us-west-2:123456789012:function:child:prod",
+        None,
+        "{}",
+    )
+
+    request = executor._child_dispatcher.dispatch.call_args.args[0]  # noqa: SLF001
+    assert (request.function_name, request.qualifier) == ("child", "prod")
+    assert request.lookup_keys() == ("child:prod", "child")
+
+
+# region Chained invoke preflight
+
+
+def test_preflight_without_a_dispatcher_fails_the_target(executor):
+    """A runner with no dispatcher cannot dispatch anything, so the target
+    fails in the checkpoint response with the same message dispatch gives."""
+    executor._child_dispatcher = None  # noqa: SLF001
+
+    error = executor.preflight_chained_invoke("child")
+
+    assert error is not None
+    assert error.message == "This runner has no chained-invoke dispatcher configured."
+    assert error.type is None
+
+
+def test_preflight_rejects_a_malformed_target(executor):
+    executor._child_dispatcher = Mock()  # noqa: SLF001
+
+    error = executor.preflight_chained_invoke("not a function name!")
+
+    assert error is not None
+    assert "not a function name!" in (error.message or "")
+    executor._child_dispatcher.preflight.assert_not_called()  # noqa: SLF001
+
+
+def test_preflight_asks_the_dispatcher_with_the_parsed_target(executor):
+    from aws_durable_execution_sdk_python_testing.child_dispatcher import (
+        ChildOutcome,
+        FunctionTarget,
+    )
+
+    dispatcher = Mock()
+    dispatcher.preflight.return_value = None
+    executor._child_dispatcher = dispatcher  # noqa: SLF001
+
+    assert executor.preflight_chained_invoke("child:prod") is None
+    dispatcher.preflight.assert_called_once_with(
+        FunctionTarget(name="child", qualifier="prod", account_id=None, region=None)
+    )
+
+    error = ErrorObject.from_message("Function not found: child.")
+    dispatcher.preflight.return_value = ChildOutcome(error=error)
+    assert executor.preflight_chained_invoke("child") is error
+
+
+# endregion
+
+
+def _linked_parent_and_child(
+    store,
+    parent_name: str = "parent",
+    child_name: str = "child",
+    *,
+    child_terminal: bool = True,
+) -> tuple[Execution, Execution]:
+    """Persist a parent with a STARTED chained invoke and its linked child.
+
+    Both halves of the link are stored: the parent lists the child under
+    the operation id, and the child names its parent. The child has
+    succeeded unless ``child_terminal`` is False, in which case it is
+    still running.
+    """
+    parent = Execution.new(
+        StartDurableExecutionInput(
+            account_id="123456789012",
+            function_name=parent_name,
+            function_qualifier="$LATEST",
+            execution_name="parent-exec",
+            execution_timeout_seconds=300,
+            execution_retention_period_days=7,
+            invocation_id="parent-inv",
+        )
+    )
+    parent.start()
+    parent.operations.append(
+        Operation(
+            operation_id="invoke-1",
+            operation_type=OperationType.CHAINED_INVOKE,
+            status=OperationStatus.STARTED,
+        )
+    )
+    child = Execution.new(
+        StartDurableExecutionInput(
+            account_id="123456789012",
+            function_name=child_name,
+            function_qualifier="$LATEST",
+            execution_name="child-exec",
+            execution_timeout_seconds=300,
+            execution_retention_period_days=7,
+            invocation_id="child-inv",
+        )
+    )
+    child.parent_execution_arn = parent.durable_execution_arn
+    parent.record_chained_invoke_child("invoke-1", child.durable_execution_arn)
+    child.start()
+    if child_terminal:
+        child.complete_success('{"squared": 16}')
+    store.save(parent)
+    store.save(child)
+    return parent, child
+
+
+def test_terminal_child_reaches_its_parent_after_a_restart(
+    tmp_path, mock_scheduler, mock_invoker, mock_checkpoint_processor
+):
+    """A fresh executor over the same store has no memory link for the
+    child. The child is then stopped through the public API, as a
+    StopDurableExecution call would after a restart. The persisted halves
+    of the link are enough: the parent's operation completes with the
+    stop error and the parent is re-invoked.
+    """
+    store = FileSystemExecutionStore(tmp_path)
+    parent, child = _linked_parent_and_child(store, child_terminal=False)
+    restarted = Executor(store, mock_scheduler, mock_invoker, mock_checkpoint_processor)
+    assert restarted._chained_invoke_links == {}  # noqa: SLF001
+
+    restarted.stop_execution(
+        child.durable_execution_arn,
+        error=ErrorObject.from_message("operator stopped the child"),
+    )
+    # The parent-side transition runs on the parent's lane, in FIFO
+    # order; a no-op behind it is a barrier.
+    restarted._registry.submit(  # noqa: SLF001
+        parent.durable_execution_arn, CallableTask(lambda: None)
+    ).result(timeout=5)
+
+    _, operation = store.load(parent.durable_execution_arn).find_operation("invoke-1")
+    assert operation.status is OperationStatus.STOPPED
+    assert (
+        operation.chained_invoke_details.error.message == "operator stopped the child"
+    )
+    assert (
+        store.load(child.durable_execution_arn).current_status()
+        is ExecutionStatus.STOPPED
+    )
+    # The parent is re-invoked to observe the completion.
+    assert mock_scheduler.call_later.call_count >= 1
+
+
+def test_persisted_link_completes_the_parent_when_the_child_already_succeeded(
+    tmp_path, mock_scheduler, mock_invoker, mock_checkpoint_processor
+):
+    """The fallback itself, with a child that succeeded: the parent's
+    operation takes the child's result."""
+    store = FileSystemExecutionStore(tmp_path)
+    parent, child = _linked_parent_and_child(store)
+    restarted = Executor(store, mock_scheduler, mock_invoker, mock_checkpoint_processor)
+
+    restarted._notify_parent_of_terminal_child(child.durable_execution_arn)  # noqa: SLF001
+    restarted._registry.submit(  # noqa: SLF001
+        parent.durable_execution_arn, CallableTask(lambda: None)
+    ).result(timeout=5)
+
+    _, operation = store.load(parent.durable_execution_arn).find_operation("invoke-1")
+    assert operation.status is OperationStatus.SUCCEEDED
+    assert operation.chained_invoke_details.result == '{"squared": 16}'
+
+
+def test_terminal_execution_without_a_parent_notifies_nobody(
+    mock_scheduler, mock_invoker, mock_checkpoint_processor
+):
+    store = InMemoryExecutionStore()
+    parent, child = _linked_parent_and_child(store)
+    child.parent_execution_arn = None
+    store.save(child)
+    fresh = Executor(store, mock_scheduler, mock_invoker, mock_checkpoint_processor)
+
+    fresh._notify_parent_of_terminal_child(child.durable_execution_arn)  # noqa: SLF001
+
+    _, operation = store.load(parent.durable_execution_arn).find_operation("invoke-1")
+    assert operation.status is OperationStatus.STARTED
+    mock_scheduler.call_later.assert_not_called()
+
+
+def test_persisted_link_ignores_a_parent_that_does_not_list_the_child(
+    mock_scheduler, mock_invoker, mock_checkpoint_processor
+):
+    store = InMemoryExecutionStore()
+    parent, child = _linked_parent_and_child(store)
+    parent.chained_invoke_children.clear()
+    store.save(parent)
+    fresh = Executor(store, mock_scheduler, mock_invoker, mock_checkpoint_processor)
+
+    assert fresh._persisted_link(child) is None  # noqa: SLF001
+    assert fresh._persisted_link(None) is None  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("qualifier", "arn_suffix", "version"),
+    [
+        ("$LATEST", "child:$LATEST", "$LATEST"),
+        ("3", "child:3", "3"),
+        ("prod", "child:$LATEST", "$LATEST"),
+        ("$LATEST.PUBLISHED", "child:$LATEST.PUBLISHED", "$LATEST.PUBLISHED"),
+    ],
+)
+def test_get_execution_details_reports_the_qualified_identity(
+    mock_scheduler,
+    mock_invoker,
+    mock_checkpoint_processor,
+    qualifier,
+    arn_suffix,
+    version,
+):
+    """FunctionArn is qualified with the executed version and Version
+    carries the same value, as the service reports them; both come from
+    the execution's own region."""
+    store = InMemoryExecutionStore()
+    real_executor = Executor(
+        store,
+        mock_scheduler,
+        mock_invoker,
+        mock_checkpoint_processor,
+        region="us-west-2",
+    )
+    output = real_executor.start_execution(
+        StartDurableExecutionInput(
+            account_id="123456789012",
+            function_name="child",
+            function_qualifier=qualifier,
+            execution_name="child-run",
+            execution_timeout_seconds=300,
+            execution_retention_period_days=7,
+            invocation_id="inv-1",
+        )
+    )
+
+    details = real_executor.get_execution_details(output.execution_arn)
+
+    assert (
+        details.function_arn
+        == f"arn:aws:lambda:us-west-2:123456789012:function:{arn_suffix}"
+    )
+    assert details.version == version
+    assert real_executor.region == "us-west-2"
+
+
+def _run_dispatch_with_blocked_target(
+    executor, *, shutdown_before_result: bool, block_in: str = "invocation"
+):
+    """Drive one dispatch that blocks until released, in target resolution
+    or in the plain-target invoke.
+
+    Returns the number of completions applied to the parent.
+    """
+    import threading
+
+    from aws_durable_execution_sdk_python_testing.child_dispatcher import (
+        ChildOutcome,
+        RunInvocation,
+    )
+
+    release = threading.Event()
+    applied: list[ChildOutcome] = []
+
+    def invocation() -> ChildOutcome:
+        if block_in == "invocation":
+            release.wait(5)
+        return ChildOutcome(result="42")
+
+    def resolve(*_args) -> RunInvocation:
+        if block_in == "resolve":
+            release.wait(5)
+        return RunInvocation(invocation=invocation)
+
+    async def record(_arn: str, _op: str, outcome: ChildOutcome) -> None:
+        applied.append(outcome)
+
+    executor._resolve_dispatch = resolve  # noqa: SLF001
+    executor._finish_from_outcome = record  # noqa: SLF001
+    dispatch = executor._dispatch_chained_invoke(  # noqa: SLF001
+        "parent-arn", "invoke-1", "child", None, None
+    )
+
+    async def main() -> None:
+        task = asyncio.ensure_future(dispatch())
+        await asyncio.sleep(0.1)  # the blocking thread is now waiting
+        if shutdown_before_result:
+            executor.shutdown()
+        release.set()
+        await task
+
+    asyncio.run(main())
+    return len(applied)
+
+
+def test_a_target_result_that_lands_after_shutdown_is_dropped(executor):
+    """The blocked target thread returns after shutdown. Its result must
+    not be applied to the parent, whose store may already be closed."""
+    assert _run_dispatch_with_blocked_target(executor, shutdown_before_result=True) == 0
+
+
+def test_a_target_resolved_after_shutdown_is_not_dispatched(executor):
+    """Shutdown while the target is still being resolved: nothing is
+    invoked and nothing is applied."""
+    assert (
+        _run_dispatch_with_blocked_target(
+            executor, shutdown_before_result=True, block_in="resolve"
+        )
+        == 0
+    )
+
+
+def test_a_target_result_before_shutdown_is_applied(executor):
+    """Positive control for the tests above: without shutdown the same
+    result completes the parent's operation once."""
+    assert (
+        _run_dispatch_with_blocked_target(executor, shutdown_before_result=False) == 1
+    )
+
+
+def test_a_handler_response_that_lands_after_shutdown_is_not_recorded(
+    executor, mock_store, mock_scheduler, mock_invoker, start_input
+):
+    """The handler invocation returns after shutdown. Its response is
+    dropped instead of being recorded on the execution."""
+    import threading
+
+    mock_execution = Mock()
+    mock_execution.is_paused = False
+    mock_execution.durable_execution_arn = "test-arn"
+    mock_execution.is_complete = False
+    mock_execution.start_input = start_input
+    mock_execution.region = "us-west-2"
+    mock_invoker.create_invocation_input.return_value = Mock()
+    release = threading.Event()
+
+    def blocked_invoke(*_args, **_kwargs) -> InvokeResponse:
+        release.wait(5)
+        return InvokeResponse(
+            invocation_output=DurableExecutionInvocationOutput(
+                status=InvocationStatus.SUCCEEDED, result="late"
+            ),
+            request_id="late-request",
+        )
+
+    mock_invoker.invoke.side_effect = blocked_invoke
+    executor._finish_invocation = Mock()  # noqa: SLF001
+
+    with patch(
+        "aws_durable_execution_sdk_python_testing.executor.Execution"
+    ) as mock_execution_class:
+        mock_execution_class.new.return_value = mock_execution
+        mock_store.load.return_value = mock_execution
+        executor.start_execution(start_input)
+        handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+
+        async def main() -> None:
+            task = asyncio.ensure_future(handler())
+            await asyncio.sleep(0.1)  # the invoke thread is now blocked
+            executor.shutdown()
+            release.set()
+            await task
+
+        asyncio.run(main())
+
+    mock_invoker.invoke.assert_called_once()
+    executor._finish_invocation.assert_not_called()  # noqa: SLF001
+
+
+def test_a_child_whose_record_cannot_be_read_fails_the_parent_operation(
+    mock_scheduler, mock_invoker, mock_checkpoint_processor
+):
+    """The memory link names the parent, but the child cannot be loaded.
+    The parent's operation still completes, as FAILED, so the parent is
+    never left waiting on a child the runner cannot read."""
+    store = InMemoryExecutionStore()
+    parent, child = _linked_parent_and_child(store)
+    real_executor = Executor(
+        store, mock_scheduler, mock_invoker, mock_checkpoint_processor
+    )
+    real_executor._chained_invoke_links[child.durable_execution_arn] = (  # noqa: SLF001
+        parent.durable_execution_arn,
+        "invoke-1",
+    )
+    store._store.pop(child.durable_execution_arn)  # noqa: SLF001
+
+    real_executor._notify_parent_of_terminal_child(child.durable_execution_arn)  # noqa: SLF001
+    real_executor._registry.submit(  # noqa: SLF001
+        parent.durable_execution_arn, CallableTask(lambda: None)
+    ).result(timeout=5)
+
+    _, operation = store.load(parent.durable_execution_arn).find_operation("invoke-1")
+    assert operation.status is OperationStatus.FAILED
+    assert "could not be read" in operation.chained_invoke_details.error.message
+
+
+def test_a_child_start_that_runs_into_shutdown_persists_and_launches_nothing(
+    mock_scheduler, mock_invoker, mock_checkpoint_processor
+):
+    """Shutdown begins while the child-start task is already running.
+    Nothing is persisted and nothing is scheduled: a child created now
+    would never be invoked."""
+    store = InMemoryExecutionStore()
+    parent, _ = _linked_parent_and_child(store)
+    real_executor = Executor(
+        store, mock_scheduler, mock_invoker, mock_checkpoint_processor
+    )
+    child_start = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="child",
+        function_qualifier="$LATEST",
+        execution_name="late-child",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+    )
+    real_executor.shutdown()
+
+    real_executor._start_child_execution(  # noqa: SLF001
+        parent.durable_execution_arn, "invoke-2", child_start
+    )
+
+    assert len(store.list_all()) == 2  # parent and the original child only
+    mock_scheduler.call_later.assert_not_called()
+
+
+def test_a_completion_during_the_invocation_reaches_the_next_input(
+    mock_scheduler, mock_invoker, mock_checkpoint_processor
+):
+    """A chained target completes while the parent handler is still
+    running. The service reports it in the next invocation's
+    UpdatedOperationIds, because the handler never observed it. So must
+    the runner: completing the current invocation keeps the id, and the
+    next input carries it."""
+    store = InMemoryExecutionStore()
+    parent, _child = _linked_parent_and_child(store)
+    real_executor = Executor(
+        store, mock_scheduler, mock_invoker, mock_checkpoint_processor
+    )
+    arn = parent.durable_execution_arn
+    now = datetime.now(UTC)
+
+    # The parent handler is running: the child's completion lands first.
+    real_executor._apply_chained_invoke_completion(  # noqa: SLF001
+        arn, "invoke-1", OperationStatus.SUCCEEDED, '{"squared": 16}', None
+    )
+    assert store.load(arn).updated_operation_ids == ["invoke-1"]
+
+    # Then the current invocation returns.
+    store.load(arn).record_invocation_completion(now, now, "request-1")
+    store.save(store.load(arn))
+    assert store.load(arn).updated_operation_ids == ["invoke-1"]
+
+    # The next input carries the id, and delivering it resets the list.
+    execution = store.load(arn)
+    execution.begin_new_invocation()
+    invocation_input = mock_invoker.create_invocation_input(execution=execution)
+    mock_invoker.create_invocation_input.assert_called_once()
+    assert invocation_input is mock_invoker.create_invocation_input.return_value
+    execution.mark_state_delivered()
+    assert execution.updated_operation_ids == []
+
+
+def test_a_target_exception_that_lands_after_shutdown_is_dropped(executor):
+    """The target raises after shutdown, or the pool refuses it. The
+    exception path must not complete the parent's operation either."""
+    import threading
+
+    from aws_durable_execution_sdk_python_testing.child_dispatcher import (
+        ChildOutcome,
+        RunInvocation,
+    )
+
+    release = threading.Event()
+    applied: list[ChildOutcome] = []
+
+    def invocation() -> ChildOutcome:
+        release.wait(5)
+        msg = "target exploded after shutdown"
+        raise RuntimeError(msg)
+
+    async def record(_arn: str, _op: str, outcome: ChildOutcome) -> None:
+        applied.append(outcome)
+
+    executor._resolve_dispatch = Mock(  # noqa: SLF001
+        return_value=RunInvocation(invocation=invocation)
+    )
+    executor._finish_from_outcome = record  # noqa: SLF001
+    dispatch = executor._dispatch_chained_invoke(  # noqa: SLF001
+        "parent-arn", "invoke-1", "child", None, None
+    )
+
+    async def main() -> None:
+        task = asyncio.ensure_future(dispatch())
+        await asyncio.sleep(0.1)
+        executor.shutdown()
+        release.set()
+        await task
+
+    asyncio.run(main())
+    assert applied == []
+
+
+def test_a_handler_error_that_lands_after_shutdown_is_not_retried(
+    executor, mock_store, mock_scheduler, mock_invoker, start_input
+):
+    """The handler invocation raises after shutdown. No retry is recorded
+    and nothing is rescheduled."""
+    import threading
+
+    mock_execution = Mock()
+    mock_execution.is_paused = False
+    mock_execution.durable_execution_arn = "test-arn"
+    mock_execution.is_complete = False
+    mock_execution.start_input = start_input
+    mock_execution.region = "us-west-2"
+    mock_invoker.create_invocation_input.return_value = Mock()
+    release = threading.Event()
+
+    def failing_invoke(*_args, **_kwargs) -> InvokeResponse:
+        release.wait(5)
+        msg = "connection reset"
+        raise ConnectionError(msg)
+
+    mock_invoker.invoke.side_effect = failing_invoke
+    executor._retry_after_error = Mock()  # noqa: SLF001
+
+    with patch(
+        "aws_durable_execution_sdk_python_testing.executor.Execution"
+    ) as mock_execution_class:
+        mock_execution_class.new.return_value = mock_execution
+        mock_store.load.return_value = mock_execution
+        executor.start_execution(start_input)
+        handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+
+        async def main() -> None:
+            task = asyncio.ensure_future(handler())
+            await asyncio.sleep(0.1)
+            executor.shutdown()
+            release.set()
+            await task
+
+        asyncio.run(main())
+
+    executor._retry_after_error.assert_not_called()  # noqa: SLF001
+
+
+def test_shutdown_waits_for_a_child_start_already_past_its_check(
+    mock_scheduler, mock_invoker, mock_checkpoint_processor
+):
+    """Shutdown begins while a child start is blocked inside
+    _create_execution, after its check. Shutdown waits for that start,
+    so the child is created, linked and launched as one unit, and no
+    half-made child is left in the store."""
+    import threading
+
+    store = InMemoryExecutionStore()
+    parent, _ = _linked_parent_and_child(store)
+    real_executor = Executor(
+        store, mock_scheduler, mock_invoker, mock_checkpoint_processor
+    )
+    child_start = StartDurableExecutionInput(
+        account_id="123456789012",
+        function_name="child",
+        function_qualifier="$LATEST",
+        execution_name="racing-child",
+        execution_timeout_seconds=300,
+        execution_retention_period_days=7,
+    )
+    inside_create = threading.Event()
+    release_create = threading.Event()
+    original_create = real_executor._create_execution  # noqa: SLF001
+
+    def blocked_create(*args, **kwargs):
+        inside_create.set()
+        release_create.wait(5)
+        return original_create(*args, **kwargs)
+
+    real_executor._create_execution = blocked_create  # noqa: SLF001
+
+    starter = threading.Thread(
+        target=real_executor._start_child_execution,  # noqa: SLF001
+        args=(parent.durable_execution_arn, "invoke-2", child_start),
+    )
+    starter.start()
+    assert inside_create.wait(5)
+
+    shutdown_done = threading.Event()
+    threading.Thread(
+        target=lambda: (real_executor.shutdown(), shutdown_done.set())
+    ).start()
+    time.sleep(0.2)
+    assert not shutdown_done.is_set()  # shutdown is waiting for the start
+
+    release_create.set()
+    starter.join(5)
+    assert shutdown_done.wait(5)
+
+    children = [
+        e for e in store.list_all() if e.start_input.execution_name == "racing-child"
+    ]
+    assert len(children) == 1
+    assert (
+        store.load(parent.durable_execution_arn).chained_invoke_children["invoke-2"]
+        == children[0].durable_execution_arn
+    )
+    # The child was launched: its timeout and its first invocation are scheduled.
+    assert mock_scheduler.call_later.call_count == 2

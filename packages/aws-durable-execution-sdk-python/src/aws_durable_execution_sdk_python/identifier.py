@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from aws_durable_execution_sdk_python.exceptions import (
     NonDeterministicExecutionError,
@@ -34,17 +34,17 @@ class OperationIdNamespace:
 
 @dataclass(frozen=True)
 class OperationIdentifier:
-    """Container for operation id, type, subtype, hierarchy, and name."""
+    """Operation identity with an explicit type independent of its subtype."""
 
     operation_id: str
     sub_type: OperationSubType
     parent_id: str | None = None
     name: str | None = None
-    operation_type: OperationType | None = None
+    operation_type: OperationType = field(kw_only=True)
 
     @property
     def type(self) -> OperationType:
-        return self.operation_type or OperationType.from_sub_type(self.sub_type)
+        return self.operation_type
 
     def validate_checkpoint(self, checkpoint: Operation | None) -> None:
         """Ensure replay history belongs to this operation before it is consumed."""

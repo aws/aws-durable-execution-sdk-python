@@ -29,7 +29,12 @@ from aws_durable_execution_sdk_python_testing.token import CheckpointToken
 
 
 if TYPE_CHECKING:
-    from aws_durable_execution_sdk_python.lambda_service import OperationUpdate
+    from collections.abc import Callable
+
+    from aws_durable_execution_sdk_python.lambda_service import (
+        ErrorObject,
+        OperationUpdate,
+    )
 
     from aws_durable_execution_sdk_python_testing.clock import Clock
     from aws_durable_execution_sdk_python_testing.execution import Execution
@@ -67,6 +72,18 @@ class CheckpointProcessor:
     def add_execution_observer(self, observer: ExecutionObserver) -> None:
         """Add observer for execution events."""
         self._observers.append(observer)
+
+    def set_chained_invoke_preflight(
+        self, preflight: Callable[[str], ErrorObject | None]
+    ) -> None:
+        """Resolve chained-invoke targets at checkpoint time with ``preflight``.
+
+        A target it fails comes back FAILED in the checkpoint response
+        instead of being dispatched (see ``ChainedInvokeProcessor``).
+        """
+        self._dispatcher = CheckpointRequestDispatcher(
+            chained_invoke_preflight=preflight
+        )
 
     def process_checkpoint(
         self,

@@ -60,6 +60,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     WaitDetails,
 )
 from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
+from aws_durable_execution_sdk_python.state import ExecutionState
 
 
 LARGE_RESULT = "large_success" * 1024 * 1024
@@ -1000,9 +1001,358 @@ def test_durable_execution_suspend_execution():
 
     result = test_handler(invocation_input, lambda_context)
 
-    assert result["Status"] == InvocationStatus.PENDING.value
-    assert "Result" not in result
-    assert "Error" not in result
+    assert result == {"Status": InvocationStatus.PENDING.value}
+
+
+def test_checkpoint_without_token_answers_pending() -> None:
+    """A tokenless step checkpoint suspends through the real background thread."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token=None,
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> str:
+        return context.step(lambda _: "x", name="s1")
+
+    result = test_handler(_make_invocation_input(mock_client), _make_lambda_context())
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_called_once()
+    mock_client.get_execution_state.assert_not_called()
+
+
+def _revoke_checkpoint_token_instead_of_checkpointing(self: ExecutionState) -> None:
+    """Stand in for the background thread: simulate an already-revoked token.
+
+    Used to make the revoked condition deterministic in tests instead of
+    racing the real background thread against a mocked checkpoint response.
+    Mirrors what _handle_revoked_checkpoint_token does to the latch, without
+    exercising the checkpoint API call itself.
+    """
+    self._checkpoint_token_revoked.set()  # noqa: SLF001
+
+
+def test_durable_execution_returns_pending_when_token_revoked_after_return():
+    """Handler returns normally while the token was revoked -> PENDING, not SUCCEEDED.
+
+    Covers the handler-returned-while-an-unawaited-checkpoint-was-in-flight
+    case: from the wrapper's point of view this is indistinguishable from any
+    other point at which the background thread could have observed the
+    revoked token, so the fake target patches checkpoint_batches_forever
+    directly rather than racing a real one.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        _revoke_checkpoint_token_instead_of_checkpointing,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_not_called()
+
+
+def test_durable_execution_returns_pending_when_background_token_revoked_during_shutdown():
+    """A shutdown-time background revocation wins over provisional SUCCEEDED."""
+    mock_client = Mock(spec=DurableServiceClient)
+
+    def revoke_checkpoint_token_after_shutdown_starts(self: ExecutionState) -> None:
+        if self._checkpointing_stopped.wait(timeout=2.0):  # noqa: SLF001
+            self._checkpoint_token_revoked.set()  # noqa: SLF001
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        revoke_checkpoint_token_after_shutdown_starts,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_not_called()
+
+
+def test_durable_execution_returns_pending_when_token_revoked_during_close_after_error():
+    """A cleanup-time revoked token wins over a provisional FAILED response."""
+    mock_client = Mock(spec=DurableServiceClient)
+    original_close = ExecutionState.close
+
+    def close_with_revoked_token(self: ExecutionState) -> None:
+        self._checkpoint_token_revoked.set()  # noqa: SLF001
+        original_close(self)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "unexpected"
+        raise ValueError(msg)
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(ExecutionState, "close", close_with_revoked_token):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_not_called()
+
+
+def test_durable_execution_returns_pending_when_token_revoked_on_invocation_error():
+    """An InvocationError raised after the token is revoked answers PENDING, not FAILED.
+
+    A retryable InvocationError would otherwise trigger a Lambda retry.
+    Revocation requires the invocation to stop instead. So the response is
+    bare PENDING, without the handler error or a result.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "Retryable invocation error"
+        raise InvocationError(msg)
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        _revoke_checkpoint_token_instead_of_checkpointing,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+
+
+def test_durable_execution_returns_pending_when_token_revoked_on_execution_error():
+    """An ExecutionError raised after the token is revoked answers PENDING, not FAILED.
+
+    Bare PENDING with no Error, same as the InvocationError case above.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "Non-retryable execution error"
+        raise ExecutionError(msg)
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        _revoke_checkpoint_token_instead_of_checkpointing,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+
+
+def test_durable_execution_returns_pending_when_token_revoked_on_generic_error():
+    """A plain user exception raised after the token is revoked answers PENDING, not FAILED.
+
+    Bare PENDING with no Error, same as the InvocationError case above.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "unexpected"
+        raise ValueError(msg)
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        _revoke_checkpoint_token_instead_of_checkpointing,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_not_called()
+
+
+def test_durable_execution_returns_pending_when_token_revoked_on_checkpoint_error():
+    """A CheckpointError raised after the token is revoked answers PENDING, not FAILED.
+
+    Covers the CheckpointError exit's latch check added for symmetry with the
+    InvocationError/ExecutionError/generic-error exits above: bare PENDING
+    with no Error, and the checkpoint error classification in
+    handle_checkpoint_error is never reached.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "Checkpoint system failed"
+        raise CheckpointError(msg, CheckpointErrorCategory.EXECUTION)
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        _revoke_checkpoint_token_instead_of_checkpointing,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_not_called()
+
+
+def test_durable_execution_oversized_result_abandoned_after_revocation_returns_pending():
+    """An oversized result returns PENDING without checkpointing after token revocation."""
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": LARGE_RESULT}
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        _revoke_checkpoint_token_instead_of_checkpointing,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_not_called()
+
+
+def test_durable_execution_oversized_result_accepted_with_revoked_token_succeeds():
+    """The terminal EXECUTION checkpoint itself getting a token-less response still succeeds.
+
+    A token-less response on the batch carrying the execution's own terminal
+    update means the execution is finished, so this reports SUCCEEDED even
+    though the same response revokes the token for any further call.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token=None,
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": LARGE_RESULT}
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    result = test_handler(invocation_input, lambda_context)
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert not result.get("Result")
+    mock_client.checkpoint.assert_called_once()
+
+
+def test_durable_execution_oversized_result_revoked_during_checkpoint_returns_pending():
+    """The token-revoked latch can flip strictly between the pre-checkpoint
+    check and the oversized-result checkpoint call itself.
+
+    create_checkpoint raising SuspendExecution there is only
+    caught by the wrapper's outer SuspendExecution handler (there is no
+    dedicated except around this call, unlike the symmetric FAILED/oversized-
+    error path). This proves that path still answers PENDING, not an
+    uncaught exception or FAILED.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": LARGE_RESULT}
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    def _raise_suspended(self: ExecutionState, *args, **kwargs) -> None:
+        raise SuspendExecution(
+            "Checkpoint token revoked by the service; ending invocation with PENDING."
+        )
+
+    with patch.object(ExecutionState, "create_checkpoint", _raise_suspended):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+
+
+def test_durable_execution_oversized_error_revoked_during_checkpoint_returns_pending() -> (
+    None
+):
+    """Revocation before an oversized-error checkpoint suspends the invocation.
+
+    Verifies:
+    * Checkpoint request is not sent and PENDING is returned.
+    * Plugins receive one PENDING invocation-end notification and no execution-end
+    notification.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    plugin = _RecordingPlugin()
+    attempted_updates: list[OperationUpdate | None] = []
+    original_checkpoint_method = ExecutionState.create_checkpoint_sync
+
+    def checkpoint_with_revoked_token(
+        self: ExecutionState, operation_update: OperationUpdate | None = None
+    ) -> None:
+        # Confirm revocation has not occurred yet.
+        assert not self.is_checkpoint_token_revoked
+        # Capture the update so the test can verify that the oversized error reached the checkpoint path.
+        attempted_updates.append(operation_update)
+        # Simulate the checkpoint worker recording revocation before this checkpoint proceeds.
+        self._checkpoint_token_revoked.set()  # noqa: SLF001
+        # Let the real checkpoint guard raise SuspendExecution rather than raising it in the test.
+        original_checkpoint_method(self, operation_update)
+
+    def user_handler(event: Any, context: DurableContext) -> dict:
+        raise ValueError(LARGE_RESULT)
+
+    test_handler = durable_execution(user_handler, plugins=[plugin])
+    with patch.object(
+        ExecutionState, "create_checkpoint_sync", checkpoint_with_revoked_token
+    ):
+        result = test_handler(
+            _make_invocation_input(mock_client), _make_lambda_context()
+        )
+
+    assert len(attempted_updates) == 1
+    update = attempted_updates[0]
+    assert update is not None
+    assert update.operation_type is OperationType.EXECUTION
+    assert update.action is OperationAction.FAIL
+    assert update.error is not None
+    assert update.error.message == LARGE_RESULT
+    assert result == {"Status": InvocationStatus.PENDING.value}
+
+    mock_client.checkpoint.assert_not_called()
+
+    invocation_end_calls = [
+        call for call in plugin.calls if call.startswith("invocation_end:")
+    ]
+    assert invocation_end_calls == ["invocation_end:PENDING"]
+    assert not any(call.startswith("execution_end:") for call in plugin.calls)
 
 
 def test_durable_execution_checkpoint_error_in_background_thread():
@@ -2955,6 +3305,86 @@ def test_durable_execution_replays_child_context_with_step_subtype():
 
     assert result["Status"] == InvocationStatus.SUCCEEDED.value
     assert child_body_calls == []
+
+
+@pytest.mark.parametrize(
+    "child_status",
+    [OperationStatus.SUCCEEDED, OperationStatus.FAILED, OperationStatus.STARTED],
+)
+def test_durable_execution_rejects_non_virtual_child_checkpoint_in_virtual_replay(
+    child_status: OperationStatus,
+):
+    """Replay rejects a child changed from non-virtual to virtual.
+
+    A virtual child never checkpoints itself, so a CONTEXT checkpoint at its id
+    comes from a non-virtual child. Replay fails before the cached result or
+    error is used and before the child body runs.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    child_id = OperationIdNamespace().create_id_for_step(1)
+    execution_operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+    child_operation = Operation(
+        operation_id=child_id,
+        operation_type=OperationType.CONTEXT,
+        status=child_status,
+        sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+        name="child",
+        context_details=ContextDetails(
+            result=(
+                json.dumps("cached")
+                if child_status is OperationStatus.SUCCEEDED
+                else None
+            ),
+            error=(
+                ErrorObject(
+                    message="child failed",
+                    type="ValueError",
+                    data=None,
+                    stack_trace=None,
+                )
+                if child_status is OperationStatus.FAILED
+                else None
+            ),
+        ),
+    )
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution/exec1",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=InitialExecutionState(
+            operations=[execution_operation, child_operation],
+            next_marker="",
+        ),
+        service_client=mock_client,
+    )
+    child_body_calls: list[bool] = []
+
+    def child_body(_child: DurableContext) -> str:
+        child_body_calls.append(True)
+        return "executed"
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> str:
+        return context.run_in_child_context(
+            child_body,
+            name="child",
+            config=ChildConfig(is_virtual=True),
+        )
+
+    result = test_handler(invocation_input, _make_lambda_context())
+
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.NonDeterministicExecutionError"
+    )
+    assert "current child context is virtual" in result["Error"]["ErrorMessage"]
+    assert child_body_calls == []
+    mock_client.checkpoint.assert_not_called()
 
 
 @pytest.mark.parametrize("operation_kind", ["map", "parallel"])

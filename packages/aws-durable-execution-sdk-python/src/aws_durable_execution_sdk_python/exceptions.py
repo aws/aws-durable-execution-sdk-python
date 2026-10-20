@@ -13,7 +13,7 @@ BAD_REQUEST_ERROR: int = 400
 TOO_MANY_REQUESTS_ERROR: int = 429
 SERVICE_ERROR: int = 500
 INVALID_PARAMETER_VALUE_EXCEPTION: str = "InvalidParameterValueException"
-INVALID_CHECKPOINT_TOKEN_PREFIX: str = "Invalid Checkpoint Token"
+INVALID_CHECKPOINT_TOKEN_PREFIX: str = "Invalid checkpoint token"
 
 # Non-retryable customer error codes that arrive as non-4xx (e.g. HTTP 502) from Lambda.
 # Unlike typical 5xx errors, these require customer intervention (e.g., fixing
@@ -162,7 +162,7 @@ class BotoClientError(InvocationError):
           These arrive as HTTP 502 but require customer intervention to fix.
         - 4xx errors → EXECUTION, except:
           - 429 (TooManyRequests) → INVOCATION (throttling is transient)
-          - InvalidParameterValueException with "Invalid Checkpoint Token" → INVOCATION
+          - InvalidParameterValueException with "Invalid checkpoint token" (exact match) → INVOCATION
             (stale token from a concurrent checkpoint; next invocation gets a fresh token)
         - 5xx, network errors → INVOCATION
         """

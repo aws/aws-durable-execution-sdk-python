@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,6 +27,10 @@ CASES = [
     # Pre-release orders below its release
     (["v2.0.0rc1", "v2.0.0"], "v2.0.0"),
     (["v2.0.0rc1"], "v2.0.0rc1"),
+    # Dotted PEP 440 suffixes are valid and ordered against the release.
+    (["v2.0.0", "v2.0.0.post1"], "v2.0.0.post1"),
+    (["v2.0.0.dev1", "v2.0.0rc1"], "v2.0.0rc1"),
+    (["v2.0.0.dev1"], "v2.0.0.dev1"),
     # Original tag text preserved, not normalized
     (["v2.0.0-beta"], "v2.0.0-beta"),
     # Off-grammar tags are not recognized -> empty (caller fails closed)
@@ -37,6 +42,7 @@ CASES = [
     (["v1.2.3.4"], ""),
     (["v999.0.0.1"], ""),
     (["v1.2.3-x86_64", "v1.2.3-arm64"], ""),
+    (["v1.2.3+local", "v1!1.2.3"], ""),
     # A good tag alongside a junk one still resolves cleanly
     (["v1", "v1.2.3"], "v1.2.3"),
     (["v1.2.3.4", "v1.2.3"], "v1.2.3"),
@@ -46,6 +52,19 @@ CASES = [
 @pytest.mark.parametrize("tags,expected", CASES)
 def test_current_latest_version(tags, expected):
     assert current_latest_version(tags) == expected
+
+
+def test_cli():
+    script = Path(__file__).resolve().parent.parent / "current_latest_version.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "latest", "v1.2.3", "v1.2.3.post1"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stdout == "v1.2.3.post1\n"
+    assert result.stderr == ""
 
 
 def _run_standalone() -> int:

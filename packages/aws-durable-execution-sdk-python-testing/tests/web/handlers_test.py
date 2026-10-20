@@ -2269,6 +2269,7 @@ def test_update_lambda_endpoint_handler_success():
     )
 
     executor = Mock()
+    executor.region = "us-west-2"
     lambda_invoker = Mock(spec=LambdaInvoker)
     executor._invoker = lambda_invoker  # noqa: SLF001
     handler = UpdateLambdaEndpointHandler(executor)
@@ -2291,6 +2292,45 @@ def test_update_lambda_endpoint_handler_success():
     lambda_invoker.update_endpoint.assert_called_once_with(
         "http://localhost:8080", "us-west-2"
     )
+
+
+def test_update_lambda_endpoint_handler_rejects_another_region():
+    """The runner emulates one region, fixed at startup. A request that
+    names another region is refused, so the invoker and the executions
+    never disagree on the region."""
+    from aws_durable_execution_sdk_python_testing.invoker import LambdaInvoker
+    from aws_durable_execution_sdk_python_testing.web.handlers import (
+        UpdateLambdaEndpointHandler,
+    )
+    from aws_durable_execution_sdk_python_testing.web.routes import (
+        UpdateLambdaEndpointRoute,
+    )
+
+    executor = Mock()
+    executor.region = "us-west-2"
+    lambda_invoker = Mock(spec=LambdaInvoker)
+    executor._invoker = lambda_invoker  # noqa: SLF001
+    handler = UpdateLambdaEndpointHandler(executor)
+
+    base_route = Route.from_string("/lambda-endpoint")
+    update_route = UpdateLambdaEndpointRoute.from_route(base_route)
+
+    request = HTTPRequest(
+        method="PUT",
+        path=update_route,
+        headers={"Content-Type": "application/json"},
+        query_params={},
+        body={"EndpointUrl": "http://localhost:8080", "RegionName": "eu-west-1"},
+    )
+
+    response = handler.handle(update_route, request)
+
+    assert response.status_code == 400
+    assert response.body["Type"] == "InvalidParameterValueException"
+    assert response.body["message"] == (
+        "RegionName must be us-west-2, the region this runner emulates; got eu-west-1"
+    )
+    lambda_invoker.update_endpoint.assert_not_called()
 
 
 def test_update_lambda_endpoint_handler_missing_endpoint_url():
@@ -2324,7 +2364,7 @@ def test_update_lambda_endpoint_handler_missing_endpoint_url():
 
 
 def test_update_lambda_endpoint_handler_default_region():
-    """Test UpdateLambdaEndpointHandler uses default region when not specified."""
+    """Without RegionName the endpoint moves and the runner's region stays."""
     from aws_durable_execution_sdk_python_testing.invoker import LambdaInvoker
     from aws_durable_execution_sdk_python_testing.web.handlers import (
         UpdateLambdaEndpointHandler,
@@ -2334,6 +2374,7 @@ def test_update_lambda_endpoint_handler_default_region():
     )
 
     executor = Mock()
+    executor.region = "eu-central-1"
     lambda_invoker = Mock(spec=LambdaInvoker)
     executor._invoker = lambda_invoker  # noqa: SLF001
     handler = UpdateLambdaEndpointHandler(executor)
@@ -2353,7 +2394,7 @@ def test_update_lambda_endpoint_handler_default_region():
 
     assert response.status_code == 200
     lambda_invoker.update_endpoint.assert_called_once_with(
-        "http://localhost:8080", "us-east-1"
+        "http://localhost:8080", "eu-central-1"
     )
 
 

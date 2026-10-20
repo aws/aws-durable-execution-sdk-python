@@ -5,26 +5,34 @@
 from __future__ import annotations
 
 import os
-import re
+import sys
 
-# A release-tag component naming the testing package: testing-v<x.y.z> with an
-# optional pre-release suffix. Anchored and matched against a single comma-split
-# component so prefixes like "mytesting-v1.2.1" are rejected.
-_COMPONENT = re.compile(r"testing-v([0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.-]*)\Z")
+from testing_version import parse_image_version
+
+_PREFIX = "testing-v"
 
 
 def parse_testing_version(release_tag: str) -> str:
     """Return the testing version named by the release tag, or empty if none."""
-    for part in release_tag.split(","):
-        match = _COMPONENT.fullmatch(part.strip())
-        if match:
-            return match.group(1)
-    return ""
+    components = [part.strip() for part in release_tag.split(",")]
+    testing_components = [part for part in components if part.startswith(_PREFIX)]
+    if not testing_components:
+        return ""
+    if len(testing_components) != 1:
+        raise ValueError("Release tag names the testing package more than once")
+
+    version = testing_components[0][len(_PREFIX) :]
+    parse_image_version(version)
+    return version
 
 
-def main():
+def main() -> int:
     release_tag = os.environ.get("RELEASE_TAG", "")
-    tag_version = parse_testing_version(release_tag)
+    try:
+        tag_version = parse_testing_version(release_tag)
+    except ValueError as error:
+        print(f"Invalid testing release tag: {error}", file=sys.stderr)
+        return 1
 
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
@@ -32,7 +40,8 @@ def main():
             f.write(f"tag_version={tag_version}\n")
 
     print(tag_version)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

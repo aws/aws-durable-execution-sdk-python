@@ -636,7 +636,11 @@ class TestSerdesApiIntegration:
         from aws_durable_execution_sdk_python.exceptions import SerDesError
         from aws_durable_execution_sdk_python.serdes import serialize
 
-        fs_serdes = FileSystemSerDes("/nonexistent/readonly/path")
+        # A regular file as the parent makes directory creation fail for
+        # every user, including root (an unwritable path under / does not).
+        blocker = tmp_path / "blocker"
+        blocker.write_text("")
+        fs_serdes = FileSystemSerDes(str(blocker / "base"))
 
         with pytest.raises(SerDesError, match="Serialization failed"):
             serialize(fs_serdes, {"data": "test"}, TEST_OPERATION_ID, TEST_ARN)

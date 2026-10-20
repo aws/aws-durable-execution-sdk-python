@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import gc
 import weakref
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from typing import Any, cast
 
 import pytest
 from opentelemetry.context import Context
+from opentelemetry import context as otel_context
 from opentelemetry.sdk.trace.sampling import (
     ALWAYS_OFF,
     ALWAYS_ON,
@@ -489,6 +492,52 @@ def test_store_sampling_intent_returns_context_unchanged_when_none() -> None:
     parent_context: Context = Context()
 
     assert store_sampling_intent(parent_context, None) is parent_context
+
+
+@pytest.mark.parametrize("decision", list(Decision))
+def test_sampling_intent_delivery_is_consumed_but_template_is_reusable(
+    decision: Decision,
+) -> None:
+    delegate = ALWAYS_OFF if decision is Decision.RECORD_AND_SAMPLE else ALWAYS_ON
+    sampler = DurableSampler(delegate)
+    intent = DurableSamplingIntent(
+        SamplingResult(
+            decision,
+            attributes={"sampler.metadata": "retained"},
+            trace_state=TraceState([("vendor", "original")]),
+        )
+    )
+    parent = store_sampling_intent(Context(), intent)
+    first = sampler.should_sample(parent, TRACE_ID, "durable")
+    forwarded = sampler.should_sample(parent, TRACE_ID, "processor")
+    next_durable = sampler.should_sample(
+        store_sampling_intent(Context(), intent), TRACE_ID, "next-durable"
+    )
+    assert first.decision is next_durable.decision is decision
+    assert first.attributes == next_durable.attributes == intent.result.attributes
+    assert first.trace_state == next_durable.trace_state == intent.result.trace_state
+    assert forwarded.decision is (
+        Decision.DROP
+        if decision is Decision.RECORD_AND_SAMPLE
+        else Decision.RECORD_AND_SAMPLE
+    )
+
+
+def test_forwarded_contexts_share_one_atomic_sampling_delivery() -> None:
+    sampler = DurableSampler(ALWAYS_OFF)
+    intent = DurableSamplingIntent(SamplingResult(Decision.RECORD_AND_SAMPLE))
+    parent = store_sampling_intent(Context(), intent)
+    ready = Barrier(2)
+
+    def sample(index: int) -> Decision:
+        forwarded = otel_context.set_value("processor", index, parent)
+        ready.wait(timeout=5)
+        return sampler.should_sample(forwarded, TRACE_ID, "concurrent").decision
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        decisions = list(pool.map(sample, range(2)))
+    assert decisions.count(Decision.RECORD_AND_SAMPLE) == 1
+    assert decisions.count(Decision.DROP) == 1
 
 
 def test_is_sampled_matches_record_and_sample_only() -> None:

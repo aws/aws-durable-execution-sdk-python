@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import copy
 import datetime
-import functools
+import inspect
 import logging
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, MutableMapping, cast
+from typing import Any, Callable, cast
 
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -259,8 +260,8 @@ class InvocationInfo:
     )
     """EXPERIMENTAL: The deserialized execution input, when available.
 
-    Surfaced to instrumentation plugins that need to record it (e.g. Workflow
-    Insight). Mirrors the JS SDK's ``InvocationInfo.executionInput``.
+    Surfaced to instrumentation plugins that need to record it (e.g. Durable
+    Execution Telemetry). Mirrors the JS SDK's ``InvocationInfo.executionInput``.
 
     Excluded from ``repr`` on purpose: instrumentation logs hook infos wholesale
     (the bundled OTel plugins at debug level, the plugin example at info), so
@@ -381,8 +382,40 @@ class InvocationEndInfo(InvocationInfo):
         )
 
 
+@dataclass(frozen=True)
+class PropagationInput:
+    """SDK-owned identity for a new chained-invoke START propagation request.
+
+    This contract does not contain generated service-model or telemetry types.
+    """
+
+    execution_arn: str
+    operation_id: str
+    target_function_name: str
+    parent_operation_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PropagationMetadata:
+    """Immutable plugin contribution; members are opaque to the core SDK."""
+
+    x_amzn_trace_id: str | None = None
+
+
 class DurableInstrumentationPlugin:
     """Base class for plugins. Override only the methods you need."""
+
+    def provide_propagation_metadata(
+        self,
+        info: PropagationInput,
+    ) -> PropagationMetadata | None:
+        """Synchronously provide metadata without performing a durable operation.
+
+        Called before checkpointing a new invoke START, never for its replay.
+        Existing plugins can inherit the no-op default. A failed, uncommitted
+        START may collect again on a later attempt.
+        """
+        return None
 
     def on_invocation_start(self, info: InvocationStartInfo) -> None:
         """Called when an invocation starts. This is called within the thread that runs user function handler.
@@ -466,6 +499,92 @@ class PluginExecutor:
         self._executor: ThreadPoolExecutor | None = None
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
+        # Non-None only after a Start hook fails: later setup and invocation
+        # work use its pre-hook snapshot. End still uses each hook's token owner.
+        self._startup_context: contextvars.Context | None = None
+        self._invocation_contexts: list[contextvars.Context | None] = []
+
+    def provide_propagation_metadata(
+        self, info: PropagationInput
+    ) -> PropagationMetadata:
+        """Collect opaque metadata synchronously in configured plugin order.
+
+        The first non-blank value wins. Ordinary plugin failures are isolated,
+        matching lifecycle dispatch; BaseException cancellation/control signals
+        retain the existing propagation policy. The caller attaches the result
+        to its operation model before checkpoint serialization.
+        """
+        value: str | None = None
+        owner: str | None = None
+        conflict_count = 0
+        for plugin in self._plugins:
+            # Read type identity without invoking instance attribute access.
+            identity = "unknown plugin"
+            try:
+                plugin_type = type(plugin)
+                identity = type.__getattribute__(plugin_type, "__qualname__")
+                module = type.__getattribute__(plugin_type, "__module__")
+                if type(module) is str:
+                    identity = ".".join((module, identity))
+            except Exception:
+                pass
+            try:
+                metadata = plugin.provide_propagation_metadata(info)
+                if metadata is None:
+                    continue
+                if inspect.iscoroutine(metadata):
+                    metadata.close()
+                    raise TypeError("propagation metadata hook must be synchronous")
+                if not isinstance(metadata, PropagationMetadata):
+                    raise TypeError("expected PropagationMetadata or None")
+                candidate = metadata.x_amzn_trace_id
+                if candidate is not None:
+                    if not isinstance(candidate, str):
+                        raise TypeError("x_amzn_trace_id must be a string or None")
+                    # Treat str subclasses as data, not executable comparison
+                    # hooks during first-value/conflict aggregation.
+                    candidate = str.__str__(candidate)
+            except Exception:
+                self._log_propagation_diagnostic(
+                    logging.ERROR,
+                    "Plugin %s propagation metadata failure ignored",
+                    identity,
+                    exc_info=True,
+                )
+                continue
+            if candidate is None or not candidate.strip():
+                continue
+            if value is None:
+                value, owner = candidate, identity
+            elif candidate != value:
+                conflict_count += 1
+                self._log_propagation_diagnostic(
+                    logging.WARNING,
+                    "Propagation metadata conflict between %s and %s for "
+                    "x_amzn_trace_id; keeping first value (conflict_count=%d)",
+                    owner,
+                    identity,
+                    conflict_count,
+                )
+        return PropagationMetadata(x_amzn_trace_id=value)
+
+    @staticmethod
+    def _log_propagation_diagnostic(
+        level: int,
+        message: str,
+        *args: object,
+        exc_info: bool = False,
+    ) -> None:
+        """Keep ordinary diagnostic failures from changing propagation collection."""
+        try:
+            logger.log(level, message, *args, exc_info=exc_info)
+        except Exception:
+            pass
+
+    @property
+    def has_plugins(self) -> bool:
+        """Return True when at least one plugin is registered."""
+        return bool(self._plugins)
 
     @contextlib.contextmanager
     def run(self):
@@ -479,12 +598,14 @@ class PluginExecutor:
         finally:
             self._invocation_status = None
             self._operations_provider = None
+            self._startup_context = None
+            self._invocation_contexts.clear()
             # Shut down the thread pool, waiting for pending tasks to complete.
             if self._executor:
                 self._executor.shutdown(wait=True)
 
     @staticmethod
-    def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> None:
+    def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> bool:
         """Invoke the appropriate plugin callback. Runs inside the thread pool."""
         try:
             match info:
@@ -507,17 +628,53 @@ class PluginExecutor:
         except Exception:
             # log and ignore the exception
             logger.exception("Plugin %s exception ignored", plugin.__class__.__name__)
+            return False
+        return True
 
     def execute_plugins(self, info, sync):
         if not self._executor:
             return
-        for plugin in self._plugins:
-            if sync:
-                # this is called synchronously, so plugins will be able to manipulate thread local objects
-                self._dispatch_plugin(plugin, info)
+        if sync and isinstance(info, InvocationStartInfo):
+            self._startup_context = None
+            self._invocation_contexts.clear()
+        for index, plugin in enumerate(self._plugins):
+            if sync and isinstance(info, InvocationStartInfo):
+                owner = self._startup_context
+                before = (
+                    owner.copy() if owner is not None else contextvars.copy_context()
+                )
+                self._invocation_contexts.append(owner)
+                succeeded = (
+                    owner.run(self._dispatch_plugin, plugin, info)
+                    if owner is not None
+                    else self._dispatch_plugin(plugin, info)
+                )
+                if not succeeded:
+                    # A failing hook may have left new bindings with no reset token.
+                    # Continue setup and the handler in the pre-hook snapshot.
+                    self._startup_context = before
+            elif sync:
+                # End hooks must reset tokens in the Context that created them,
+                # even when a failed start hook moved later setup to a snapshot.
+                owner = (
+                    self._invocation_contexts[index]
+                    if isinstance(info, InvocationEndInfo)
+                    and index < len(self._invocation_contexts)
+                    else None
+                )
+                if owner is not None:
+                    owner.run(self._dispatch_plugin, plugin, info)
+                else:
+                    self._dispatch_plugin(plugin, info)
             else:
                 # this is called asynchronously, so plugins cannot manipulate thread local objects
                 self._executor.submit(self._dispatch_plugin, plugin, info)
+
+    def _run_in_invocation_context(self, invoke: Callable[[], Any]) -> Any:
+        """Continue in the pre-hook Context only after a failed Start hook."""
+        if self._startup_context is not None:
+            return self._startup_context.run(invoke)
+        return invoke()
 
     def _snapshot_operation_infos(
         self,
@@ -763,7 +920,9 @@ class PluginExecutor:
             operations: full operation map after the update, when available.
             previous_operations: operation map before the update, when available.
         """
-        if operation_or_operations is None:
+        # Only plugins read the info built below, and the change info converts
+        # every operation. So without a plugin, return before building any of it.
+        if operation_or_operations is None or not self.has_plugins:
             return
 
         updated_operations: list[Operation] = (
@@ -836,28 +995,3 @@ class PluginExecutor:
             OperationStatus.CANCELLED,
             OperationStatus.STOPPED,
         ]
-
-    @property
-    def handle_durable_output(self):
-        def decorator(func: Callable[[Any, LambdaContext], MutableMapping[str, Any]]):
-            @functools.wraps(func)
-            def wrapper(event: Any, context: LambdaContext):
-                with self.run():
-                    try:
-                        output = func(event, context)
-
-                        self.on_invocation_end(
-                            output=DurableExecutionInvocationOutput.from_dict(output),
-                        )
-                        return output
-                    except Exception as e:
-                        self.on_invocation_end(
-                            output=DurableExecutionInvocationOutput.create_retry(
-                                ErrorObject.from_exception(e)
-                            ),
-                        )
-                        raise
-
-            return wrapper
-
-        return decorator

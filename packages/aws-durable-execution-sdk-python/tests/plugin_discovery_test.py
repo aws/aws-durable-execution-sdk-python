@@ -477,3 +477,526 @@ def test_first_dynamic_registration_wins_for_duplicate_plugin_type(
     first_factory.assert_called_once_with()
     second_factory.assert_not_called()
     assert "already registered by dynamic provider 'first'" in caplog.text
+
+
+class _ExclusivePluginA(DurableInstrumentationPlugin):
+    __durable_registration_api__ = 1
+    exclusive_group = "test-telemetry"
+
+
+class _ExclusivePluginB(DurableInstrumentationPlugin):
+    __durable_registration_api__ = 1
+    exclusive_group = "test-telemetry"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_explicit_plugins_in_same_group_are_rejected(reverse: bool) -> None:
+    plugins = [_ExclusivePluginA(), _ExclusivePluginB()]
+    if reverse:
+        plugins.reverse()
+    with pytest.raises(PluginLoadError) as error:
+        load_configured_plugins(plugins, environment={})
+    assert "_ExclusivePluginA" in str(error.value)
+    assert "_ExclusivePluginB" in str(error.value)
+    assert "Keep only one" in str(error.value)
+
+
+@pytest.mark.parametrize("same_instance", [False, True])
+def test_repeated_explicit_exclusive_plugin_type_is_rejected(
+    same_instance: bool,
+) -> None:
+    plugin = _ExclusivePluginA()
+    duplicate = plugin if same_instance else _ExclusivePluginA()
+
+    with pytest.raises(PluginLoadError) as error:
+        load_configured_plugins([plugin, duplicate], environment={})
+
+    message = str(error.value)
+    assert "_ExclusivePluginA" in message
+    assert "registered more than once in exclusive group 'test-telemetry'" in message
+    assert "Register this plugin only once" in message
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_discovery_preserves_first_registration_of_exclusive_type(
+    explicit: bool,
+) -> None:
+    first_plugin = _ExclusivePluginA()
+    first_factory = Mock(return_value=first_plugin)
+    second_factory = Mock(side_effect=_ExclusivePluginA)
+    entries = [
+        _FakeEntryPoint(
+            "first", _provider(first_factory, plugin_type=_ExclusivePluginA)
+        ),
+        _FakeEntryPoint(
+            "second", _provider(second_factory, plugin_type=_ExclusivePluginA)
+        ),
+    ]
+
+    with patch(
+        "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+        return_value=entries,
+    ):
+        result = load_configured_plugins(
+            [first_plugin] if explicit else None,
+            environment={
+                PLUGIN_ENVIRONMENT_VARIABLE: "second" if explicit else "first,second"
+            },
+        )
+
+    assert result == [first_plugin]
+    second_factory.assert_not_called()
+    if explicit:
+        first_factory.assert_not_called()
+    else:
+        first_factory.assert_called_once_with()
+
+
+def test_unrelated_plugins_can_accompany_exclusive_plugin() -> None:
+    plugins = [_PluginA(), _ExclusivePluginA(), _PluginB()]
+    assert load_configured_plugins(plugins, environment={}) == plugins
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_exclusive_groups_validated_before_any_factory(
+    reverse: bool, mixed: bool
+) -> None:
+    factory_a = Mock(side_effect=_ExclusivePluginA)
+    factory_b = Mock(side_effect=_ExclusivePluginB)
+    providers = [
+        _FakeEntryPoint("a", _provider(factory_a, plugin_type=_ExclusivePluginA)),
+        _FakeEntryPoint("b", _provider(factory_b, plugin_type=_ExclusivePluginB)),
+    ]
+    names = ["a", "b"]
+    types = [_ExclusivePluginA, _ExclusivePluginB]
+    if reverse:
+        names.reverse()
+        types.reverse()
+    explicit = [types[0]()] if mixed else []
+    configured = names[1:] if mixed else names
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=providers,
+        ),
+        pytest.raises(PluginLoadError, match="mutually exclusive"),
+    ):
+        load_configured_plugins(
+            explicit, environment={PLUGIN_ENVIRONMENT_VARIABLE: ",".join(configured)}
+        )
+    factory_a.assert_not_called()
+    factory_b.assert_not_called()
+
+
+@pytest.mark.parametrize("group", [[], {}, 123, True, "", "   "])
+@pytest.mark.parametrize("discovered", [False, True])
+def test_invalid_exclusive_group_is_a_clear_load_error(
+    monkeypatch: pytest.MonkeyPatch,
+    group: object,
+    discovered: bool,
+) -> None:
+    monkeypatch.setattr(_PluginA, "__durable_registration_api__", 1, raising=False)
+    monkeypatch.setattr(_PluginA, "exclusive_group", group, raising=False)
+    factory = Mock(side_effect=_PluginA)
+    entry = _FakeEntryPoint("a", _provider(factory))
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry],
+        ),
+        pytest.raises(
+            PluginLoadError, match="_PluginA.*exclusive_group.*non-empty string"
+        ),
+    ):
+        load_configured_plugins(
+            None if discovered else [_PluginA()],
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "a"} if discovered else {},
+        )
+    factory.assert_not_called()
+
+
+class _RegistrationObserver(_PluginA):
+    __durable_registration_api__ = 1
+
+    def __init__(self) -> None:
+        self.results: list[bool] = []
+
+    def on_registration_result(self, registered: bool) -> None:
+        self.results.append(registered)
+
+
+def test_registration_result_notifies_acceptance_and_later_rejection() -> None:
+    observer = _RegistrationObserver()
+    assert load_configured_plugins([observer], environment={}) == [observer]
+    with pytest.raises(PluginLoadError, match="non-empty"):
+        load_configured_plugins(
+            [observer], environment={PLUGIN_ENVIRONMENT_VARIABLE: ","}
+        )
+    assert observer.results == [True, False]
+
+
+def test_factory_failure_rejects_already_constructed_plugins() -> None:
+    observer = _RegistrationObserver()
+    failing = Mock(side_effect=ValueError("factory failed"))
+    entries = [
+        _FakeEntryPoint(
+            "a", _provider(lambda: observer, plugin_type=_RegistrationObserver)
+        ),
+        _FakeEntryPoint("b", _provider(failing, plugin_type=_PluginB)),
+    ]
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=entries,
+        ),
+        pytest.raises(PluginLoadError, match="factory failed"),
+    ):
+        load_configured_plugins(None, environment={PLUGIN_ENVIRONMENT_VARIABLE: "a,b"})
+    assert observer.results == [False]
+
+
+def test_registration_callback_failure_does_not_break_valid_plugins() -> None:
+    class Broken(_PluginA):
+        __durable_registration_api__ = 1
+
+        def on_registration_result(self, registered: bool) -> None:
+            raise ValueError("cleanup notification failed")
+
+    observer = _RegistrationObserver()
+    result = load_configured_plugins([Broken(), observer], environment={})
+    assert result[-1] is observer
+    assert observer.results == [True]
+
+
+def test_optional_registration_metadata_preserves_legacy_explicit_objects() -> None:
+    class LegacyPlugin:
+        pass
+
+    legacy = cast(DurableInstrumentationPlugin, LegacyPlugin())
+    assert load_configured_plugins([legacy], environment={}) == [legacy]
+
+
+def test_registration_diagnostic_failure_is_isolated() -> None:
+    class Broken(_PluginA):
+        __durable_registration_api__ = 1
+
+        def on_registration_result(self, registered: bool) -> None:
+            raise ValueError("callback failed")
+
+    observer = _RegistrationObserver()
+    with patch(
+        "aws_durable_execution_sdk_python.plugin_discovery.logger.exception",
+        side_effect=ValueError("diagnostic failed"),
+    ):
+        assert (
+            load_configured_plugins([Broken(), observer], environment={})[-1]
+            is observer
+        )
+    assert observer.results == [True]
+
+
+def test_wrong_type_factory_result_receives_rejection_cleanup() -> None:
+    actual = _RegistrationObserver()
+    entry = _FakeEntryPoint("wrong", _provider(lambda: actual, plugin_type=_PluginB))
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry],
+        ),
+        pytest.raises(
+            PluginLoadError, match="returned.*_RegistrationObserver.*expected.*_PluginB"
+        ),
+    ):
+        load_configured_plugins(
+            None, environment={PLUGIN_ENVIRONMENT_VARIABLE: "wrong"}
+        )
+    assert actual.results == [False]
+
+
+@pytest.mark.parametrize("discovered", [False, True])
+@pytest.mark.parametrize(
+    "legacy_value", [42, property(lambda _: "business"), "business-group"]
+)
+def test_unopted_legacy_metadata_and_helpers_are_never_interpreted(
+    discovered: bool,
+    legacy_value: object,
+) -> None:
+    calls: list[bool] = []
+
+    class Legacy(DurableInstrumentationPlugin):
+        exclusive_group = legacy_value
+
+        def on_registration_result(self, registered: bool) -> None:
+            calls.append(registered)
+
+    instance = Legacy()
+    entry = _FakeEntryPoint("legacy", _provider(lambda: instance, plugin_type=Legacy))
+    with patch(
+        "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+        return_value=[entry],
+    ):
+        result = load_configured_plugins(
+            None if discovered else [instance],
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "legacy"} if discovered else {},
+        )
+    assert result == [instance]
+    with pytest.raises(PluginLoadError, match="non-empty"):
+        load_configured_plugins(
+            [instance], environment={PLUGIN_ENVIRONMENT_VARIABLE: ","}
+        )
+    assert calls == []
+
+
+def test_legacy_descriptors_are_not_read_without_registration_opt_in() -> None:
+    reads: list[str] = []
+
+    class LegacyMeta(type):
+        def __getattribute__(cls, name: str):
+            if name in {"exclusive_group", "__durable_registration_api__"}:
+                reads.append(name)
+                raise RuntimeError("legacy descriptor is not registration metadata")
+            return super().__getattribute__(name)
+
+    class Legacy(DurableInstrumentationPlugin, metaclass=LegacyMeta):
+        @property
+        def on_registration_result(self):
+            reads.append("on_registration_result")
+            raise RuntimeError("legacy helper is not a hook")
+
+    instance = Legacy()
+    assert load_configured_plugins([instance], environment={}) == [instance]
+    assert reads == []
+
+
+def test_inherited_registration_preserves_legacy_attribute_meaning() -> None:
+    calls: list[bool] = []
+
+    class LegacyChild(_RegistrationObserver):
+        exclusive_group = 42
+
+        def on_registration_result(self, registered: bool) -> None:
+            calls.append(registered)
+
+    old = LegacyChild()
+    assert load_configured_plugins([old], environment={}) == [old]
+    assert old.results == [True]
+    with pytest.raises(PluginLoadError, match="non-empty"):
+        load_configured_plugins([old], environment={PLUGIN_ENVIRONMENT_VARIABLE: ","})
+    assert old.results == [True, False]
+    assert calls == []
+    assert old.exclusive_group == 42
+
+    class DeliberateChild(_RegistrationObserver):
+        __durable_registration_api__ = 1
+
+    enabled = DeliberateChild()
+    assert load_configured_plugins([enabled], environment={}) == [enabled]
+    assert enabled.results == [True]
+
+
+@pytest.mark.parametrize("discovered", [False, True])
+def test_subclass_inherits_exclusive_group_before_factory_runs(
+    discovered: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Child(_ExclusivePluginA):
+        pass
+
+    monkeypatch.setattr(Child, "exclusive_group", 42)
+    factory = Mock(side_effect=Child)
+    entry = _FakeEntryPoint("child", _provider(factory, plugin_type=Child))
+    explicit: list[DurableInstrumentationPlugin] = [_ExclusivePluginB()]
+    if not discovered:
+        explicit.append(Child())
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=[entry],
+        ),
+        pytest.raises(PluginLoadError, match="mutually exclusive"),
+    ):
+        load_configured_plugins(
+            explicit,
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "child"} if discovered else {},
+        )
+    factory.assert_not_called()
+
+
+def test_subclass_can_explicitly_customize_registration_contract() -> None:
+    class Child(_RegistrationObserver):
+        __durable_registration_api__ = 1
+        exclusive_group = "custom"
+
+        def on_registration_result(self, registered: bool) -> None:
+            self.results.append(not registered)
+
+    child = Child()
+    assert load_configured_plugins([child], environment={}) == [child]
+    assert child.results == [False]
+    with pytest.raises(PluginLoadError, match="exclusive group 'custom'"):
+        load_configured_plugins([child, Child()], environment={})
+
+
+class _CustomExclusivePlugin(DurableInstrumentationPlugin):
+    __durable_registration_api__ = 1
+    exclusive_group = "custom"
+
+
+@pytest.mark.parametrize("discovered", [False, True])
+@pytest.mark.parametrize("inherited_group", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_redeclared_group_adds_to_inherited_exclusion(
+    discovered: bool, inherited_group: bool, reverse: bool
+) -> None:
+    class Child(_ExclusivePluginA):
+        __durable_registration_api__ = 1
+        exclusive_group = "custom"
+
+    competitor = _ExclusivePluginB if inherited_group else _CustomExclusivePlugin
+    classes = [Child, competitor]
+    if reverse:
+        classes.reverse()
+    factories = [Mock(side_effect=cls) for cls in classes]
+    entries = [
+        _FakeEntryPoint(str(index), _provider(factory, plugin_type=cls))
+        for index, (cls, factory) in enumerate(zip(classes, factories))
+    ]
+    with (
+        patch(
+            "aws_durable_execution_sdk_python.plugin_discovery.metadata.entry_points",
+            return_value=entries,
+        ),
+        pytest.raises(PluginLoadError, match="mutually exclusive"),
+    ):
+        load_configured_plugins(
+            None if discovered else [cls() for cls in classes],
+            environment={PLUGIN_ENVIRONMENT_VARIABLE: "0,1"} if discovered else {},
+        )
+    for factory in factories:
+        factory.assert_not_called()
+
+
+def test_redeclared_none_does_not_erase_inherited_exclusion() -> None:
+    class Child(_ExclusivePluginA):
+        __durable_registration_api__ = 1
+
+    with patch.object(Child, "exclusive_group", None):
+        with pytest.raises(PluginLoadError, match="mutually exclusive"):
+            load_configured_plugins([Child(), _ExclusivePluginB()], environment={})
+
+
+@pytest.mark.parametrize("legacy_group", [42, property(lambda _: "business-group")])
+def test_group_accumulation_preserves_unmarked_legacy_intermediate(
+    legacy_group: object,
+) -> None:
+    class LegacyMiddle(_ExclusivePluginA):
+        pass
+
+    class Child(LegacyMiddle):
+        __durable_registration_api__ = 1
+        exclusive_group = "custom"
+
+    with patch.object(LegacyMiddle, "exclusive_group", legacy_group):
+        child = Child()
+        assert load_configured_plugins([child], environment={}) == [child]
+        assert vars(LegacyMiddle)["exclusive_group"] is legacy_group
+        with pytest.raises(PluginLoadError, match="mutually exclusive"):
+            load_configured_plugins([child, _ExclusivePluginB()], environment={})
+
+
+@pytest.mark.parametrize("redeclare_same_group", [False, True])
+def test_inherited_group_is_counted_once_per_registration(
+    redeclare_same_group: bool,
+) -> None:
+    namespace: dict[str, object] = {"__durable_registration_api__": 1}
+    if redeclare_same_group:
+        namespace["exclusive_group"] = "test-telemetry"
+    child_type = type("Child", (_ExclusivePluginA,), namespace)
+    child = child_type()
+    assert load_configured_plugins([child], environment={}) == [child]
+    with pytest.raises(PluginLoadError, match="registered more than once"):
+        load_configured_plugins([child, child_type()], environment={})
+
+
+def test_multiple_inheritance_retains_each_opted_in_group() -> None:
+    class Child(_ExclusivePluginA, _CustomExclusivePlugin):
+        pass
+
+    child = Child()
+    assert load_configured_plugins([child], environment={}) == [child]
+    for competitor in [_ExclusivePluginB(), _CustomExclusivePlugin()]:
+        with pytest.raises(PluginLoadError, match="mutually exclusive"):
+            load_configured_plugins([child, competitor], environment={})
+
+
+@pytest.mark.parametrize("marker", [None, 2, True])
+def test_invalid_marker_still_disables_all_inherited_groups(marker: object) -> None:
+    class Child(_ExclusivePluginA):
+        exclusive_group = "custom"
+
+    with patch.object(Child, "__durable_registration_api__", marker):
+        plugins = [Child(), _ExclusivePluginB(), _CustomExclusivePlugin()]
+        assert load_configured_plugins(plugins, environment={}) == plugins
+
+
+def test_multiple_groups_do_not_duplicate_registration_callbacks() -> None:
+    class Child(_RegistrationObserver, _ExclusivePluginA):
+        __durable_registration_api__ = 1
+        exclusive_group = "custom"
+
+    child = Child()
+    assert load_configured_plugins([child], environment={}) == [child]
+    assert child.results == [True]
+    with pytest.raises(PluginLoadError, match="mutually exclusive"):
+        load_configured_plugins([child, _ExclusivePluginB()], environment={})
+    assert child.results == [True, False]
+
+
+@pytest.mark.parametrize("marker", [None, True, "1", 1.0, property(lambda _: 1)])
+def test_invalid_registration_marker_shadows_inherited_opt_in(
+    marker: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Legacy(_RegistrationObserver):
+        exclusive_group = 42
+
+    monkeypatch.setattr(Legacy, "__durable_registration_api__", marker)
+    instance = Legacy()
+    assert load_configured_plugins([instance], environment={}) == [instance]
+    assert instance.results == []
+
+
+def test_base_class_does_not_shadow_legacy_dynamic_attributes() -> None:
+    class Legacy(DurableInstrumentationPlugin):
+        def __getattr__(self, name: str) -> str:
+            return "legacy-" + name
+
+    assert Legacy().exclusive_group == "legacy-exclusive_group"
+    assert Legacy().on_registration_result == "legacy-on_registration_result"
+    assert "__durable_registration_api__" not in DurableInstrumentationPlugin.__dict__
+
+
+def test_legacy_metaclass_dict_property_is_not_executed() -> None:
+    def namespace(_cls: object) -> None:
+        raise RuntimeError("legacy metaclass property")
+
+    def helper(_self: object, _registered: bool) -> None:
+        raise AssertionError("legacy helper must not run")
+
+    # Dynamically authored plugin classes can legally shadow type.__dict__ at
+    # runtime, even though static stubs mark that attribute final.
+    legacy_meta = type(
+        "LegacyMeta",
+        (type,),
+        {"__dict__": property(namespace), "__mro__": property(namespace)},
+    )
+    legacy_type = legacy_meta(
+        "Legacy",
+        (DurableInstrumentationPlugin,),
+        {
+            "exclusive_group": 42,
+            "on_registration_result": helper,
+        },
+    )
+    legacy = legacy_type()
+    assert load_configured_plugins([legacy], environment={}) == [legacy]

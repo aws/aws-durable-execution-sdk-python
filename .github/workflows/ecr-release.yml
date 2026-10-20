@@ -7,6 +7,13 @@ on:
 permissions:
   contents: read
 
+# Serialize the whole release, including preflight and verification. Keeping all
+# pending runs prevents a backport or retry from discarding a newer release.
+concurrency:
+  group: ecr-release
+  queue: max
+  cancel-in-progress: false
+
 env:
   package_path: packages/aws-durable-execution-sdk-python-testing
   aws_region: us-east-1
@@ -27,6 +34,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install version parser dependency
+        run: python -m pip install packaging==25.0
 
       - name: Parse testing version from the release tag
         id: tag
@@ -69,7 +84,7 @@ jobs:
 
       - name: Configure AWS Credentials
         if: steps.tag.outputs.tag_version != ''
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.ECR_UPLOAD_IAM_ROLE_ARN }}
           aws-region: ${{ env.aws_region }}
@@ -161,7 +176,7 @@ jobs:
 
       - name: Set up QEMU for multi-platform builds
         if: matrix.arch == 'arm64'
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           platforms: arm64
 
@@ -170,7 +185,7 @@ jobs:
         run: hatch build
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.ECR_UPLOAD_IAM_ROLE_ARN }}
           aws-region: ${{ env.aws_region }}
@@ -200,19 +215,10 @@ jobs:
       contents: read
       id-token: write
     needs: [preflight, build-and-upload-image-to-ecr]
-    if: always() && needs.preflight.outputs.should_update_latest == 'true' && needs.build-and-upload-image-to-ecr.result != 'failure' && needs.build-and-upload-image-to-ecr.result != 'cancelled'
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.preflight.outputs.should_update_latest == 'true' && (needs.build-and-upload-image-to-ecr.result == 'success' || needs.build-and-upload-image-to-ecr.result == 'skipped') }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ github.event.release.tag_name }}
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: "3.13"
-
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.ECR_UPLOAD_IAM_ROLE_ARN }}
           aws-region: ${{ env.aws_region }}
@@ -225,6 +231,7 @@ jobs:
 
       - name: Create the version manifest
         id: version-manifest
+        shell: bash
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           BUILT_THIS_RUN: ${{ needs.build-and-upload-image-to-ecr.result == 'success' }}
@@ -236,17 +243,19 @@ jobs:
           image_x86_64="$base:v$VERSION-x86_64"
           image_arm64="$base:v$VERSION-arm64"
 
-          # Recovery path: the build was skipped because v$VERSION already exists.
-          # Never rewrite a published release manifest from the mutable per-arch
-          # tags. Confirm it is present and leave it untouched.
+          # Recheck even after a build: a retry of failed jobs can reuse an old
+          # preflight result. Never replace a version published by another run.
+          if err="$(aws ecr-public describe-images \
+              --region "${{ env.aws_region }}" \
+              --repository-name "$repo_name" \
+              --image-ids imageTag="v$VERSION" 2>&1 >/dev/null)"; then
+            echo "v$VERSION already published, leaving its manifest untouched." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          elif [[ "$err" != *ImageNotFoundException* && "$err" != *ReferencedImagesNotFoundException* ]]; then
+            echo "::error::Could not check v$VERSION before publishing: $err"
+            exit 1
+          fi
           if [[ "$BUILT_THIS_RUN" != "true" ]]; then
-            if aws ecr-public describe-images \
-                --region "${{ env.aws_region }}" \
-                --repository-name "$repo_name" \
-                --image-ids imageTag="v$VERSION" >/dev/null 2>&1; then
-              echo "v$VERSION already published, leaving its manifest untouched." >> "$GITHUB_STEP_SUMMARY"
-              exit 0
-            fi
             echo "::error::v$VERSION was expected to exist but is missing, cannot reconcile. Rebuild manually."
             exit 1
           fi
@@ -262,11 +271,7 @@ jobs:
       contents: read
       id-token: write
     needs: [preflight, create-ecr-manifest-per-arch]
-    if: always() && needs.create-ecr-manifest-per-arch.result == 'success'
-    # Serialize the latest update so two releases do not race it.
-    concurrency:
-      group: ecr-release-latest
-      cancel-in-progress: false
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.create-ecr-manifest-per-arch.result == 'success' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -277,8 +282,11 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install version parser dependency
+        run: python -m pip install packaging==25.0
+
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.ECR_UPLOAD_IAM_ROLE_ARN }}
           aws-region: ${{ env.aws_region }}
@@ -290,30 +298,32 @@ jobs:
           registry-type: public
 
       - name: Advance latest to this version when it is newer
+        shell: bash
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           ECR_REGISTRY: ${{ steps.login-ecr-public.outputs.registry }}
           ECR_REPOSITORY: ${{ env.ecr_repository_name }}
         run: |
-          python -m pip install --upgrade packaging
           repo_name="${ECR_REPOSITORY##*/}"
           base="$ECR_REGISTRY/$ECR_REPOSITORY"
 
           # Confirm this release's own manifest is present before touching latest.
           # It is pushed by a prior job, so allow for registry propagation lag.
-          version_visible=""
+          version_digest=""
           for attempt in $(seq 1 10); do
-            if aws ecr-public describe-images \
+            if version_digest="$(aws ecr-public describe-images \
                 --region "${{ env.aws_region }}" \
                 --repository-name "$repo_name" \
-                --image-ids imageTag="v$VERSION" >/dev/null 2>&1; then
-              version_visible="true"
+                --image-ids imageTag="v$VERSION" \
+                --query 'imageDetails[0].imageDigest' --output text 2>/dev/null)" \
+                && [[ -n "$version_digest" && "$version_digest" != "None" ]]; then
               break
             fi
+            version_digest=""
             echo "attempt $attempt: v$VERSION not visible in public ECR yet, retrying."
             sleep 15
           done
-          if [[ -z "$version_visible" ]]; then
+          if [[ -z "$version_digest" ]]; then
             echo "::error::v$VERSION manifest not found in public ECR after polling, cannot update latest."
             exit 1
           fi
@@ -327,12 +337,12 @@ jobs:
               --region "${{ env.aws_region }}" \
               --repository-name "$repo_name" \
               --image-ids imageTag="latest" \
-              --query 'imageDetails[0].imageDigest' --output text 2>/dev/null)"; then
-            :
-          elif aws ecr-public describe-images \
-              --region "${{ env.aws_region }}" \
-              --repository-name "$repo_name" \
-              --image-ids imageTag="latest" 2>&1 | grep -q "ImageNotFoundException"; then
+              --query 'imageDetails[0].imageDigest' --output text 2>&1)"; then
+            if [[ -z "$latest_digest" || "$latest_digest" == "None" ]]; then
+              echo "::error::The latest lookup returned no digest, cannot safely update latest."
+              exit 1
+            fi
+          elif [[ "$latest_digest" == *ImageNotFoundException* || "$latest_digest" == *ReferencedImagesNotFoundException* ]]; then
             latest_digest=""
           else
             echo "::error::Could not read the current latest tag in public ECR, cannot safely update latest."
@@ -354,7 +364,8 @@ jobs:
             # here means it resolves to something we cannot order against (a
             # scheme change or a hand-pushed tag). We cannot prove we are newer,
             # so refuse to overwrite latest and leave it for manual review.
-            current="$(python .github/scripts/current_latest_version.py $latest_tags)"
+            read -r -a latest_tag_array <<< "$latest_tags"
+            current="$(python .github/scripts/current_latest_version.py "${latest_tag_array[@]}")"
             if [[ -z "$current" ]]; then
               echo "::error::latest resolves to no recognized version ($latest_tags), refusing to update latest. Needs manual review."
               exit 1
@@ -366,15 +377,28 @@ jobs:
             exit 0
           fi
 
-          docker manifest create "$base" "$base:v$VERSION-x86_64" "$base:v$VERSION-arm64"
-          docker manifest annotate "$base" "$base:v$VERSION-arm64" --arch arm64 --os linux
-          docker manifest annotate "$base" "$base:v$VERSION-x86_64" --arch amd64 --os linux
-          docker manifest push "$base"
+          # Copy the published manifest bytes, never rebuild from mutable
+          # architecture tags. PutImage checks the expected digest, so even a
+          # recovery run cannot silently publish different content as latest.
+          manifest_file="$(mktemp)"
+          trap 'rm -f "$manifest_file"' EXIT
+          docker buildx imagetools inspect --raw "$base@$version_digest" > "$manifest_file"
+          if err="$(aws ecr-public put-image \
+              --region "${{ env.aws_region }}" \
+              --repository-name "$repo_name" \
+              --image-tag latest \
+              --image-digest "$version_digest" \
+              --image-manifest "file://$manifest_file" 2>&1 >/dev/null)"; then
+            :
+          elif [[ "$err" != *ImageAlreadyExistsException* ]]; then
+            echo "::error::Could not copy v$VERSION to latest: $err"
+            exit 1
+          fi
           echo "latest now points at v$VERSION." >> "$GITHUB_STEP_SUMMARY"
 
   verify-publish:
     needs: [preflight, update-latest-manifest]
-    if: always() && needs.preflight.outputs.should_update_latest == 'true' && needs.update-latest-manifest.result == 'success'
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.preflight.outputs.should_update_latest == 'true' && needs.update-latest-manifest.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -389,8 +413,11 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install version parser dependency
+        run: python -m pip install packaging==25.0
+
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.ECR_UPLOAD_IAM_ROLE_ARN }}
           aws-region: ${{ env.aws_region }}
@@ -402,7 +429,6 @@ jobs:
           ECR_REPOSITORY: ${{ env.ecr_repository_name }}
         run: |
           repo_name="${ECR_REPOSITORY##*/}"
-          python -m pip install --upgrade packaging
           digest_for() {
             aws ecr-public describe-images \
               --region "${{ env.aws_region }}" \
@@ -425,8 +451,17 @@ jobs:
             local latest_digest; latest_digest="$(digest_for latest)"
             [[ -z "$latest_digest" || "$latest_digest" == "None" ]] && return 1
             local latest_version
-            latest_version="$(python .github/scripts/current_latest_version.py $(tags_on "$latest_digest"))"
+            local -a latest_tags
+            read -r -a latest_tags <<< "$(tags_on "$latest_digest")"
+            latest_version="$(python .github/scripts/current_latest_version.py "${latest_tags[@]}")"
             [[ -n "$latest_version" ]] || return 1
+            # ECR reads can lag. A tag list alone does not prove that latest
+            # has the manifest of the version it claims to represent.
+            local expected_digest; expected_digest="$(digest_for "$latest_version")"
+            [[ "$latest_digest" == "$expected_digest" ]] || return 1
+            if python -c "import sys; from packaging.version import Version; sys.exit(0 if Version('${latest_version#v}') == Version('${VERSION}') else 1)"; then
+              [[ "$latest_digest" == "$v" ]] || return 1
+            fi
             python -c "import sys; from packaging.version import Version; sys.exit(0 if Version('${latest_version#v}') >= Version('${VERSION}') else 1)"
           }
           for attempt in $(seq 1 10); do
@@ -442,7 +477,8 @@ jobs:
             echo "::error::v$VERSION did not become visible in public ECR after publishing."
           else
             latest_digest="$(digest_for latest)"
-            latest_version="$(python .github/scripts/current_latest_version.py $(tags_on "$latest_digest"))"
+            read -r -a latest_tags <<< "$(tags_on "$latest_digest")"
+            latest_version="$(python .github/scripts/current_latest_version.py "${latest_tags[@]}")"
             echo "::error::v$VERSION is published but latest resolves to ${latest_version:-no recognized version}, not this release or newer."
           fi
           exit 1

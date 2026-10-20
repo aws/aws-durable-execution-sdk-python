@@ -35,6 +35,12 @@ from aws_durable_execution_sdk_python_testing.checkpoint.validators.operations.w
     WaitOperationValidator,
     VALID_ACTIONS_FOR_WAIT,
 )
+from aws_durable_execution_sdk_python_testing.child_dispatcher import (
+    CHAINED_INVOKE_INPUT_TOO_LARGE_MESSAGE,
+    CHILD_EXECUTION_OUTPUT_TOO_LARGE_MESSAGE,
+    MAX_CHAINED_INVOKE_PAYLOAD_BYTES,
+    payload_size_bytes,
+)
 from aws_durable_execution_sdk_python_testing.exceptions import (
     InvalidParameterValueException,
 )
@@ -99,20 +105,40 @@ class CheckpointValidator:
     ) -> None:
         """Validate a single operation update."""
         CheckpointValidator._validate_inconsistent_operation_metadata(update, execution)
-        CheckpointValidator._validate_payload_sizes(update)
+        CheckpointValidator._validate_payload_sizes(update, execution)
         CheckpointValidator._validate_valid_action_for_type(
             update.operation_type, update.action
         )
         CheckpointValidator._validate_operation_status_transition(update, execution)
 
     @staticmethod
-    def _validate_payload_sizes(update: OperationUpdate) -> None:
-        """Validate that operation payload sizes are not too large."""
+    def _validate_payload_sizes(update: OperationUpdate, execution: Execution) -> None:
+        """Validate that operation payload sizes are not too large.
+
+        Besides the error-object bound, two chained-invoke bounds apply:
+        the input a parent sends to a target, and the result a child
+        execution returns to its parent, are each capped at 1 MiB.
+        """
         if update.error is not None:
             payload = json.dumps(update.error.to_dict())
             if len(payload) > MAX_ERROR_PAYLOAD_SIZE_BYTES:
                 msg: str = f"Error object size must be less than {MAX_ERROR_PAYLOAD_SIZE_BYTES} bytes."
                 raise InvalidParameterValueException(msg)
+        if update.payload is None:
+            return
+        if (
+            update.operation_type == OperationType.CHAINED_INVOKE
+            and payload_size_bytes(update.payload) > MAX_CHAINED_INVOKE_PAYLOAD_BYTES
+        ):
+            raise InvalidParameterValueException(CHAINED_INVOKE_INPUT_TOO_LARGE_MESSAGE)
+        if (
+            update.operation_type == OperationType.EXECUTION
+            and execution.parent_execution_arn is not None
+            and payload_size_bytes(update.payload) > MAX_CHAINED_INVOKE_PAYLOAD_BYTES
+        ):
+            raise InvalidParameterValueException(
+                CHILD_EXECUTION_OUTPUT_TOO_LARGE_MESSAGE
+            )
 
     @staticmethod
     def _validate_valid_action_for_type(
@@ -150,7 +176,9 @@ class CheckpointValidator:
             case OperationType.CALLBACK:
                 CallbackOperationValidator.validate(current_state, update)
             case OperationType.CHAINED_INVOKE:
-                ChainedInvokeOperationValidator.validate(current_state, update)
+                ChainedInvokeOperationValidator.validate(
+                    current_state, update, execution
+                )
             case OperationType.EXECUTION:
                 ExecutionOperationValidator.validate(update)
             case _:  # pragma: no cover

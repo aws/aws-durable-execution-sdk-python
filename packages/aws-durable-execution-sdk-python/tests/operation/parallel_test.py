@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from aws_durable_execution_sdk_python.plugin import PluginExecutor
 from aws_durable_execution_sdk_python.concurrency.executor import ConcurrentExecutor
 from aws_durable_execution_sdk_python.identifier import OperationIdNamespace
 
@@ -31,7 +32,10 @@ from aws_durable_execution_sdk_python.config import (
 )
 from aws_durable_execution_sdk_python.context import DurableContext, ExecutionContext
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
-from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+from aws_durable_execution_sdk_python.lambda_service import (
+    OperationSubType,
+    OperationType,
+)
 from aws_durable_execution_sdk_python.operation import child
 from aws_durable_execution_sdk_python.operation.parallel import (
     ParallelExecutor,
@@ -211,6 +215,8 @@ def test_parallel_handler():
     config = ParallelConfig(max_concurrency=2)
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -221,7 +227,11 @@ def test_parallel_handler():
 
     execution_state = MockExecutionState()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        "test_op",
+        OperationSubType.PARALLEL,
+        "parent",
+        "test_parallel",
+        operation_type=OperationType.CONTEXT,
     )
 
     # Mock the run_in_child_context function
@@ -255,6 +265,8 @@ def test_parallel_handler_with_none_config():
     callables = [func1]
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -265,7 +277,11 @@ def test_parallel_handler_with_none_config():
 
     execution_state = MockExecutionState()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        "test_op",
+        OperationSubType.PARALLEL,
+        "parent",
+        "test_parallel",
+        operation_type=OperationType.CONTEXT,
     )
 
     def mock_run_in_child_context(callable_func, name, child_config):
@@ -299,6 +315,8 @@ def test_parallel_handler_creates_executor_with_correct_config():
     config = ParallelConfig(max_concurrency=5)
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -309,7 +327,11 @@ def test_parallel_handler_creates_executor_with_correct_config():
 
     execution_state = MockExecutionState()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        "test_op",
+        OperationSubType.PARALLEL,
+        "parent",
+        "test_parallel",
+        operation_type=OperationType.CONTEXT,
     )
 
     executor_context = Mock()
@@ -351,6 +373,8 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
     callables = [func1]
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -361,7 +385,11 @@ def test_parallel_handler_creates_executor_with_default_config_when_none():
 
     execution_state = MockExecutionState()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        "test_op",
+        OperationSubType.PARALLEL,
+        "parent",
+        "test_parallel",
+        operation_type=OperationType.CONTEXT,
     )
 
     executor_context = Mock()
@@ -466,6 +494,8 @@ def test_parallel_handler_with_serdes():
     callables = [func1]
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -476,7 +506,11 @@ def test_parallel_handler_with_serdes():
 
     execution_state = MockExecutionState()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        "test_op",
+        OperationSubType.PARALLEL,
+        "parent",
+        "test_parallel",
+        operation_type=OperationType.CONTEXT,
     )
 
     executor_context = Mock()
@@ -513,6 +547,8 @@ def test_parallel_handler_with_summary_generator():
     config = ParallelConfig(summary_generator=mock_summary_generator)
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -523,7 +559,11 @@ def test_parallel_handler_with_summary_generator():
 
     execution_state = MockExecutionState()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        "test_op",
+        OperationSubType.PARALLEL,
+        "parent",
+        "test_parallel",
+        operation_type=OperationType.CONTEXT,
     )
 
     executor_context = Mock()
@@ -556,6 +596,8 @@ def test_parallel_handler_default_summary_generator():
     callables = [func1, func2]
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -566,7 +608,11 @@ def test_parallel_handler_default_summary_generator():
 
     execution_state = MockExecutionState()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        "test_op",
+        OperationSubType.PARALLEL,
+        "parent",
+        "test_parallel",
+        operation_type=OperationType.CONTEXT,
     )
 
     executor_context = Mock()
@@ -606,6 +652,8 @@ def test_parallel_handler_with_explicit_none_summary_generator():
     config = ParallelConfig(summary_generator=None)
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -616,7 +664,11 @@ def test_parallel_handler_with_explicit_none_summary_generator():
 
     execution_state = MockExecutionState()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        "test_op",
+        OperationSubType.PARALLEL,
+        "parent",
+        "test_parallel",
+        operation_type=OperationType.CONTEXT,
     )
 
     executor_context = Mock()
@@ -654,6 +706,8 @@ def test_parallel_handler_replay_mechanism():
 
     # Mock execution state that indicates operation already succeeded
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -670,7 +724,11 @@ def test_parallel_handler_replay_mechanism():
     execution_state = MockExecutionState()
     config = ParallelConfig()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        "test_op",
+        OperationSubType.PARALLEL,
+        "parent",
+        "test_parallel",
+        operation_type=OperationType.CONTEXT,
     )
 
     # Mock parallel context
@@ -723,6 +781,8 @@ def test_parallel_handler_replay_with_replay_children():
 
     # Mock execution state that indicates operation succeeded but children need replay
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -738,7 +798,11 @@ def test_parallel_handler_replay_with_replay_children():
     execution_state = MockExecutionState()
     config = ParallelConfig()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        "test_op",
+        OperationSubType.PARALLEL,
+        "parent",
+        "test_parallel",
+        operation_type=OperationType.CONTEXT,
     )
 
     # Mock parallel context
@@ -817,13 +881,19 @@ def test_parallel_handler_first_execution_then_replay():
     callables = [task1, task2]
     config = ParallelConfig()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        "test_op",
+        OperationSubType.PARALLEL,
+        "parent",
+        "test_parallel",
+        operation_type=OperationType.CONTEXT,
     )
 
     # Track whether we're in first or second execution
     execution_count = 0
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -1052,6 +1122,8 @@ def test_parallel_result_serialization_roundtrip():
     callables = [func1, func2, func3]
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -1071,7 +1143,11 @@ def test_parallel_result_serialization_roundtrip():
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     parallel_context.create_child_context = Mock(return_value=child_context)
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        "test_op",
+        OperationSubType.PARALLEL,
+        "parent",
+        "test_parallel",
+        operation_type=OperationType.CONTEXT,
     )
 
     # Execute parallel
@@ -1474,6 +1550,8 @@ def test_parallel_handler_defaults_summary_generator_for_user_config():
     """A user config without a summary generator gets the default (JS parity)."""
 
     class MockExecutionState:
+        _plugin_executor = PluginExecutor([])
+
         def register_branch_pool(self, pool):
             pass
 
@@ -1494,7 +1572,11 @@ def test_parallel_handler_defaults_summary_generator_for_user_config():
         return original_from_callables(cls, callables, config, operation_id_namespace)
 
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+        "test_op",
+        OperationSubType.PARALLEL,
+        "parent",
+        "test_parallel",
+        operation_type=OperationType.CONTEXT,
     )
     with patch.object(
         ParallelExecutor, "from_callables", classmethod(capturing_from_callables)
@@ -1551,6 +1633,8 @@ def test_parallel_handler_with_should_complete_predicate():
     ) as mock_execute:
 
         class MockExecutionState:
+            _plugin_executor = PluginExecutor([])
+
             def register_branch_pool(self, pool):
                 pass
 
@@ -1561,7 +1645,11 @@ def test_parallel_handler_with_should_complete_predicate():
 
         execution_state = MockExecutionState()
         operation_identifier: OperationIdentifier = OperationIdentifier(
-            "test_op", OperationSubType.PARALLEL, "parent", "test_parallel"
+            "test_op",
+            OperationSubType.PARALLEL,
+            "parent",
+            "test_parallel",
+            operation_type=OperationType.CONTEXT,
         )
 
         result: BatchResult = parallel_handler(

@@ -750,7 +750,10 @@ def test_durable_function_test_runner_init(
     mock_processor.assert_called_once()
     mock_client.assert_called_once()
     mock_invoker.assert_called_once_with(
-        handler, mock_client.return_value, max_page_bytes=5 * 1024 * 1024
+        handler,
+        mock_client.return_value,
+        max_page_bytes=5 * 1024 * 1024,
+        region="us-west-2",
     )
     mock_executor.assert_called_once()
 
@@ -1031,7 +1034,10 @@ def test_durable_context_test_runner_init(
     mock_processor.assert_called_once()
     mock_client.assert_called_once()
     mock_invoker.assert_called_once_with(
-        decorated_handler, mock_client.return_value, max_page_bytes=5 * 1024 * 1024
+        decorated_handler,
+        mock_client.return_value,
+        max_page_bytes=5 * 1024 * 1024,
+        region="us-west-2",
     )
     mock_executor.assert_called_once()
 
@@ -1084,7 +1090,10 @@ def test_durable_child_context_test_runner_init_with_args(
     mock_processor.assert_called_once()
     mock_client.assert_called_once()
     mock_invoker.assert_called_once_with(
-        decorated_handler, mock_client.return_value, max_page_bytes=5 * 1024 * 1024
+        decorated_handler,
+        mock_client.return_value,
+        max_page_bytes=5 * 1024 * 1024,
+        region="us-west-2",
     )
     mock_executor.assert_called_once()
 
@@ -1197,6 +1206,40 @@ def test_cloud_runner_init(mock_boto3):
     assert runner.region == "us-west-2"
     assert runner.poll_interval == 0.5
     mock_boto3.client.assert_called_once()
+
+
+@patch("aws_durable_execution_sdk_python_testing.runner.boto3")
+def test_cloud_runner_pause_execution_not_implemented(mock_boto3: Mock) -> None:
+    mock_client = Mock()
+    mock_boto3.client.return_value = mock_client
+    runner = DurableFunctionCloudTestRunner(function_name="test-function")
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        runner.pause_execution(
+            execution_arn="arn:aws:lambda:us-west-2:123456789012:function:test:execution:exec-1"
+        )
+
+    assert str(exc_info.value) == (
+        "pause_execution() is not implemented for DurableFunctionCloudTestRunner"
+    )
+    assert mock_client.mock_calls == []
+
+
+@patch("aws_durable_execution_sdk_python_testing.runner.boto3")
+def test_cloud_runner_resume_execution_not_implemented(mock_boto3: Mock) -> None:
+    mock_client = Mock()
+    mock_boto3.client.return_value = mock_client
+    runner = DurableFunctionCloudTestRunner(function_name="test-function")
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        runner.resume_execution(
+            execution_arn="arn:aws:lambda:us-west-2:123456789012:function:test:execution:exec-1"
+        )
+
+    assert str(exc_info.value) == (
+        "resume_execution() is not implemented for DurableFunctionCloudTestRunner"
+    )
+    assert mock_client.mock_calls == []
 
 
 @patch("aws_durable_execution_sdk_python_testing.runner.boto3")
@@ -2524,3 +2567,19 @@ def test_cloud_runner_wait_for_result_success(mock_boto3):
         mock_from_history.assert_called_once_with(
             mock_execution_response, mock_history_response
         )
+
+
+@pytest.mark.parametrize("timeout", [None, 0.25])
+@patch("aws_durable_execution_sdk_python_testing.runner.Executor")
+def test_local_runner_forwards_pause_timeout(
+    mock_executor_class: Mock, timeout: float | None
+) -> None:
+    with DurableFunctionTestRunner(Mock()) as runner:
+        if timeout is None:
+            runner.pause_execution("test-arn")
+        else:
+            runner.pause_execution("test-arn", timeout=timeout)
+
+    mock_executor_class.return_value.pause_execution.assert_called_once_with(
+        "test-arn", timeout=60 if timeout is None else timeout
+    )

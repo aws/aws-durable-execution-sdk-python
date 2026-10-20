@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
+import time
 import uuid
+from concurrent.futures import wait
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 from aws_durable_execution_sdk_python.execution import (
     DurableExecutionInvocationInput,
@@ -30,17 +33,37 @@ from aws_durable_execution_sdk_python_testing.checkpoint.core import CheckpointC
 from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
     DEFAULT_MAX_INVOCATION_PAGE_BYTES,
 )
+from aws_durable_execution_sdk_python_testing.child_dispatcher import (
+    CHILD_EXECUTION_OUTPUT_TOO_LARGE_MESSAGE,
+    FUNCTION_NOT_FOUND_ERROR_TYPE,
+    INVALID_FUNCTION_ARN_MESSAGE_FORMAT,
+    MAX_CHAINED_INVOKE_PAYLOAD_BYTES,
+    ChainedInvokeRequest,
+    ChildOutcome,
+    DispatchResult,
+    FunctionTarget,
+    KnownOutcome,
+    RunInvocation,
+    StartChild,
+    chained_invoke_timeout_error,
+    failed_to_start,
+    invoke_identifier,
+    parse_function_target,
+    payload_size_bytes,
+)
 from aws_durable_execution_sdk_python_testing.clock import Clock, RealClock
 from aws_durable_execution_sdk_python_testing.checkpoint.transformer import (
     CheckpointRequestDispatcher,
 )
 from aws_durable_execution_sdk_python_testing.exceptions import (
     IllegalStateException,
+    InvalidInvocationOutputError,
     InvalidParameterValueException,
     ResourceNotFoundException,
 )
 from aws_durable_execution_sdk_python_testing.execution import (
     Execution,
+    ExecutionStatus,
     OperationPaginatorState,
 )
 from aws_durable_execution_sdk_python_testing.model import (
@@ -70,6 +93,7 @@ from aws_durable_execution_sdk_python_testing.observer import (
     ExecutionObserver,
     apply_effects,
 )
+from aws_durable_execution_sdk_python_testing.threads import DaemonThreadPool
 from aws_durable_execution_sdk_python_testing.token import (
     CallbackToken,
     CheckpointToken,
@@ -88,6 +112,9 @@ if TYPE_CHECKING:
     from aws_durable_execution_sdk_python_testing.checkpoint.processor import (
         CheckpointProcessor,
     )
+    from aws_durable_execution_sdk_python_testing.child_dispatcher import (
+        ChildDispatcher,
+    )
     from aws_durable_execution_sdk_python_testing.invoker import (
         Invoker,
         InvokeResponse,
@@ -99,7 +126,15 @@ logger = logging.getLogger(__name__)
 
 
 class Executor(ExecutionObserver):
+    # Workers for the quick half of chained-invoke dispatch: resolving a
+    # target and creating a durable child. Each takes milliseconds.
+    QUICK_DISPATCH_WORKERS: int = 8
     MAX_CONSECUTIVE_FAILED_ATTEMPTS: int = 5
+    # The service fails an execution on an invalid invocation output at
+    # once, except PENDING with no pending operations. An SDK race that
+    # resolves on replay can produce that one, so it gets this many
+    # consecutive attempts.
+    MAX_CONSECUTIVE_INVALID_PENDING_ATTEMPTS: int = 3
     RETRY_BACKOFF_SECONDS: int = 5
     # GetDurableExecutionState page-count bounds, mirroring the service
     # (default 100, hard cap 1000 operations per page).
@@ -116,8 +151,14 @@ class Executor(ExecutionObserver):
         invocation_timeout_seconds: int = 900,
         registry: ExecutionRegistry | None = None,
         clock: Clock | None = None,
+        child_dispatcher: ChildDispatcher | None = None,
+        region: str = "us-west-2",
     ):
         self._store = store
+        # The region this runner stands in for. Executions record it, so a
+        # chained-invoke target ARN in another region is rejected as the
+        # service rejects one.
+        self._region = region
         self._scheduler = scheduler
         self._invoker = invoker
         self._checkpoint_processor = checkpoint_processor
@@ -126,7 +167,10 @@ class Executor(ExecutionObserver):
         )
         self._clock: Clock = clock if clock is not None else RealClock()
         self._invocation_timeout_seconds = invocation_timeout_seconds
-        self._dispatcher = CheckpointRequestDispatcher()
+        self._dispatcher = CheckpointRequestDispatcher(
+            chained_invoke_preflight=self.preflight_chained_invoke
+        )
+        self._child_dispatcher = child_dispatcher
         self._max_invocation_page_bytes = (
             max_invocation_page_bytes
             if max_invocation_page_bytes is not None
@@ -144,15 +188,100 @@ class Executor(ExecutionObserver):
         self._completion_events: dict[str, Event] = {}
         self._callback_timeouts: dict[str, Future] = {}
         self._callback_heartbeats: dict[str, Future] = {}
-        self._execution_timeout: Future | None = None
+        self._execution_timeouts: dict[str, Future] = {}
+        # Chained-invoke linkage: child execution ARN -> (parent
+        # execution ARN, operation id). Consulted on every terminal
+        # transition to complete the parent's CHAINED_INVOKE operation.
+        self._chained_invoke_links: dict[str, tuple[str, str]] = {}
+        self._links_lock: threading.Lock = threading.Lock()
+        # Dedicated pool for chained-invoke dispatch. Dispatching a
+        # non-durable target blocks for one invocation of it, so these
+        # calls stay off the scheduler's default executor, whose single
+        # thread every handler invocation depends on. Dispatching a
+        # durable target does not block: the child is launched and its
+        # terminal transition completes the parent's operation.
+        # Two pools, because the work has two durations. Resolving a
+        # target and creating a durable child take milliseconds. The
+        # Invoke of a plain target blocks until the target returns, up
+        # to the read timeout. Sharing one cap would let a wall of long
+        # Invokes delay a child start, which the service never does.
+        self._dispatch_pool: DaemonThreadPool = DaemonThreadPool(
+            max_workers=self.QUICK_DISPATCH_WORKERS,
+            thread_name_prefix="durable-chained-invoke",
+        )
+        self._target_pool: DaemonThreadPool = DaemonThreadPool(
+            thread_name_prefix="durable-chained-invoke-target",
+        )
+        # Dedicated pool for handler invocations, so concurrent
+        # executions (a parent and its chained children, or parallel
+        # web-driven executions) invoke their handlers in parallel.
+        self._invocation_pool: DaemonThreadPool = DaemonThreadPool(
+            thread_name_prefix="durable-invocation"
+        )
+        # Set by shutdown(). A blocking call that returns after it
+        # must not touch the store or re-invoke anything. Child starts
+        # are counted under the condition, so shutdown can wait for the
+        # ones already running (milliseconds each) before it returns.
+        self._closing: bool = False
+        self._closing_cond = threading.Condition()
+        self._child_starts_in_flight: int = 0
+
+    def shutdown(self) -> None:
+        """Release executor-owned resources without waiting for blocked calls.
+
+        Python cannot interrupt a thread blocked in a socket read. So a
+        handler invocation or plain-target Invoke in flight is left to
+        run until its endpoint answers or its read timeout expires. The
+        pools' workers are daemon threads, so neither this call nor
+        process exit waits for them. Queued work is cancelled and never
+        starts. A result that lands after this call is dropped by the
+        coroutine that awaited it. Inside a process that keeps running,
+        such a thread idles until its read timeout, holding one thread
+        and one socket.
+        """
+        with self._closing_cond:
+            self._closing = True
+            # A child start already past its check finishes under the
+            # same condition; a new one sees the flag and does nothing.
+            while self._child_starts_in_flight > 0:
+                self._closing_cond.wait(timeout=5)
+        self._dispatch_pool.shutdown(wait=False, cancel_futures=True)
+        self._target_pool.shutdown(wait=False, cancel_futures=True)
+        self._invocation_pool.shutdown(wait=False, cancel_futures=True)
+
+    @property
+    def region(self) -> str:
+        """The one region this runner emulates.
+
+        A function has one region for its life, so the region is fixed
+        when the runner starts. Every execution is created in it and
+        reports it.
+        """
+        return self._region
 
     def start_execution(
         self,
         input: StartDurableExecutionInput,  # noqa: A002
     ) -> StartDurableExecutionOutput:
+        execution = self._create_execution(input)
+        self._launch_execution(execution, input.execution_timeout_seconds)
+        return StartDurableExecutionOutput(
+            execution_arn=execution.durable_execution_arn
+        )
+
+    def _create_execution(
+        self,
+        input: StartDurableExecutionInput,  # noqa: A002
+        parent_execution_arn: str | None = None,
+    ) -> Execution:
+        """Create and persist a new execution without launching it.
+
+        ``parent_execution_arn`` marks a child started by a chained
+        invoke; the child's output limit depends on it.
+        """
         # Generate invocation_id if not provided
         if input.invocation_id is None:
-            input = StartDurableExecutionInput(
+            input = StartDurableExecutionInput(  # noqa: A001
                 account_id=input.account_id,
                 function_name=input.function_name,
                 function_qualifier=input.function_qualifier,
@@ -167,34 +296,36 @@ class Executor(ExecutionObserver):
             )
 
         execution = Execution.new(input=input)
+        execution.region = self._region
+        execution.parent_execution_arn = parent_execution_arn
         execution.start(now=self._clock.now())
         self._store.save(execution)
         logger.debug("Created execution with ARN: %s", execution.durable_execution_arn)
+        return execution
 
+    def _launch_execution(self, execution: Execution, timeout_seconds: int) -> None:
+        """Arm the execution's timeout and schedule its first invocation."""
+        arn: str = execution.durable_execution_arn
         completion_event = self._scheduler.create_event()
-        self._completion_events[execution.durable_execution_arn] = completion_event
+        self._completion_events[arn] = completion_event
 
         # Schedule execution timeout
-        if input.execution_timeout_seconds > 0:
+        if timeout_seconds > 0:
 
             def timeout_handler():
                 error = ErrorObject.from_message(
-                    f"Execution timed out after {input.execution_timeout_seconds} seconds."
+                    f"Execution timed out after {timeout_seconds} seconds."
                 )
-                self.on_timed_out(execution.durable_execution_arn, error)
+                self.on_timed_out(arn, error)
 
-            self._execution_timeout = self._scheduler.call_later(
+            self._execution_timeouts[arn] = self._scheduler.call_later(
                 timeout_handler,
-                delay=input.execution_timeout_seconds,
+                delay=timeout_seconds,
                 completion_event=completion_event,
             )
 
         # Schedule initial invocation to run immediately
-        self._invoke_execution(execution.durable_execution_arn)
-
-        return StartDurableExecutionOutput(
-            execution_arn=execution.durable_execution_arn
-        )
+        self._invoke_execution(arn)
 
     @staticmethod
     def _validate_execution_arn(execution_arn: str) -> None:
@@ -229,7 +360,7 @@ class Executor(ExecutionObserver):
         try:
             return self._store.load(execution_arn)
         except KeyError as e:
-            msg: str = f"Execution {execution_arn} not found"
+            msg: str = "Durable Execution does not exist"
             raise ResourceNotFoundException(msg) from e
 
     def get_execution_details(self, execution_arn: str) -> GetDurableExecutionResponse:
@@ -262,7 +393,7 @@ class Executor(ExecutionObserver):
         return GetDurableExecutionResponse(
             durable_execution_arn=execution.durable_execution_arn,
             durable_execution_name=execution.start_input.execution_name,
-            function_arn=f"arn:aws:lambda:us-east-1:123456789012:function:{execution.start_input.function_name}",
+            function_arn=execution.function_arn(self._region),
             status=status,
             start_timestamp=execution_op.start_timestamp
             if execution_op.start_timestamp
@@ -275,7 +406,7 @@ class Executor(ExecutionObserver):
             end_timestamp=execution_op.end_timestamp
             if execution_op.end_timestamp
             else None,
-            version="1.0",
+            version=execution.executed_version(),
         )
 
     def list_executions(
@@ -328,7 +459,9 @@ class Executor(ExecutionObserver):
 
         # Convert to ExecutionSummary objects
         execution_summaries: list[ExecutionSummary] = [
-            ExecutionSummary.from_execution(execution, execution.current_status().value)
+            ExecutionSummary.from_execution(
+                execution, execution.current_status().value, self._region
+            )
             for execution in executions
         ]
 
@@ -656,6 +789,10 @@ class Executor(ExecutionObserver):
                 op_update_ref: OperationUpdate | None = (
                     update
                     if update.action in (OperationAction.RETRY, OperationAction.FAIL)
+                    or (
+                        update.action == OperationAction.START
+                        and update.operation_type == OperationType.CHAINED_INVOKE
+                    )
                     else None
                 )
 
@@ -667,12 +804,15 @@ class Executor(ExecutionObserver):
                     execution.result,
                     op_update_ref,
                     include_execution_data,
+                    child_execution_arn=execution.chained_invoke_children.get(
+                        update.operation_id
+                    ),
                 )
 
                 if update.action == OperationAction.START:
                     if update.operation_type == OperationType.CHAINED_INVOKE:
                         all_events.append(
-                            HistoryEvent.create_chained_invoke_event_pending(context)
+                            HistoryEvent.create_chained_invoke_event_started(context)
                         )
                     else:
                         all_events.append(HistoryEvent.create_event_started(context))
@@ -724,9 +864,12 @@ class Executor(ExecutionObserver):
                         execution.result,
                         None,
                         include_execution_data,
+                        child_execution_arn=execution.chained_invoke_children.get(
+                            op.operation_id
+                        ),
                     )
                     all_events.append(
-                        HistoryEvent.create_chained_invoke_event_pending(context)
+                        HistoryEvent.create_chained_invoke_event_started(context)
                     )
                 if op.start_timestamp is not None:
                     context = EventCreationContext(
@@ -1260,8 +1403,12 @@ class Executor(ExecutionObserver):
         execution_arn: str,
         response: DurableExecutionInvocationOutput,
         execution: Execution,
+        invocation_seq: int | None = None,
     ):
         """Validate response status and save it to the store if fine.
+
+        ``invocation_seq`` is the execution's ``seq_counter`` when the
+        invocation's input was built.
 
         Raises:
             InvalidParameterValueException: If the response status is invalid.
@@ -1293,13 +1440,47 @@ class Executor(ExecutionObserver):
                         "Cannot provide an Error for SUCCEEDED status."
                     )
                     raise InvalidParameterValueException(msg_success_error)
+                if (
+                    execution.parent_execution_arn is not None
+                    and response.result is not None
+                    and payload_size_bytes(response.result)
+                    > MAX_CHAINED_INVOKE_PAYLOAD_BYTES
+                ):
+                    # A child returns its result to the parent's chained
+                    # invoke, which caps it; the service applies the same
+                    # bound to the invocation output as to a checkpoint.
+                    logger.info("[%s] Child result exceeds the limit", execution_arn)
+                    self._fail_workflow(
+                        execution_arn,
+                        ErrorObject.from_message(
+                            CHILD_EXECUTION_OUTPUT_TOO_LARGE_MESSAGE
+                        ),
+                    )
+                    return
                 logger.info("[%s] Execution succeeded", execution_arn)
                 self._complete_workflow(
                     execution_arn, result=response.result, error=None
                 )
 
             case InvocationStatus.PENDING:
-                if not execution.has_pending_operations(execution):
+                # A paused execution answers the running invocation's
+                # checkpoint without a token and defers its next invocation;
+                # that invocation must stop as PENDING even with nothing
+                # pending, and resume re-invokes it. Any other PENDING needs
+                # pending operations or a change the handler has not seen
+                # since its input was built. The unseen-change case happens
+                # when an operation completes after this invocation's input
+                # was built but before this response is validated.
+                if (
+                    not execution.has_deferred_invocation
+                    and not execution.has_pending_operations(execution)
+                    and not (
+                        invocation_seq is not None
+                        and execution.has_changes_after(
+                            max(invocation_seq, execution.handler_seen_seq)
+                        )
+                    )
+                ):
                     msg_pending_ops: str = (
                         "Cannot return PENDING status with no pending operations."
                     )
@@ -1314,13 +1495,18 @@ class Executor(ExecutionObserver):
 
     def _begin_invocation(
         self, execution_arn: str
-    ) -> tuple[Execution, DurableExecutionInvocationInput] | None:
+    ) -> tuple[Execution, DurableExecutionInvocationInput, int] | None:
         """Claim the invocation gate and build the handler input.
 
-        Returns the execution and its invocation input when this call
-        claims the gate (PRE_INVOKE -> INVOKING); returns None when the
-        execution is already complete, the gate is COMPLETED, or another
-        invocation is in flight (recording a deferred re-invoke).
+        Returns the execution, its invocation input, and the execution's
+        ``seq_counter`` at that moment when this call claims the gate
+        (PRE_INVOKE -> INVOKING); returns None when the execution is
+        already complete, the gate is COMPLETED, or another invocation
+        is in flight (recording a deferred re-invoke).
+
+        The counter is captured here, on the execution's serial lane,
+        because a completion queued behind this call mutates the same
+        object before the caller resumes.
         """
         execution = self._store.load(execution_arn)
 
@@ -1351,13 +1537,23 @@ class Executor(ExecutionObserver):
             )
             return None
 
+        if execution.is_paused:
+            execution.defer_invocation()
+            self._store.save(execution)
+            logger.debug(
+                "[%s] Holding back scheduled invocation while paused",
+                execution_arn,
+            )
+            return None
+
         # Claim the gate: at most one handler invocation per
         # execution in flight.
         self._set_invocation_gate(execution_arn, InvocationState.INVOKING)
         execution.begin_new_invocation()
         invocation_input = self._invoker.create_invocation_input(execution=execution)
+        execution.mark_state_delivered()
         self._store.save(execution)
-        return execution, invocation_input
+        return execution, invocation_input, execution.seq_counter
 
     def _finish_invocation(
         self,
@@ -1365,11 +1561,12 @@ class Executor(ExecutionObserver):
         invoke_response: InvokeResponse,
         invocation_start: datetime,
         invocation_end: datetime,
+        invocation_seq: int | None = None,
     ) -> None:
         """Apply a completed handler invocation.
 
-        Records the attempt, validates the response (completing or
-        retrying), resets the retry counter on a clean run, and releases
+        Records the attempt, validates the response (completing, failing
+        or retrying), resets the retry counter on a clean run, and releases
         the gate to PRE_INVOKE (re-invoking if a trigger was deferred) or
         COMPLETED.
         """
@@ -1396,17 +1593,26 @@ class Executor(ExecutionObserver):
         response = invoke_response.invocation_output
         try:
             self._validate_invocation_response_and_store(
-                execution_arn, response, execution
+                execution_arn, response, execution, invocation_seq
             )
         except (InvalidParameterValueException, IllegalStateException) as e:
             logger.warning(
                 "[%s] Lambda output validation failure: %s", execution_arn, e
             )
-            error_obj = ErrorObject.from_exception(e)
+            error_obj = self._invalid_output_error(str(e))
             # Release the gate before retry scheduling so the retry's
             # invoke finds PRE_INVOKE.
             self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
-            self._retry_invocation(execution, error_obj)
+            # Only PENDING with no pending operations is retried; every
+            # other invalid output fails the execution at once.
+            if response.status is InvocationStatus.PENDING:
+                self._retry_invocation(
+                    execution,
+                    error_obj,
+                    max_attempts=self.MAX_CONSECUTIVE_INVALID_PENDING_ATTEMPTS,
+                )
+            else:
+                self._fail_workflow(execution_arn, error_obj)
             return
 
         # A clean invocation resets the retry counter.
@@ -1422,8 +1628,13 @@ class Executor(ExecutionObserver):
             should_reinvoke = False
         else:
             self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
-            should_reinvoke = reloaded.needs_reinvoke
-            if should_reinvoke:
+            # A deferred trigger is only actionable if something
+            # changed that the in-flight handler did not already
+            # observe through a checkpoint response. A completion the
+            # handler consumed mid-invocation earns no extra
+            # invocation.
+            should_reinvoke = reloaded.needs_reinvoke and reloaded.has_unseen_changes()
+            if reloaded.needs_reinvoke:
                 reloaded.needs_reinvoke = False
                 self._store.save(reloaded)
 
@@ -1436,6 +1647,37 @@ class Executor(ExecutionObserver):
     def _fail_invocation_not_found(
         self, execution_arn: str, error: ErrorObject
     ) -> None:
+        self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
+        self._fail_workflow(execution_arn, error)
+
+    @staticmethod
+    def _invalid_output_error(message: str) -> ErrorObject:
+        """The error the service fails an execution with for an invalid output."""
+        return ErrorObject(
+            message=message,
+            type="InvalidParameterValueException",
+            data=None,
+            stack_trace=None,
+        )
+
+    def _fail_after_invalid_output(
+        self,
+        execution_arn: str,
+        error: ErrorObject,
+        invocation_start: datetime,
+        invocation_end: datetime,
+        request_id: str | None,
+    ) -> None:
+        """Fail the execution for an output the invoker could not parse."""
+        execution = self._store.load(execution_arn)
+        execution.record_invocation_completion(
+            invocation_start, invocation_end, request_id or str(uuid.uuid4())
+        )
+        self._store.save(execution)
+        if execution.is_complete:
+            # A stop or timeout landed during the invocation and stands.
+            self._set_invocation_gate(execution_arn, InvocationState.COMPLETED)
+            return
         self._set_invocation_gate(execution_arn, InvocationState.PRE_INVOKE)
         self._fail_workflow(execution_arn, error)
 
@@ -1470,32 +1712,44 @@ class Executor(ExecutionObserver):
             # post-invoke processing run as separate steps: the two
             # state-mutation windows run on the execution's worker lane
             # (serialized with checkpoints), while the blocking invoke
-            # runs off the lane so the handler's checkpoints can run on
-            # it.
+            # runs on the invocation pool so concurrent executions
+            # (for example a chained child alongside its parent) invoke
+            # in parallel instead of queueing on one thread.
+            loop = asyncio.get_running_loop()
             try:
-                claim = await asyncio.to_thread(
-                    lambda: self._registry.submit(
+                claim = await asyncio.wrap_future(
+                    self._registry.submit(
                         execution_arn,
                         CallableTask(lambda: self._begin_invocation(execution_arn)),
-                    ).result()
+                    )
                 )
                 if claim is None:
                     return
-                execution, invocation_input = claim
+                execution, invocation_input, invocation_seq = claim
 
                 invocation_start = self._clock.now()
                 invoke_response = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._invoker.invoke,
-                        execution.start_input.function_name,
-                        invocation_input,
-                        execution.start_input.lambda_endpoint,
+                    loop.run_in_executor(
+                        self._invocation_pool,
+                        lambda: self._invoker.invoke(
+                            invoke_identifier(
+                                execution.start_input.function_name,
+                                execution.start_input.function_qualifier,
+                            ),
+                            invocation_input,
+                            execution.start_input.lambda_endpoint,
+                            tenant_id=execution.start_input.tenant_id,
+                            account_id=execution.start_input.account_id,
+                            region_name=execution.region,
+                        ),
                     ),
                     timeout=self._invocation_timeout_seconds,
                 )
+                if self._closing:
+                    return
                 invocation_end = self._clock.now()
-                await asyncio.to_thread(
-                    lambda: self._registry.submit(
+                await asyncio.wrap_future(
+                    self._registry.submit(
                         execution_arn,
                         CallableTask(
                             lambda: self._finish_invocation(
@@ -1503,26 +1757,64 @@ class Executor(ExecutionObserver):
                                 invoke_response,
                                 invocation_start,
                                 invocation_end,
+                                invocation_seq,
                             )
                         ),
-                    ).result()
+                    )
                 )
 
-            except ResourceNotFoundException:
+            except ResourceNotFoundException as err:
+                if self._closing:
+                    return
                 logger.warning("[%s] Function No longer exists", execution_arn)
-                error_obj = ErrorObject.from_message(message="Function not found")
-                await asyncio.to_thread(
-                    lambda: self._registry.submit(
+                # Keep the Lambda API error code, so a parent chained
+                # invoke sees ResourceNotFoundException on its operation.
+                error_obj = ErrorObject(
+                    message=str(err) or "Function not found",
+                    type=FUNCTION_NOT_FOUND_ERROR_TYPE,
+                    data=None,
+                    stack_trace=None,
+                )
+                await asyncio.wrap_future(
+                    self._registry.submit(
                         execution_arn,
                         CallableTask(
                             lambda: self._fail_invocation_not_found(
                                 execution_arn, error_obj
                             )
                         ),
-                    ).result()
+                    )
+                )
+
+            except InvalidInvocationOutputError as err:
+                if self._closing:
+                    return
+                # The handler ran, but the service cannot parse its output,
+                # so it fails the execution without invoking it again.
+                invocation_end = self._clock.now()
+                logger.warning(
+                    "[%s] Lambda output validation failure: %s", execution_arn, err
+                )
+                error_obj = self._invalid_output_error(str(err))
+                request_id = err.request_id
+                await asyncio.wrap_future(
+                    self._registry.submit(
+                        execution_arn,
+                        CallableTask(
+                            lambda: self._fail_after_invalid_output(
+                                execution_arn,
+                                error_obj,
+                                invocation_start,
+                                invocation_end,
+                                request_id,
+                            )
+                        ),
+                    )
                 )
 
             except asyncio.TimeoutError:
+                if self._closing:
+                    return
                 # Invocation killed by Lambda timeout. Step operations
                 # stay in their current state (STARTED) — no checkpoint
                 # was sent. Record the failed invocation and re-invoke.
@@ -1535,8 +1827,8 @@ class Executor(ExecutionObserver):
                 error_obj = ErrorObject.from_message(
                     message=f"Function timed out after {self._invocation_timeout_seconds} seconds"
                 )
-                await asyncio.to_thread(
-                    lambda: self._registry.submit(
+                await asyncio.wrap_future(
+                    self._registry.submit(
                         execution_arn,
                         CallableTask(
                             lambda: self._retry_after_timeout(
@@ -1546,20 +1838,22 @@ class Executor(ExecutionObserver):
                                 invocation_end,
                             )
                         ),
-                    ).result()
+                    )
                 )
 
             except Exception as e:  # noqa: BLE001
+                if self._closing:
+                    return
                 # Handle invocation errors (network, function not found, etc.)
                 logger.warning("[%s] Invocation failed: %s", execution_arn, e)
                 error_obj = ErrorObject.from_exception(e)
-                await asyncio.to_thread(
-                    lambda: self._registry.submit(
+                await asyncio.wrap_future(
+                    self._registry.submit(
                         execution_arn,
                         CallableTask(
                             lambda: self._retry_after_error(execution_arn, error_obj)
                         ),
-                    ).result()
+                    )
                 )
 
         return invoke
@@ -1572,6 +1866,107 @@ class Executor(ExecutionObserver):
             delay=delay,
             completion_event=completion_event,
         )
+
+    def pause_execution(self, execution_arn: str, timeout: float = 60) -> None:
+        """Experimental; may change or be removed in a future release.
+
+        Pause an execution and wait for its current invocation to stop.
+
+        If a running invocation sends another checkpoint after the pause is
+        applied, its updates are accepted and saved. The response omits the
+        checkpoint token, causing the SDK to end the invocation with PENDING.
+        Further checkpoints from that invocation are rejected.
+
+        Returns once the pause request is applied and no invocation is running.
+        A running step is not interrupted.
+
+        Repeated calls leave an existing pause unchanged and wait again for
+        the running invocation to stop. Completed executions are unchanged.
+
+        If this call times out, the pause request is not cancelled.
+
+        Args:
+            execution_arn: Execution to pause.
+            timeout: Maximum wait in real seconds. Must be finite and positive.
+
+        Raises:
+            InvalidParameterValueException: If the ARN is blank.
+            ResourceNotFoundException: If the execution does not exist.
+            ValueError: If timeout is not finite and positive.
+            TimeoutError: If the pause wait times out.
+        """
+
+        if not math.isfinite(timeout) or timeout <= 0:
+            msg = "timeout must be finite and positive"
+            raise ValueError(msg)
+        deadline = time.monotonic() + timeout
+
+        self._validate_execution_arn(execution_arn)
+        pause = self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._set_paused(execution_arn)),
+        )
+
+        timeout_message = (
+            f"Execution {execution_arn} did not become idle within {timeout:g} seconds "
+            "of requesting pause. The pause request has not been cancelled."
+        )
+
+        done, _ = wait([pause], timeout=max(0, deadline - time.monotonic()))
+        if not done:
+            raise TimeoutError(timeout_message)
+        pause.result()
+
+        self._wait_until_idle(execution_arn, deadline, timeout_message)
+
+    def resume_execution(self, execution_arn: str) -> None:
+        """Experimental; may change or be removed in a future release.
+
+        Make the local checkpoint server answer this execution's
+        checkpoints with a token again.
+
+        Starts the invocation that pause_execution(arn) held back, if any.
+
+        Repeated calls leave an execution that is not paused unchanged.
+        Completed executions are unchanged.
+
+        Raises:
+            InvalidParameterValueException: If the ARN is blank.
+            ResourceNotFoundException: If the execution does not exist.
+        """
+        self._validate_execution_arn(execution_arn)
+        self._registry.submit(
+            execution_arn,
+            CallableTask(lambda: self._resume_execution(execution_arn)),
+        ).result()
+
+    def _set_paused(self, execution_arn: str) -> None:
+        execution = self.get_execution(execution_arn)
+        if execution.is_complete or execution.is_paused:
+            return
+        execution.pause()
+        self._store.save(execution)
+
+    def _resume_execution(self, execution_arn: str) -> None:
+        execution = self.get_execution(execution_arn)
+        if execution.is_complete or not execution.is_paused:
+            return
+
+        deferred = execution.resume()
+
+        self._store.save(execution)
+        if deferred:
+            self._invoke_execution(execution_arn)
+
+    def _wait_until_idle(
+        self, execution_arn: str, deadline: float, timeout_message: str
+    ) -> None:
+        """Wait for no invocation to be running. Raise at the deadline."""
+        while self._invocation_gate(execution_arn) is InvocationState.INVOKING:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(timeout_message)
+            time.sleep(min(0.005, remaining))
 
     def _complete_workflow(
         self, execution_arn: str, result: str | None, error: ErrorObject | None
@@ -1600,22 +1995,26 @@ class Executor(ExecutionObserver):
 
         self.fail_execution(execution_arn, error)
 
-    def _retry_invocation(self, execution: Execution, error: ErrorObject):
+    def _retry_invocation(
+        self,
+        execution: Execution,
+        error: ErrorObject,
+        max_attempts: int | None = None,
+    ) -> None:
         """Handle retry logic or fail execution if retries exhausted.
 
-        Budget: ``MAX_CONSECUTIVE_FAILED_ATTEMPTS`` attempts
-        per ``RETRY_BACKOFF_SECONDS`` backoff. Increments the counter
-        BEFORE the threshold check so an attempt-N failure that
-        reaches the ceiling fails the execution rather than scheduling
-        a pointless retry.
+        Budget: ``max_attempts`` attempts, by default
+        ``MAX_CONSECUTIVE_FAILED_ATTEMPTS``, per ``RETRY_BACKOFF_SECONDS``
+        backoff. Increments the counter BEFORE the threshold check so an
+        attempt-N failure that reaches the ceiling fails the execution
+        rather than scheduling a pointless retry.
         """
+        if max_attempts is None:
+            max_attempts = self.MAX_CONSECUTIVE_FAILED_ATTEMPTS
         execution.consecutive_failed_invocation_attempts += 1
         self._store.save(execution)
 
-        if (
-            execution.consecutive_failed_invocation_attempts
-            >= self.MAX_CONSECUTIVE_FAILED_ATTEMPTS
-        ):
+        if execution.consecutive_failed_invocation_attempts >= max_attempts:
             # Budget exhausted — fail the execution with the last
             # observed error.
             self._fail_workflow(
@@ -1635,9 +2034,163 @@ class Executor(ExecutionObserver):
         # complete doesn't actually checkpoint explicitly
         if event := self._completion_events.get(execution_arn):
             event.set()
-        if self._execution_timeout:
-            self._execution_timeout.cancel()
-            self._execution_timeout = None
+        if timeout_future := self._execution_timeouts.pop(execution_arn, None):
+            timeout_future.cancel()
+        self._notify_parent_of_terminal_child(execution_arn)
+
+    def _notify_parent_of_terminal_child(self, child_arn: str) -> None:
+        """Complete the parent's CHAINED_INVOKE operation for a terminal child.
+
+        The link from a child to its parent operation is looked up in
+        memory first. A runner restart empties that map. Both halves of
+        the link are persisted: the child's parent ARN and the parent's
+        map of operation id to child ARN. So a miss falls back to the
+        store, and a child that completes after a restart still reaches
+        its parent. No-op for an execution without a parent. The
+        parent-side transition runs on the parent's worker lane and the
+        parent is re-invoked to observe it.
+        """
+        with self._links_lock:
+            link: tuple[str, str] | None = self._chained_invoke_links.pop(
+                child_arn, None
+            )
+        child: Execution | None = None
+        try:
+            child = self._store.load(child_arn)
+        except Exception:  # noqa: BLE001 — never let linkage failure kill the child's terminal path
+            logger.exception("[%s] Failed to read terminal execution", child_arn)
+        if link is None:
+            link = self._persisted_link(child)
+        if link is None:
+            return
+        parent_arn, operation_id = link
+
+        if child is None:
+            status: OperationStatus = OperationStatus.FAILED
+            result: str | None = None
+            error: ErrorObject | None = ErrorObject.from_message(
+                "Chained invoke target completed but its outcome could not be read."
+            )
+        else:
+            status, result, error = self._child_terminal_to_completion(child)
+
+        self._registry.submit(
+            parent_arn,
+            CallableTask(
+                lambda: self._apply_chained_invoke_completion(
+                    parent_arn, operation_id, status, result, error
+                )
+            ),
+        )
+        self._invoke_execution(parent_arn)
+
+    def _persisted_link(self, child: Execution | None) -> tuple[str, str] | None:
+        """Rebuild a child's link to its parent operation from the store.
+
+        Returns None when the child has no parent, when the parent cannot
+        be read, or when the parent no longer lists the child.
+        """
+        if child is None or child.parent_execution_arn is None:
+            return None
+        try:
+            parent: Execution = self._store.load(child.parent_execution_arn)
+        except Exception:  # noqa: BLE001 — a missing parent must not kill the child's terminal path
+            logger.exception(
+                "[%s] Failed to read parent %s",
+                child.durable_execution_arn,
+                child.parent_execution_arn,
+            )
+            return None
+        for operation_id, child_arn in parent.chained_invoke_children.items():
+            if child_arn == child.durable_execution_arn:
+                return (parent.durable_execution_arn, operation_id)
+        return None
+
+    @staticmethod
+    def _child_terminal_to_completion(
+        child: Execution,
+    ) -> tuple[OperationStatus, str | None, ErrorObject | None]:
+        """Map a terminal child execution to the parent operation outcome."""
+        result_output = child.result
+        status: ExecutionStatus = child.current_status()
+        match status:
+            case ExecutionStatus.SUCCEEDED:
+                return (
+                    OperationStatus.SUCCEEDED,
+                    result_output.result if result_output else None,
+                    None,
+                )
+            case ExecutionStatus.TIMED_OUT:
+                # A timed-out child carries no payload; the service reports
+                # a fixed error type and the child's execution timeout.
+                return (
+                    OperationStatus.TIMED_OUT,
+                    None,
+                    chained_invoke_timeout_error(
+                        child.start_input.execution_timeout_seconds
+                    ),
+                )
+            case ExecutionStatus.STOPPED:
+                # A stopped child surfaces the error object that the stop
+                # request carried, as the service does.
+                return (
+                    OperationStatus.STOPPED,
+                    None,
+                    result_output.error if result_output else None,
+                )
+            case ExecutionStatus.FAILED:
+                error = (
+                    result_output.error
+                    if result_output and result_output.error
+                    else ErrorObject.from_message("Chained invoke failed.")
+                )
+                return (OperationStatus.FAILED, None, error)
+            case ExecutionStatus.RUNNING:
+                msg: str = (
+                    f"Child execution {child.durable_execution_arn} has not "
+                    "reached a terminal state."
+                )
+                raise IllegalStateException(msg)
+            case _:
+                assert_never(status)
+
+    def _apply_chained_invoke_completion(
+        self,
+        parent_arn: str,
+        operation_id: str,
+        status: OperationStatus,
+        result: str | None,
+        error: ErrorObject | None,
+    ) -> None:
+        """Stamp a chained-invoke outcome onto the parent operation.
+
+        Runs on the parent's worker lane. Drops the outcome when the
+        parent is already terminal (its terminal state is authoritative)
+        or when the operation already completed.
+        """
+        try:
+            execution = self.get_execution(parent_arn)
+        except ResourceNotFoundException:
+            logger.warning(
+                "[%s] Parent not found for chained invoke %s", parent_arn, operation_id
+            )
+            return
+        if execution.is_complete:
+            return
+        _, operation = execution.find_operation(operation_id)
+        # Must agree with Execution.complete_chained_invoke, which
+        # accepts only STARTED; a raise here would land in a lane
+        # future nobody awaits.
+        if operation.status is not OperationStatus.STARTED:
+            return
+        execution.complete_chained_invoke(
+            operation_id,
+            status,
+            result=result,
+            error=error,
+            now=self._clock.now(),
+        )
+        self._store.update(execution)
 
     def wait_until_complete(
         self, execution_arn: str, timeout: float | None = None
@@ -1728,7 +2281,254 @@ class Executor(ExecutionObserver):
         # Schedule callback timeouts if configured
         self._schedule_callback_timeouts(execution_arn, callback_options, callback_id)
 
+    def on_chained_invoke_started(
+        self,
+        execution_arn: str,
+        operation_id: str,
+        function_name: str,
+        tenant_id: str | None,
+        payload: str | None,
+    ) -> None:
+        """Dispatch a chained-invoke target. Observer method triggered by notifier.
+
+        Scheduling only: the dispatch itself runs off the caller's
+        worker lane so the checkpoint that raised the effect returns
+        without waiting on the target.
+        """
+        completion_event = self._completion_events.get(execution_arn)
+        self._scheduler.call_later(
+            self._dispatch_chained_invoke(
+                execution_arn, operation_id, function_name, tenant_id, payload
+            ),
+            completion_event=completion_event,
+        )
+
     # endregion ExecutionObserver
+
+    # region Chained invoke
+    def _dispatch_chained_invoke(
+        self,
+        execution_arn: str,
+        operation_id: str,
+        function_name: str,
+        tenant_id: str | None,
+        payload: str | None,
+    ) -> Callable[[], Awaitable[None]]:
+        """Build the dispatch coroutine for a chained-invoke operation."""
+
+        async def dispatch() -> None:
+            loop = asyncio.get_running_loop()
+            try:
+                result: DispatchResult = await loop.run_in_executor(
+                    self._dispatch_pool,
+                    lambda: self._resolve_dispatch(
+                        execution_arn,
+                        operation_id,
+                        function_name,
+                        tenant_id,
+                        payload,
+                    ),
+                )
+                if self._closing:
+                    return
+
+                match result:
+                    case StartChild(child_start=child_start):
+                        await loop.run_in_executor(
+                            self._dispatch_pool,
+                            lambda: self._start_child_execution(
+                                execution_arn, operation_id, child_start
+                            ),
+                        )
+                    case RunInvocation(invocation=invocation):
+                        invocation_result: ChildOutcome = await loop.run_in_executor(
+                            self._target_pool, invocation
+                        )
+                        if self._closing:
+                            return
+                        await self._finish_from_outcome(
+                            execution_arn, operation_id, invocation_result
+                        )
+                    case KnownOutcome(outcome=outcome):
+                        await self._finish_from_outcome(
+                            execution_arn, operation_id, outcome
+                        )
+                    case _:
+                        assert_never(result)
+            except Exception:
+                if self._closing:
+                    # The pools refuse work after shutdown, and a target
+                    # may raise after it. Neither outcome is applied.
+                    return
+                logger.exception(
+                    "[%s] Chained invoke dispatch failed for %s",
+                    execution_arn,
+                    operation_id,
+                )
+                # An unexpected dispatch failure has no Lambda API error
+                # code, so the error carries a message only.
+                error = ErrorObject(
+                    message="Chained invoke could not be dispatched.",
+                    type=None,
+                    data=None,
+                    stack_trace=None,
+                )
+                await self._finish_from_outcome(
+                    execution_arn, operation_id, ChildOutcome(error=error)
+                )
+
+        return dispatch
+
+    def preflight_chained_invoke(self, function_name: str) -> ErrorObject | None:
+        """Resolve a chained-invoke target at checkpoint time.
+
+        Returns the error that fails the operation in the checkpoint
+        response, or ``None`` when the target can be dispatched. Runs on
+        the parent's worker lane inside the checkpoint, so it must not
+        block: the dispatcher answers from what it already holds.
+        """
+        if self._child_dispatcher is None:
+            return failed_to_start(
+                "This runner has no chained-invoke dispatcher configured."
+            ).outcome.error
+        try:
+            target: FunctionTarget = parse_function_target(function_name)
+        except ValueError:
+            return failed_to_start(
+                INVALID_FUNCTION_ARN_MESSAGE_FORMAT.format(function_name)
+            ).outcome.error
+        outcome: ChildOutcome | None = self._child_dispatcher.preflight(target)
+        return outcome.error if outcome is not None else None
+
+    def _resolve_dispatch(
+        self,
+        execution_arn: str,
+        operation_id: str,  # noqa: ARG002 — part of the request identity in logs
+        function_name: str,
+        tenant_id: str | None,
+        payload: str | None,
+    ) -> DispatchResult:
+        """Resolve the dispatch result for a chained-invoke request."""
+        if self._child_dispatcher is None:
+            return failed_to_start(
+                "This runner has no chained-invoke dispatcher configured."
+            )
+        parent: Execution = self._store.load(execution_arn)
+        if parent.is_complete:
+            # The parent reached a terminal state between the checkpoint
+            # and this dispatch; its terminal state is authoritative.
+            return KnownOutcome(outcome=ChildOutcome())
+        # Checkpoint validation already rejected a malformed target; this
+        # guards a dispatch that bypassed it.
+        try:
+            target: FunctionTarget = parse_function_target(function_name)
+        except ValueError:
+            return failed_to_start(
+                INVALID_FUNCTION_ARN_MESSAGE_FORMAT.format(function_name)
+            )
+        request = ChainedInvokeRequest(
+            parent_execution_arn=execution_arn,
+            operation_id=operation_id,
+            function_name=target.name,
+            qualifier=target.qualifier,
+            tenant_id=tenant_id,
+            # An invoke without a payload delivers an empty JSON object
+            # to the target, matching the Lambda Invoke API.
+            payload=payload if payload is not None else "{}",
+            account_id=parent.start_input.account_id,
+            trace_fields=parent.start_input.trace_fields,
+        )
+        return self._child_dispatcher.dispatch(request)
+
+    async def _finish_from_outcome(
+        self, execution_arn: str, operation_id: str, outcome: ChildOutcome
+    ) -> None:
+        """Complete the operation from a known outcome and re-invoke."""
+        status: OperationStatus
+        if outcome.timed_out:
+            status = OperationStatus.TIMED_OUT
+        elif outcome.error is None:
+            status = OperationStatus.SUCCEEDED
+        else:
+            status = OperationStatus.FAILED
+        await asyncio.wrap_future(
+            self._registry.submit(
+                execution_arn,
+                CallableTask(
+                    lambda: self._apply_chained_invoke_completion(
+                        execution_arn,
+                        operation_id,
+                        status,
+                        outcome.result,
+                        outcome.error,
+                    )
+                ),
+            )
+        )
+        self._invoke_execution(execution_arn)
+
+    def _start_child_execution(
+        self,
+        parent_arn: str,
+        operation_id: str,
+        child_start: StartDurableExecutionInput,
+    ) -> None:
+        """Create, link, and launch a child durable execution.
+
+        The linkage is registered and recorded on the parent before the
+        child's first invocation is scheduled, so a child that
+        completes immediately still finds its link. The child is pinned
+        to its parent's endpoint before that first invocation, so it is
+        invoked where the parent's chained targets go.
+        """
+        # Shutdown can begin while this task runs. The check and the
+        # count are one step under the condition, and shutdown waits for
+        # the count to reach zero. So nothing is persisted or scheduled
+        # after shutdown: a child created then would never be invoked.
+        with self._closing_cond:
+            if self._closing:
+                return
+            self._child_starts_in_flight += 1
+        try:
+            child: Execution = self._create_execution(
+                child_start, parent_execution_arn=parent_arn
+            )
+            child_arn: str = child.durable_execution_arn
+            self._invoker.inherit_endpoint(child_arn, parent_arn)
+            with self._links_lock:
+                self._chained_invoke_links[child_arn] = (parent_arn, operation_id)
+            self._registry.submit(
+                parent_arn,
+                CallableTask(
+                    lambda: self._record_child_on_parent(
+                        parent_arn, operation_id, child_arn
+                    )
+                ),
+            ).result()
+            self._launch_execution(child, child_start.execution_timeout_seconds)
+        finally:
+            with self._closing_cond:
+                self._child_starts_in_flight -= 1
+                self._closing_cond.notify_all()
+
+    def _record_child_on_parent(
+        self, parent_arn: str, operation_id: str, child_arn: str
+    ) -> None:
+        """Record a child execution ARN on the parent's operation.
+
+        Runs on the parent's worker lane. No-op when the parent is
+        already terminal.
+        """
+        try:
+            execution = self.get_execution(parent_arn)
+        except ResourceNotFoundException:
+            return
+        if execution.is_complete:
+            return
+        execution.record_chained_invoke_child(operation_id, child_arn)
+        self._store.update(execution)
+
+    # endregion Chained invoke
 
     # region Callback Timeouts
     def _schedule_callback_timeouts(

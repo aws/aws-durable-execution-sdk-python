@@ -1,36 +1,24 @@
-"""Integration test: empty checkpoint coalescing with concurrent map + wait.
+"""Integration tests for coalescing the refreshes of concurrent resume waves.
 
-Python equivalent of the Java MapWithConditionAndCallbackExample referenced in
-issue #325. Verifies that when many concurrent map branches resume from timed
-wait operations simultaneously, the empty checkpoints produced by the
-resubmitter (executor.py) are coalesced into minimal API calls instead of
-being split across multiple batches.
+A coordinator that resumes timed waits in-process needs a refresh, an empty
+checkpoint whose response shows the waits complete. It requests one refresh
+per distinct resume time through ExecutionState.schedule_refresh(resume_at).
+Independent coordinators, such as nested maps, each request their own.
 
-Background
-----------
-When a map branch suspends via TimedSuspendExecution and later resumes, the
-ConcurrentExecutor resubmitter calls::
+The batcher holds a refresh until resume_at, then sends every refresh due at
+that time in one request. So the number of requests depends on the resume
+times, not on how far apart the requests were made or how the threads were
+scheduled.
 
-    execution_state.create_checkpoint()  # empty checkpoint
-
-before resubmitting the branch. In high-concurrency scenarios (300+ branches)
-all resuming at the same time, 300+ empty checkpoints flood the checkpoint
-queue.
-
-Without the coalescing optimization (issue #325), the 250-operation batch limit
-causes these to be split across multiple batches → multiple API calls.
-With the optimization, all subsequent empty checkpoints beyond the first do
-NOT count toward the batch limit, so they are coalesced into a single batch
-and a single API call.
-
-These tests directly simulate that concurrent-checkpoint pattern by launching
-many threads that each call ``create_checkpoint()`` simultaneously, mirroring
-what the map resubmitter does when all branches resume at once.
+The batch operation limit still applies. The first empty checkpoint counts
+toward the 250-operation limit and the rest do not, so 300 refreshes fit in
+one batch. These tests verify both rules.
 """
 
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -92,33 +80,28 @@ def _make_tracking_client() -> tuple[Mock, list]:
 
 
 def test_map_with_concurrent_waits_coalesces_empty_checkpoints():
-    """300 concurrent branches all create empty checkpoints simultaneously.
+    """300 due refreshes from 300 independent callers must make one API call.
 
-    Simulates the Java MapWithConditionAndCallbackExample scenario: 300 map
-    branches all resuming from a wait operation at the same time, each calling
-    the resubmitter which enqueues an empty checkpoint.
-
-    Without the coalescing optimization, the 250-op batch limit splits 300
-    empty checkpoints into 2 batches (250 + 50) → 2 API calls.
-    With the optimization (effective_operation_count stays 1 for empties),
-    all 300 are collected in a single batch → 1 API call.
+    All 300 threads request their refreshes before the batcher starts, so the
+    result does not depend on how fast the scheduler runs them. The check time
+    is in the past: deferral of future refreshes is covered by unit tests, and
+    here every refresh is due when the batcher first looks. Without the
+    batch-limit optimization the 250-op limit would split them into 2 requests.
     """
     mock_client, calls = _make_tracking_client()
     state = _make_state(mock_client, batch_time=5.0, max_ops=250)
 
-    batcher = ThreadPoolExecutor(max_workers=1)
-    batcher.submit(state.checkpoint_batches_forever)
-
-    # 300 branches all call create_checkpoint() concurrently, each blocking
-    # until the batch is processed — mirrors the resubmitter pattern.
     branch_count = 300
-    start_barrier = threading.Barrier(branch_count)
+    check_time = time.time() - 1.0
     errors: list[Exception] = []
+    handles = []
+    handles_lock = threading.Lock()
 
     def branch_work():
         try:
-            start_barrier.wait()  # all start simultaneously
-            state.create_checkpoint()  # empty checkpoint, synchronous
+            handle = state.schedule_refresh(check_time)
+            with handles_lock:
+                handles.append(handle)
         except Exception as e:  # noqa: BLE001
             errors.append(e)
 
@@ -127,17 +110,19 @@ def test_map_with_concurrent_waits_coalesces_empty_checkpoints():
         t.start()
     for t in threads:
         t.join(timeout=30)
+    assert not errors, f"Branch errors: {errors}"
+    assert len(handles) == branch_count, "every caller must have enqueued first"
 
+    batcher = ThreadPoolExecutor(max_workers=1)
+    batcher.submit(state.checkpoint_batches_forever)
     try:
-        assert not errors, f"Branch errors: {errors}"
-
-        # All 300 empty checkpoints should be batched into 1 API call.
-        # Without the fix, 300 > 250 limit would produce 2 calls.
+        for handle in handles:
+            assert handle.wait(timeout=30)
         assert len(calls) == 1, (
-            f"Expected 1 coalesced API call for {branch_count} concurrent empty "
-            f"checkpoints, got {len(calls)}. The 250-op limit must not split empties."
+            f"Expected 1 coalesced API call for {branch_count} due refreshes, "
+            f"got {len(calls)}."
         )
-        assert calls[0] == [], "Empty checkpoints should produce an empty updates list"
+        assert calls[0] == [], "Refreshes should produce an empty updates list"
     finally:
         state.stop_checkpointing()
         batcher.shutdown(wait=True)
