@@ -6,7 +6,7 @@ parameter on ``durable_execution``. The plugin emits its lines from the SDK's
 running line via the SDK-provided step context logger (mirrors handler 1-7).
 """
 
-import json
+import logging
 from typing import Any
 
 from aws_durable_execution_sdk_python.context import (
@@ -28,7 +28,10 @@ def _emit(record: dict[str, Any], execution_arn: str | None) -> None:
     # execution. Omit the field when the ARN is unset (never invent a value).
     if execution_arn:
         record = {"durableExecutionArn": execution_arn, **record}
-    print(json.dumps(record), flush=True)
+    # Use the same logging transport as the step context logger. Mixing stdout
+    # and Lambda's logging sink can invert their CloudWatch timestamps even
+    # though invocation-start runs synchronously before the handler.
+    logging.getLogger().info("Plugin invocation lifecycle", extra=record)
 
 
 class LifecyclePlugin(DurableInstrumentationPlugin):
