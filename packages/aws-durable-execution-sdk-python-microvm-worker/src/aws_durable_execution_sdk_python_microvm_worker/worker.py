@@ -300,10 +300,14 @@ class MicrovmWorkerListener:
     7. A call that the service refused for now on its first attempt, such
        as expired credentials or a signature error, ends the refusal at
        once too. The idle time then starts again, so the listener tries the
-       call again. The default client retries a throttle. So a throttle
-       from it usually ends as an unknown outcome, as in item 8. A throttle
-       is refused for now only from a caller's client that does not retry
-       it.
+       call again. That idle time lasts at least 30 seconds, because the
+       same error can repeat on every call, for example with a wrong secret
+       key. A job that ends after the refusal, or a ``resume`` hook after
+       it, starts the normal idle time instead. A ``resume`` hook during the
+       call does not, because the refused outcome arrives after the hook.
+       The default client retries a throttle. So a throttle from it usually
+       ends as an unknown outcome, as in item 8. A throttle is refused for
+       now only from a caller's client that does not retry it.
     8. A call whose outcome is unknown, such as a timeout, a conflict, a
        server error, or an error after a retried attempt, is handled like a
        successful call. The service may have suspended the MicroVM anyway.
@@ -410,6 +414,12 @@ class MicrovmWorkerListener:
         # flight, for example after a resume hook during the call. The idle
         # time then starts when the call ends.
         self._idle_after_call = False
+        # Written each time _idle_after_call is set, and read when the call
+        # ends. True when the latest request to start the idle time during
+        # the call came from a call refused for now. That idle time then
+        # lasts at least SUSPEND_GRACE_SECONDS. A later request during the
+        # same call, such as a job that ends, writes False.
+        self._idle_after_call_floor = False
         # Run hook jobs that arrived during a refusal. The durable function
         # cannot deliver a run hook job again. So the listener starts it when
         # the refusal ends, instead of refusing it.
@@ -1293,8 +1303,15 @@ class MicrovmWorkerListener:
             callback_id, self._create_client(region), logger=self._logger
         )
 
-    def _start_idle_time(self) -> None:
+    def _start_idle_time(self, *, after_refusal: bool = False) -> None:
         """Start the idle time, when the session asked for it and no job runs.
+
+        ``after_refusal`` marks the restart after a call refused for now.
+        That idle time lasts at least :data:`SUSPEND_GRACE_SECONDS`. A
+        persistent error, such as a wrong secret key, is refused for now on
+        every call. Without the floor, a tiny idle time would repeat the
+        call as fast as the client can make it. Every other start uses the
+        session's idle time.
 
         The caller holds the lock.
         """
@@ -1311,13 +1328,18 @@ class MicrovmWorkerListener:
         if self._suspend_calls:
             # A second call could start while the first one runs. The first
             # call's grace period could then end the refusal while the second
-            # call can still freeze the MicroVM.
+            # call can still freeze the MicroVM. The latest request decides
+            # the floor.
             self._idle_after_call = True
+            self._idle_after_call_floor = after_refusal
             return
+        idle_seconds = auto_suspend.idle_seconds
+        if after_refusal:
+            idle_seconds = max(idle_seconds, SUSPEND_GRACE_SECONDS)
         generation = self._idle_generation
         try:
             self._cancel_idle_timer = _start_timer(
-                auto_suspend.idle_seconds, lambda: self._idle_time_ended(generation)
+                idle_seconds, lambda: self._idle_time_ended(generation)
             )
         except Exception as error:  # noqa: BLE001
             # Without a timer thread, the MicroVM keeps running until a job
@@ -1396,12 +1418,12 @@ class MicrovmWorkerListener:
 
     def _suspend_call_ended(self) -> None:
         """Count a SuspendMicrovm call as ended, and start the idle time that
-        a resume hook or a job asked for during it. The caller holds the
-        lock."""
+        a resume hook, a job, or a refusal for now asked for during it. The
+        caller holds the lock."""
         self._suspend_calls -= 1
         if self._idle_after_call:
             self._idle_after_call = False
-            self._start_idle_time()
+            self._start_idle_time(after_refusal=self._idle_after_call_floor)
         self._changed.notify_all()
 
     def _call_suspend(self, auto_suspend: _AutoSuspend, hooks_before: int) -> None:
@@ -1448,7 +1470,8 @@ class MicrovmWorkerListener:
                     self._logger.warning(
                         "could not suspend the idle MicroVM, because the "
                         "service refused the call for now. It keeps running, "
-                        "and the worker tries again after the next idle time.",
+                        "and the worker tries again after the next idle time, "
+                        "at least 30 seconds.",
                         extra={**fields, "error": describe(error)},
                     )
                 # The service did nothing. So jobs can run again at once. A
@@ -1460,9 +1483,11 @@ class MicrovmWorkerListener:
                         deferred = self._stop_refusing()
                         # A rejection, such as a missing permission, is not
                         # retried until a job ends. A refusal for now is
-                        # retried after the next idle time.
+                        # retried after the next idle time. That idle time
+                        # lasts at least 30 seconds, because the same error
+                        # can repeat on every call.
                         if outcome is SuspendOutcome.REFUSED_FOR_NOW:
-                            self._start_idle_time()
+                            self._start_idle_time(after_refusal=True)
                 self._launch_deferred(deferred)
                 return
             # A timeout, a conflict, a server error, or an error after a
