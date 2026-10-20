@@ -110,3 +110,33 @@ def test_inject_raises_when_no_functions(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit):
         inject_execution_role.inject(template, ROLE_ARN)
+
+
+def test_plugin_logging_survives_execution_role_injection(tmp_path: Path) -> None:
+    source = Path(__file__).resolve().parents[1] / "template_plugin.yaml"
+    original = yaml.safe_load(source.read_text())
+    expected_functions = {
+        name: resource
+        for name, resource in original["Resources"].items()
+        if resource.get("Type") == "AWS::Serverless::Function"
+        and "DurableConfig" in resource.get("Properties", {})
+    }
+    assert expected_functions
+    template = _write(tmp_path, original)
+
+    assert inject_execution_role.inject(template, ROLE_ARN) == len(expected_functions)
+    actual = yaml.safe_load(Path(template).read_text())
+    global_logging = actual["Globals"]["Function"].get("LoggingConfig", {})
+    for name, original_resource in expected_functions.items():
+        resource = actual["Resources"][name]
+        properties = resource["Properties"]
+        effective_logging = {**global_logging, **properties.get("LoggingConfig", {})}
+        assert effective_logging.get("LogFormat", "Text") == "JSON", (
+            f"{name}: Lambda durable functions require JSON logs"
+        )
+        assert properties["Role"] == ROLE_ARN
+        assert (
+            properties["DurableConfig"]
+            == original_resource["Properties"]["DurableConfig"]
+        )
+        assert resource["TestingMetadata"] == original_resource["TestingMetadata"]
