@@ -182,6 +182,16 @@ def mock_execution():
     return execution
 
 
+def _invalid_output_error(message: str) -> ErrorObject:
+    """The error the service fails an execution with for an invalid output."""
+    return ErrorObject(
+        message=message,
+        type="InvalidParameterValueException",
+        data=None,
+        stack_trace=None,
+    )
+
+
 def test_init(mock_store, mock_scheduler, mock_invoker, mock_checkpoint_processor):
     # Test that Executor can be constructed with dependencies
     # Dependency injection is implementation detail - test behavior instead
@@ -513,10 +523,10 @@ def test_should_ignore_response_when_execution_already_complete(
     mock_invoker.invoke.assert_not_called()
 
 
-def test_should_retry_when_response_has_no_status(
+def test_should_fail_when_response_has_no_status(
     executor, mock_store, mock_scheduler, mock_invoker, start_input
 ):
-    """Test that invocation responses without status trigger retry logic."""
+    """Test that invocation responses without status fail the execution without a retry."""
     # Arrange
     mock_execution = Mock()
     mock_execution.is_paused = False
@@ -540,27 +550,30 @@ def test_should_retry_when_response_has_no_status(
         mock_execution_class.new.return_value = mock_execution
         mock_store.load.return_value = mock_execution
 
-        # Act - trigger invocation through public start_execution method
-        executor.start_execution(start_input)
+        with patch.object(executor, "fail_execution") as mock_fail:
+            # Act - trigger invocation through public start_execution method
+            executor.start_execution(start_input)
 
-        # Get the handler that was passed to the scheduler and execute it manually
-        assert mock_scheduler.call_later.call_count >= 1
-        handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+            # Get the handler that was passed to the scheduler and execute it manually
+            assert mock_scheduler.call_later.call_count >= 1
+            handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
-        # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+            # Execute the handler to trigger the invocation logic
+            asyncio.run(handler())
 
-        # Assert - verify retry was triggered due to validation error
-        assert mock_execution.consecutive_failed_invocation_attempts == 1
-        mock_store.save.assert_called_with(mock_execution)
-        # Verify retry was scheduled (call_later should be called 3 times: timeout + initial + retry)
-        assert mock_scheduler.call_later.call_count == 3
+        # Assert - verify the execution failed at once, as the service does
+        mock_fail.assert_called_once_with(
+            "test-arn", _invalid_output_error("Response status is required")
+        )
+        assert mock_execution.consecutive_failed_invocation_attempts == 0
+        # Verify no retry was scheduled (call_later is called 2 times: timeout + initial)
+        assert mock_scheduler.call_later.call_count == 2
 
 
-def test_should_retry_when_failed_response_has_result(
+def test_should_fail_when_failed_response_has_result(
     executor, mock_store, mock_scheduler, mock_invoker, start_input
 ):
-    """Test that failed responses with result trigger retry logic."""
+    """Test that failed responses with result fail the execution without a retry."""
     # Arrange
     mock_execution = Mock()
     mock_execution.is_paused = False
@@ -586,27 +599,31 @@ def test_should_retry_when_failed_response_has_result(
         mock_execution_class.new.return_value = mock_execution
         mock_store.load.return_value = mock_execution
 
-        # Act - trigger invocation through public start_execution method
-        executor.start_execution(start_input)
+        with patch.object(executor, "fail_execution") as mock_fail:
+            # Act - trigger invocation through public start_execution method
+            executor.start_execution(start_input)
 
-        # Get the handler that was passed to the scheduler and execute it manually
-        assert mock_scheduler.call_later.call_count >= 1
-        handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+            # Get the handler that was passed to the scheduler and execute it manually
+            assert mock_scheduler.call_later.call_count >= 1
+            handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
-        # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+            # Execute the handler to trigger the invocation logic
+            asyncio.run(handler())
 
-        # Assert - verify retry was triggered due to validation error
-        assert mock_execution.consecutive_failed_invocation_attempts == 1
-        mock_store.save.assert_called_with(mock_execution)
-        # Verify retry was scheduled (call_later should be called 3 times: timeout + initial + retry)
-        assert mock_scheduler.call_later.call_count == 3
+        # Assert - verify the execution failed at once, as the service does
+        mock_fail.assert_called_once_with(
+            "test-arn",
+            _invalid_output_error("Cannot provide a Result for FAILED status."),
+        )
+        assert mock_execution.consecutive_failed_invocation_attempts == 0
+        # Verify no retry was scheduled (call_later is called 2 times: timeout + initial)
+        assert mock_scheduler.call_later.call_count == 2
 
 
-def test_should_retry_when_success_response_has_error(
+def test_should_fail_when_success_response_has_error(
     executor, mock_store, mock_scheduler, mock_invoker, start_input
 ):
-    """Test that successful responses with error trigger retry logic."""
+    """Test that successful responses with error fail the execution without a retry."""
     # Arrange
     mock_execution = Mock()
     mock_execution.is_paused = False
@@ -633,21 +650,25 @@ def test_should_retry_when_success_response_has_error(
         mock_execution_class.new.return_value = mock_execution
         mock_store.load.return_value = mock_execution
 
-        # Act - trigger invocation through public start_execution method
-        executor.start_execution(start_input)
+        with patch.object(executor, "fail_execution") as mock_fail:
+            # Act - trigger invocation through public start_execution method
+            executor.start_execution(start_input)
 
-        # Get the handler that was passed to the scheduler and execute it manually
-        assert mock_scheduler.call_later.call_count >= 1
-        handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+            # Get the handler that was passed to the scheduler and execute it manually
+            assert mock_scheduler.call_later.call_count >= 1
+            handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
-        # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+            # Execute the handler to trigger the invocation logic
+            asyncio.run(handler())
 
-        # Assert - verify retry was triggered due to validation error
-        assert mock_execution.consecutive_failed_invocation_attempts == 1
-        mock_store.save.assert_called_with(mock_execution)
-        # Verify retry was scheduled (call_later should be called 3 times: timeout + initial + retry)
-        assert mock_scheduler.call_later.call_count == 3
+        # Assert - verify the execution failed at once, as the service does
+        mock_fail.assert_called_once_with(
+            "test-arn",
+            _invalid_output_error("Cannot provide an Error for SUCCEEDED status."),
+        )
+        assert mock_execution.consecutive_failed_invocation_attempts == 0
+        # Verify no retry was scheduled (call_later is called 2 times: timeout + initial)
+        assert mock_scheduler.call_later.call_count == 2
 
 
 def test_should_retry_when_pending_response_has_no_operations(
@@ -662,6 +683,7 @@ def test_should_retry_when_pending_response_has_no_operations(
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
     mock_execution.consecutive_failed_invocation_attempts = 0
+    mock_execution.seq_counter = 0
     mock_execution.has_pending_operations.return_value = False  # No pending operations
     mock_execution.handler_seen_seq = 0
     mock_execution.has_changes_after.return_value = False
@@ -1271,7 +1293,12 @@ def test_should_retry_invocation_when_under_limit_through_public_api(
     mock_execution.durable_execution_arn = "test-arn"
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
-    mock_execution.consecutive_failed_invocation_attempts = 3  # Under limit (5 is max)
+    # Under limit (3 is max for PENDING with no pending operations)
+    mock_execution.consecutive_failed_invocation_attempts = 1
+    mock_execution.seq_counter = 0
+    mock_execution.has_pending_operations.return_value = False
+    mock_execution.handler_seen_seq = 0
+    mock_execution.has_changes_after.return_value = False
 
     # Configure invoker to fail initially with validation error, then succeed on retry
     mock_invocation_input = Mock()
@@ -1279,8 +1306,7 @@ def test_should_retry_invocation_when_under_limit_through_public_api(
 
     # First invocation: invalid response triggers retry
     invalid_response = DurableExecutionInvocationOutput(
-        status=InvocationStatus.FAILED,
-        result="should not have result",  # Invalid: failed response with result
+        status=InvocationStatus.PENDING,  # Invalid: PENDING with nothing pending
     )
     # Second invocation: valid success response
     success_response = DurableExecutionInvocationOutput(
@@ -1324,8 +1350,8 @@ def test_should_retry_invocation_when_under_limit_through_public_api(
 
     # Assert - verify final outcome after retry sequence
     # Counter resets to 0 on a clean invocation. The first
-    # attempt failed validation (3 -> 4), the second attempt succeeded
-    # (4 -> 0). Previously this was 4 because the counter only ever
+    # attempt failed validation (1 -> 2), the second attempt succeeded
+    # (2 -> 0). Previously this was 2 because the counter only ever
     # grew; that was a bug.
     assert mock_execution.consecutive_failed_invocation_attempts == 0
     assert retry_delay == Executor.RETRY_BACKOFF_SECONDS  # Correct backoff delay used
@@ -1562,10 +1588,10 @@ def test_on_failed(executor):
     mock_fail.assert_called_once_with("test-arn", error)
 
 
-def test_should_retry_when_response_has_unexpected_status(
+def test_should_fail_when_response_has_unexpected_status(
     executor, mock_store, mock_scheduler, mock_invoker, start_input
 ):
-    """Test that responses with unexpected status trigger retry logic."""
+    """Test that responses with unexpected status fail the execution without a retry."""
     # Arrange
     mock_execution = Mock()
     mock_execution.is_paused = False
@@ -1590,21 +1616,113 @@ def test_should_retry_when_response_has_unexpected_status(
         mock_execution_class.new.return_value = mock_execution
         mock_store.load.return_value = mock_execution
 
-        # Act - trigger invocation through public start_execution method
-        executor.start_execution(start_input)
+        with patch.object(executor, "fail_execution") as mock_fail:
+            # Act - trigger invocation through public start_execution method
+            executor.start_execution(start_input)
 
-        # Get the handler that was passed to the scheduler and execute it manually
-        assert mock_scheduler.call_later.call_count >= 1
-        handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+            # Get the handler that was passed to the scheduler and execute it manually
+            assert mock_scheduler.call_later.call_count >= 1
+            handler = mock_scheduler.call_later.call_args_list[-1][0][0]
 
-        # Execute the handler to trigger the invocation logic
-        asyncio.run(handler())
+            # Execute the handler to trigger the invocation logic
+            asyncio.run(handler())
 
-        # Assert - verify retry was triggered due to validation error
-        assert mock_execution.consecutive_failed_invocation_attempts == 1
-        mock_store.save.assert_called_with(mock_execution)
-        # Verify retry was scheduled (call_later should be called 3 times: timeout + initial + retry)
-        assert mock_scheduler.call_later.call_count == 3
+        # Assert - verify the execution failed at once, as the service does
+        mock_fail.assert_called_once_with(
+            "test-arn",
+            _invalid_output_error("Unexpected invocation status: UNKNOWN_STATUS"),
+        )
+        assert mock_execution.consecutive_failed_invocation_attempts == 0
+        # Verify no retry was scheduled (call_later is called 2 times: timeout + initial)
+        assert mock_scheduler.call_later.call_count == 2
+
+
+def test_invoke_handler_fails_execution_when_output_cannot_be_parsed(
+    executor, mock_store, mock_scheduler, mock_invoker, start_input
+):
+    """An output the invoker cannot parse fails the execution at once,
+    without a retry, and the invocation is still recorded."""
+    from aws_durable_execution_sdk_python_testing.exceptions import (
+        InvalidInvocationOutputError,
+    )
+
+    mock_execution = Mock()
+    mock_execution.durable_execution_arn = "test-arn"
+    mock_execution.is_complete = False
+    mock_execution.start_input = start_input
+    mock_execution.consecutive_failed_invocation_attempts = 0
+
+    mock_invoker.create_invocation_input.return_value = Mock()
+    mock_invoker.invoke.side_effect = InvalidInvocationOutputError(
+        "Invalid invocation output: Expecting value: line 1 column 1 (char 0)"
+    )
+
+    with patch(
+        "aws_durable_execution_sdk_python_testing.executor.Execution"
+    ) as mock_execution_class:
+        mock_execution_class.new.return_value = mock_execution
+        mock_store.load.return_value = mock_execution
+
+        with patch.object(executor, "fail_execution") as mock_fail:
+            executor.start_execution(start_input)
+            handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+            asyncio.run(handler())
+
+        mock_fail.assert_called_once_with(
+            "test-arn",
+            _invalid_output_error(
+                "Invalid invocation output: Expecting value: line 1 column 1 (char 0)"
+            ),
+        )
+        mock_execution.record_invocation_completion.assert_called_once()
+        assert mock_execution.consecutive_failed_invocation_attempts == 0
+        # timeout + initial invocation, no retry
+        assert mock_scheduler.call_later.call_count == 2
+
+
+def test_invoke_handler_unparsed_output_leaves_a_stop_during_invocation(
+    executor, mock_store, mock_scheduler, mock_invoker, start_input
+):
+    """A stop that lands while the handler runs stands when its output
+    cannot be parsed: the execution is not failed over it."""
+    from aws_durable_execution_sdk_python_testing.exceptions import (
+        InvalidInvocationOutputError,
+    )
+
+    incomplete_execution = Mock(spec=Execution)
+    incomplete_execution.is_complete = False
+    incomplete_execution.start_input = start_input
+    incomplete_execution.consecutive_failed_invocation_attempts = 0
+    incomplete_execution.durable_execution_arn = "test-arn"
+    incomplete_execution.seq_counter = 0
+
+    stopped_execution = Mock(spec=Execution)
+    stopped_execution.is_complete = True
+
+    # Never let the side_effect iterator exhaust: see
+    # test_invoke_handler_execution_completed_during_invocation_async.
+    _loads = iter([incomplete_execution])
+    mock_store.load.side_effect = lambda *a, **k: next(_loads, stopped_execution)
+
+    mock_invoker.create_invocation_input.return_value = Mock()
+    mock_invoker.invoke.side_effect = InvalidInvocationOutputError(
+        "Invalid invocation output: 'str' object has no attribute 'get'"
+    )
+
+    with patch(
+        "aws_durable_execution_sdk_python_testing.executor.Execution"
+    ) as mock_execution_class:
+        mock_execution_class.new.return_value = incomplete_execution
+
+        with patch.object(executor, "fail_execution") as mock_fail:
+            executor.start_execution(start_input)
+            handler = mock_scheduler.call_later.call_args_list[-1][0][0]
+            asyncio.run(handler())
+
+    mock_fail.assert_not_called()
+    stopped_execution.record_invocation_completion.assert_called_once()
+    # No retry is scheduled either: timeout + initial invocation only.
+    assert mock_scheduler.call_later.call_count == 2
 
 
 def test_invoke_handler_execution_completed_during_invocation_async(
