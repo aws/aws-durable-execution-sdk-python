@@ -1299,6 +1299,7 @@ def test_should_retry_invocation_when_under_limit_through_public_api(
     mock_execution.has_pending_operations.return_value = False
     mock_execution.handler_seen_seq = 0
     mock_execution.has_changes_after.return_value = False
+    mock_execution.has_deferred_invocation = False
 
     # Configure invoker to fail initially with validation error, then succeed on retry
     mock_invocation_input = Mock()
@@ -1648,6 +1649,7 @@ def test_invoke_handler_fails_execution_when_output_cannot_be_parsed(
 
     mock_execution = Mock()
     mock_execution.durable_execution_arn = "test-arn"
+    mock_execution.is_paused = False
     mock_execution.is_complete = False
     mock_execution.start_input = start_input
     mock_execution.consecutive_failed_invocation_attempts = 0
@@ -1694,6 +1696,7 @@ def test_invoke_handler_unparsed_output_leaves_a_stop_during_invocation(
     incomplete_execution.start_input = start_input
     incomplete_execution.consecutive_failed_invocation_attempts = 0
     incomplete_execution.durable_execution_arn = "test-arn"
+    incomplete_execution.is_paused = False
     incomplete_execution.seq_counter = 0
 
     stopped_execution = Mock(spec=Execution)
