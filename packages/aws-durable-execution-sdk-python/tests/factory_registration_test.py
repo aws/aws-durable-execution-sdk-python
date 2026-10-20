@@ -1,12 +1,16 @@
 """Registration metadata remains opt-in under the invocation factory API."""
 
+from io import StringIO
+from typing import cast
 from unittest.mock import patch
 
 import pytest
 
+from aws_durable_execution_sdk_python import DurableContext, durable_execution
 from aws_durable_execution_sdk_python.exceptions import PluginLoadError
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
+    DurableInstrumentationPluginFactory,
     InvocationStartInfo,
 )
 from aws_durable_execution_sdk_python.plugin_discovery import (
@@ -339,3 +343,50 @@ def test_inherited_callback_on_factory_class_binds_the_concrete_factory() -> Non
 
     assert load_configured_plugins([Derived], environment={}) == [Derived]
     assert observed == [(Derived, True)]
+
+
+@pytest.mark.parametrize("invalid_first", [False, True])
+def test_decorator_rejection_cleans_valid_explicit_factories(
+    monkeypatch: pytest.MonkeyPatch, invalid_first: bool
+) -> None:
+    """An invalid neighbor cannot strand a registered factory's resources."""
+    monkeypatch.delenv(PLUGIN_ENVIRONMENT_VARIABLE, raising=False)
+    created: list[InvocationStartInfo] = []
+    notifications: list[bool] = []
+
+    class ResourceFactory:
+        __durable_registration_api__ = 1
+
+        def __init__(self) -> None:
+            self.resource = StringIO()
+
+        def create_plugin(
+            self, info: InvocationStartInfo
+        ) -> DurableInstrumentationPlugin:
+            created.append(info)
+            return DurableInstrumentationPlugin()
+
+        def on_registration_result(self, registered: bool) -> None:
+            notifications.append(registered)
+            if not registered:
+                self.resource.close()
+
+    factory = ResourceFactory()
+    entries: list[object] = [factory, object()]
+    if invalid_first:
+        entries.reverse()
+
+    def handler(event: object, context: DurableContext) -> None:
+        raise AssertionError("registration must not run the handler")
+
+    try:
+        with pytest.raises(PluginLoadError, match="must be a plugin factory"):
+            durable_execution(
+                handler,
+                plugins=cast(list[DurableInstrumentationPluginFactory], entries),
+            )
+        assert notifications == [False]
+        assert factory.resource.closed
+        assert created == []
+    finally:
+        factory.resource.close()

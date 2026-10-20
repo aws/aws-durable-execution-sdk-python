@@ -410,8 +410,9 @@ def load_configured_plugins(
     registered.
     """
 
-    resolved_factories = _validate_explicit_factories(explicit_plugins)
+    resolved_factories = list(explicit_plugins or [])
     try:
+        resolved_factories = _validate_explicit_factories(resolved_factories)
         result = _resolve_configured_factories(
             resolved_factories, environment=environment
         )
