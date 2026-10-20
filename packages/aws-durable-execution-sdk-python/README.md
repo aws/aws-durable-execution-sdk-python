@@ -122,17 +122,19 @@ initialization with the provider and distribution details.
 
 ### Selecting an OpenTelemetry view
 
-Enable at most one of `InvocationOtelPlugin` and `ExecutionOtelPlugin`. This
+Enable at most one of `InvocationOtelPluginFactory` and
+`ExecutionOtelPluginFactory`. This
 constraint applies to the combined `plugins=[...]` argument and
 `DURABLE_EXECUTION_PLUGINS=otel-invocation` or `otel-execution` selection.
-Core 2.1+ with OTel 1.1+ rejects both at cold start with `PluginLoadError` naming the
+Core 3 with OTel 2 rejects both at cold start with `PluginLoadError` naming the
 conflicting views; keep only one. Choose Invocation for work within each Lambda
 invocation or Execution for logical operations across the durable execution.
-Unrelated instrumentation plugins can run alongside either view. OTel 1.1 requires core 2.1 or later for the invocation-worker lifecycle as well
-as view-exclusivity validation. Release core 2.1 before releasing OTel 1.1.
+Unrelated instrumentation plugin factories can run alongside either view.
+OTel 2 requires core 3.x and the per-invocation factory contract. Release the
+coordinated core version before releasing OTel 2.
 
 Plugin authors explicitly opt in by declaring
-`__durable_registration_api__ = 1` on a plugin class. That class and its subclasses
+`__durable_registration_api__ = 1` on a factory class. That class and its subclasses
 have their optional `exclusive_group` metadata validated and their
 optional `on_registration_result(registered)` callback invoked. A missing group
 or `None` adds no exclusivity constraint. The callback can release rejected
@@ -145,14 +147,14 @@ Once enabled, every class in the MRO explicitly declaring the integer `1`
 contributes its resolved `exclusive_group`. These constraints accumulate:
 repeating the marker with a new group adds to inherited groups rather than
 replacing them, and `None` does not erase an inherited constraint. A group is
-counted once per plugin registration even if several ancestors declare it.
+counted once per factory registration even if several ancestors declare it.
 Unmarked classes' coincidental same-named legacy fields/helpers remain inert.
-Subclasses of the bundled OTel views therefore retain the view group when they
+Subclasses of the bundled OTel factories therefore retain the view group when they
 add their own group. Repeat the marker to add a group or customize the callback;
-the callback is still notified once per plugin. Plugins with no marker anywhere
-in their hierarchy retain their existing attributes/helpers. The generic plugin base defines
-neither attribute nor hook, and provider API version 1 and existing plugin
-lifecycle order are unchanged.
+the callback is still notified once per factory. Factories with no marker anywhere
+in their hierarchy retain their existing attributes/helpers. The generic plugin
+base defines neither attribute nor hook. The registration API remains independent
+of the removed provider API version 1 contract.
 
 ### Invocation worker lifecycle
 
@@ -182,11 +184,47 @@ cleanup failures, leaving the host's bindings unchanged. This isolates bindings,
 not mutations to shared objects or external side effects. Without plugins, the
 handler retains its existing fresh-worker context behavior.
 
-These lifecycle guarantees require core 2.1.0 or later. The OTel 1.1 plugin
-requires that core version and uses the existing Start/End hooks. Upgrading the
-core alone with OTel 1.0 isolates worker bindings, but does not add the newer
-Invocation-view fallback to that older plugin; upgrade both packages for it.
-Provider API version 1 and the independent registration API are unchanged.
+Core 3 creates a fresh plugin instance per invocation through each registered
+factory. OTel 2 requires core 3.x and uses the existing Start/End hooks on those
+instances. Upgrade both packages together; core 3 rejects OTel 1.x registrations
+and the removed provider API version 1 contract. The independent registration
+API remains unchanged.
+
+### Chained-invoke propagation
+
+A new invoke START collects synchronous plugin metadata after resolving its
+operation and target identity, before checkpointing. The SDK writes a non-blank
+`x_amzn_trace_id` contribution to the flat
+`ChainedInvokeOptions.XAmznTraceId` member. Function, tenant, payload, operation
+name and identity remain unchanged. The member is omitted without a contribution.
+Each invoke in a batch has its own metadata; this is not a request-wide header.
+
+The SDK-owned frozen `PropagationInput` carries `execution_arn`, `operation_id`,
+optional `parent_operation_id`, and `target_function_name`. Frozen
+`PropagationMetadata` has optional `x_amzn_trace_id`. Neither type depends on
+OpenTelemetry or generated service models. The optional synchronous plugin
+`provide_propagation_metadata(info)` hook defaults to no contribution.
+
+The collector keeps the first non-blank opaque value in configured order without
+trimming it. Equal values do not conflict; different later values log both plugin
+identities and a conflict count. Ordinary hook/getter/result/diagnostic failures
+are isolated; cancellation and other `BaseException` control signals keep their
+existing behavior. Replaying a checkpointed START, pending operation or terminal
+result does not call the hook. If a START was never committed, a later attempt
+can collect again; the callback is not exactly-once.
+
+This requires boto3 1.43.114 or newer, whose botocore dependency includes the
+published optional `ChainedInvokeOptions.XAmznTraceId` string field. The real
+botocore tests exercise its parameter validation and wire serialization without
+field removal, validation bypass or a model-capability fallback. Deployed backend
+delivery and downstream topology still require separate validation.
+Python has no `DistributedMapOptions` wrapper
+or distributed-map START API: its existing map/parallel operations use CONTEXT.
+The design's corresponding distributed-map field awaits that future modeled path.
+
+This release pairs core 3 with OTel 2 and its per-invocation factories. Custom
+plugins that omit the optional hook retain their existing tracing behavior.
+Backend rollout and deployed downstream trace-topology validation remain pending.
 
 ## 🚀 Quick Start
 

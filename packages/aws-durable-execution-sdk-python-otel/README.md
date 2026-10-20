@@ -24,6 +24,12 @@ The base package intentionally does not install OpenTelemetry libraries. The
 Lambda layer supplies a version-aligned API, SDK, exporter, and propagators,
 preventing packages in the function artifact from shadowing parts of the layer.
 
+The generated `aws-durable-execution-sdk-python-otel-plugin` Lambda layer includes
+Core's runtime dependencies, including its required boto3/botocore service model.
+It still leaves OpenTelemetry provider packages to the ADOT/community layer.
+Dependencies bundled in the function artifact take precedence over layer packages;
+those application-owned boto3/botocore versions must also meet Core's minimum.
+
 For an application that configures its own OpenTelemetry provider instead of
 using a Lambda layer:
 
@@ -453,6 +459,38 @@ fields as optional:
   unclaimed record to the single open invocation would be wrong whenever the
   emitting thread belongs to a different invocation, and an uncorrelated record
   is preferred over one carrying another execution's trace.
+
+## Chained-invoke propagation
+
+Both views supply the synchronous `provide_propagation_metadata` hook with
+SDK-owned types. It encodes canonical X-Ray `Root`, the calling operation's
+`Parent`, and resolved `Sampled=1` or `Sampled=0`, without creating an extra span.
+An existing operation's actual span ID is used; before span creation, its stable
+ID is derived from the execution ARN and operation ID. Unrelated ambient spans
+cannot replace execution ownership. An operation that has already started uses
+its actual span's sampled flag. A deferred operation contributes metadata only
+while the instrumentation tracer still uses the installed `DurableSampler`:
+replacing that sampler after invocation Start may give the operation a different
+sampling decision, so the producer abstains instead of guessing or querying the
+sampler early. Inactive/mismatched executions contribute nothing. Tracer,
+provider and resource ownership remain unchanged.
+
+The core now calls the collector only for a new invoke START and persists the
+contribution in flat `ChainedInvokeOptions.XAmznTraceId`. Pending and terminal
+replay do not recollect metadata; an uncommitted START can be retried. Separate
+invokes carry separate operation parents. Public invoke tests cover both views,
+sampled/unsampled context, parallel branches, preserved tenant/payload and replay.
+
+For [#751](https://github.com/aws/aws-durable-execution-sdk-python/issues/751),
+deployed backend delivery and topology still require validation. The core requires
+boto3 1.43.114 or newer, which depends on a botocore model containing the optional
+field. The normal request tests use the published serializer and parameter
+validation. Python has no distributed-map
+model/START path; existing map/parallel APIs are CONTEXT operations.
+
+OTel 2 requires core 3.x and per-invocation plugin factories. Chained-invoke
+propagation uses the coordinated core release and its boto3 minimum. The
+published model alone does not establish deployed downstream topology.
 
 ## Verification
 
