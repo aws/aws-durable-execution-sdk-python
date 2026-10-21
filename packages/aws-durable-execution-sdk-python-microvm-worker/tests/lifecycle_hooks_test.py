@@ -1044,6 +1044,62 @@ def test_waits_30_seconds_after_a_refusal_for_now_that_follows_a_resume_hook(
     assert h.microvms.suspended == ["mvm-1", "mvm-1"]
 
 
+def test_uses_the_normal_idle_time_after_a_job_that_ran_across_the_refused_call(
+    start: Any,
+) -> None:
+    # A resume hook during the call lets a job start. The call ends refused
+    # for now while the job runs. The job ends after the call. So the job's
+    # end is the latest restart, and the normal idle time applies.
+    h = start()
+    h.microvms.hold = True
+    h.microvms.failure = suspend_error("InvalidSignatureException", 403)
+
+    h.run_hook(1.0)
+    h.advance(1.0)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    assert h.hook("resume") == 200
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+    h.microvms.hold = False
+    h.microvms.finish()
+    h.settle()
+
+    # No call while the job runs.
+    h.advance(GRACE * 2)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.finish_job("cb-1")
+    h.advance(1.0 - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_waits_30_seconds_after_a_refusal_for_now_that_follows_a_job_end(
+    start: Any,
+) -> None:
+    # A job starts and ends during the call. The call then ends refused for
+    # now. That outcome is the later request, so the floor applies.
+    h = start()
+    h.microvms.hold = True
+    h.microvms.failure = suspend_error("InvalidSignatureException", 403)
+
+    h.run_hook(1.0)
+    h.advance(1.0)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    assert h.hook("resume") == 200
+    assert h.job("cb-1") == 202
+    h.finish_job("cb-1")
+    h.microvms.hold = False
+    h.microvms.finish()
+    h.settle()
+    h.advance(GRACE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
 class _ClosingClient(FakeMicrovmsClient):
     """A default client whose ``close()`` waits until the test releases it.
 
