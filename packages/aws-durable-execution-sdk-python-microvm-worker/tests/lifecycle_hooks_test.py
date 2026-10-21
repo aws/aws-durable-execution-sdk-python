@@ -1,0 +1,2100 @@
+# SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
+#
+# SPDX-License-Identifier: Apache-2.0
+"""Tests for the suspend, resume, and terminate hooks, and for auto-suspend.
+
+The requests go over HTTP to a real worker. The idle time and the refusal
+after a suspend run on a fake clock, which each test advances.
+"""
+
+from __future__ import annotations
+
+import functools
+import http.client
+import json
+import socket
+import threading
+import time
+from collections.abc import Callable, Iterator
+from concurrent.futures import Future
+from dataclasses import dataclass, field
+from typing import Any
+
+import pytest
+from botocore.exceptions import ClientError, NoCredentialsError
+
+from aws_durable_execution_sdk_python_microvm_worker import (
+    HOOK_PATH_PREFIX,
+    MicrovmJobContext,
+    MicrovmTerminatedError,
+    MicrovmWorker,
+    MicrovmWorkerListener,
+    start_microvm_worker,
+)
+from aws_durable_execution_sdk_python_microvm_worker import worker as worker_module
+
+
+WAIT = 10.0
+IDLE = 10.0
+GRACE = 30.0
+TERMINATED_MESSAGE = "the MicroVM was terminated before the job finished"
+
+LAMBDA_HEADERS = {"Host": "localhost:8080"}
+FORWARDED_HEADERS = {
+    "Host": "7ed0892b.lambda-microvm.us-east-1.on.aws",
+    "x-amzn-requestid": "6f1c0e0a-0000-4000-8000-000000000000",
+}
+
+
+@functools.cache
+def _has_ipv6_loopback() -> bool:
+    """Whether this host can use ``::1``.
+
+    A host can support IPv6 sockets and still have no ``::1`` address. A
+    Docker container with IPv6 turned off is one example. A connection to
+    ``::1`` then fails with ``EADDRNOTAVAIL``.
+    """
+    if not socket.has_dualstack_ipv6():
+        return False
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+def host_of(worker: MicrovmWorker) -> str:
+    """The loopback address on which a test reaches ``worker``.
+
+    A dual-stack worker binds ``[::]`` with ``SO_REUSEADDR``. On macOS, that
+    bind succeeds on a port that another process holds on ``127.0.0.1``. A
+    connection to ``127.0.0.1`` then reaches the other process, and the test
+    fails with its answer. So the tests connect to ``::1`` when the worker
+    is dual-stack. Linux refuses such a bind, so a MicroVM is not affected.
+    """
+    server = worker._server  # noqa: SLF001
+    if server.address_family == socket.AF_INET6 and _has_ipv6_loopback():
+        return "::1"
+    return "127.0.0.1"
+
+
+def reaches_worker(worker: MicrovmWorker) -> bool:
+    """Whether a connection to ``host_of(worker)`` reaches this worker.
+
+    The port that the kernel picks can be held by another process on one
+    loopback address, ``127.0.0.1`` or ``::1``. The worker's ``[::]`` bind
+    still succeeds on macOS, and a connection then reaches the other
+    process. So a test checks the ``Server`` header, and starts the worker
+    again on another port when it is not the worker's.
+    """
+    connection = http.client.HTTPConnection(host_of(worker), worker.port, timeout=5)
+    try:
+        connection.request("GET", "/__reachability_check__")
+        response = connection.getresponse()
+        response.read()
+        server = response.getheader("Server") or ""
+    except OSError:
+        return False
+    finally:
+        connection.close()
+    return server.startswith("aws-durable-execution-sdk-python-microvm-worker")
+
+
+def start_reachable_worker(start: Callable[[], MicrovmWorker]) -> MicrovmWorker:
+    """Start a worker with ``start`` until a test connection reaches it."""
+    for _ in range(10):
+        worker = start()
+        if reaches_worker(worker):
+            return worker
+        worker.close()
+    msg = "every port that the kernel picked was held by another process"
+    raise RuntimeError(msg)
+
+
+def eventually(condition: Callable[[], bool]) -> bool:
+    deadline = time.monotonic() + WAIT
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.005)
+    return True
+
+
+def suspend_error(code: str, status: int, retries: int = 0) -> ClientError:
+    response: Any = {
+        "Error": {"Code": code, "Message": f"{code} message"},
+        "ResponseMetadata": {"HTTPStatusCode": status, "RetryAttempts": retries},
+    }
+    return ClientError(response, "SuspendMicrovm")
+
+
+class FakeTimers:
+    """Replaces the listener's timers with a clock that the test advances.
+
+    ``advance`` runs every due action in the test's thread, in time order.
+    The clock counts whole milliseconds, so that sums of seconds compare
+    exactly.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0
+        self.failure: BaseException | None = None
+        # Fire cancelled timers too. A threading.Timer whose action has
+        # begun runs it although cancel() was called.
+        self.fire_cancelled = False
+        self._lock = threading.Lock()
+        self._timers: list[_FakeTimer] = []
+
+    def start(self, delay: float, action: Callable[[], None]) -> Callable[[], None]:
+        if self.failure is not None:
+            raise self.failure
+        with self._lock:
+            timer = _FakeTimer(due=self.now + round(delay * 1000), action=action)
+            self._timers.append(timer)
+            return timer.cancel
+
+    def advance(self, seconds: float) -> None:
+        target = self.now + round(seconds * 1000)
+        while True:
+            with self._lock:
+                due = [
+                    t
+                    for t in self._timers
+                    if (self.fire_cancelled or not t.cancelled) and t.due <= target
+                ]
+                if not due:
+                    self.now = target
+                    return
+                timer = min(due, key=lambda t: t.due)
+                self._timers.remove(timer)
+                self.now = timer.due
+            timer.action()
+
+
+@dataclass
+class _FakeTimer:
+    due: int
+    action: Callable[[], None]
+    cancelled: bool = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class FakeMicrovmsClient:
+    """Records SuspendMicrovm calls. ``hold`` keeps each call open until
+    ``finish()``. ``failure`` answers every call with an error."""
+
+    def __init__(self) -> None:
+        self.suspended: list[str] = []
+        self.failure: BaseException | None = None
+        self.hold = False
+        self.closed = False
+        self._release = threading.Event()
+        self._lock = threading.Lock()
+
+    def suspend_microvm(self, *, microvmIdentifier: str) -> dict[str, Any]:  # noqa: N803
+        with self._lock:
+            self.suspended.append(microvmIdentifier)
+        if self.hold:
+            self._release.wait(WAIT)
+        if self.failure is not None:
+            raise self.failure
+        return {}
+
+    def finish(self) -> None:
+        self._release.set()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class Jobs:
+    """A handler whose jobs each run until the test releases them."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._releases: dict[str, threading.Event] = {}
+        self.contexts: dict[str, MicrovmJobContext] = {}
+        self.order: list[str] = []
+
+    def _release(self, callback_id: str) -> threading.Event:
+        with self._lock:
+            return self._releases.setdefault(callback_id, threading.Event())
+
+    def __call__(self, job_input: Any, context: MicrovmJobContext) -> Any:
+        with self._lock:
+            self.order.append(context.callback_id)
+            self.contexts[context.callback_id] = context
+        self._release(context.callback_id).wait(WAIT)
+        return "done"
+
+    def started(self) -> list[str]:
+        with self._lock:
+            return list(self.order)
+
+    def release(self, callback_id: str) -> None:
+        self._release(callback_id).set()
+
+    def release_all(self) -> None:
+        with self._lock:
+            releases = list(self._releases.values())
+        for release in releases:
+            release.set()
+
+
+class HeldLambdaClient:
+    """Records callback completions. While ``hold`` is set, each completion
+    waits until ``finish()`` or ``finish_first()``."""
+
+    def __init__(self, heartbeat_error: BaseException | None = None) -> None:
+        self.heartbeat_error = heartbeat_error
+        self.completion_error: BaseException | None = None
+        self.hold = False
+        self._lock = threading.Lock()
+        self._changed = threading.Condition(self._lock)
+        self._waiting: list[threading.Event] = []
+        self.completions: list[dict[str, Any]] = []
+
+    def send_durable_execution_callback_heartbeat(self, **kwargs: Any) -> Any:
+        if self.heartbeat_error is not None:
+            raise self.heartbeat_error
+        return {}
+
+    def _complete(self, entry: dict[str, Any]) -> Any:
+        with self._changed:
+            gate = None
+            if self.hold:
+                gate = threading.Event()
+                self._waiting.append(gate)
+                self._changed.notify_all()
+        if gate is not None:
+            gate.wait(WAIT)
+        if self.completion_error is not None:
+            raise self.completion_error
+        with self._lock:
+            self.completions.append(entry)
+        return {}
+
+    def send_durable_execution_callback_success(self, **kwargs: Any) -> Any:
+        return self._complete({"kind": "success", "callbackId": kwargs["CallbackId"]})
+
+    def send_durable_execution_callback_failure(self, **kwargs: Any) -> Any:
+        error = kwargs["Error"]
+        return self._complete(
+            {
+                "kind": "failure",
+                "callbackId": kwargs["CallbackId"],
+                "errorType": error["ErrorType"],
+                "message": error["ErrorMessage"],
+            }
+        )
+
+    def waiting(self) -> int:
+        with self._lock:
+            return len(self._waiting)
+
+    def finish_first(self) -> None:
+        with self._lock:
+            gate = self._waiting.pop(0) if self._waiting else None
+        if gate is not None:
+            gate.set()
+
+    def finish(self) -> None:
+        with self._lock:
+            self.hold = False
+            gates, self._waiting = self._waiting, []
+        for gate in gates:
+            gate.set()
+
+    def recorded(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(self.completions)
+
+    def close(self) -> None:
+        return
+
+
+def terminated_failure(callback_id: str) -> dict[str, Any]:
+    return {
+        "kind": "failure",
+        "callbackId": callback_id,
+        "errorType": "MicrovmTerminatedError",
+        "message": TERMINATED_MESSAGE,
+    }
+
+
+@dataclass
+class Harness:
+    worker: MicrovmWorker
+    lambda_client: HeldLambdaClient
+    microvms: FakeMicrovmsClient
+    timers: FakeTimers
+    jobs: Jobs
+    logger: Any
+    _threads: list[threading.Thread] = field(default_factory=list)
+
+    @property
+    def listener(self) -> MicrovmWorkerListener:
+        return self.worker._listener  # noqa: SLF001
+
+    def post(self, path: str, body: Any, headers: dict[str, str] | None = None) -> int:
+        connection = http.client.HTTPConnection(
+            host_of(self.worker), self.worker.port, timeout=WAIT
+        )
+        try:
+            connection.request(
+                "POST",
+                path,
+                body=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json", **(headers or {})},
+            )
+            response = connection.getresponse()
+            response.read()
+        finally:
+            connection.close()
+        return response.status
+
+    def run_hook(
+        self,
+        idle_seconds: float | None = None,
+        microvm_id: str = "mvm-1",
+        job: dict[str, Any] | None = None,
+    ) -> int:
+        payload: dict[str, Any] = {"version": 1, "region": "us-east-1"}
+        if idle_seconds is not None:
+            payload["autoSuspendIdleSeconds"] = idle_seconds
+        if job is not None:
+            payload["job"] = job
+        return self.post(
+            f"{HOOK_PATH_PREFIX}run",
+            {"microvmId": microvm_id, "runHookPayload": json.dumps(payload)},
+        )
+
+    def hook(self, name: str, headers: dict[str, str] | None = None) -> int:
+        return self.post(f"{HOOK_PATH_PREFIX}{name}", {}, headers)
+
+    def hook_in_background(
+        self, name: str, headers: dict[str, str] | None = None
+    ) -> Future[int]:
+        future: Future[int] = Future()
+
+        def run() -> None:
+            try:
+                future.set_result(self.hook(name, headers))
+            except BaseException as error:  # noqa: BLE001
+                future.set_exception(error)
+
+        thread = threading.Thread(target=run, daemon=True)
+        self._threads.append(thread)
+        thread.start()
+        return future
+
+    def job(self, callback_id: str, **fields: Any) -> int:
+        return self.post(
+            "/job",
+            {
+                "version": 1,
+                "region": "us-east-1",
+                "callbackId": callback_id,
+                "input": {},
+                **fields,
+            },
+        )
+
+    def finish_job(self, callback_id: str) -> None:
+        """Release a job, and wait until it has ended."""
+        self.jobs.release(callback_id)
+        assert eventually(lambda: callback_id not in self.listener._jobs)  # noqa: SLF001
+        # The job's thread removes the job and starts the idle time in one
+        # locked block. The check above reads without the lock, so it can see
+        # the removal first. Taking the lock waits for the rest of the block.
+        with self.listener._lock:  # noqa: SLF001
+            pass
+
+    def settle(self) -> None:
+        """Wait until no SuspendMicrovm call runs."""
+        assert eventually(lambda: self.listener._suspend_calls == 0)  # noqa: SLF001
+
+    def advance(self, seconds: float) -> None:
+        """Advance the clock, and let a suspend call that it started end."""
+        self.timers.advance(seconds)
+        if not self.microvms.hold:
+            self.settle()
+
+    def started(self, callback_id: str) -> bool:
+        return callback_id in self.jobs.started()
+
+
+@pytest.fixture
+def timers(monkeypatch: pytest.MonkeyPatch) -> FakeTimers:
+    fake = FakeTimers()
+    monkeypatch.setattr(worker_module, "_start_timer", fake.start)
+    return fake
+
+
+@pytest.fixture
+def start(logger: Any, timers: FakeTimers) -> Iterator[Callable[..., Harness]]:
+    harnesses: list[Harness] = []
+
+    def _start(
+        *,
+        lambda_client: HeldLambdaClient | None = None,
+        create_microvms_client: Any = "fake",
+        **options: Any,
+    ) -> Harness:
+        client = lambda_client or HeldLambdaClient()
+        microvms = FakeMicrovmsClient()
+        jobs = Jobs()
+        if create_microvms_client == "fake":
+            create_microvms_client = lambda region: microvms  # noqa: E731
+
+        def create_client(region: str) -> Any:
+            return client
+
+        options.setdefault("logger", logger)
+        worker = start_reachable_worker(
+            lambda: start_microvm_worker(
+                handler=jobs,
+                routes={"/job": jobs},
+                create_client=create_client,
+                create_microvms_client=create_microvms_client,
+                port=0,
+                **options,
+            )
+        )
+        harness = Harness(
+            worker=worker,
+            lambda_client=client,
+            microvms=microvms,
+            timers=timers,
+            jobs=jobs,
+            logger=options["logger"],
+        )
+        harnesses.append(harness)
+        return harness
+
+    yield _start
+    for harness in harnesses:
+        harness.listener.close()
+        harness.jobs.release_all()
+        harness.lambda_client.finish()
+        harness.microvms.finish()
+        timers.advance(GRACE * 10)
+        harness.worker.idle(WAIT)
+        harness.worker.close()
+        for thread in harness._threads:  # noqa: SLF001
+            thread.join(WAIT)
+
+
+class SlowCall:
+    """A request whose body arrives in two parts.
+
+    The worker has the headers and half of the body when the constructor
+    returns. ``finish()`` sends the rest, and returns the status.
+    """
+
+    def __init__(self, harness: Harness, path: str, body: Any) -> None:
+        data = json.dumps(body).encode()
+        half = len(data) // 2
+        self._socket = socket.create_connection(
+            (host_of(harness.worker), harness.worker.port), timeout=WAIT
+        )
+        head = (
+            f"POST {path} HTTP/1.1\r\nHost: localhost:8080\r\n"
+            f"Content-Type: application/json\r\nContent-Length: {len(data)}\r\n\r\n"
+        ).encode()
+        self._socket.sendall(head + data[:half])
+        self._rest = data[half:]
+
+    def finish(self) -> int:
+        try:
+            self._socket.sendall(self._rest)
+            chunks = []
+            while chunk := self._socket.recv(65536):
+                chunks.append(chunk)
+        finally:
+            self._socket.close()
+        status_line = b"".join(chunks).split(b"\r\n", 1)[0]
+        return int(status_line.split()[1])
+
+    def abandon(self) -> None:
+        self._socket.close()
+
+
+RUN_HOOK_WITH_JOB = {
+    "microvmId": "mvm-1",
+    "runHookPayload": json.dumps(
+        {
+            "version": 1,
+            "region": "us-east-1",
+            "job": {"callbackId": "cb-run", "input": {}},
+        }
+    ),
+}
+
+
+def slow_run_hook(harness: Harness) -> SlowCall:
+    call = SlowCall(harness, f"{HOOK_PATH_PREFIX}run", RUN_HOOK_WITH_JOB)
+    assert eventually(lambda: harness.listener._run_hooks == 1)  # noqa: SLF001
+    return call
+
+
+def answered_within(future: Future[int], seconds: float) -> bool:
+    try:
+        future.result(seconds)
+    except TimeoutError:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Auto-suspend when idle
+# ---------------------------------------------------------------------------
+
+
+def test_suspends_its_own_microvm_after_the_idle_time_when_no_job_arrives(
+    start: Any,
+) -> None:
+    h = start()
+
+    h.run_hook(IDLE)
+    h.advance(IDLE - 0.001)
+    assert h.microvms.suspended == []
+
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_closes_the_default_client_after_each_suspend_and_never_a_provided_one(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created: list[FakeMicrovmsClient] = []
+
+    def create_default(region: str) -> FakeMicrovmsClient:
+        client = FakeMicrovmsClient()
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(worker_module, "create_microvms_client", create_default)
+    h = start(create_microvms_client=None)
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+
+    assert [client.suspended for client in created] == [["mvm-1"]]
+    assert created[0].closed
+
+    provided = start()
+    provided.run_hook(IDLE)
+    provided.advance(IDLE)
+
+    assert provided.microvms.suspended == ["mvm-1"]
+    assert not provided.microvms.closed
+
+
+def test_never_suspends_when_the_run_hook_payload_does_not_ask_for_it(
+    start: Any,
+) -> None:
+    h = start()
+
+    h.run_hook()
+    h.advance(IDLE * 10)
+
+    assert h.microvms.suspended == []
+
+
+def test_does_not_suspend_while_a_job_runs_and_suspends_one_idle_time_after_it(
+    start: Any,
+) -> None:
+    h = start()
+
+    h.run_hook(IDLE)
+    assert h.job("cb-1") == 202
+    h.advance(IDLE * 4)
+    assert h.microvms.suspended == []
+
+    h.finish_job("cb-1")
+    h.advance(IDLE - 0.001)
+    assert h.microvms.suspended == []
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_suspends_with_the_run_hook_id_after_a_job_that_arrived_first_with_another(
+    start: Any,
+) -> None:
+    h = start()
+
+    assert h.job("cb-1", microvmId="mvm-from-job") == 202
+    h.run_hook(IDLE)
+    # The run hook arrived while the job runs, so the idle time waits.
+    h.advance(IDLE * 2)
+    assert h.microvms.suspended == []
+
+    h.finish_job("cb-1")
+    h.advance(IDLE)
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_keeps_the_first_run_hook_target_when_a_later_run_hook_has_another_id(
+    start: Any,
+) -> None:
+    h = start()
+
+    h.run_hook(IDLE)
+    h.run_hook(microvm_id="mvm-2")
+    h.advance(IDLE)
+
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_ignores_a_later_run_hook_that_asks_to_suspend_another_microvm(
+    start: Any,
+) -> None:
+    # The endpoint forwards the hook path from any caller with an auth token.
+    # SuspendMicrovm authorizes on the image, so the later hook must not
+    # choose the suspend target.
+    h = start()
+
+    h.run_hook()
+    assert h.run_hook(IDLE, microvm_id="mvm-2") == 200
+    h.advance(IDLE * 2)
+
+    assert h.microvms.suspended == []
+
+
+def test_accepts_a_valid_run_hook_after_an_invalid_one(start: Any) -> None:
+    h = start()
+
+    assert h.post(f"{HOOK_PATH_PREFIX}run", {}) == 400
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_starts_the_idle_time_again_when_a_job_arrives_before_it_ends(
+    start: Any,
+) -> None:
+    h = start()
+
+    h.run_hook(IDLE)
+    h.advance(IDLE / 2)
+    h.job("cb-1")
+    h.finish_job("cb-1")
+    # The first idle time would have ended here.
+    h.advance(IDLE / 2)
+    assert h.microvms.suspended == []
+
+    h.advance(IDLE / 2)
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_does_not_suspend_while_one_of_two_parallel_jobs_still_runs(
+    start: Any,
+) -> None:
+    h = start()
+
+    h.run_hook(IDLE)
+    h.job("cb-1")
+    h.job("cb-2")
+    h.finish_job("cb-1")
+    h.advance(IDLE * 4)
+    assert h.microvms.suspended == []
+
+    h.finish_job("cb-2")
+    h.advance(IDLE)
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_starts_the_idle_time_after_a_run_hook_job(start: Any) -> None:
+    h = start()
+
+    h.run_hook(IDLE, job={"callbackId": "cb-run", "input": {}})
+    assert eventually(lambda: h.started("cb-run"))
+    h.advance(IDLE * 2)
+    assert h.microvms.suspended == []
+
+    h.finish_job("cb-run")
+    h.advance(IDLE)
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_refuses_a_job_with_503_while_its_suspend_call_runs(start: Any) -> None:
+    h = start()
+    h.microvms.hold = True
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+
+    assert h.job("cb-1") == 503
+    assert h.jobs.started() == []
+    h.microvms.finish()
+
+
+def test_refuses_jobs_after_the_call_returned_until_the_resume_hook_arrives(
+    start: Any,
+) -> None:
+    h = start()
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert h.job("cb-1") == 503
+
+    assert h.hook("resume") == 200
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.jobs.started() == ["cb-1"])
+
+    # The idle time starts again after the job.
+    h.finish_job("cb-1")
+    h.advance(IDLE)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_accepts_jobs_again_30_seconds_after_the_call_without_a_resume_hook(
+    start: Any,
+) -> None:
+    h = start()
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    h.advance(GRACE - 0.001)
+    assert h.job("cb-1") == 503
+
+    h.advance(0.001)
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.jobs.started() == ["cb-1"])
+
+
+def test_starts_the_idle_time_again_at_the_end_of_the_30_second_refusal(
+    start: Any,
+) -> None:
+    h = start()
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    h.advance(GRACE)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.advance(IDLE)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_suspends_again_one_idle_time_after_a_resume_that_brings_no_job(
+    start: Any,
+) -> None:
+    h = start()
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    h.hook("resume")
+    h.advance(IDLE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_accepts_jobs_at_once_when_the_resume_hook_arrives_during_the_call(
+    start: Any,
+) -> None:
+    h = start()
+    h.microvms.hold = True
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    h.hook("resume")
+    assert h.job("cb-1") == 202
+
+    # The call returns after the resume. It must not start a new refusal.
+    h.microvms.finish()
+    h.settle()
+    assert h.job("cb-2") == 202
+    assert eventually(lambda: sorted(h.jobs.started()) == ["cb-1", "cb-2"])
+
+
+def test_logs_a_rejected_suspend_accepts_jobs_at_once_and_does_not_retry(
+    start: Any, logger: Any
+) -> None:
+    h = start()
+    h.microvms.failure = suspend_error("AccessDeniedException", 403)
+
+    h.run_hook(IDLE)
+    h.advance(IDLE * 6)
+
+    assert h.microvms.suspended == ["mvm-1"]
+    warnings = [line for line in logger.lines if line[0] == "warning"]
+    assert len(warnings) == 1
+    assert "lambda:SuspendMicrovm" in warnings[0][1]
+    assert warnings[0][2]["microvmId"] == "mvm-1"
+    assert warnings[0][2]["error"]["name"] == "ClientError"
+    assert h.job("cb-1") == 202
+
+
+def test_retries_the_suspend_one_idle_time_after_a_job_that_follows_a_rejection(
+    start: Any,
+) -> None:
+    h = start()
+    h.microvms.failure = suspend_error("AccessDeniedException", 403)
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    h.job("cb-1")
+    h.finish_job("cb-1")
+    h.advance(IDLE)
+
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError("timed out"),
+        suspend_error("ConflictException", 409),
+        suspend_error("InternalServerException", 500),
+        suspend_error("RequestTimeoutException", 408),
+        # The client retried a 5xx. The first attempt may have suspended the
+        # MicroVM, and the retry then fails validation.
+        suspend_error("ValidationException", 400, retries=1),
+        # botocore retries a throttle. An earlier attempt may have reached
+        # the service.
+        suspend_error("ThrottlingException", 429, retries=2),
+        ConnectionResetError("reset"),
+    ],
+    ids=[
+        "timeout",
+        "conflict",
+        "server-error",
+        "request-timeout",
+        "retried-rejection",
+        "retried-throttle",
+        "connection-error",
+    ],
+)
+def test_keeps_refusing_jobs_after_an_unknown_outcome(
+    start: Any, logger: Any, failure: BaseException
+) -> None:
+    h = start()
+    h.microvms.failure = failure
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert "unknown outcome" in logger.messages("warning")[0]
+    assert h.job("cb-1") == 503
+
+    h.advance(GRACE)
+    assert h.job("cb-1") == 202
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [NoCredentialsError(), suspend_error("ValidationException", 400)],
+    ids=["missing-credentials", "first-attempt-rejection"],
+)
+def test_accepts_jobs_at_once_after_a_rejection(
+    start: Any, failure: BaseException
+) -> None:
+    h = start()
+    h.microvms.failure = failure
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+
+    assert h.job("cb-1") == 202
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        suspend_error("ThrottlingException", 429),
+        suspend_error("ThrottlingException", 400),
+        suspend_error("ExpiredTokenException", 403),
+        suspend_error("SignatureDoesNotMatch", 403),
+    ],
+    ids=["throttle", "throttle-400", "expired-token", "clock-offset"],
+)
+def test_accepts_jobs_at_once_and_retries_after_a_refusal_for_now(
+    start: Any, logger: Any, failure: BaseException
+) -> None:
+    h = start()
+    h.microvms.failure = failure
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert "refused the call for now" in logger.messages("warning")[0]
+    assert h.job("cb-1") == 202
+    h.finish_job("cb-1")
+
+    # The idle time started again when the call failed, and once more when
+    # the job ended. So the next call comes one idle time after the job.
+    h.advance(IDLE)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_retries_a_refusal_for_now_one_idle_time_later_without_a_job(
+    start: Any,
+) -> None:
+    h = start()
+    h.microvms.failure = suspend_error("ThrottlingException", 429)
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    h.advance(IDLE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_keeps_a_hook_refusal_after_a_refusal_for_now_of_the_own_call(
+    start: Any,
+) -> None:
+    h = start()
+    h.microvms.hold = True
+    h.microvms.failure = suspend_error("ThrottlingException", 429)
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+
+    h.hook("suspend")
+    h.microvms.finish()
+    h.settle()
+
+    assert h.job("cb-1") == 503
+
+
+def test_keeps_refusing_jobs_until_a_call_past_its_deadline_has_ended(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # botocore cannot cancel an attempt in flight, so the attempt can reach
+    # the service after the deadline. The refusal and its 30 seconds start
+    # only when the call has ended.
+    monkeypatch.setattr(worker_module, "SUSPEND_CALL_TIMEOUT_SECONDS", 0.05)
+    h = start()
+    h.microvms.hold = True
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    # The deadline passes while the call is held.
+    time.sleep(0.3)
+    h.advance(GRACE * 3)
+    assert h.job("cb-1") == 503
+    assert not h.worker.idle(0.05)
+
+    h.microvms.finish()
+    h.settle()
+    h.advance(GRACE - 0.001)
+    assert h.job("cb-1") == 503
+    h.advance(0.001)
+    assert h.job("cb-1") == 202
+
+
+def test_accepts_jobs_at_once_when_the_microvms_client_cannot_be_created(
+    start: Any, logger: Any
+) -> None:
+    def broken(region: str) -> Any:
+        raise RuntimeError("no client")
+
+    h = start(create_microvms_client=broken)
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+
+    assert "could not create the Lambda MicroVMs client" in logger.messages("error")
+    assert h.job("cb-1") == 202
+
+
+def test_logs_a_default_client_that_cannot_be_closed(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = FakeMicrovmsClient()
+
+    def close() -> None:
+        raise RuntimeError("close failed")
+
+    client.close = close  # type: ignore[method-assign]
+    monkeypatch.setattr(worker_module, "create_microvms_client", lambda r: client)
+    h = start(create_microvms_client=None)
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+
+    assert "could not close the Lambda MicroVMs client" in logger.messages("error")
+    assert h.job("cb-1") == 503
+
+
+def test_tries_the_call_again_one_idle_time_after_an_unknown_outcome_refusal(
+    start: Any,
+) -> None:
+    h = start()
+    h.microvms.failure = suspend_error("InternalServerException", 500, retries=2)
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    h.advance(GRACE + IDLE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_starts_the_idle_time_on_a_resume_hook_that_no_suspend_preceded(
+    start: Any,
+) -> None:
+    h = start()
+
+    h.run_hook(IDLE)
+    h.job("cb-1")
+    h.finish_job("cb-1")
+    h.advance(IDLE / 2)
+    # An idle policy can resume the MicroVM. The hook starts the idle time
+    # again from zero.
+    h.hook("resume")
+    h.advance(IDLE / 2)
+    assert h.microvms.suspended == []
+    h.advance(IDLE / 2)
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_never_suspends_after_close(start: Any) -> None:
+    h = start()
+
+    h.run_hook(IDLE)
+    h.listener.close()
+    h.advance(IDLE * 4)
+
+    assert h.microvms.suspended == []
+
+
+def test_does_not_start_the_idle_time_when_a_job_ends_after_close(
+    start: Any,
+) -> None:
+    h = start()
+
+    h.run_hook(IDLE)
+    h.job("cb-1")
+    h.listener.close()
+    h.finish_job("cb-1")
+    h.advance(IDLE * 4)
+
+    assert h.microvms.suspended == []
+
+
+def test_ends_a_refusal_30_seconds_after_a_call_that_returned_after_close(
+    start: Any,
+) -> None:
+    h = start()
+    h.microvms.hold = True
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    h.listener.close()
+    h.microvms.finish()
+    h.settle()
+    assert h.job("cb-1") == 503
+
+    h.advance(GRACE)
+    assert h.job("cb-1") == 202
+    # The closed listener does not suspend again.
+    h.finish_job("cb-1")
+    h.advance(IDLE * 4)
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_ends_a_refusal_30_seconds_after_the_call_when_close_follows_the_call(
+    start: Any,
+) -> None:
+    h = start()
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    # The call has returned, and its grace timer runs.
+    h.listener.close()
+    assert h.job("cb-1") == 503
+
+    h.advance(GRACE)
+    assert h.job("cb-1") == 202
+
+
+def test_idle_waits_for_a_running_suspend_call(start: Any) -> None:
+    h = start()
+    h.microvms.hold = True
+
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+
+    assert not h.worker.idle(0.1)
+    h.microvms.finish()
+    assert h.worker.idle(WAIT)
+
+
+# ---------------------------------------------------------------------------
+# The terminate hook
+# ---------------------------------------------------------------------------
+
+
+def test_terminate_fails_each_running_job_and_sets_its_cancelled_event(
+    start: Any,
+) -> None:
+    h = start()
+    h.run_hook()
+    assert h.job("cb-1") == 202
+    assert h.job("cb-2") == 202
+    assert eventually(lambda: len(h.jobs.started()) == 2)
+
+    assert h.hook("terminate") == 200
+
+    assert sorted(h.lambda_client.recorded(), key=lambda c: c["callbackId"]) == [
+        terminated_failure("cb-1"),
+        terminated_failure("cb-2"),
+    ]
+    assert h.jobs.contexts["cb-1"].cancelled.is_set()
+    assert h.jobs.contexts["cb-2"].cancelled.is_set()
+
+
+def test_terminate_reports_nothing_more_when_the_handler_returns_after_it(
+    start: Any, logger: Any
+) -> None:
+    h = start()
+    h.run_hook()
+    h.job("cb-1")
+    assert eventually(lambda: h.started("cb-1"))
+    h.hook("terminate")
+
+    h.finish_job("cb-1")
+
+    assert h.lambda_client.recorded() == [terminated_failure("cb-1")]
+    assert eventually(
+        lambda: "job outcome not reported: the MicroVM is terminating"
+        in logger.messages("info")
+    )
+
+
+def test_terminate_answers_after_the_reports_end(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    h.job("cb-1")
+    assert eventually(lambda: h.started("cb-1"))
+    h.lambda_client.hold = True
+
+    answer = h.hook_in_background("terminate")
+    assert eventually(lambda: h.lambda_client.waiting() == 1)
+    assert not answered_within(answer, 0.2)
+
+    h.lambda_client.finish()
+    assert answer.result(WAIT) == 200
+    assert h.lambda_client.recorded() == [terminated_failure("cb-1")]
+
+
+def test_terminate_answers_after_the_budget_when_a_report_stalls(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker_module, "TERMINATE_REPORT_BUDGET_SECONDS", 0.3)
+    h = start()
+    h.run_hook()
+    h.job("cb-1")
+    assert eventually(lambda: h.started("cb-1"))
+    h.lambda_client.hold = True
+
+    started = time.monotonic()
+    assert h.hook("terminate") == 200
+
+    assert 0.25 <= time.monotonic() - started < WAIT
+    assert h.lambda_client.recorded() == []
+
+
+def test_terminate_waits_for_a_job_that_is_reporting_its_own_outcome(
+    start: Any,
+) -> None:
+    h = start()
+    h.run_hook()
+    h.job("cb-1")
+    assert eventually(lambda: h.started("cb-1"))
+    h.lambda_client.hold = True
+    h.jobs.release("cb-1")
+    assert eventually(lambda: h.lambda_client.waiting() == 1)
+
+    answer = h.hook_in_background("terminate")
+    assert not answered_within(answer, 0.2)
+
+    h.lambda_client.finish()
+    assert answer.result(WAIT) == 200
+    assert h.lambda_client.recorded() == [{"kind": "success", "callbackId": "cb-1"}]
+
+
+def test_holds_a_second_concurrent_terminate_until_the_first_one_ends(
+    start: Any,
+) -> None:
+    h = start()
+    h.run_hook()
+    h.job("cb-1")
+    assert eventually(lambda: h.started("cb-1"))
+    h.lambda_client.hold = True
+
+    first = h.hook_in_background("terminate")
+    assert eventually(lambda: h.lambda_client.waiting() == 1)
+    second = h.hook_in_background("terminate")
+    assert not answered_within(second, 0.2)
+    assert not first.done()
+
+    h.lambda_client.finish()
+    assert first.result(WAIT) == 200
+    assert second.result(WAIT) == 200
+    assert h.lambda_client.recorded() == [terminated_failure("cb-1")]
+
+
+def test_terminate_reports_nothing_for_a_job_whose_callback_a_heartbeat_found_gone(
+    start: Any, make_error: Any
+) -> None:
+    h = start(
+        lambda_client=HeldLambdaClient(
+            heartbeat_error=make_error("CallbackTimeoutException")
+        )
+    )
+    h.run_hook()
+    h.job("cb-gone", heartbeatTimeoutSeconds=30)
+    assert eventually(lambda: h.started("cb-gone"))
+    assert eventually(lambda: h.jobs.contexts["cb-gone"].cancelled.is_set())
+
+    assert h.hook("terminate") == 200
+    h.finish_job("cb-gone")
+
+    assert h.lambda_client.recorded() == []
+
+
+def test_terminate_stops_the_heartbeats_of_a_job_before_it_fails_it(
+    start: Any,
+) -> None:
+    h = start()
+    h.run_hook()
+    h.job("cb-1", heartbeatTimeoutSeconds=30)
+    assert eventually(lambda: h.started("cb-1"))
+    heartbeats = h.listener._active["cb-1"].heartbeats  # noqa: SLF001
+    assert heartbeats is not None
+
+    h.hook("terminate")
+
+    assert heartbeats._stopped.is_set()  # noqa: SLF001
+    assert h.lambda_client.recorded() == [terminated_failure("cb-1")]
+
+
+def test_terminate_logs_a_failure_report_that_the_service_refuses_at_info(
+    start: Any, logger: Any, make_error: Any
+) -> None:
+    h = start()
+    h.run_hook()
+    h.job("cb-1")
+    assert eventually(lambda: h.started("cb-1"))
+    h.lambda_client.completion_error = make_error("CallbackTimeoutException")
+
+    h.hook("terminate")
+
+    assert "the callback no longer accepts a failure" in logger.messages("info")
+    assert "could not fail the callback" not in logger.messages("error")
+
+
+def test_terminate_answers_at_once_when_no_job_runs(start: Any) -> None:
+    h = start()
+    h.run_hook()
+
+    assert h.hook("terminate") == 200
+    assert h.lambda_client.recorded() == []
+
+
+def test_terminate_fails_a_job_once_when_the_hook_arrives_twice(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    h.job("cb-1")
+    assert eventually(lambda: h.started("cb-1"))
+
+    h.hook("terminate")
+    h.hook("terminate")
+
+    assert h.lambda_client.recorded() == [terminated_failure("cb-1")]
+
+
+def test_refuses_jobs_with_503_after_the_terminate_hook(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    h.hook("terminate")
+
+    assert h.job("cb-1") == 503
+    assert not h.started("cb-1")
+
+
+def test_never_suspends_after_the_terminate_hook(start: Any) -> None:
+    h = start()
+    h.run_hook(IDLE)
+    h.hook("terminate")
+
+    h.advance(IDLE * 6)
+
+    assert h.microvms.suspended == []
+
+
+def test_fails_a_job_whose_thread_had_not_run_when_the_terminate_hook_came(
+    start: Any, logger: Any
+) -> None:
+    # The job is registered before its thread runs. A terminate hook in
+    # between fails the callback, and the thread then does not run the
+    # handler.
+    entered = threading.Event()
+    release = threading.Event()
+    lambda_client = HeldLambdaClient()
+    calls = 0
+    lock = threading.Lock()
+
+    def create_client(region: str) -> HeldLambdaClient:
+        nonlocal calls
+        with lock:
+            calls += 1
+            first = calls == 1
+        if first:
+            entered.set()
+            release.wait(WAIT)
+        return lambda_client
+
+    h = start(lambda_client=lambda_client)
+    h.listener._create_client = create_client  # noqa: SLF001
+    h.run_hook()
+    h.job("cb-1")
+    assert entered.wait(WAIT)
+
+    assert h.hook("terminate") == 200
+    release.set()
+    assert eventually(lambda: "cb-1" not in h.listener._jobs)  # noqa: SLF001
+
+    assert not h.started("cb-1")
+    assert h.lambda_client.recorded() == [terminated_failure("cb-1")]
+    assert "job not started: the MicroVM is terminating" in logger.messages("info")
+
+
+def test_does_not_start_a_job_whose_thread_ran_after_the_terminate_hook(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The terminate hook can mark the job between its thread's two checks.
+    h = start()
+    original = h.listener._reporter_for  # noqa: SLF001
+    marked = threading.Event()
+
+    def reporter_for(callback_id: str, region: str) -> Any:
+        if callback_id == "cb-1" and not marked.is_set():
+            marked.set()
+            with h.listener._lock:  # noqa: SLF001
+                h.listener._active[callback_id].terminated = True  # noqa: SLF001
+        return original(callback_id, region)
+
+    monkeypatch.setattr(h.listener, "_reporter_for", reporter_for)
+    h.run_hook()
+    h.job("cb-1")
+
+    assert eventually(lambda: "cb-1" not in h.listener._jobs)  # noqa: SLF001
+    assert not h.started("cb-1")
+    assert "job not started: the MicroVM is terminating" in logger.messages("info")
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        FORWARDED_HEADERS,
+        {**LAMBDA_HEADERS, "x-amzn-requestid": "r-1"},
+        {"Host": ""},
+    ],
+    ids=["forwarded", "request-id", "empty-host"],
+)
+def test_ignores_a_terminate_hook_that_did_not_come_from_lambda(
+    start: Any, logger: Any, headers: dict[str, str]
+) -> None:
+    h = start()
+    h.run_hook()
+    h.job("cb-1")
+    assert eventually(lambda: h.started("cb-1"))
+
+    assert h.hook("terminate", headers) == 200
+
+    assert h.lambda_client.recorded() == []
+    assert not h.jobs.contexts["cb-1"].cancelled.is_set()
+    assert h.job("cb-2") == 202
+    ignored = [
+        line
+        for line in logger.lines
+        if line[1] == "lifecycle hook ignored: it did not come from Lambda"
+    ]
+    assert ignored[0][2]["hook"] == "terminate"
+    h.finish_job("cb-1")
+    assert {"kind": "success", "callbackId": "cb-1"} in h.lambda_client.recorded()
+
+
+def test_ignores_a_terminate_hook_without_a_host_header(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    h.job("cb-1")
+    assert eventually(lambda: h.started("cb-1"))
+
+    connection = http.client.HTTPConnection(
+        host_of(h.worker), h.worker.port, timeout=WAIT
+    )
+    try:
+        connection.putrequest("POST", f"{HOOK_PATH_PREFIX}terminate", skip_host=True)
+        connection.putheader("Content-Length", "2")
+        connection.endheaders(b"{}")
+        response = connection.getresponse()
+        response.read()
+    finally:
+        connection.close()
+
+    assert response.status == 200
+    assert h.lambda_client.recorded() == []
+
+
+@pytest.mark.parametrize(
+    "host", ["127.0.0.1:8080", "localhost", "[::1]:8080", "LOCALHOST:8080"]
+)
+def test_acts_on_a_terminate_hook_with_a_local_host(start: Any, host: str) -> None:
+    h = start()
+    h.run_hook()
+    h.job("cb-1")
+    assert eventually(lambda: h.started("cb-1"))
+
+    h.hook("terminate", {"Host": host})
+
+    assert h.lambda_client.recorded() == [terminated_failure("cb-1")]
+
+
+# ---------------------------------------------------------------------------
+# A request whose body is still arriving
+# ---------------------------------------------------------------------------
+
+
+def test_fails_a_slow_run_hook_job_when_the_terminate_hook_came_first(
+    start: Any,
+) -> None:
+    h = start()
+    run = slow_run_hook(h)
+
+    # Lambda can end the MicroVM as soon as the terminate hook answers. So
+    # the failure must be reported before that answer.
+    answer = h.hook_in_background("terminate")
+    assert not answered_within(answer, 0.2)
+    assert run.finish() == 200
+
+    assert answer.result(WAIT) == 200
+    assert h.lambda_client.recorded() == [terminated_failure("cb-run")]
+    assert not h.started("cb-run")
+
+
+def test_waits_for_a_run_hook_that_begins_while_the_terminate_hook_waits(
+    start: Any,
+) -> None:
+    h = start()
+    # An HTTP job can arrive before the run hook. Its report holds the
+    # terminate answer open while the run hook begins.
+    assert h.job("cb-http") == 202
+    assert eventually(lambda: h.started("cb-http"))
+    h.lambda_client.hold = True
+
+    answer = h.hook_in_background("terminate")
+    assert eventually(lambda: h.lambda_client.waiting() == 1)
+    run = slow_run_hook(h)
+    h.lambda_client.finish()
+    assert not answered_within(answer, 0.2)
+    assert run.finish() == 200
+
+    assert answer.result(WAIT) == 200
+    assert sorted(c["callbackId"] for c in h.lambda_client.recorded()) == [
+        "cb-http",
+        "cb-run",
+    ]
+
+
+INVALID_RUN_HOOK = {
+    "microvmId": "mvm-1",
+    "runHookPayload": json.dumps(
+        {
+            "version": 99,
+            "region": "us-east-1",
+            "job": {"callbackId": "cb-invalid", "input": {}},
+        }
+    ),
+}
+INVALID_JOB = {
+    "version": 99,
+    "region": "us-east-1",
+    "callbackId": "cb-invalid",
+    "input": {},
+}
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [(f"{HOOK_PATH_PREFIX}run", INVALID_RUN_HOOK), ("/job", INVALID_JOB)],
+    ids=["run-hook", "job-request"],
+)
+def test_an_invalid_request_failure_report_holds_the_terminate_answer(
+    start: Any, path: str, body: Any
+) -> None:
+    h = start()
+    if path == "/job":
+        h.run_hook()
+    h.lambda_client.hold = True
+    assert h.post(path, body) == 400
+    assert eventually(lambda: h.lambda_client.waiting() == 1)
+
+    answer = h.hook_in_background("terminate")
+    assert not answered_within(answer, 0.2)
+
+    h.lambda_client.finish()
+    assert answer.result(WAIT) == 200
+    assert [c["callbackId"] for c in h.lambda_client.recorded()] == ["cb-invalid"]
+
+
+def test_an_invalid_request_failure_report_holds_the_answer_for_the_budget_only(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker_module, "TERMINATE_REPORT_BUDGET_SECONDS", 0.3)
+    h = start()
+    h.lambda_client.hold = True
+    assert h.post(f"{HOOK_PATH_PREFIX}run", INVALID_RUN_HOOK) == 400
+
+    started = time.monotonic()
+    assert h.hook("terminate") == 200
+    assert time.monotonic() - started >= 0.25
+
+
+def test_an_invalid_request_that_begins_while_the_terminate_hook_waits_holds_it(
+    start: Any,
+) -> None:
+    h = start()
+    h.run_hook()
+    assert h.job("cb-http") == 202
+    assert eventually(lambda: h.started("cb-http"))
+    h.lambda_client.hold = True
+    answer = h.hook_in_background("terminate")
+    assert eventually(lambda: h.lambda_client.waiting() == 1)
+
+    assert h.post("/job", INVALID_JOB) == 400
+    assert eventually(lambda: h.lambda_client.waiting() == 2)
+    # The running job's report ends. The invalid request's report still runs,
+    # so the answer must wait.
+    h.lambda_client.finish_first()
+    assert eventually(lambda: len(h.lambda_client.recorded()) == 1)
+    assert not answered_within(answer, 0.2)
+
+    h.lambda_client.finish()
+    assert answer.result(WAIT) == 200
+    assert sorted(c["callbackId"] for c in h.lambda_client.recorded()) == [
+        "cb-http",
+        "cb-invalid",
+    ]
+
+
+def test_answers_the_terminate_hook_after_the_budget_when_a_run_hook_never_ends(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker_module, "TERMINATE_REPORT_BUDGET_SECONDS", 0.3)
+    h = start()
+    run = slow_run_hook(h)
+
+    started = time.monotonic()
+    assert h.hook("terminate") == 200
+    assert time.monotonic() - started >= 0.25
+    run.abandon()
+
+
+def test_starts_a_slow_run_hook_job_after_the_resume_hook_when_a_suspend_came_first(
+    start: Any,
+) -> None:
+    h = start()
+    run = slow_run_hook(h)
+
+    assert h.hook("suspend") == 200
+    assert run.finish() == 200
+    assert not h.started("cb-run")
+
+    h.hook("resume")
+    assert eventually(lambda: h.started("cb-run"))
+    h.finish_job("cb-run")
+    assert h.lambda_client.recorded() == [{"kind": "success", "callbackId": "cb-run"}]
+
+
+def test_starts_a_deferred_job_30_seconds_after_the_suspend_hook_without_a_resume(
+    start: Any,
+) -> None:
+    h = start()
+    run = slow_run_hook(h)
+    h.hook("suspend")
+    assert run.finish() == 200
+
+    h.advance(GRACE - 0.001)
+    assert not h.started("cb-run")
+    h.advance(0.001)
+    assert eventually(lambda: h.started("cb-run"))
+
+
+def test_fails_a_deferred_job_when_the_terminate_hook_follows_the_suspend_hook(
+    start: Any,
+) -> None:
+    h = start()
+    run = slow_run_hook(h)
+    h.hook("suspend")
+    assert run.finish() == 200
+
+    h.hook("terminate")
+    h.advance(GRACE)
+
+    assert not h.started("cb-run")
+    assert h.lambda_client.recorded() == [terminated_failure("cb-run")]
+
+
+def test_refuses_a_slow_http_job_with_503_when_the_terminate_hook_came_first(
+    start: Any,
+) -> None:
+    h = start()
+    h.run_hook()
+    request = SlowCall(
+        h,
+        "/job",
+        {"version": 1, "region": "us-east-1", "callbackId": "cb-http", "input": {}},
+    )
+
+    h.hook("terminate")
+    assert request.finish() == 503
+    assert not h.started("cb-http")
+
+
+# ---------------------------------------------------------------------------
+# The suspend hook
+# ---------------------------------------------------------------------------
+
+
+def test_the_suspend_hook_refuses_jobs_with_503_until_the_resume_hook(
+    start: Any,
+) -> None:
+    h = start()
+    h.run_hook()
+
+    assert h.hook("suspend") == 200
+    assert h.job("cb-1") == 503
+
+    h.hook("resume")
+    assert h.job("cb-1") == 202
+
+
+def test_accepts_jobs_again_30_seconds_after_the_suspend_hook_without_a_resume(
+    start: Any,
+) -> None:
+    h = start()
+    h.run_hook()
+    h.hook("suspend")
+
+    h.advance(GRACE - 0.001)
+    assert h.job("cb-1") == 503
+    h.advance(0.001)
+    assert h.job("cb-1") == 202
+
+
+def test_the_suspend_hook_leaves_running_jobs_running(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    h.job("cb-1")
+    assert eventually(lambda: h.started("cb-1"))
+
+    h.hook("suspend")
+    h.finish_job("cb-1")
+
+    assert not h.jobs.contexts["cb-1"].cancelled.is_set()
+    assert h.lambda_client.recorded() == [{"kind": "success", "callbackId": "cb-1"}]
+
+
+def test_keeps_refusing_jobs_after_a_forwarded_resume(start: Any) -> None:
+    h = start()
+    h.run_hook()
+    h.hook("suspend")
+
+    assert h.hook("resume", FORWARDED_HEADERS) == 200
+    assert h.job("cb-1") == 503
+
+    h.hook("resume")
+    assert h.job("cb-1") == 202
+
+
+def test_ignores_a_forwarded_suspend_hook(start: Any) -> None:
+    h = start()
+    h.run_hook()
+
+    assert h.hook("suspend", FORWARDED_HEADERS) == 200
+    assert h.job("cb-1") == 202
+
+
+def test_the_suspend_hook_stops_the_idle_time_and_the_resume_hook_restarts_it(
+    start: Any,
+) -> None:
+    h = start()
+    h.run_hook(IDLE)
+    h.advance(IDLE / 2)
+    h.hook("suspend")
+
+    h.advance(IDLE * 2)
+    assert h.microvms.suspended == []
+
+    h.hook("resume")
+    h.advance(IDLE)
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+def test_keeps_the_refusal_when_the_hook_arrives_during_a_rejected_own_call(
+    start: Any,
+) -> None:
+    # The worker's own SuspendMicrovm call triggers the suspend hook. A
+    # rejection of a retried or concurrent call must not end the refusal
+    # that the hook started, because the MicroVM is suspending.
+    h = start()
+    h.microvms.hold = True
+    h.microvms.failure = suspend_error("AccessDeniedException", 403)
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+
+    h.hook("suspend")
+    h.microvms.finish()
+    h.settle()
+
+    assert h.job("cb-1") == 503
+    h.hook("resume")
+    assert h.job("cb-1") == 202
+
+
+def test_ends_the_refusal_at_once_when_a_rejected_own_call_had_no_hook(
+    start: Any,
+) -> None:
+    h = start()
+    h.microvms.failure = suspend_error("AccessDeniedException", 403)
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+
+    assert h.job("cb-1") == 202
+
+
+def test_keeps_one_30_second_refusal_when_the_hook_follows_the_own_call(
+    start: Any,
+) -> None:
+    h = start()
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.advance(5)
+    h.hook("suspend")
+
+    # The hook started a new 30-second refusal 5 seconds after the call's.
+    h.advance(25)
+    assert h.job("cb-1") == 503
+    h.advance(5)
+    assert h.job("cb-1") == 202
+
+
+def test_a_terminated_error_names_its_cause() -> None:
+    error = MicrovmTerminatedError()
+
+    assert str(error) == TERMINATED_MESSAGE
+    assert type(error).__name__ == "MicrovmTerminatedError"
+
+
+# ---------------------------------------------------------------------------
+# Threads and timers that cannot start
+# ---------------------------------------------------------------------------
+
+
+def failing_thread_start(monkeypatch: pytest.MonkeyPatch, prefix: str) -> None:
+    """Make every thread whose name starts with ``prefix`` fail to start."""
+    original = threading.Thread.start
+
+    def start(self: threading.Thread) -> None:
+        if self.name.startswith(prefix):
+            msg = "can't start new thread"
+            raise RuntimeError(msg)
+        original(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+
+
+def test_logs_an_idle_time_that_cannot_start(
+    start: Any, logger: Any, timers: FakeTimers
+) -> None:
+    h = start()
+    timers.failure = RuntimeError("can't start new thread")
+
+    assert h.run_hook(IDLE) == 200
+
+    assert "could not start the idle time" in logger.messages("error")
+    timers.failure = None
+    h.advance(IDLE * 2)
+    assert h.microvms.suspended == []
+
+
+def test_accepts_jobs_at_once_when_the_suspend_thread_cannot_start(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = start()
+    h.run_hook(IDLE)
+    failing_thread_start(monkeypatch, "microvm-suspend")
+
+    h.advance(IDLE)
+
+    assert "could not start the suspend of the idle MicroVM" in logger.messages("error")
+    assert h.microvms.suspended == []
+    monkeypatch.undo()
+    assert h.job("cb-1") == 202
+
+
+def test_refuses_jobs_until_the_resume_hook_when_the_refusal_timer_cannot_start(
+    start: Any, logger: Any, timers: FakeTimers
+) -> None:
+    h = start()
+    h.run_hook()
+    timers.failure = RuntimeError("can't start new thread")
+
+    h.hook("suspend")
+
+    assert "could not start the end of the refusal" in logger.messages("error")
+    timers.failure = None
+    h.advance(GRACE * 2)
+    assert h.job("cb-1") == 503
+    h.hook("resume")
+    assert h.job("cb-1") == 202
+
+
+def test_fails_a_deferred_run_hook_job_whose_thread_cannot_start(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = start()
+    run = slow_run_hook(h)
+    h.hook("suspend")
+    assert run.finish() == 200
+    failing_thread_start(monkeypatch, "microvm-job-")
+
+    h.hook("resume")
+
+    assert eventually(lambda: len(h.lambda_client.recorded()) == 1)
+    assert h.lambda_client.recorded()[0]["callbackId"] == "cb-run"
+    assert h.lambda_client.recorded()[0]["errorType"] == "RuntimeError"
+    assert "could not start the run hook job" in logger.messages("error")
+    assert not h.started("cb-run")
+
+
+def test_a_stale_idle_timer_does_not_suspend(start: Any, timers: FakeTimers) -> None:
+    h = start()
+    timers.fire_cancelled = True
+
+    h.run_hook(IDLE)
+    h.job("cb-1")
+    h.advance(IDLE)
+
+    assert h.microvms.suspended == []
+
+
+def test_a_stale_refusal_timer_does_not_end_a_later_refusal(
+    start: Any, timers: FakeTimers
+) -> None:
+    h = start()
+    timers.fire_cancelled = True
+    h.run_hook()
+
+    h.hook("suspend")
+    h.advance(1)
+    h.hook("resume")
+    h.advance(9)
+    h.hook("suspend")
+    # The first refusal's timer fires 30 seconds after the first hook.
+    h.advance(GRACE - 9)
+
+    assert h.job("cb-1") == 503
+    h.advance(9)
+    assert h.job("cb-1") == 202
+
+
+def test_terminate_waits_for_and_does_not_repeat_a_heartbeat_start_failure(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A job whose heartbeats cannot start fails its own callback. The
+    # terminate hook waits for that report, and does not fail the job again.
+    h = start()
+    h.run_hook()
+    h.lambda_client.hold = True
+    failing_thread_start(monkeypatch, "heartbeats-")
+    assert h.job("cb-1", heartbeatTimeoutSeconds=30) == 202
+    assert eventually(lambda: h.lambda_client.waiting() == 1)
+    monkeypatch.undo()
+
+    answer = h.hook_in_background("terminate")
+    assert not answered_within(answer, 0.2)
+
+    h.lambda_client.finish()
+    assert answer.result(WAIT) == 200
+    recorded = h.lambda_client.recorded()
+    assert [(c["callbackId"], c["errorType"]) for c in recorded] == [
+        ("cb-1", "RuntimeError")
+    ]
+    assert not h.started("cb-1")
+
+
+def test_answers_the_resume_hook_before_it_reports_a_deferred_job_that_cannot_start(
+    start: Any, logger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A deferred job whose thread cannot start fails its callback, which can
+    # take minutes. Lambda allows the resume hook about 10 seconds.
+    h = start()
+    run = slow_run_hook(h)
+    h.hook("suspend")
+    assert run.finish() == 200
+    h.lambda_client.hold = True
+    failing_thread_start(monkeypatch, "microvm-job-")
+
+    answer = h.hook_in_background("resume")
+
+    assert answer.result(WAIT) == 200
+    assert eventually(lambda: h.lambda_client.waiting() == 1)
+    monkeypatch.undo()
+    h.lambda_client.finish()
+    assert eventually(lambda: len(h.lambda_client.recorded()) == 1)
+    assert h.lambda_client.recorded()[0]["errorType"] == "RuntimeError"
+
+
+def test_starts_no_second_suspend_call_while_one_runs(start: Any) -> None:
+    # A resume hook during the call ends the refusal. A second call started
+    # then would share the grace period with the first one, and that period
+    # could end the refusal while the second call can still freeze the
+    # MicroVM.
+    h = start()
+    h.microvms.hold = True
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+
+    h.hook("resume")
+    h.advance(IDLE * 3)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    # The idle time starts when the call ends.
+    h.microvms.finish()
+    h.settle()
+    h.advance(IDLE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.advance(0.001)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1", "mvm-1"])
+
+
+def test_starts_the_idle_time_after_the_call_when_a_job_ended_during_it(
+    start: Any,
+) -> None:
+    h = start()
+    h.microvms.hold = True
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    h.hook("resume")
+    assert h.job("cb-1") == 202
+    h.finish_job("cb-1")
+    h.advance(IDLE * 2)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.microvms.finish()
+    h.settle()
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1", "mvm-1"])
+
+
+def test_retries_a_rejected_call_when_a_resume_hook_came_during_it(
+    start: Any,
+) -> None:
+    # A resume hook starts the idle time. During the call, the idle time
+    # waits for the call to end. The JS worker also retries in this case,
+    # because its resume hook starts the idle time too.
+    h = start()
+    h.microvms.hold = True
+    h.microvms.failure = suspend_error("AccessDeniedException", 403)
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    h.hook("resume")
+
+    h.microvms.finish()
+    h.settle()
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1", "mvm-1"])
+
+
+def thread_start_that(
+    monkeypatch: pytest.MonkeyPatch, prefix: str, before_failing: Callable[[], None]
+) -> None:
+    """Make the thread named ``prefix`` run ``before_failing``, then fail to
+    start."""
+    original = threading.Thread.start
+
+    def start(self: threading.Thread) -> None:
+        if self.name.startswith(prefix):
+            before_failing()
+            msg = "can't start new thread"
+            raise RuntimeError(msg)
+        original(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+
+
+def test_keeps_a_hook_refusal_when_the_suspend_thread_cannot_start(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = start()
+    h.run_hook(IDLE)
+    thread_start_that(monkeypatch, "microvm-suspend", lambda: h.hook("suspend"))
+
+    h.advance(IDLE)
+    monkeypatch.undo()
+
+    assert h.job("cb-1") == 503
+    h.hook("resume")
+    assert h.job("cb-1") == 202
+
+
+def test_starts_the_idle_time_after_a_resume_during_a_suspend_thread_that_failed(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = start()
+    h.run_hook(IDLE)
+    thread_start_that(monkeypatch, "microvm-suspend", lambda: h.hook("resume"))
+
+    h.advance(IDLE)
+    monkeypatch.undo()
+
+    assert not h.listener._idle_after_call  # noqa: SLF001
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+
+
+@pytest.mark.parametrize("then", ["client-fails", "call-rejected"])
+def test_keeps_a_hook_refusal_that_arrives_while_the_client_is_created(
+    start: Any, then: str
+) -> None:
+    holder: dict[str, Harness] = {}
+
+    def create(region: str) -> Any:
+        holder["h"].hook("suspend")
+        if then == "client-fails":
+            raise RuntimeError("no client")
+        holder["h"].microvms.failure = suspend_error("AccessDeniedException", 403)
+        return holder["h"].microvms
+
+    h = start(create_microvms_client=create)
+    holder["h"] = h
+    h.run_hook(IDLE)
+
+    h.advance(IDLE)
+
+    assert h.job("cb-1") == 503
+    h.hook("resume")
+    assert h.job("cb-1") == 202
