@@ -13,6 +13,7 @@ from aws_durable_execution_sdk_python.config import WaitForCallbackConfig
 from aws_durable_execution_sdk_python.serdes import JsonSerDes
 from aws_durable_execution_sdk_python.types import WaitForCallbackContext
 from common import otel_plugin, require_scenario
+from chain_wire_observer import install_checkpoint_observer
 
 
 def _submit(_callback_id: str, _context: WaitForCallbackContext) -> None:
@@ -26,6 +27,7 @@ def handler(
     context: DurableContext,
 ) -> dict[str, Any]:
     require_scenario(event, "chained-invoke")
+    install_checkpoint_observer()
     result: dict[str, Any] = context.invoke(
         function_name=os.environ["OTEL_INVOKE_TARGET_FUNCTION_NAME"],
         payload=event,

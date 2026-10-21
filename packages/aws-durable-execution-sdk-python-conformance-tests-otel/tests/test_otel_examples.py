@@ -144,6 +144,7 @@ REQUIRED_LONG_RUNNING_PARAMETERS: frozenset[str] = frozenset(
 EXPECTED_MODULES: frozenset[str] = frozenset(
     {
         "common",
+        "chain_wire_observer",  # Temporary diagnostic helper, not a new scenario.
         "otel_1_success",
         "otel_2_wait_resume",
         "otel_3_retry",

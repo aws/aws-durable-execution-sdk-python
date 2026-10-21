@@ -29,6 +29,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 def test_case11_uses_one_real_child_and_replays_after_barrier(
     view, monkeypatch, caplog
 ):
+    monkeypatch.syspath_prepend(str(SRC))
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
     monkeypatch.delenv("_X_AMZN_TRACE_ID", raising=False)
     monkeypatch.setenv("OTEL_INVOKE_TARGET_FUNCTION_NAME", "case11-child")
