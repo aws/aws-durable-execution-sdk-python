@@ -11,6 +11,7 @@ both the public re-export path and the concrete submodules.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -19,6 +20,12 @@ from aws_durable_execution_sdk_python_telemetry_exporter import (
     LambdaLogExporter,
     S3Exporter,
     S3Partitioning,
+)
+from aws_durable_execution_sdk_python_telemetry_exporter.exporters._common import (
+    compact_dumps,
+)
+from aws_durable_execution_sdk_python_telemetry_exporter.truncation import (
+    truncate_record,
 )
 from aws_durable_execution_sdk_python_telemetry_exporter.exporters import (
     LambdaLogExporter as LambdaLogExporterFromPkg,
@@ -96,14 +103,62 @@ def test_lambda_log_default_size_and_render_is_operations_by_name():
     assert shaped["operationsByName"]["greet"]["count"] == 1
 
 
-def test_lambda_log_export_prints_compact_json_line(capsys):
+def test_lambda_log_export_prints_lambda_json_log_envelope(capsys):
     LambdaLogExporter().export(_record())
-    out = capsys.readouterr().out.strip()
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert len(lines) == 1
+    line = lines[0]
     # single compact JSON line, no whitespace separators
-    assert ", " not in out and '": ' not in out
-    parsed = json.loads(out)
-    assert parsed["recordType"] == "DurableExecutionTelemetry"
-    assert "operationsByName" in parsed
+    assert ", " not in line and '": ' not in line
+    envelope = json.loads(line)
+    # Same keys, same order as the Lambda runtime's JSON envelope (and the Java
+    # exporter): timestamp, level, [requestId], message.
+    assert list(envelope) == ["timestamp", "level", "message"]
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", envelope["timestamp"]
+    )
+    assert envelope["level"] == "INFO"
+    # message is the compact record JSON as a string, and parses to the record.
+    message = envelope["message"]
+    assert isinstance(message, str)
+    assert ", " not in message and '": ' not in message
+    exporter = LambdaLogExporter()
+    assert json.loads(message) == exporter.render(_record())
+    assert json.loads(message)["recordType"] == "DurableExecutionTelemetry"
+    assert "operationsByName" in json.loads(message)
+
+
+def test_lambda_log_line_matches_the_reader_filter(capsys):
+    # The lambda-log-exporter reader always starts with:
+    #   filter level = "INFO" and message like /DurableExecutionTelemetry/
+    # then parses fields out of the message string.
+    LambdaLogExporter().export(
+        _record(status="FAILED", error={"name": "E", "message": "m"})
+    )
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["level"] == "INFO"
+    assert re.search(r"DurableExecutionTelemetry", envelope["message"])
+    assert '"status":"FAILED"' in envelope["message"]
+    assert '"error":{"name":"E"' in envelope["message"]
+
+
+def test_lambda_log_size_limit_applies_to_the_record_not_the_envelope(capsys):
+    record = _record(input={"blob": "x" * 500})
+    # A limit exactly the size of the rendered record: the record fits as-is.
+    limit = len(compact_dumps(LambdaLogExporter().render(record)).encode("utf-8"))
+    exporter = LambdaLogExporter(max_record_size_bytes=limit)
+    shaped = truncate_record(record, exporter.max_record_size_bytes, exporter.render)
+    assert "truncated" not in shaped
+    exporter.export(shaped)
+    line = capsys.readouterr().out.rstrip("\n")
+    message = json.loads(line)["message"]
+    assert len(message.encode("utf-8")) == limit
+    # The envelope keys and the escaping of message add bytes on top.
+    assert len(line.encode("utf-8")) > limit
+    # One byte less and the same record is truncated (the record is measured).
+    smaller = LambdaLogExporter(max_record_size_bytes=limit - 1)
+    assert truncate_record(record, limit - 1, smaller.render).get("truncated") is True
 
 
 def test_lambda_log_custom_size_and_flush_noop():

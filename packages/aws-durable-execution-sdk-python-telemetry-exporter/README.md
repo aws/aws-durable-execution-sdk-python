@@ -44,10 +44,46 @@ def handler(event, context):
 ```
 
 With no exporter configured, records are written to the function's own
-CloudWatch log group as single JSON lines (the `LambdaLogExporter` default),
-carrying the name-keyed `operationsByName` summary. The `S3Exporter` writes the
+CloudWatch log group (the `LambdaLogExporter` default), one Lambda JSON log
+line per record whose `message` is the compact record JSON carrying the
+name-keyed `operationsByName` summary (see
+[LambdaLogExporter](#lambdalogexporter)). The `S3Exporter` writes the
 lossless per-occurrence `operations` array, one object per execution
 (upsert-by-execution-name, so re-emission overwrites rather than appends).
+
+## Record fields shared with the JS exporter
+
+Records follow the JS exporter's shape, which the record readers rely on for
+every SDK:
+
+- `error.name` (the execution `error`, `operations[].error`, and
+  `operationsByName.<name>.error`) is the simple type name of the error the
+  user's code raised, for example `PaymentError`: no module prefix, and not the
+  SDK wrapper (`StepError`, `ChildContextError`, ...). Hooks deliver
+  checkpointed `ErrorObject`s, so the type string is cut to its last segment
+  after any `.` and any `$`, and an SDK wrapper is resolved to the user error
+  of the failed operation it was raised from (same message, data and stack
+  trace). With no user error (for example a callback timeout or an SDK
+  failure), the SDK error's simple class name is used. A failure on its first
+  invocation and the same failure replayed later get the same name. `message`
+  is unchanged.
+- An opted-in operation `result` (`operations[].result`,
+  `operationsByName.<name>.result`, and the value passed to an override's
+  `result` transform) is the plain JSON value, for example `{"amount": 99.99}`.
+  Results checkpointed by the SDK's default serializer as a `{"t": ..., "v":
+  ...}` envelope are decoded with that serializer and converted to JSON values
+  the way the Java SDK's default serializer writes them: `Decimal` becomes a
+  number (`null` when not finite), `datetime`/`date` an ISO-8601 string from
+  `isoformat()`, `UUID` a string, `bytes` a base64 string, `tuple` a list, and
+  a map/parallel `BatchResult` its `to_dict()` form. A payload that is not an
+  envelope (for example from a custom `SerDes`, which is never run) is passed
+  through as parsed JSON, or as the raw string when it is not JSON; an
+  envelope that cannot be decoded is passed through as parsed JSON.
+- Every record built at invocation end carries `endTime` (the emission time)
+  and `durationMs` (`endTime - startTime`), including the `RUNNING` record of
+  an invocation that suspends or retries (`on-change` mode). Records built at
+  invocation start or on an operation change carry neither. Do not use the
+  presence of `endTime` as a completion signal; use `status`.
 
 ## Exporters
 
@@ -76,6 +112,31 @@ the Lambda runtime's boto3 otherwise; none adds a required dependency.
 (`OperationsFormat`). `max_record_size_bytes` raises or lowers an exporter's
 size limit; omitting it keeps the default. `HttpExporter` and `FileExporter`
 have no default and do not truncate unless a limit is set.
+
+### LambdaLogExporter
+
+Prints one line per record to stdout, so it lands in the function's own log
+group with no extra IAM. The line is the Lambda JSON log envelope, with keys
+in this order:
+
+```json
+{"timestamp":"2026-01-01T00:00:00.000Z","level":"INFO","message":"{\"recordType\":\"DurableExecutionTelemetry\",...}"}
+```
+
+`timestamp` is the UTC write time with millisecond precision, `level` is
+always `INFO`, and `message` is the compact record JSON as a string. This is
+the shape the Node.js runtime gives the JS exporter's `console.log` line in the
+JSON log format, and record readers for this destination filter on
+`level = "INFO" and message like /DurableExecutionTelemetry/` and parse
+`message`. Lambda captures Python `print` output as written in both the Text
+and JSON log formats, and does not re-encode lines that are already JSON, so
+the envelope is never wrapped twice. With the JSON log format and an
+application log level above `INFO` (`WARN`, `ERROR`, `FATAL`), Lambda filters
+these lines out, as it does for the JS exporter's lines. `requestId` is not
+included, because exporters do not receive the request id.
+`max_record_size_bytes` (default 256 KB) is measured on the rendered record,
+that is the `message` string; the envelope keys and the JSON escaping of
+`message` add bytes on top of it.
 
 ### CloudWatchLogsExporter
 

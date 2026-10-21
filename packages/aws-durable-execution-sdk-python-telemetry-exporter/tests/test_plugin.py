@@ -13,10 +13,24 @@ map on ``InvocationStartInfo`` / ``InvocationEndInfo`` / ``OperationChangeInfo``
 from __future__ import annotations
 
 import datetime
+import decimal
+import json
 import threading
+import uuid
 from typing import Any
 
 import pytest
+from aws_durable_execution_sdk_python.concurrency.models import (
+    BatchItem,
+    BatchResult,
+    CompletionReason,
+)
+from aws_durable_execution_sdk_python.config import BatchItemStatus
+from aws_durable_execution_sdk_python.exceptions import (
+    CallbackTimeoutError,
+    ChildContextError,
+    StepError,
+)
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationStatus,
@@ -31,6 +45,10 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationInfo,
     OperationType,
 )
+from aws_durable_execution_sdk_python.serdes import (
+    EXTENDED_TYPES_SERDES,
+    SerDesContext,
+)
 
 from aws_durable_execution_sdk_python_telemetry_exporter import (
     ContentConfig,
@@ -39,6 +57,9 @@ from aws_durable_execution_sdk_python_telemetry_exporter import (
     OperationOverride,
     DurableExecutionTelemetryConfig,
     durable_execution_telemetry,
+)
+from aws_durable_execution_sdk_python_telemetry_exporter import (
+    plugin as plugin_module,
 )
 from aws_durable_execution_sdk_python_telemetry_exporter.plugin import (
     _resolve_sampling_rate,
@@ -591,12 +612,14 @@ def test_default_exporter_actually_emits_to_stdout(capsys):
     plugin = durable_execution_telemetry(DurableExecutionTelemetryConfig())
     _run(plugin, ops=[_step("greet")])
     out = capsys.readouterr().out
-    # compact JSON via LambdaLogExporter
-    assert '"recordType":"DurableExecutionTelemetry"' in out
-    assert '"operationsByName"' in out
+    # Lambda JSON log envelope whose message is the compact record JSON.
+    line = json.loads(out.strip())
+    record = json.loads(line["message"])
+    assert record["recordType"] == "DurableExecutionTelemetry"
+    assert "operationsByName" in record
 
 
-# -- terminal timestamps: end time only for SUCCEEDED/FAILED (comment 3) ------
+# -- endTime/durationMs: every invocation-end record carries them (JS parity) -
 
 
 def _last_record_for_end_status(status, *, emit_mode="on-change", result=None):
@@ -616,18 +639,46 @@ def _last_record_for_end_status(status, *, emit_mode="on-change", result=None):
     return exporter.records[-1]
 
 
-def test_pending_end_maps_to_running_and_omits_end_time():
+def test_pending_end_maps_to_running_with_end_time_and_duration():
+    # JS onInvocationEnd sets endTime for every status, so a suspended
+    # invocation's RUNNING record carries endTime/durationMs up to the suspend.
     rec = _last_record_for_end_status(InvocationStatus.PENDING)
     assert rec["status"] == "RUNNING"
-    assert "endTime" not in rec
-    assert "durationMs" not in rec
+    assert rec["endTime"].endswith("Z")
+    assert isinstance(rec["durationMs"], int) and rec["durationMs"] >= 0
+    assert "output" not in rec and "error" not in rec
 
 
-def test_retry_end_maps_to_running_and_omits_end_time():
+def test_retry_end_maps_to_running_with_end_time_and_duration():
     rec = _last_record_for_end_status(InvocationStatus.RETRY)
     assert rec["status"] == "RUNNING"
-    assert "endTime" not in rec
-    assert "durationMs" not in rec
+    assert rec["endTime"].endswith("Z")
+    assert isinstance(rec["durationMs"], int) and rec["durationMs"] >= 0
+    assert "output" not in rec and "error" not in rec
+
+
+def test_start_and_operation_change_records_have_no_end_time():
+    exporter = CaptureExporter()
+    plugin = durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(exporters=[exporter], emit_mode="on-change")
+    )
+    op = _step("s", op_id="1")
+    plugin.on_invocation_start(_start(operations={}))
+    plugin._scheduler.drain()
+    plugin.on_operation_change(
+        OperationChangeInfo(
+            execution_arn=ARN, updated_operations=_ops(op), operations=_ops(op)
+        )
+    )
+    plugin._scheduler.drain()
+    plugin.on_invocation_end(
+        _end(operations=_ops(op), status=InvocationStatus.PENDING, result=None)
+    )
+    assert [r["status"] for r in exporter.records] == ["RUNNING"] * 3
+    start_rec, change_rec, end_rec = exporter.records
+    for rec in (start_rec, change_rec):
+        assert "endTime" not in rec and "durationMs" not in rec
+    assert "endTime" in end_rec and "durationMs" in end_rec
 
 
 def test_succeeded_end_is_terminal_with_end_time_and_duration():
@@ -661,3 +712,326 @@ def test_failed_end_is_terminal_with_end_time_and_duration():
     assert rec["endTime"] is not None
     assert rec["durationMs"] is not None
     assert rec["error"]["name"] == "StepError"
+
+
+# -- opted-in operation results are the plain JSON value (JS parity) ---------
+
+
+def _serialize(value: Any) -> str:
+    """Checkpoint a step result exactly as the SDK's default serializer does."""
+    return EXTENDED_TYPES_SERDES.serialize(value, SerDesContext("1", ARN))
+
+
+def _override_plugin(exporter, transform=lambda r: r, name="charge"):
+    return durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(
+            exporters=[exporter],
+            content=ContentConfig(
+                operations=ContentOperations(
+                    overrides=[OperationOverride(name, result=transform)]
+                )
+            ),
+        )
+    )
+
+
+def _charge_result(raw: str | None, transform=lambda r: r) -> Any:
+    exporter = CaptureExporter()
+    _run(
+        _override_plugin(exporter, transform),
+        ops=[_step("charge", result=raw)],
+    )
+    op = exporter.records[0]["operations"][0]
+    return op.get("result", "<absent>")
+
+
+def test_result_envelope_is_decoded_to_plain_json():
+    raw = _serialize({"amount": 99.99})
+    assert json.loads(raw) == {"t": "m", "v": {"amount": {"t": "f", "v": 99.99}}}
+    assert _charge_result(raw) == {"amount": 99.99}
+
+
+def test_override_transform_receives_the_plain_value():
+    seen: list[Any] = []
+
+    def transform(value: Any) -> Any:
+        seen.append(value)
+        return {"masked": value["amount"] > 50}
+
+    result = _charge_result(_serialize({"amount": 99.99}), transform)
+    assert seen == [{"amount": 99.99}]
+    assert result == {"masked": True}
+
+
+def test_result_non_json_types_become_json_compatible_values():
+    value = {
+        "price": decimal.Decimal("99.99"),
+        "qty": decimal.Decimal("3"),
+        "nan": decimal.Decimal("NaN"),
+        "at": datetime.datetime(2026, 1, 2, 3, 4, 5, 123456, tzinfo=datetime.UTC),
+        "day": datetime.date(2026, 1, 2),
+        "id": uuid.UUID("12345678-1234-5678-1234-567812345678"),
+        "blob": b"\x00\x01",
+        "pair": (1, "a"),
+        "nested": [{"k": [1, {"deep": True}]}, None],
+    }
+    assert _charge_result(_serialize(value)) == {
+        "price": 99.99,
+        "qty": 3,
+        "nan": None,
+        "at": "2026-01-02T03:04:05.123456+00:00",
+        "day": "2026-01-02",
+        "id": "12345678-1234-5678-1234-567812345678",
+        "blob": "AAE=",
+        "pair": [1, "a"],
+        "nested": [{"k": [1, {"deep": True}]}, None],
+    }
+
+
+def test_result_top_level_non_json_type_is_converted():
+    assert _charge_result(_serialize(decimal.Decimal("12.5"))) == 12.5
+    assert _charge_result(_serialize(("x", 2))) == ["x", 2]
+
+
+def test_result_batch_result_becomes_its_dict_form():
+    batch = BatchResult(
+        all=[BatchItem(index=0, status=BatchItemStatus.SUCCEEDED, result={"a": 1})],
+        completion_reason=CompletionReason.ALL_COMPLETED,
+    )
+    assert _charge_result(_serialize(batch)) == {
+        "all": [{"index": 0, "status": "SUCCEEDED", "result": {"a": 1}, "error": None}],
+        "completionReason": "ALL_COMPLETED",
+    }
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("42", 42),  # primitives are plain JSON already
+        ('"hi"', "hi"),
+        ("[1,2,3]", [1, 2, 3]),
+        ('{"amount":1}', {"amount": 1}),  # e.g. a custom JSON SerDes
+        ('{"t":"m","v":{},"x":1}', {"t": "m", "v": {}, "x": 1}),  # not an envelope
+        ("not json", "not json"),  # raw string fallback
+    ],
+)
+def test_result_plain_payloads_keep_previous_behaviour(raw, expected):
+    assert _charge_result(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"t":"zz","v":1}',  # unknown tag
+        '{"t":"d","v":"not-a-decimal"}',  # decode failure
+        '{"t":"m","v":[1,2]}',  # wrong payload for the tag
+        '{"t":1,"v":2}',  # non-string tag
+    ],
+)
+def test_result_undecodable_envelope_falls_back_to_parsed_json(raw):
+    assert _charge_result(raw) == json.loads(raw)
+
+
+def test_result_unsupported_decoded_type_falls_back_to_parsed_json(monkeypatch):
+    class _OpaqueSerDes:
+        def deserialize(self, data: str, context: Any) -> Any:
+            return object()
+
+    monkeypatch.setattr(plugin_module, "EXTENDED_TYPES_SERDES", _OpaqueSerDes())
+    raw = '{"t":"m","v":{}}'
+    assert _charge_result(raw) == {"t": "m", "v": {}}
+
+
+def test_result_in_operations_by_name_is_plain():
+    exporter = CaptureExporter(render=LambdaLogExporter().render)
+    _run(
+        _override_plugin(exporter),
+        ops=[_step("charge", result=_serialize({"amount": 99.99}))],
+    )
+    rendered = exporter.render(exporter.records[0])
+    assert rendered["operationsByName"]["charge"]["result"] == {"amount": 99.99}
+
+
+# -- error.name: simple type name of the user's error (cross-SDK rule) --------
+
+
+def _execution_error_from(op_error: ErrorObject, wrapper=StepError) -> ErrorObject:
+    """Build the execution ErrorObject exactly as the SDK does for a failed op.
+
+    The operation raises its typed wrapper rebuilt from the checkpointed
+    ErrorObject (first run and replay alike); the handler lets it escape and
+    the SDK records ``ErrorObject.from_exception`` of that wrapper.
+    """
+    try:
+        op_error.raise_as_operation_error(wrapper)
+    except Exception as exc:  # noqa: BLE001 - captured to build the wire error
+        return ErrorObject.from_exception(exc)
+    raise AssertionError("raise_as_operation_error must raise")  # pragma: no cover
+
+
+def _failed_record(op_errors: dict[str, ErrorObject], execution_error: ErrorObject):
+    exporter = CaptureExporter(render=LambdaLogExporter().render)
+    plugin = durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(exporters=[exporter])
+    )
+    _run(
+        plugin,
+        ops=[
+            _step(name, status=OperationStatus.FAILED, error=err)
+            for name, err in op_errors.items()
+        ],
+        status=InvocationStatus.FAILED,
+        result=None,
+        error=execution_error,
+    )
+    return exporter.records[0], exporter.render(exporter.records[0])
+
+
+PAYMENT_ERROR = ErrorObject(
+    message="card declined",
+    type="__main__.PaymentError",
+    data=None,
+    stack_trace=None,
+)
+
+
+def test_error_name_is_simple_user_type_for_execution_and_operation():
+    exec_err = _execution_error_from(PAYMENT_ERROR)
+    assert exec_err.type == "aws_durable_execution_sdk_python.exceptions.StepError"
+    rec, rendered = _failed_record({"charge": PAYMENT_ERROR}, exec_err)
+    assert rec["error"] == {"name": "PaymentError", "message": "card declined"}
+    assert rec["operations"][0]["error"] == {
+        "name": "PaymentError",
+        "message": "card declined",
+    }
+    assert rendered["operationsByName"]["charge"]["error"]["name"] == "PaymentError"
+
+
+def test_error_name_live_and_replayed_failures_agree():
+    exec_err = _execution_error_from(PAYMENT_ERROR)
+    op = _step("charge", status=OperationStatus.FAILED, error=PAYMENT_ERROR)
+
+    # Live: the failed operation first appears in this invocation's end snapshot.
+    live = CaptureExporter()
+    plugin = durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(exporters=[live])
+    )
+    plugin.on_invocation_start(_start(operations={}))
+    plugin.on_invocation_end(
+        _end(
+            operations=_ops(op),
+            status=InvocationStatus.FAILED,
+            result=None,
+            error=exec_err,
+        )
+    )
+
+    # Replayed: a fresh plugin (cold resume) sees the checkpointed failure in
+    # both snapshots and the replayed wrapper produces the same ErrorObject.
+    replayed = CaptureExporter()
+    plugin = durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(exporters=[replayed])
+    )
+    plugin.on_invocation_start(_start(operations=_ops(op), is_first=False))
+    plugin.on_invocation_end(
+        _end(
+            operations=_ops(op),
+            status=InvocationStatus.FAILED,
+            result=None,
+            error=_execution_error_from(PAYMENT_ERROR),
+            is_first=False,
+        )
+    )
+    for exporter in (live, replayed):
+        rec = exporter.records[0]
+        assert rec["error"]["name"] == "PaymentError"
+        assert rec["operations"][0]["error"]["name"] == "PaymentError"
+
+
+def test_error_name_resolves_nested_wrappers_to_the_user_cause():
+    # A step failing inside a child context: the context's own checkpointed
+    # error is the StepError wrapper, the execution error is ChildContextError.
+    step_wrapper = _execution_error_from(PAYMENT_ERROR)
+    exec_err = _execution_error_from(step_wrapper, ChildContextError)
+    rec, _ = _failed_record({"charge": PAYMENT_ERROR, "ctx": step_wrapper}, exec_err)
+    assert rec["error"]["name"] == "PaymentError"
+    names = {op["name"]: op["error"]["name"] for op in rec["operations"]}
+    assert names == {"charge": "PaymentError", "ctx": "PaymentError"}
+
+
+@pytest.mark.parametrize(
+    ("type_name", "expected"),
+    [
+        ("__main__.PaymentError", "PaymentError"),
+        ("app.billing.errors.PaymentError", "PaymentError"),
+        ("app.handler.<locals>.PaymentError", "PaymentError"),
+        ("ValueError", "ValueError"),
+        ("software.amazon.example.Probe$PaymentError", "PaymentError"),
+        ("aws_durable_execution_sdk_python.exceptions.SerDesError", "SerDesError"),
+        (
+            "aws_durable_execution_sdk_python.exceptions.StepInterruptedError",
+            "StepInterruptedError",
+        ),
+    ],
+)
+def test_error_name_from_type_string_is_last_segment(type_name, expected):
+    err = ErrorObject(message="m", type=type_name, data=None, stack_trace=None)
+    rec, _ = _failed_record({"op": err}, err)
+    assert rec["error"]["name"] == expected
+    assert rec["operations"][0]["error"]["name"] == expected
+
+
+def test_error_name_wrapper_without_user_cause_uses_sdk_simple_name():
+    # No failed operation carries the wrapper's fields (e.g. not in snapshot).
+    exec_err = _execution_error_from(PAYMENT_ERROR)
+    rec, _ = _failed_record({}, exec_err)
+    assert rec["error"]["name"] == "StepError"
+
+
+def test_error_name_callback_timeout_is_sdk_name_not_service_type():
+    service_error = ErrorObject(
+        message="Callback timed out",
+        type="Callback.Timeout",
+        data=None,
+        stack_trace=None,
+    )
+    exec_err = ErrorObject.from_exception(
+        CallbackTimeoutError(message="Callback timed out")
+    )
+    rec, _ = _failed_record({"cb": service_error}, exec_err)
+    assert rec["error"]["name"] == "CallbackTimeoutError"
+
+
+def test_error_name_ambiguous_cause_falls_back_to_wrapper_name():
+    other = ErrorObject(
+        message="card declined", type="app.OtherError", data=None, stack_trace=None
+    )
+    exec_err = _execution_error_from(PAYMENT_ERROR)
+    rec, _ = _failed_record({"a": PAYMENT_ERROR, "b": other}, exec_err)
+    assert rec["error"]["name"] == "StepError"
+
+
+def test_error_name_cause_lookup_ignores_include_errors_false():
+    exporter = CaptureExporter()
+    plugin = durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(
+            exporters=[exporter],
+            content=ContentConfig(operations=ContentOperations(include_errors=False)),
+        )
+    )
+    _run(
+        plugin,
+        ops=[_step("charge", status=OperationStatus.FAILED, error=PAYMENT_ERROR)],
+        status=InvocationStatus.FAILED,
+        result=None,
+        error=_execution_error_from(PAYMENT_ERROR),
+    )
+    rec = exporter.records[0]
+    assert rec["error"]["name"] == "PaymentError"
+    assert "error" not in rec["operations"][0]
+
+
+def test_error_name_none_type_is_kept():
+    err = ErrorObject.from_message("no type")
+    rec, _ = _failed_record({}, err)
+    assert rec["error"] == {"name": None, "message": "no type"}

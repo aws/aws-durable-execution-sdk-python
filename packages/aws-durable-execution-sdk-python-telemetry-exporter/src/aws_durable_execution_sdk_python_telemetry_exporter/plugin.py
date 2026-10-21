@@ -31,12 +31,25 @@ Operation-map sourcing:
 
 from __future__ import annotations
 
+import base64
 import datetime
+import decimal
 import json
 import math
 import threading
+import uuid
 from typing import Any, Callable
 
+from aws_durable_execution_sdk_python.concurrency.models import BatchResult
+from aws_durable_execution_sdk_python.exceptions import (
+    CallbackSubmitterError,
+    ChildContextError,
+    DurableOperationError,
+    InvokeError,
+    StepError,
+    WaitForConditionError,
+)
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationEndInfo,
@@ -45,6 +58,10 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationChangeInfo,
     OperationInfo,
     OperationType,
+)
+from aws_durable_execution_sdk_python.serdes import (
+    EXTENDED_TYPES_SERDES,
+    SerDesContext,
 )
 
 from aws_durable_execution_sdk_python_telemetry_exporter._export_scheduler import (
@@ -152,14 +169,153 @@ def _apply_result_override(
 ) -> Any:
     if raw_result is None:
         return None
-    try:
-        parsed = json.loads(raw_result)
-    except (json.JSONDecodeError, TypeError):
-        parsed = raw_result
+    parsed = _decode_checkpoint_result(raw_result)
     try:
         return transform(parsed)
     except Exception:  # noqa: BLE001 - untrusted transform must never break emission
         return None
+
+
+# -- operation results ----------------------------------------------------------
+
+
+def _is_extended_type_envelope(value: Any) -> bool:
+    # ExtendedTypeSerDes wraps every non-primitive value in exactly
+    # {"t": <type tag>, "v": <encoded value>} at the root.
+    return (
+        isinstance(value, dict)
+        and value.keys() == {"t", "v"}
+        and isinstance(value["t"], str)
+    )
+
+
+def _decode_checkpoint_result(raw_result: str) -> Any:
+    """Return an operation's checkpointed result as a plain JSON value.
+
+    The SDK's default serializer (``ExtendedTypeSerDes``) writes primitives and
+    primitive lists as plain JSON, and everything else (dicts, nested lists,
+    ``Decimal``, ``datetime``, ...) as a ``{"t": ..., "v": ...}`` envelope. The
+    JS and Java exporters emit the user's plain JSON value, so an envelope is
+    decoded with that default serializer and converted to JSON-compatible
+    values (see ``_to_json_compatible``). A user's custom ``SerDes`` is never
+    run: a payload that is not an envelope keeps the previous behaviour (parsed
+    JSON, or the raw string when it is not JSON), and so does an envelope that
+    fails to decode. Never raises.
+    """
+    try:
+        parsed = json.loads(raw_result)
+    except (json.JSONDecodeError, TypeError):
+        return raw_result
+    if not _is_extended_type_envelope(parsed):
+        return parsed
+    try:
+        decoded = EXTENDED_TYPES_SERDES.deserialize(raw_result, SerDesContext())
+        return _to_json_compatible(decoded)
+    except Exception:  # noqa: BLE001 - fall back to the parsed payload, never raise
+        return parsed
+
+
+def _to_json_compatible(value: Any) -> Any:
+    """Convert a value decoded by ``ExtendedTypeSerDes`` into plain JSON values.
+
+    Non-JSON types follow what the Java SDK's default Jackson serializer writes
+    for the equivalent Java types: ``Decimal`` -> JSON number, ``datetime`` /
+    ``date`` -> ISO-8601 string (``isoformat()``, offset and precision kept),
+    ``UUID`` -> string, ``bytes`` -> base64 string, ``tuple`` -> list. A
+    ``BatchResult`` becomes its ``to_dict()`` form. A non-finite ``Decimal``
+    becomes ``None`` (JSON ``null``), like ``JSON.stringify(NaN)`` in JS.
+    """
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, decimal.Decimal):
+        if not value.is_finite():
+            return None
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.isoformat()
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(value)).decode("ascii")
+    if isinstance(value, (list, tuple)):
+        return [_to_json_compatible(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _to_json_compatible(item) for key, item in value.items()}
+    if isinstance(value, BatchResult):
+        return _to_json_compatible(value.to_dict())
+    msg = f"Unsupported decoded result type: {type(value)!r}"
+    raise TypeError(msg)
+
+
+# -- error names ----------------------------------------------------------------
+
+# SDK operation wrappers whose ErrorObject stands for an error raised by user
+# code inside the operation. Their checkpointed ErrorObject.type is the wrapper's
+# own class; the user's error type lives on the failed operation's ErrorObject.
+# Callback timeout/external errors and other SDK errors are not listed: they have
+# no user cause, so they are reported under their own name.
+_USER_CAUSE_WRAPPER_TYPES: frozenset[str] = frozenset(
+    f"{cls.__module__}.{cls.__qualname__}"
+    for cls in (
+        DurableOperationError,
+        StepError,
+        InvokeError,
+        ChildContextError,
+        WaitForConditionError,
+        CallbackSubmitterError,
+    )
+)
+_SDK_TYPE_PREFIX = "aws_durable_execution_sdk_python."
+
+
+def _simple_type_name(type_name: str) -> str:
+    """Return the last segment of a type string after any ``.`` and any ``$``.
+
+    ``"__main__.PaymentError"`` -> ``"PaymentError"``; also handles Java's
+    ``"pkg.Outer$Inner"`` and ``"builtins"``-style unqualified names.
+    """
+    return type_name.rsplit(".", 1)[-1].rsplit("$", 1)[-1]
+
+
+def _user_cause_type(
+    error: ErrorObject, operations: dict[str, OperationInfo]
+) -> str | None:
+    # A wrapper is rebuilt from the failed operation's ErrorObject with the same
+    # message, data and stack trace (ErrorObject.raise_as_operation_error), on
+    # the first run and on replay alike, so the cause is the operation error
+    # carrying those fields under a non-SDK type.
+    key = (error.message, error.data, error.stack_trace)
+    names = {
+        _simple_type_name(op_error.type)
+        for op in operations.values()
+        if (op_error := op.error) is not None
+        and op_error.type
+        and not op_error.type.startswith(_SDK_TYPE_PREFIX)
+        and (op_error.message, op_error.data, op_error.stack_trace) == key
+    }
+    # Ambiguous (several different user types share the fields): do not guess.
+    return names.pop() if len(names) == 1 else None
+
+
+def _error_name(error: ErrorObject, operations: dict[str, OperationInfo]) -> str | None:
+    """Cross-SDK ``error.name``: the simple type name of the user's error.
+
+    Python hooks only carry checkpointed ``ErrorObject`` values (no live
+    exception), so: for an SDK wrapper with a user cause, the cause's simple
+    type name (recovered from the failed operation); otherwise the simple name
+    of ``ErrorObject.type`` (the SDK error's own name when there is no user
+    error). The same snapshot yields the same name on a live run and on replay.
+    """
+    type_name = error.type
+    if not type_name:
+        return type_name
+    if type_name in _USER_CAUSE_WRAPPER_TYPES:
+        cause = _user_cause_type(error, operations)
+        if cause is not None:
+            return cause
+    return _simple_type_name(type_name)
 
 
 class _ExecutionState:
@@ -312,16 +468,17 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin):
             should_emit = is_terminal
 
         if should_emit:
-            # Only terminal (SUCCEEDED/FAILED) records carry an end time; a
-            # PENDING/RETRY invocation end maps to RUNNING (still in flight) and
-            # must omit endTime/durationMs. Passing end_time=None makes _emit
-            # drop both fields. Output and error likewise belong only to a
-            # terminal record.
+            # Every record built at invocation end carries endTime (the emission
+            # time) and durationMs, including a PENDING/RETRY end that maps to
+            # RUNNING -- the same rule as the JS plugin's onInvocationEnd
+            # (``endTime: new Date()`` for every status). Records built at
+            # invocation start or on an operation change carry neither. Output
+            # and error still belong only to a terminal record.
             self._emit(
                 arn,
                 state,
                 status=status,
-                end_time=datetime.datetime.now(datetime.UTC) if is_terminal else None,
+                end_time=datetime.datetime.now(datetime.UTC),
                 output_raw=info.execution_result if is_terminal else None,
                 error=info.error if is_terminal else None,
             )
@@ -369,7 +526,10 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin):
             if op.attempt is not None:
                 entry["attempt"] = op.attempt
             if self._include_errors and op.error is not None:
-                entry["error"] = {"name": op.error.type, "message": op.error.message}
+                entry["error"] = {
+                    "name": _error_name(op.error, operations),
+                    "message": op.error.message,
+                }
             if override is not None and override.result is not None:
                 value = _apply_result_override(override.result, op.result)
                 if value is not None:
@@ -436,7 +596,10 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin):
         if output_value is not None:
             record["output"] = output_value
         if error is not None:
-            record["error"] = {"name": error.type, "message": error.message}
+            record["error"] = {
+                "name": _error_name(error, operations),
+                "message": error.message,
+            }
         record["operations"] = self._build_operations(operations)
 
         self._scheduler.schedule(record)
