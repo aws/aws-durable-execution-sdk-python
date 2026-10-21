@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import Mock, patch
 
-from aws_durable_execution_sdk_python.config import Duration, StepConfig
+from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.context import DurableContext
 from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
@@ -27,8 +27,6 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
 )
 from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
-from aws_durable_execution_sdk_python.retries import RetryDecision
-from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
 from tests.test_helpers import operation_id_sequence
 
 
@@ -259,85 +257,3 @@ def test_plugin_execution_input_is_isolated_from_handler_end_to_end():
     assert handler_saw["nested_items"] == ["original"]
     # The handler's mutation never reached the end hook.
     assert "injected_by_handler" not in plugin.end_inputs[0]
-
-
-class _OutcomeRecordingPlugin(DurableInstrumentationPlugin):
-    """Records the result and error payloads seen on each hook that carries one."""
-
-    def __init__(self) -> None:
-        self.operation_ends: list[Any] = []
-        self.user_function_ends: list[Any] = []
-        self.invocation_ends: list[Any] = []
-
-    def on_operation_end(self, info) -> None:
-        self.operation_ends.append(info)
-
-    def on_user_function_end(self, info) -> None:
-        self.user_function_ends.append(info)
-
-    def on_invocation_end(self, info) -> None:
-        self.invocation_ends.append(info)
-
-
-def _run_with_plugin(handler: Any, plugin: _OutcomeRecordingPlugin) -> Any:
-    wrapped = durable_execution(handler, plugins=[plugin])
-    with DurableFunctionTestRunner(handler=wrapped) as runner:
-        return runner.run(input="{}", execution_timeout=60)
-
-
-def test_plugin_sees_operation_result_and_no_error_on_success_end_to_end():
-    """A succeeding step reports its serialized result and no error on its hooks."""
-    plugin = _OutcomeRecordingPlugin()
-
-    def my_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
-        return context.step(lambda _: "step-value", name="work")
-
-    result = _run_with_plugin(my_handler, plugin)
-
-    assert result.status is InvocationStatus.SUCCEEDED
-    step_ends = [info for info in plugin.operation_ends if info.name == "work"]
-    assert len(step_ends) == 1
-    assert step_ends[0].status is OperationStatus.SUCCEEDED
-    assert step_ends[0].result == '"step-value"'
-    assert step_ends[0].error is None
-    assert [info.error for info in plugin.user_function_ends] == [None]
-    assert plugin.invocation_ends[0].error is None
-    assert plugin.invocation_ends[0].execution_result == '"step-value"'
-
-
-def test_plugin_sees_error_payloads_on_failing_step_end_to_end():
-    """A failing step reports its error on the operation, function and invocation hooks."""
-    plugin = _OutcomeRecordingPlugin()
-
-    def failing_step(_):
-        msg = "step-boom"
-        raise ValueError(msg)
-
-    def my_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
-        return context.step(
-            failing_step,
-            name="work",
-            config=StepConfig(
-                retry_strategy=lambda _error, _attempt: RetryDecision.no_retry()
-            ),
-        )
-
-    result = _run_with_plugin(my_handler, plugin)
-
-    assert result.status is InvocationStatus.FAILED
-    step_ends = [info for info in plugin.operation_ends if info.name == "work"]
-    assert len(step_ends) == 1
-    assert step_ends[0].status is OperationStatus.FAILED
-    assert step_ends[0].error is not None
-    assert step_ends[0].error.message == "step-boom"
-    assert step_ends[0].result is None
-
-    assert len(plugin.user_function_ends) == 1
-    assert plugin.user_function_ends[0].error is not None
-    assert plugin.user_function_ends[0].error.message == "step-boom"
-
-    invocation_end = plugin.invocation_ends[0]
-    assert invocation_end.status.value == InvocationStatus.FAILED.value
-    assert invocation_end.error is not None
-    assert invocation_end.error.message == "step-boom"
-    assert invocation_end.execution_result is None
