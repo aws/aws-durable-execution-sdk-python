@@ -924,7 +924,12 @@ def test_accepts_jobs_at_once_and_retries_after_a_refusal_for_now(
 
     h.run_hook(IDLE)
     h.advance(IDLE)
-    assert "refused the call for now" in logger.messages("warning")[0]
+    assert logger.messages("warning")[0] == (
+        "could not suspend the idle MicroVM, because the service refused the "
+        "call for now. It keeps running, and the worker tries again after the "
+        "next idle time. That idle time lasts at least 30 seconds, unless a job "
+        "or a resume hook starts the idle time again."
+    )
     assert h.job("cb-1") == 202
     h.finish_job("cb-1")
 
@@ -1082,7 +1087,7 @@ def test_a_job_that_ends_before_a_refused_call_has_ended_uses_the_normal_idle_ti
 
 
 def test_keeps_a_hook_refusal_after_a_refusal_for_now_of_the_own_call(
-    start: Any,
+    start: Any, logger: Any
 ) -> None:
     h = start()
     h.microvms.hold = True
@@ -1096,6 +1101,13 @@ def test_keeps_a_hook_refusal_after_a_refusal_for_now_of_the_own_call(
     h.settle()
 
     assert h.job("cb-1") == 503
+    # No 30-second floor applies, so the warning does not promise one.
+    assert logger.messages("warning") == [
+        "could not suspend the idle MicroVM, because the service refused the "
+        "call for now. A suspend hook arrived during the call, so its refusal "
+        "of jobs stays. That refusal ends when the resume hook arrives, or 30 "
+        "seconds after the suspend hook. The idle time then starts again."
+    ]
 
 
 def test_keeps_refusing_jobs_until_a_call_past_its_deadline_has_ended(

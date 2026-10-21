@@ -1466,20 +1466,13 @@ class MicrovmWorkerListener:
                         "MicroVM image in its execution role.",
                         extra={**fields, "error": describe(error)},
                     )
-                else:
-                    self._logger.warning(
-                        "could not suspend the idle MicroVM, because the "
-                        "service refused the call for now. It keeps running, "
-                        "and the worker tries again after the next idle time, "
-                        "at least 30 seconds.",
-                        extra={**fields, "error": describe(error)},
-                    )
                 # The service did nothing. So jobs can run again at once. A
                 # suspend hook that arrived since the idle time ended means
                 # that the MicroVM is suspending anyway, so its refusal stays.
                 with self._lock:
                     deferred = []
-                    if self._suspend_hooks == hooks_before:
+                    hook_arrived = self._suspend_hooks != hooks_before
+                    if not hook_arrived:
                         deferred = self._stop_refusing()
                         # A rejection, such as a missing permission, is not
                         # retried until a job ends. A refusal for now is
@@ -1488,6 +1481,30 @@ class MicrovmWorkerListener:
                         # can repeat on every call.
                         if outcome is SuspendOutcome.REFUSED_FOR_NOW:
                             self._start_idle_time(after_refusal=True)
+                if outcome is SuspendOutcome.REFUSED_FOR_NOW:
+                    if hook_arrived:
+                        # The hook's refusal stays, so no 30-second floor
+                        # applies. The idle time starts when that refusal
+                        # ends.
+                        self._logger.warning(
+                            "could not suspend the idle MicroVM, because the "
+                            "service refused the call for now. A suspend hook "
+                            "arrived during the call, so its refusal of jobs "
+                            "stays. That refusal ends when the resume hook "
+                            "arrives, or 30 seconds after the suspend hook. "
+                            "The idle time then starts again.",
+                            extra={**fields, "error": describe(error)},
+                        )
+                    else:
+                        self._logger.warning(
+                            "could not suspend the idle MicroVM, because the "
+                            "service refused the call for now. It keeps "
+                            "running, and the worker tries again after the "
+                            "next idle time. That idle time lasts at least 30 "
+                            "seconds, unless a job or a resume hook starts the "
+                            "idle time again.",
+                            extra={**fields, "error": describe(error)},
+                        )
                 self._launch_deferred(deferred)
                 return
             # A timeout, a conflict, a server error, or an error after a
