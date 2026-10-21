@@ -303,8 +303,9 @@ class MicrovmWorkerListener:
        call again. That idle time lasts at least 30 seconds, because the
        same error can repeat on every call, for example with a wrong secret
        key. A job that ends after the refusal, or a ``resume`` hook after
-       it, starts the normal idle time instead. A ``resume`` hook during the
-       call does not, because the refused outcome arrives after the hook.
+       it, starts the normal idle time instead. A ``resume`` hook or a job
+       that ends during the call does not, because the refused outcome
+       arrives after it.
        The default client retries a throttle. So a throttle from it usually
        ends as an unknown outcome, as in item 8. A throttle is refused for
        now only from a caller's client that does not retry it.
