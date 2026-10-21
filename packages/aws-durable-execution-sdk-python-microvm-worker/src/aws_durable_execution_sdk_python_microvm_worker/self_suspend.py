@@ -104,7 +104,7 @@ def create_microvms_client(region: str) -> LambdaMicrovmsClient:
     The client uses botocore's standard retry mode with 3 attempts. That
     mode retries a throttle error code, such as ``ThrottlingException``, a
     5xx answer, and a connection error. It retries no credential or
-    signature error, also with a clock offset. Each error reports the
+    signature error, also with a clock offset. Each ``ClientError`` reports the
     retries in ``ResponseMetadata.RetryAttempts``.
     """
     return boto3.session.Session().client(
