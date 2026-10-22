@@ -372,13 +372,25 @@ def test_noncooperative_work_is_joined_and_other_invocations_stay_healthy(
 
 
 @pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("checkpoint_token", ["next-token", None])
 def test_accepted_terminal_result_survives_slow_delivery_hook(
-    monkeypatch: pytest.MonkeyPatch, fail: bool
+    monkeypatch: pytest.MonkeyPatch, fail: bool, checkpoint_token: str | None
 ) -> None:
     monkeypatch.setattr(
         "aws_durable_execution_sdk_python.execution.LAMBDA_RESPONSE_SIZE_LIMIT", 20
     )
-    service = RecordingService()
+
+    class TerminalResultService(RecordingService):
+        def checkpoint(
+            self, *, updates: list[OperationUpdate], **kwargs: Any
+        ) -> CheckpointOutput:
+            response = super().checkpoint(updates=updates, **kwargs)
+            return CheckpointOutput(
+                checkpoint_token=checkpoint_token,
+                new_execution_state=response.new_execution_state,
+            )
+
+    service = TerminalResultService()
     entered = threading.Event()
     release = threading.Event()
     ends: list[InvocationEndInfo] = []

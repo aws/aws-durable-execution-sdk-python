@@ -35,7 +35,7 @@ if __name__ == "__main__":
     worker.wait()
 ```
 
-The worker needs `handler`, `routes`, or both. A handler is a plain function. An `async def` function, or an object whose `__call__` is `async def`, raises `TypeError`. A handler that returns an awaitable fails its job with a `TypeError`, because the worker cannot run it. The handler's return value becomes the durable function's result, and must be JSON-serializable. An exception fails the durable operation with the exception's class name and message.
+The worker needs `handler`, `routes`, or both. A handler is a plain function. An `async def` function, or an object whose `__call__` is `async def`, raises `TypeError`. A handler that returns an awaitable fails its job with a `TypeError`, because the worker cannot run it. The handler's return value becomes the durable function's result, and must be JSON-serializable. An exception fails the durable operation with the exception's class name and message. `context.cancelled` is set when the durable function stops waiting, for example after a heartbeat timeout, and when Lambda calls the `terminate` hook. Python cannot stop a running thread, so the handler should check the event and stop its work.
 
 `start_microvm_worker` serves in a daemon thread and returns. So the entry point ends with `worker.wait()`, which blocks until `worker.close()`.
 
@@ -49,19 +49,29 @@ The image needs these hook settings in `CreateMicrovmImage`:
 {
   "hooks": {
     "port": 8080,
-    "microvmHooks": { "run": "ENABLED", "runTimeoutInSeconds": 10 },
+    "microvmHooks": {
+      "run": "ENABLED",
+      "runTimeoutInSeconds": 10,
+      "resume": "ENABLED",
+      "resumeTimeoutInSeconds": 10,
+      "suspend": "ENABLED",
+      "suspendTimeoutInSeconds": 10,
+      "terminate": "ENABLED",
+      "terminateTimeoutInSeconds": 10
+    },
     "microvmImageHooks": { "ready": "ENABLED" }
   }
 }
 ```
 
 - The `run` hook delivers the job, or tells the worker that jobs arrive over HTTP. So it must be enabled.
+- The `resume` hook tells a session's worker that its MicroVM runs again after a suspend. It is optional, and recommended for sessions. See [Suspending when idle](#suspending-when-idle).
+- The `suspend` hook tells the worker that Lambda is about to freeze the MicroVM. The worker then refuses new jobs until the `resume` hook. It is optional, and recommended for sessions.
+- The `terminate` hook tells the worker that Lambda is about to end the MicroVM. The worker then fails the callback of each running job, so the durable function fails the job at once instead of at its heartbeat timeout or its timeout. It is optional, and recommended. Give it at least 10 seconds, because the worker reports before it answers, for at most 5 seconds. A hook timeout left unset ended the hook after about 2 seconds in testing.
 - The service requires the `ready` hook whenever a lifecycle hook is enabled. The worker answers it with HTTP 200.
 - `port` must match the worker's port. The worker listens on 8080 by default, which is also the port that the MicroVM endpoint forwards to. Pass `port=` for another port.
 
 The worker listens on IPv6 and IPv4 at once when the host supports it. Lambda calls the hooks on `localhost`, and that name can resolve to either family.
-
-The worker answers the `resume`, `suspend`, and `terminate` hooks with HTTP 200, and does nothing else for them yet. A later change acts on them.
 
 ## What the worker does
 
@@ -88,11 +98,55 @@ The worker creates a Lambda client for each job, after the job arrives, not at i
 
 A document that does not match the contract gets HTTP 400 with the validation message. If the document named a callback, the worker also fails that callback, so the durable function fails at once instead of at its timeout. A request whose body cannot be read gets HTTP 400 with a generic message, and the error is logged. The worker accepts a `run` hook body of at most 64 KB and a job request body of at most 6 MB, with a `Content-Length` or with chunked transfer encoding. In a chunked body, the chunk-size lines, their extensions, and the trailers have a limit of their own, of the same size. A larger body gets HTTP 400. With `Expect: 100-continue`, the 400 replaces `100 Continue`, so the client does not send the body. Without it, the worker reads and drops the body after the answer, for at most 10 seconds and 24 MB. Without that read, the connection would close with unread bytes, and the client would get a TCP reset instead of the 400. A body that is larger, or that is still arriving after 10 seconds, still gets the reset. Other lifecycle hooks get HTTP 200. Other paths get HTTP 404.
 
-`worker.idle(timeout)` waits until every job started so far has ended, and returns `False` when the timeout ends first. `worker.close()` stops the server. Running jobs continue, so call `idle()` first to let them report their outcome.
+`worker.idle(timeout)` waits until every job started so far has ended, and a running `SuspendMicrovm` call has returned. It returns `False` when the timeout ends first. `worker.close()` stops the server and the idle time. Running jobs continue, so call `idle()` first to let them report their outcome.
+
+## Suspending when idle
+
+A session's run hook payload can set `autoSuspendIdleSeconds`. The session sets it only with `auto_suspend_on_idle=True`, because suspending is off by default. The worker then suspends its own MicroVM when it has run no job for that many seconds:
+
+1. The idle time starts when the `run` hook arrives without a job, when a job ends, and when the `resume` lifecycle hook arrives, if the image enables it.
+2. A job that starts cancels the idle time. So the worker never suspends the MicroVM during a job.
+3. When the idle time ends, the worker calls `SuspendMicrovm` with the MicroVM ID from the `run` hook, never one from a job request. The call returned in under 100 milliseconds in testing, before the MicroVM froze. No attempt of the call starts after 10 seconds, because a `before-send` handler on the client stops botocore's retries at that deadline. botocore cannot cancel an attempt in flight, and it opens the connection after `before-send`. So an attempt that started before the deadline can still reach the service after it. The worker waits for that attempt to end, and refuses jobs until then. The client's connect and read timeouts bound the attempt: 5 and 10 seconds for the default client. A client from `create_microvms_client` should use similar timeouts. botocore's own defaults are 60 seconds each, so with them the refusal can last minutes. The durable function resumes the MicroVM before the next job, and the process continues with its memory and files.
+4. From the moment the idle time ends, the worker answers every job with HTTP 503 and does not start it. A job accepted then would freeze with the MicroVM, and nothing would resume it. After a 503, the durable function checks the state, resumes the MicroVM, and delivers the job again.
+5. The refusal ends when the `resume` lifecycle hook arrives, or 30 seconds after the call returned, if no hook arrives. The idle time then starts again. At most one call runs at a time. A `resume` hook that arrives during the call ends the refusal at once, and the next idle time starts when the call ends. So enable the `resume` hook in the image. Without it, the first job after a resume can wait a little over 30 seconds: the 30 seconds, plus up to 4 seconds until the durable function's next delivery attempt. A test measured 32 seconds.
+6. A call that the service rejected on its first attempt, such as `AccessDeniedException` for a missing permission, is logged as a warning, and the MicroVM keeps running. Missing credentials count as a rejection, because the call sends no request. The worker accepts jobs again at once and does not retry the call. The next job that ends starts the idle time again.
+7. A call that the service refused for now on its first attempt is logged as a warning too, and the worker accepts jobs again at once. This covers a throttle, expired credentials, and a clock offset, whatever the HTTP status. The service answers these before it acts. The idle time then starts again, so the worker tries the call again. The JavaScript worker decides these cases by HTTP status.
+8. A call whose outcome is unknown is handled like a successful call, because the service may have suspended the MicroVM anyway. This covers a timeout, a conflict, a server error, and a dropped connection. An error after botocore retried an earlier attempt also counts as unknown, because the earlier attempt may have suspended the MicroVM. botocore retries a throttle, so a throttle usually ends here. The refusal continues until the `resume` hook or the 30-second limit. The idle time then starts again, so the worker tries the call again.
+
+`worker.close()` stops the idle time. A closed worker never suspends its MicroVM again. A refusal that is already running still ends on the `resume` hook or after 30 seconds.
+
+The worker counts only jobs. It cannot see background threads or processes, or inbound traffic that is not a job. A session with such work leaves `auto_suspend_on_idle` off, and the payload then has no `autoSuspendIdleSeconds`.
+
+The worker creates a `lambda-microvms` client for each suspend, and closes it after the call. Pass `create_microvms_client` to provide the client. The worker never closes a client that it returns.
+
+## Suspend and terminate hooks
+
+Lambda waits for the answer to a `suspend` or `terminate` hook, up to the hook's timeout. The network and the execution role's credentials work while the hook runs. These facts come from probes in us-east-1, which the JavaScript SDK ran.
+
+On the `suspend` hook the worker:
+
+1. Answers HTTP 200 at once. A suspend hook that ran past its timeout terminated the MicroVM instead of suspending it.
+2. Refuses every job with HTTP 503, as after its own suspend. A job accepted now would freeze with the MicroVM. The refusal ends when the `resume` hook arrives, or after 30 seconds.
+3. Leaves running jobs alone. They freeze with the MicroVM, and continue after a resume.
+4. Defers a job from a `run` hook whose body was still arriving. The durable function cannot deliver a `run` hook job again, so the worker does not refuse it. It starts the job when the refusal ends.
+
+Lambda called the hook after `SuspendMicrovm` from outside, after the worker's own `SuspendMicrovm`, and when the idle policy suspended the MicroVM.
+
+On the `terminate` hook the worker:
+
+1. Sets each running job's `context.cancelled`, and stops its heartbeats.
+2. Fails each running job's callback with `MicrovmTerminatedError`. The worker reports `MicrovmTerminatedError` as the callback's error type. The `microvm` operation then fails with a `MicrovmJobFailedError` whose message contains `(MicrovmTerminatedError)`. The worker does not report the handler's outcome when it returns later.
+3. Skips a job whose callback a heartbeat already found gone. A report would fail the same way.
+4. Answers HTTP 200 when the reports end, or after 5 seconds. A report took 20 to 1,700 milliseconds in testing. The answer also waits for a job that is reporting its own outcome, for a `run` hook request whose body is still arriving, and for every callback failure report in flight, such as the report for an invalid request. Work that begins during the wait is included. A second `terminate` hook that arrives during the wait waits for the same work. Lambda can end the MicroVM as soon as it gets the answer, so a report sent after it can be lost.
+5. Refuses every later job with HTTP 503, and never suspends the MicroVM again. A job from a `run` hook whose body was still arriving is not started. Its callback fails with `MicrovmTerminatedError`, as does a job deferred by an earlier `suspend` hook.
+
+Lambda called the hook after `TerminateMicrovm` on a running MicroVM, and at the end of `maximumDurationInSeconds`. It did not call the hook when it terminated a suspended MicroVM, after `TerminateMicrovm` or at the end of the idle policy's `suspendedDurationSeconds`. The process is frozen then. A job of such a MicroVM fails at its heartbeat timeout or its timeout.
+
+The MicroVM endpoint forwards a request to a hook path from any caller that holds an auth token for the MicroVM. Lambda's own hook calls carried `Host: localhost:8080` and no `x-amzn-requestid` header. A forwarded request carried the endpoint's host name and an `x-amzn-requestid` header. So the worker acts on `suspend`, `terminate`, and `resume` only when the request has a `localhost`, `127.0.0.1`, or `[::1]` host, with any port, and no `x-amzn-requestid`. It answers any other request to these hooks with 200, and logs a warning. The Lambda documentation does not state these headers. If Lambda changed them, the worker would ignore `suspend` and `terminate`. A refusal after a suspend would then end after 30 seconds instead of at the `resume` hook. Without the check on `resume`, a forwarded `resume` between a `suspend` hook and the freeze could end the refusal early, and a job accepted then would freeze with the MicroVM. The `run` hook does not use the check, because a false rejection there would lose every job.
 
 ## Lower-level building blocks
 
-- `MicrovmWorkerListener.create(...)` takes the same arguments as `start_microvm_worker`, except `port`. Its `request_handler_class` serves the hooks and routes from your own `http.server.ThreadingHTTPServer`. Set the server's backlog to 511, as `start_microvm_worker` does. A session can send many jobs at once, and the default backlog of 5 resets the connections beyond it. The server's constructor already listens, so set `request_queue_size = 511` as a class attribute of a `ThreadingHTTPServer` subclass, not on the server object.
+- `MicrovmWorkerListener.create(...)` takes the same arguments as `start_microvm_worker`, except `port`. Call its `close()` when you stop serving it, so that it no longer suspends the MicroVM. Its `request_handler_class` serves the hooks and routes from your own `http.server.ThreadingHTTPServer`. Set the server's backlog to 511, as `start_microvm_worker` does. A session can send many jobs at once, and the default backlog of 5 resets the connections beyond it. The server's constructor already listens, so set `request_queue_size = 511` as a class attribute of a `ThreadingHTTPServer` subclass, not on the server object.
 - `RunHookRequest.from_dict` and `MicrovmJobRequest.from_dict` validate the two documents that deliver a job: the `run` lifecycle hook body, and the body of an HTTP job request.
 - `CallbackReporter` sends heartbeats, and completes the callback with a result or an error.
 
@@ -147,3 +201,7 @@ The worker logs to the standard library logger `aws_durable_execution_sdk_python
 ## Permissions
 
 The MicroVM's execution role needs `lambda:SendDurableExecutionCallbackSuccess`, `lambda:SendDurableExecutionCallbackFailure`, and `lambda:SendDurableExecutionCallbackHeartbeat` on the durable function's ARN (`arn:aws:lambda:<region>:<account>:function:<name>:*`).
+
+A session that suspends when idle also needs `lambda:SuspendMicrovm` on the MicroVM image (`arn:aws:lambda:<region>:<account>:microvm-image:<name>`). The action authorizes on the image, not on the MicroVM. So a MicroVM with this permission can suspend any MicroVM from the same image, even during a job. That job then waits until its heartbeat timeout or its timeout. Use one image per trust boundary.
+
+The worker needs boto3 1.43.35 or later, the first release with the `lambda-microvms` client.
