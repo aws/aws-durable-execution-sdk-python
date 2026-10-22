@@ -60,6 +60,10 @@ class PaymentError(Exception):
     """The user error type of Table B."""
 
 
+class FraudError(Exception):
+    """B20/B21: a second user error type with the same message."""
+
+
 class WrappedPaymentError(StepError):
     """B15 (Python form): a user error that subclasses an SDK wrapper."""
 
@@ -120,6 +124,8 @@ class Scenario:
     # Drives an external event (a callback failure) while the execution runs.
     drive: Callable[[DurableFunctionTestRunner, str], None] | None = None
     fresh: Callable[[], Callable[[DurableContext], Any]] | None = None
+    # Operation messages that differ from the execution's, by operation name.
+    operation_messages: dict[str, str] | None = None
 
 
 # -- scenario bodies ---------------------------------------------------------------
@@ -215,16 +221,23 @@ def _b12_b13(ctx: DurableContext) -> Any:
 
 
 def _fail_callback(
-    error_type: str | None,
+    error_type: str | None, message: str | None = MESSAGE
 ) -> Callable[[DurableFunctionTestRunner, str], None]:
     def drive(runner: DurableFunctionTestRunner, arn: str) -> None:
         callback_id = runner.wait_for_callback(arn, timeout=30)
         runner.send_callback_failure(
             callback_id,
-            ErrorObject(message=MESSAGE, type=error_type, data=None, stack_trace=None),
+            ErrorObject(message=message, type=error_type, data=None, stack_trace=None),
         )
 
     return drive
+
+
+def _b10_empty_message(ctx: DurableContext) -> Any:
+    # The core re-raises the submitter's failure with its default message.
+    return ctx.wait_for_callback(
+        _raise(PaymentError()), name="approval", config=NO_RETRY_SUBMITTER
+    )
 
 
 def _b14(ctx: DurableContext) -> Any:
@@ -255,6 +268,72 @@ def _b18(ctx: DurableContext) -> Any:
     return ctx.step(_raise(DollarError(MESSAGE)), name="charge", config=NO_RETRY)
 
 
+def _b20(ctx: DurableContext) -> Any:
+    def item(_c: DurableContext, value: str, *_args: Any) -> Any:
+        # One raise site, so both items carry the same message and stack trace.
+        raise (PaymentError if value == "a" else FraudError)(MESSAGE)
+
+    ctx.map(["a", "b"], item, name="fanout").throw_if_error()
+
+
+def _b21(ctx: DurableContext) -> Any:
+    ctx.parallel(
+        [_raise(PaymentError(MESSAGE)), _raise(FraudError(MESSAGE))], name="branches"
+    ).throw_if_error()
+
+
+def _handled_in_subtree(ctx: DurableContext) -> Any:
+    # Review case 5b: a failure handled inside the failing context's subtree.
+    def inner(c: DurableContext) -> Any:
+        try:
+            c.step(_raise(ValueError(MESSAGE)), name="lookup", config=NO_RETRY)
+        except StepError:
+            return "handled"
+        return "unreachable"  # pragma: no cover
+
+    def outer(c: DurableContext) -> Any:
+        c.run_in_child_context(inner, name="inner")
+        return c.step(_raise(PaymentError(MESSAGE)), name="charge", config=NO_RETRY)
+
+    return ctx.run_in_child_context(outer, name="outer")
+
+
+def _nested(depth: int) -> Callable[[DurableContext], Any]:
+    """A step that throws PaymentError inside ``depth`` nested child contexts."""
+
+    def level(i: int) -> Callable[[DurableContext], Any]:
+        def body(c: DurableContext) -> Any:
+            if i > depth:
+                return c.step(
+                    _raise(PaymentError(MESSAGE)), name="charge", config=NO_RETRY
+                )
+            return c.run_in_child_context(level(i + 1), name=f"ctx-{i:02d}")
+
+        return body
+
+    return level(1)
+
+
+def _depth_names(depth: int, bounded: dict[str, str]) -> dict[str, str]:
+    names = {f"ctx-{i:02d}": "PaymentError" for i in range(1, depth + 1)}
+    names["charge"] = "PaymentError"
+    names.update(bounded)
+    return names
+
+
+def _map_in_map_in_child(ctx: DurableContext) -> Any:
+    def inner_item(_c: DurableContext, *_args: Any) -> Any:
+        raise PaymentError(MESSAGE)
+
+    def outer_item(c: DurableContext, *_args: Any) -> Any:
+        c.map(["b"], inner_item, name="inner").throw_if_error()
+
+    def child(c: DurableContext) -> Any:
+        c.map(["a"], outer_item, name="outer").throw_if_error()
+
+    return ctx.run_in_child_context(child, name="checkout")
+
+
 SCENARIOS = [
     Scenario("B1", _b1, {"charge": "PaymentError"}, "PaymentError"),
     Scenario("B2", _b1, {"charge": "PaymentError"}, "PaymentError", fresh=_b2),
@@ -280,6 +359,15 @@ SCENARIOS = [
         _b10,
         {"approval": "PaymentError", "approval submitter": "PaymentError"},
         "PaymentError",
+    ),
+    Scenario(
+        "B10-empty-message",
+        _b10_empty_message,
+        {"approval": "PaymentError", "approval submitter": "PaymentError"},
+        "PaymentError",
+        message="Callback submitter failed",
+        # The context and the step keep the submitter's empty message.
+        operation_messages={"approval": "", "approval submitter": ""},
     ),
     Scenario(
         "B11",
@@ -308,6 +396,24 @@ SCENARIOS = [
         "CallbackExternalError",
         drive=_fail_callback(None),
     ),
+    Scenario(
+        "B13b",
+        _b12_b13,
+        {"approval": "Error", "approval create callback id": "Error"},
+        "Error",
+        drive=_fail_callback("Error"),
+    ),
+    Scenario(
+        "B12-empty-message",
+        _b12_b13,
+        {"approval": "PaymentError", "approval create callback id": "PaymentError"},
+        "PaymentError",
+        # The core fills in its default message on the context and the
+        # execution; the callback operation keeps the sender's empty one.
+        message="Callback failed",
+        operation_messages={"approval create callback id": ""},
+        drive=_fail_callback("com.acme.PaymentError", ""),
+    ),
     Scenario("B14", _b14, {}, "PaymentError"),
     Scenario("B15", _b15, {}, "WrappedPaymentError"),
     Scenario(
@@ -325,6 +431,42 @@ SCENARIOS = [
         message="Unsupported type: <class 'object'>",
     ),
     Scenario("B18", _b18, {"charge": "Error"}, "Error"),
+    Scenario(
+        "B20",
+        _b20,
+        {"map-item-0": "PaymentError", "map-item-1": "FraudError"},
+        "ChildContextError",
+    ),
+    Scenario(
+        "B21",
+        _b21,
+        {"parallel-branch-0": "PaymentError", "parallel-branch-1": "FraudError"},
+        "ChildContextError",
+    ),
+    Scenario(
+        "handled-in-subtree",
+        _handled_in_subtree,
+        {"outer": "PaymentError", "lookup": "ValueError", "charge": "PaymentError"},
+        "PaymentError",
+    ),
+    # Rule 3: ctx-01 needs `depth` unwraps (depth - 1 ChildContextErrors and the
+    # innermost context's StepError); at most 16 happen.
+    Scenario("depth-16", _nested(16), _depth_names(16, {}), "PaymentError"),
+    Scenario(
+        "depth-17", _nested(17), _depth_names(17, {"ctx-01": "StepError"}), "StepError"
+    ),
+    Scenario(
+        "depth-18",
+        _nested(18),
+        _depth_names(18, {"ctx-01": "ChildContextError", "ctx-02": "StepError"}),
+        "ChildContextError",
+    ),
+    Scenario(
+        "map-in-map-in-child",
+        _map_in_map_in_child,
+        {"checkout": "PaymentError", "map-item-0": "PaymentError"},
+        "PaymentError",
+    ),
 ]
 
 
@@ -351,6 +493,9 @@ def _handler(scenario: Scenario, replay: bool) -> Callable[[Any, DurableContext]
     return handler
 
 
+_TERMINAL = frozenset({"SUCCEEDED", "FAILED", "TIMED_OUT", "STOPPED"})
+
+
 def run_scenario(scenario: Scenario, replay: bool) -> dict[str, Any]:
     capture = _Capture()
     plugin = durable_execution_telemetry(
@@ -366,10 +511,17 @@ def run_scenario(scenario: Scenario, replay: bool) -> dict[str, Any]:
         if scenario.drive is not None:
             scenario.drive(runner, arn)
         runner.wait_for_result(arn, timeout=60)
+    # Wait for the terminal record, not just the first one: in on-change mode
+    # earlier RUNNING records may arrive first.
     deadline = time.monotonic() + 5
-    while not capture.records and time.monotonic() < deadline:  # pragma: no cover
-        time.sleep(0.01)
-    record = capture.records[-1]
+    while time.monotonic() < deadline:
+        with capture.lock:
+            terminal = [r for r in capture.records if r["status"] in _TERMINAL]
+        if terminal:
+            break
+        time.sleep(0.01)  # pragma: no cover
+    assert terminal, [r["status"] for r in capture.records]
+    record = terminal[-1]
     assert record["status"] == "FAILED"
     return record
 
@@ -389,12 +541,15 @@ def _assert_record(scenario: Scenario, record: dict[str, Any]) -> None:
     for name, expected in scenario.operations.items():
         assert names.get(name) == expected, (name, names)
     assert record["error"]["message"] == scenario.message
+    messages = scenario.operation_messages or {}
     for name in scenario.operations:
-        assert errors[name]["message"] == scenario.message
+        assert errors[name]["message"] == messages.get(name, scenario.message), name
     # operationsByName carries the same name as operations[].
+    # (A name used by several operations, such as nested map items, is skipped.)
     by_name = LambdaLogExporter().render(record)["operationsByName"]
+    used = [op["name"] for op in record["operations"]]
     for op in record["operations"]:
-        if "error" in op:
+        if "error" in op and used.count(op["name"]) == 1:
             assert by_name[op["name"]]["error"]["name"] == op["error"]["name"]
 
 

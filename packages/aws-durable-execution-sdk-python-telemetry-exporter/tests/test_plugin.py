@@ -848,7 +848,10 @@ def test_result_decimal_with_huge_exponent_is_fast_and_emitted(exponent):
     value = decimal.Decimal(f"1E+{exponent}")
     exporter = CaptureExporter(render=LambdaLogExporter().render)
     start = time.perf_counter()
-    _run(_override_plugin(exporter), ops=[_step("charge", result=_serialize({"x": value}))])
+    _run(
+        _override_plugin(exporter),
+        ops=[_step("charge", result=_serialize({"x": value}))],
+    )
     line = json.dumps(exporter.render(exporter.records[0]), allow_nan=False)
     elapsed = time.perf_counter() - start
     assert exporter.records[0]["operations"][0]["result"] == {"x": f"1E+{exponent}"}
