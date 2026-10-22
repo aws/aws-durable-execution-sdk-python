@@ -1,5 +1,7 @@
 """Registration metadata remains opt-in under the invocation factory API."""
 
+import inspect
+from collections.abc import Callable
 from io import StringIO
 from typing import cast
 from unittest.mock import patch
@@ -390,3 +392,40 @@ def test_decorator_rejection_cleans_valid_explicit_factories(
         assert created == []
     finally:
         factory.resource.close()
+
+
+@pytest.mark.parametrize("invalid_first", [False, True])
+@pytest.mark.parametrize("inspection", ["create_plugin", "signature"])
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt, SystemExit])
+def test_factory_inspection_failure_preserves_error_and_rejects_registration(
+    invalid_first: bool, inspection: str, error_type: type[BaseException]
+) -> None:
+    failure = error_type("factory inspection failed")
+
+    class BrokenCallable:
+        @property
+        def __signature__(self) -> inspect.Signature:
+            raise failure
+
+        def __call__(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+            raise AssertionError("registration must not construct invocation plugins")
+
+    class BrokenFactory:
+        @property
+        def create_plugin(
+            self,
+        ) -> Callable[[InvocationStartInfo], DurableInstrumentationPlugin]:
+            if inspection == "create_plugin":
+                raise failure
+            return BrokenCallable()
+
+    observer = _RegistrationObserver()
+    entries: list[DurableInstrumentationPluginFactory] = [observer, BrokenFactory()]
+    if invalid_first:
+        entries.reverse()
+
+    with pytest.raises(error_type) as error:
+        load_configured_plugins(entries, environment={})
+
+    assert error.value is failure
+    assert observer.results == ([False] if isinstance(failure, Exception) else [])

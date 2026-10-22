@@ -416,7 +416,9 @@ def load_configured_plugins(
         result = _resolve_configured_factories(
             resolved_factories, environment=environment
         )
-    except PluginLoadError:
+    except Exception:
+        # Customer descriptors and signature inspection can raise ordinary
+        # exceptions too. Release rejected resources and preserve the cause.
         _notify_registration_result(resolved_factories, registered=False)
         raise
     _notify_registration_result(result, registered=True)
