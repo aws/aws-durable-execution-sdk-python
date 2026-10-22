@@ -29,7 +29,7 @@ The changes most likely to touch your code are the `plugins` argument,
 custom entry-point providers, and OTel registrations. Use
 [Finding affected code](#finding-affected-code) to locate them before upgrading.
 
-| 2.x core / 1.x OTel | 3.x core / 2.x OTel |
+| Core 2.x / OTel 1.x | Core 3.x / OTel 2.x |
 | --- | --- |
 | `plugins=[plugin_instance]` | `plugins=[factory_instance]` |
 | `DurableInstrumentationPluginProvider(plugin_type=..., factory=..., plugin_api_version=1)` | An object with `create_plugin(info: InvocationStartInfo)` |
@@ -80,7 +80,7 @@ synchronous `create_plugin(info)` method that returns a fresh
 For a custom plugin, replace the instance registration:
 
 ```python
-# 2.x
+# Core 2.x
 @durable_execution(plugins=[AuditPlugin()])
 def handler(event: dict, context: DurableContext) -> str:
     return context.step(lambda _: "ok", name="work")
@@ -89,7 +89,7 @@ def handler(event: dict, context: DurableContext) -> str:
 With a factory instance:
 
 ```python
-# 3.0
+# Core 3.0
 from aws_durable_execution_sdk_python import DurableContext, durable_execution
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -149,7 +149,7 @@ the old zero-argument factory must become `create_plugin(info)`, and each call
 must construct a new plugin.
 
 ```python
-# 2.x, in example_audit/__init__.py
+# Core 2.x, in example_audit/__init__.py
 from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPluginProvider
 
 AUDIT_PROVIDER = DurableInstrumentationPluginProvider(
@@ -160,7 +160,7 @@ AUDIT_PROVIDER = DurableInstrumentationPluginProvider(
 ```
 
 ```python
-# 3.0, alongside the AuditPluginFactory definition above
+# Core 3.0, alongside the AuditPluginFactory definition above
 AUDIT_PLUGIN_FACTORY = AuditPluginFactory()
 ```
 
@@ -226,6 +226,14 @@ already returns a factory in this release, so pass its result directly to
 `plugins`. Do not wrap or cache a plugin returned by that factory. See the
 [Telemetry Exporter guide](../packages/aws-durable-execution-sdk-python-telemetry-exporter/README.md).
 
+### Move registration metadata to the factory
+
+Optional exclusivity metadata belongs on the factory class. Custom factories
+can opt in with `__durable_registration_api__ = 1` and `exclusive_group`;
+unmarked fields are ignored. The optional `on_registration_result(registered)`
+callback concerns registration resources, not invocation finalization. This
+registration API is distinct from the removed provider `plugin_api_version`.
+
 ### Finding affected code
 
 Search application code, plugin packages, deployment configuration, and tests:
@@ -240,7 +248,7 @@ rg -n 'aws-durable-execution-sdk-python|Layers:|layer_version_arn' .
 These searches find registration and packaging candidates. They cannot prove
 that plugin state has the correct lifetime.
 
-## Plugin State and Invocation Lifecycle
+## Plugin state and invocation lifecycle
 
 Move invocation identity, spans, operation maps, and pending records onto each
 new plugin instance. Keep reusable resources such as thread-safe exporters and
@@ -262,13 +270,7 @@ cleanup, output preparation, and checkpoint shutdown; it is not a reverse-order
 context stack. See the [invocation worker lifecycle](../packages/aws-durable-execution-sdk-python/README.md#invocation-worker-lifecycle)
 for context-variable handling.
 
-Optional exclusivity metadata belongs on the factory class. Custom factories
-can opt in with `__durable_registration_api__ = 1` and `exclusive_group`;
-unmarked fields are ignored. The optional `on_registration_result(registered)`
-callback concerns registration resources, not invocation finalization. This
-registration API is distinct from the removed provider `plugin_api_version`.
-
-## Recommended Validation After Upgrading
+## Recommended validation after upgrading
 
 1. Resolve Core 3 and OTel 2 together, regenerate the lock file, and run
    `python -m pip check` in the built application environment. Verify attached
