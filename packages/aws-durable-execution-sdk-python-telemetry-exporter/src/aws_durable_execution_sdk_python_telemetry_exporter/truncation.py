@@ -4,6 +4,9 @@
 """Best-effort record size limiter.
 
 Direct port of the JS ``truncation.ts``. Drop order:
+  0. every error ``cause`` (``droppedCauses: true``). Records written by this
+     SDK never carry a cause, so this step only changes a record whose errors
+     were given a ``cause`` by other code;
   1. operation ``result`` fields, oldest operation first (each dropped op marked
      ``truncated: true``);
   2. whole operations, oldest first (``droppedOperations`` count);
@@ -14,7 +17,9 @@ Identity/timeline fields are never dropped. The input record is never mutated.
 ``render`` maps the record to the exact value the exporter serializes, so the
 size check measures what is actually emitted. Byte size is measured with
 JS-compatible compact JSON (no whitespace, non-ASCII preserved) to match
-``JSON.stringify`` byte counts.
+``JSON.stringify`` byte counts. U+2028 and U+2029 are counted as their 6-byte
+``\\uXXXX`` escapes, which ``LambdaLogExporter`` prints; for every other
+exporter this overcounts by 3 bytes per such character.
 """
 
 from __future__ import annotations
@@ -25,11 +30,24 @@ from typing import Any, Callable
 
 def json_byte_size(value: Any) -> int | None:
     try:
-        return len(
-            json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        )
+        text = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
     except (TypeError, ValueError):
         return None
+    # Each U+2028 / U+2029 is 3 bytes raw and 6 bytes escaped.
+    return len(text.encode("utf-8")) + 3 * (text.count("\u2028") + text.count("\u2029"))
+
+
+def _has_cause(holder: dict[str, Any]) -> bool:
+    error = holder.get("error")
+    return isinstance(error, dict) and "cause" in error
+
+
+def _drop_cause(holder: dict[str, Any]) -> None:
+    # ``holder`` is already a copy; the error is copied too, never mutated.
+    if _has_cause(holder):
+        holder["error"] = {
+            key: value for key, value in holder["error"].items() if key != "cause"
+        }
 
 
 def truncate_record(
@@ -53,6 +71,12 @@ def truncate_record(
         range(len(ops)), key=lambda i: (ops[i].get("startTime") or "\uffff", i)
     )
 
+    # Phase 0: drop every cause. The cause chain hangs off each error only, so
+    # removing the top-level ``cause`` removes the whole chain.
+    dropped_causes = _has_cause(record) or any(_has_cause(op) for op in ops)
+    for op in ops:
+        _drop_cause(op)
+
     any_result = False
     dropped_ops = 0
     dropped_input = False
@@ -62,6 +86,9 @@ def truncate_record(
         out = dict(record)
         out["operations"] = [op for i, op in enumerate(ops) if kept[i]]
         out["truncated"] = True
+        if dropped_causes:
+            _drop_cause(out)
+            out["droppedCauses"] = True
         if dropped_ops > 0:
             out["droppedOperations"] = dropped_ops
         if dropped_input:
@@ -101,7 +128,13 @@ def truncate_record(
     if not fits() and record.get("output") is not None:
         dropped_output = True
 
-    if not any_result and dropped_ops == 0 and not dropped_input and not dropped_output:
+    if (
+        not dropped_causes
+        and not any_result
+        and dropped_ops == 0
+        and not dropped_input
+        and not dropped_output
+    ):
         return record
 
     return candidate()

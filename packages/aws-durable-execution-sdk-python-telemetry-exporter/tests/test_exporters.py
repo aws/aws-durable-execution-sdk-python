@@ -34,6 +34,9 @@ from aws_durable_execution_sdk_python_telemetry_exporter.exporters.s3_exporter i
 from aws_durable_execution_sdk_python_telemetry_exporter.exporters.s3_exporter import (
     S3Partitioning as S3PartitioningFromModule,
 )
+from aws_durable_execution_sdk_python_telemetry_exporter.operations_index import (
+    with_operations_by_name,
+)
 
 
 def _record(**kw: Any) -> dict[str, Any]:
@@ -90,10 +93,13 @@ def test_every_exporter_is_re_exported_from_the_package_root():
 # -- LambdaLogExporter --------------------------------------------------------
 
 
-def test_lambda_log_default_size_and_render_is_operations_by_name():
+def test_lambda_log_default_size_and_render_is_the_envelope():
     exporter = LambdaLogExporter()
     assert exporter.max_record_size_bytes == 256_000
-    shaped = exporter.render(_record())
+    envelope = exporter.render(_record())
+    # render returns the printed envelope, so truncation measures the line.
+    assert list(envelope) == ["timestamp", "level", "message"]
+    shaped = json.loads(envelope["message"])
     assert "operations" not in shaped
     assert shaped["operationsByName"]["greet"]["count"] == 1
 
@@ -113,10 +119,12 @@ def test_lambda_log_export_prints_one_envelope_line(capsys):
     assert envelope["level"] == "INFO"
     # message parses back to exactly the rendered record
     assert isinstance(envelope["message"], str)
-    assert json.loads(envelope["message"]) == exporter.render(_record())
+    expected = with_operations_by_name(_record())
+    assert json.loads(envelope["message"]) == expected
     assert envelope["message"] == json.dumps(
-        exporter.render(_record()), separators=(",", ":"), ensure_ascii=False
+        expected, separators=(",", ":"), ensure_ascii=False
     )
+    assert envelope["message"] == exporter.render(_record())["message"]
     # UTC, millisecond precision, Z suffix
     ts = envelope["timestamp"]
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", ts)

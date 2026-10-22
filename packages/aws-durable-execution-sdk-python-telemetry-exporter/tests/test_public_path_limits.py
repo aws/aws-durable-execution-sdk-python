@@ -1,0 +1,276 @@
+# SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
+#
+# SPDX-License-Identifier: Apache-2.0
+"""Public plugin path into real exporters: decoded numbers, line size, caps."""
+
+from __future__ import annotations
+
+import datetime
+import decimal
+import json
+import logging
+from typing import Any
+
+import pytest
+from aws_durable_execution_sdk_python.lambda_service import (
+    ErrorObject,
+    OperationStatus,
+    OperationSubType,
+)
+from aws_durable_execution_sdk_python.plugin import (
+    InvocationEndInfo,
+    InvocationStartInfo,
+    InvocationStatus,
+    OperationEndInfo,
+    OperationInfo,
+    OperationType,
+)
+from aws_durable_execution_sdk_python.serdes import EXTENDED_TYPES_SERDES
+
+from aws_durable_execution_sdk_python_telemetry_exporter import (
+    ContentConfig,
+    ContentOperations,
+    DurableExecutionTelemetryConfig,
+    DynamoDBExporter,
+    LambdaLogExporter,
+    OperationOverride,
+    durable_execution_telemetry,
+)
+
+ARN = "arn:aws:lambda:us-west-2:123456789012:function:my-fn:$LATEST/durable-execution/exec-1/inv-1"
+T0 = datetime.datetime(2026, 1, 1, 0, 0, 0, tzinfo=datetime.UTC)
+T1 = datetime.datetime(2026, 1, 1, 0, 0, 1, tzinfo=datetime.UTC)
+BIG_39_DIGITS = "123456789012345678901234567890123456789"
+
+
+class StubDynamoDBClient:
+    def __init__(self) -> None:
+        self.items: list[dict[str, Any]] = []
+
+    def put_item(self, **kwargs: Any) -> None:
+        self.items.append(kwargs["Item"])
+
+
+def _op(name: str, index: int, *, result: str | None = None) -> OperationEndInfo:
+    start = T0 + datetime.timedelta(milliseconds=index)
+    return OperationEndInfo(
+        operation_id=f"{name}-id",
+        operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name=name,
+        parent_id=None,
+        start_time=start,
+        is_replayed=False,
+        status=OperationStatus.SUCCEEDED,
+        end_time=T1,
+        result=result,
+        error=None,
+        attempt=1,
+    )
+
+
+def _run(
+    exporter: Any,
+    ops: list[OperationEndInfo],
+    *,
+    execution_input: str | None = None,
+    error: ErrorObject | None = None,
+) -> None:
+    overrides = [OperationOverride(op.name or "", result=lambda r: r) for op in ops]
+    plugin = durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(
+            exporters=[exporter],
+            content=ContentConfig(operations=ContentOperations(overrides=overrides)),
+        )
+    )
+    operations: dict[str, OperationInfo] = {op.operation_id: op for op in ops}
+    plugin.on_invocation_start(
+        InvocationStartInfo(
+            request_id=None,
+            execution_arn=ARN,
+            is_first_invocation=True,
+            execution_start_time=T0,
+            execution_input=execution_input,
+            operations=operations,
+        )
+    )
+    plugin.on_invocation_end(
+        InvocationEndInfo(
+            request_id=None,
+            execution_arn=ARN,
+            is_first_invocation=True,
+            execution_start_time=T0,
+            status=InvocationStatus.FAILED if error else InvocationStatus.SUCCEEDED,
+            error=error,
+            execution_result=None,
+            operations=operations,
+        )
+    )
+
+
+def _envelope(value: Any) -> str:
+    return EXTENDED_TYPES_SERDES.serialize(value, None)  # type: ignore[arg-type]
+
+
+# -- B1: decoded numbers reach DynamoDB ----------------------------------------
+
+
+def _dynamodb_results(*results: str, caplog: pytest.LogCaptureFixture) -> Any:
+    client = StubDynamoDBClient()
+    exporter = DynamoDBExporter(table_name="t", client=client)
+    ops = [_op(f"op{i}", i, result=raw) for i, raw in enumerate(results)]
+    with caplog.at_level(logging.WARNING):
+        _run(exporter, ops)
+    assert "failed" not in caplog.text
+    assert len(client.items) == 1
+    by_name = client.items[0]["operationsByName"]["M"]
+    return [by_name[f"op{i}"]["M"]["result"] for i in range(len(results))]
+
+
+def test_out_of_range_decoded_decimals_keep_the_dynamodb_item(caplog):
+    results = _dynamodb_results(
+        _envelope(decimal.Decimal("1E+299")),
+        _envelope(decimal.Decimal(BIG_39_DIGITS)),
+        _envelope(decimal.Decimal("9007199254740993")),
+        _envelope({"amount": decimal.Decimal("12.50"), "n": decimal.Decimal("7")}),
+        caplog=caplog,
+    )
+    assert results[:3] == [
+        {"S": "1E+299"},
+        {"S": BIG_39_DIGITS},
+        # Exact for JavaScript readers, which would round the number.
+        {"S": "9007199254740993"},
+    ]
+    assert results[3] == {"M": {"amount": {"N": "12.5"}, "n": {"N": "7"}}}
+
+
+def test_out_of_range_plain_json_numbers_keep_the_dynamodb_item(caplog):
+    results = _dynamodb_results(
+        "1e300",
+        BIG_39_DIGITS,
+        "[1e-200, 1.5, 3]",
+        caplog=caplog,
+    )
+    assert results == [
+        {"S": "1e+300"},
+        {"S": BIG_39_DIGITS},
+        {"L": [{"S": "1e-200"}, {"N": "1.5"}, {"N": "3"}]},
+    ]
+
+
+def test_dynamodb_marshal_turns_non_finite_numbers_into_strings():
+    client = StubDynamoDBClient()
+    exporter = DynamoDBExporter(table_name="t", client=client)
+    marshalled = exporter._marshal({"a": float("nan"), "b": float("inf"), "c": 1})
+    assert marshalled == {"a": {"S": "NaN"}, "b": {"S": "Infinity"}, "c": {"N": "1"}}
+
+
+def test_dynamodb_marshal_applies_the_service_magnitude_range():
+    exporter = DynamoDBExporter(table_name="t", client=StubDynamoDBClient())
+    marshalled = exporter._marshal({"a": [1e125, 1e126, 1e-130, 1e-131, 0, -0.0]})
+    assert marshalled["a"]["L"] == [
+        {"N": "1E+125"},
+        {"S": "1e+126"},
+        {"N": "1E-130"},
+        {"S": "1e-131"},
+        {"N": "0"},
+        {"N": "-0.0"},
+    ]
+
+
+# -- B2: LambdaLogExporter bounds the printed line ------------------------------
+
+
+def _printed_line(capsys: pytest.CaptureFixture[str]) -> str:
+    out = capsys.readouterr().out
+    assert out.endswith("\n") and out.count("\n") == 1
+    return out[:-1]
+
+
+def test_quote_heavy_record_line_fits_the_limit(capsys):
+    limit = 262_144
+    exporter = LambdaLogExporter(max_record_size_bytes=limit)
+    # Each '"' is 2 bytes in the record JSON and 4 bytes in the printed line.
+    ops = [_op(f"q{i}", i, result=json.dumps('"' * 4000)) for i in range(40)]
+    _run(exporter, ops, execution_input='"\\' * 10_000)
+    line = _printed_line(capsys)
+    assert len(line.encode("utf-8")) <= limit
+    envelope = json.loads(line)
+    record = json.loads(envelope["message"])
+    assert record["truncated"] is True
+    # The single pass measured the line, so it still keeps what fits.
+    kept = [summary for summary in record["operationsByName"].values()]
+    assert kept
+    assert any("result" in summary for summary in kept)
+
+
+def test_capped_execution_error_fits_a_64_kb_line(capsys):
+    limit = 65_536
+    exporter = LambdaLogExporter(max_record_size_bytes=limit)
+    # \x01 is the worst case: 6 bytes in the record, 7 in the printed line.
+    message = "\x01" * 100_000
+    ops = [_op(f"q{i}", i, result=json.dumps('"' * 2000)) for i in range(40)]
+    _run(
+        exporter,
+        ops,
+        execution_input='"' * 50_000,
+        error=ErrorObject(message=message, type="E", data=None, stack_trace=None),
+    )
+    line = _printed_line(capsys)
+    assert len(line.encode("utf-8")) <= limit
+    record = json.loads(json.loads(line)["message"])
+    assert record["error"]["message"] == "\x01" * 8192 + "\u2026"
+    assert record["droppedInput"] is True
+
+
+def test_line_separators_are_escaped_and_text_round_trips(capsys):
+    exporter = LambdaLogExporter()
+    text = 'a\u2028b\u2029c é "q" \\ \n \x01 \U0001f600'
+    _run(exporter, [_op("s", 0, result=json.dumps(text))])
+    out = capsys.readouterr().out
+    assert "\u2028" not in out and "\u2029" not in out
+    assert len(out.splitlines()) == 1
+    # Non-ASCII stays raw; control characters and quotes are escaped.
+    assert "é" in out and "\U0001f600" in out and "\x01" not in out
+    record = json.loads(json.loads(out)["message"])
+    assert record["operationsByName"]["s"]["result"] == text
+
+
+def test_line_separator_escaping_is_counted_in_the_limit(capsys):
+    limit = 4096
+    exporter = LambdaLogExporter(max_record_size_bytes=limit)
+    ops = [_op(f"s{i}", i, result=json.dumps("\u2028" * 300)) for i in range(10)]
+    _run(exporter, ops)
+    line = _printed_line(capsys)
+    assert len(line.encode("utf-8")) <= limit
+    assert json.loads(json.loads(line)["message"])["truncated"] is True
+
+
+# -- rule 7: message cap --------------------------------------------------------
+
+
+def test_error_messages_are_capped_at_8192_characters(capsys):
+    exporter = LambdaLogExporter(max_record_size_bytes=0)
+    op = OperationEndInfo(
+        operation_id="f-id",
+        operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="f",
+        parent_id=None,
+        start_time=T0,
+        is_replayed=False,
+        status=OperationStatus.FAILED,
+        end_time=T1,
+        result=None,
+        error=ErrorObject(message="m" * 8193, type="E", data=None, stack_trace=None),
+        attempt=1,
+    )
+    _run(
+        exporter,
+        [op],
+        error=ErrorObject(message="x" * 8192, type="E", data=None, stack_trace=None),
+    )
+    record = json.loads(json.loads(_printed_line(capsys))["message"])
+    # Exactly 8,192 characters is kept as is.
+    assert record["error"]["message"] == "x" * 8192
+    assert record["operationsByName"]["f"]["error"]["message"] == "m" * 8192 + "…"

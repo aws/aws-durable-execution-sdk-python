@@ -10,7 +10,6 @@ import dataclasses
 import datetime
 import decimal
 import json
-import time
 import uuid
 from typing import Any
 
@@ -243,10 +242,21 @@ def test_batch_result_becomes_to_dict():
     [
         ("12", 12),
         ("-0", 0),
+        ("-0.0", 0),
         ("1.10", 1.1),
         ("0.1", 0.1),
-        ("1E+299", 10**299),
-        ("1E+300", 1e300),
+        ("9007199254740991", 9007199254740991),
+        ("-9007199254740991", -9007199254740991),
+        ("9007199254740992", 9007199254740992.0),
+        ("9007199254740993", "9007199254740993"),
+        ("1E+20", 1e20),
+        ("1E+125", 1e125),
+        ("1E+126", "1E+126"),
+        ("1E-130", 1e-130),
+        ("1E-131", "1E-131"),
+        ("1E+299", "1E+299"),
+        ("1E+300", "1E+300"),
+        ("1" * 39, "1" * 39),
         ("12345678901234567.89", "12345678901234567.89"),
         ("1E+5000", "1E+5000"),
         ("1E+1000000", "1E+1000000"),
@@ -259,15 +269,57 @@ def test_batch_result_becomes_to_dict():
 )
 def test_decimal_conversion(text, expected):
     raw = _envelope({"v": decimal.Decimal(text)})
-    started = time.perf_counter()
     decoded = _decode_checkpoint_result(raw)
-    assert time.perf_counter() - started < 0.5
     assert decoded == {"v": expected}
     assert type(decoded["v"]) is type(expected)
 
 
+class _CountingDecimal(decimal.Decimal):
+    int_calls = 0
+
+    def __int__(self) -> int:
+        type(self).int_calls += 1
+        return super().__int__()
+
+
+@pytest.mark.parametrize(
+    "text", ["1E+16", "1E+299", "1E+5000", "1E+1000000", "1" * 4000]
+)
+def test_out_of_range_integral_decimal_never_builds_an_int(text):
+    # Counts int() conversions instead of timing them: a Decimal past the
+    # 2**53 - 1 bound is rejected on its exponent before any int is built.
+    _CountingDecimal.int_calls = 0
+    assert _to_json_compatible([_CountingDecimal(text)]) == [
+        float(text) if text == "1E+16" else text
+    ]
+    assert _CountingDecimal.int_calls == 0
+    assert _to_json_compatible([_CountingDecimal("12")]) == [12]
+    assert _CountingDecimal.int_calls == 1
+
+
 def test_non_finite_plain_json_becomes_null():
     assert _decode_checkpoint_result("[NaN, Infinity, 1.5]") == [None, None, 1.5]
+    assert _decode_checkpoint_result('{"a": [1e999, -1e999]}') == {"a": [None, None]}
+
+
+def test_plain_json_skips_the_tree_walk(monkeypatch):
+    from aws_durable_execution_sdk_python_telemetry_exporter import plugin
+
+    calls: list[Any] = []
+    real = plugin._to_json_compatible
+
+    def spy(value):
+        calls.append(value)
+        return real(value)
+
+    monkeypatch.setattr(plugin, "_to_json_compatible", spy)
+    assert _decode_checkpoint_result('{"a": [1, 2.5, "x", null, true]}') == {
+        "a": [1, 2.5, "x", None, True]
+    }
+    assert _decode_checkpoint_result('{"t": "zz", "v": 1}') == {"t": "zz", "v": 1}
+    assert calls == []
+    assert _decode_checkpoint_result("[NaN]") == [None]
+    assert len(calls) == 1
 
 
 def test_600_nested_arrays():
@@ -315,6 +367,14 @@ def test_non_envelope_results_pass_through():
     }
     # Shape collision: a JsonSerDes value that looks like an envelope is decoded.
     assert _decode_checkpoint_result('{"t":"s","v":"x"}') == "x"
+    assert _decode_checkpoint_result('{"t":"i","v":5}') == 5
+    assert _decode_checkpoint_result('{"t":"m","v":{"a":1}}') == {"a": 1}
+    # The core coerces ``v`` for a known tag.
+    assert _decode_checkpoint_result('{"t":"b","v":"yes"}') is True
+    assert _decode_checkpoint_result('{"t":"temperature","v":21.5}') == {
+        "t": "temperature",
+        "v": 21.5,
+    }
 
 
 def test_one_failing_result_keeps_the_rest_of_the_record():
@@ -349,4 +409,4 @@ def test_unsupported_value_after_fallback_returns_raw_string(monkeypatch):
         raise TypeError
 
     monkeypatch.setattr(plugin, "_to_json_compatible", boom)
-    assert _decode_checkpoint_result('{"a":1}') == '{"a":1}'
+    assert _decode_checkpoint_result('{"a":NaN}') == '{"a":NaN}'

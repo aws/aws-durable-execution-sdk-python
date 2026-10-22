@@ -31,12 +31,12 @@ class LambdaLogExporter:
     request id is not available to exporters, so ``requestId`` is omitted.
     Requires no extra IAM.
 
-    ``max_record_size_bytes`` limits the rendered record (the ``message``
-    string), as for every exporter; the envelope keys and the JSON escaping of
-    ``message`` add bytes on top of it. The line can be up to about twice the
-    record (escaping doubles each ``"`` and ``\\``), about 20% more for a
-    typical record. CloudWatch Logs accepts events of up to 1 MB, so a record
-    at the default 256 KB limit fits.
+    ``render`` returns this envelope, so ``max_record_size_bytes`` (default
+    256,000) limits the printed line itself (in UTF-8 bytes, without the
+    trailing newline). Truncation runs once, against the envelope, including
+    the JSON escaping of ``message``. U+2028 and U+2029 are written as
+    ``\\u2028`` and ``\\u2029`` so tools that split on them keep one record per
+    line. CloudWatch Logs accepts events of up to 1 MB.
     """
 
     def __init__(self, max_record_size_bytes: int | None = None) -> None:
@@ -45,22 +45,26 @@ class LambdaLogExporter:
         )
 
     def render(self, record: dict[str, Any]) -> dict[str, Any]:
-        return with_operations_by_name(record)
-
-    def export(self, record: dict[str, Any]) -> None:
         timestamp = (
             datetime.datetime.now(datetime.UTC)
             .isoformat(timespec="milliseconds")
             .replace("+00:00", "Z")
         )
-        envelope = {
+        return {
             "timestamp": timestamp,
             "level": "INFO",
-            "message": compact_dumps(self.render(record)),
+            "message": compact_dumps(with_operations_by_name(record)),
         }
+
+    def export(self, record: dict[str, Any]) -> None:
+        line = (
+            compact_dumps(self.render(record))
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029")
+        )
         # print (not logging): Lambda leaves stdout lines as written in both
         # the Text and JSON log formats, so the envelope is never wrapped twice.
-        print(compact_dumps(envelope), flush=True)  # noqa: T201
+        print(line, flush=True)  # noqa: T201
 
     def flush(self) -> None:
         return None

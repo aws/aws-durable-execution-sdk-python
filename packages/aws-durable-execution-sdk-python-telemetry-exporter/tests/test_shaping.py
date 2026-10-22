@@ -160,3 +160,41 @@ def test_apply_operations_format_both_keeps_array_and_adds_map():
 
 def test_operations_format_enum_values():
     assert {f.value for f in OperationsFormat} == {"array", "by-name", "both"}
+
+
+def test_truncation_drops_every_cause_first():
+    cause = {
+        "name": "Inner",
+        "message": "c" * 400,
+        "cause": {"name": "E", "message": "x"},
+    }
+    op_error = {"name": "E", "message": "m", "cause": cause}
+    record = {
+        "executionArn": "arn",
+        "error": {"name": "E", "message": "m", "cause": cause},
+        "operations": [_op("a", error=op_error, result="r")],
+    }
+    out = truncate_record(record, 300, render=lambda r: r)
+    assert out["droppedCauses"] is True
+    assert out["error"] == {"name": "E", "message": "m"}
+    assert out["operations"][0]["error"] == {"name": "E", "message": "m"}
+    # Dropping causes was enough: later phases did not run.
+    assert out["operations"][0]["result"] == "r"
+    # The input record is never mutated.
+    assert record["error"]["cause"] is cause
+    assert record["operations"][0]["error"]["cause"] is cause
+
+
+def test_truncation_without_causes_sets_no_dropped_causes():
+    record = _record_with_results([2000])
+    out = truncate_record(record, 400, render=lambda r: r)
+    assert out["truncated"] is True
+    assert "droppedCauses" not in out
+
+
+def test_json_byte_size_counts_line_separators_as_escapes():
+    from aws_durable_execution_sdk_python_telemetry_exporter.truncation import (
+        json_byte_size,
+    )
+
+    assert json_byte_size("\u2028\u2029") == len('"\\u2028\\u2029"')

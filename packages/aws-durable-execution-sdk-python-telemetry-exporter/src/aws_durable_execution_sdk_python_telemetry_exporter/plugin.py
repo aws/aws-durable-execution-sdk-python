@@ -190,15 +190,36 @@ def _decode_checkpoint_result(raw_result: str) -> Any:
     primitive lists as plain JSON, and everything else as a ``{"t": ..., "v":
     ...}`` envelope. An envelope is decoded with that default serializer and
     converted to plain JSON values (see ``_to_json_compatible``). A payload that
-    is not an envelope is parsed JSON, or the raw string when it is not JSON. An
-    envelope that fails to decode falls back to the parsed payload. Never raises.
+    is not an envelope is parsed JSON, or the raw string when it is not JSON;
+    its tree is only walked when it holds NaN or an infinite number. An
+    envelope that fails to decode falls back to the parsed payload. Never
+    raises.
 
     The hooks do not say which serializer wrote a result, so the envelope is
     recognised by shape alone: a result written by ``JsonSerDes`` or a custom
-    ``SerDes`` that has this exact shape is decoded too.
+    ``SerDes`` that has this exact shape is decoded too. Only the core's known
+    tags are decoded, and the core may coerce ``v`` while decoding (for
+    example ``{"t": "b", "v": "yes"}`` becomes ``True``). An unknown tag fails
+    to decode and passes through unchanged.
     """
+    non_finite = False
+
+    def parse_constant(name: str) -> float:
+        nonlocal non_finite
+        non_finite = True
+        return float(name)
+
+    def parse_float(text: str) -> float:
+        nonlocal non_finite
+        number = float(text)
+        if not math.isfinite(number):  # for example 1e999
+            non_finite = True
+        return number
+
     try:
-        parsed = json.loads(raw_result)
+        parsed = json.loads(
+            raw_result, parse_constant=parse_constant, parse_float=parse_float
+        )
     except (ValueError, TypeError, RecursionError):
         return raw_result
     try:
@@ -208,22 +229,31 @@ def _decode_checkpoint_result(raw_result: str) -> Any:
                 return _to_json_compatible(decoded)
             except Exception:  # noqa: BLE001 - fall back to the parsed payload
                 pass
-        return _to_json_compatible(parsed)
+        # Plain JSON is already JSON-compatible, except NaN and Infinity.
+        return _to_json_compatible(parsed) if non_finite else parsed
     except Exception:  # noqa: BLE001 - one bad result never breaks the record
         return raw_result
 
 
-# An integral Decimal becomes a JSON integer only while its leading digit's
-# exponent is below this bound; larger values never build a huge int.
-_MAX_INT_ADJUSTED = 300
+# Largest integer that every JSON reader (including JavaScript) parses exactly.
+_MAX_SAFE_INTEGER = 2**53 - 1
+# 2**53 - 1 has 16 digits, so its leading digit's exponent is 15.
+_MAX_SAFE_INTEGER_ADJUSTED = 15
+# DynamoDB's number range, the narrowest of the record destinations: at most
+# 38 significant digits and a magnitude from 1E-130 to 9.99...E+125.
+_MAX_NUMBER_DIGITS = 38
+_MAX_NUMBER_ADJUSTED = 125
+_MIN_NUMBER_ADJUSTED = -130
 
 
 def _to_json_compatible(value: Any) -> Any:
     """Convert a decoded result into plain JSON values, without recursion.
 
-    ``Decimal``: an int when integral and ``adjusted() < 300``, else a float
-    when it round-trips exactly, else ``str(value)``; NaN and Infinity become
-    ``None``. ``datetime`` / ``date`` -> ``isoformat()``, ``UUID`` -> string,
+    ``Decimal``: an int when integral and ``abs(n) <= 2**53 - 1``, else a float
+    when it round-trips exactly and is within DynamoDB's number range (at most
+    38 significant digits, magnitude 1E-130 to 9.99...E+125), else
+    ``str(value)``; NaN and Infinity become ``None``. Negative zero becomes
+    ``0``. ``datetime`` / ``date`` -> ``isoformat()``, ``UUID`` -> string,
     ``bytes`` -> base64, ``tuple`` -> list, ``BatchResult`` -> ``to_dict()``.
     Non-finite floats become ``None``.
     """
@@ -261,10 +291,24 @@ def _scalar_to_json_compatible(value: Any) -> Any:
             return None
         # adjusted() is checked first so Decimal("1E+1000000") never builds a
         # million-digit int.
-        if value.adjusted() < _MAX_INT_ADJUSTED and value == value.to_integral_value():
-            return int(value)
+        if (
+            value.adjusted() <= _MAX_SAFE_INTEGER_ADJUSTED
+            and value == value.to_integral_value()
+        ):
+            as_int = int(value)
+            if abs(as_int) <= _MAX_SAFE_INTEGER:
+                return as_int
+        if value and not (
+            _MIN_NUMBER_ADJUSTED <= value.adjusted() <= _MAX_NUMBER_ADJUSTED
+        ):
+            return str(value)
         as_float = float(value)
-        if math.isfinite(as_float) and decimal.Decimal(repr(as_float)) == value:
+        written = decimal.Decimal(repr(as_float))
+        if (
+            math.isfinite(as_float)
+            and written == value
+            and len(written.as_tuple().digits) <= _MAX_NUMBER_DIGITS
+        ):
             return as_float
         return str(value)
     if isinstance(value, (datetime.datetime, datetime.date)):
@@ -277,14 +321,22 @@ def _scalar_to_json_compatible(value: Any) -> Any:
     raise TypeError(msg)
 
 
+# A longer error message keeps its first 8,192 characters followed by "…".
+_MAX_ERROR_MESSAGE_CHARS = 8192
+
+
 def _error_shape(error: ErrorObject) -> dict[str, Any]:
     """Return an error as ``{name, message}`` in that key order.
 
     The plugin hooks carry an ``ErrorObject`` (type, message, data, stack
     trace) and no cause, so records written by this SDK never have ``cause``.
-    The name is the SDK's ErrorType, unchanged.
+    The name is the SDK's ErrorType, unchanged. A message longer than 8,192
+    characters is cut to its first 8,192 characters followed by ``…``.
     """
-    return {"name": error.type, "message": error.message}
+    message = error.message
+    if isinstance(message, str) and len(message) > _MAX_ERROR_MESSAGE_CHARS:
+        message = message[:_MAX_ERROR_MESSAGE_CHARS] + "\u2026"
+    return {"name": error.type, "message": message}
 
 
 class _ExecutionState:
