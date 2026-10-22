@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -1321,7 +1322,7 @@ def test_invocation_end_restores_context_from_before_invocation_start(status):
 )
 def test_step_scope_is_released_at_user_function_end(outcome):
     """Verify a finished step restores the context that enclosed it."""
-    plugin, _ = _create_plugin()
+    plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     enclosing_context = otel_context.get_current()
 
@@ -1341,6 +1342,12 @@ def test_step_scope_is_released_at_user_function_end(outcome):
 
     plugin.on_invocation_end(_invocation_end_info())
     assert plugin._context_tokens == {}
+    events = [
+        (span, event) for span in exporter.get_finished_spans() for event in span.events
+    ]
+    assert len(events) == (1 if outcome is UserFunctionOutcome.FAILED else 0)
+    for span, event in events:
+        assert span.start_time <= event.timestamp <= span.end_time
 
 
 def test_user_function_start_preserves_baggage_in_current_context():
@@ -1473,7 +1480,9 @@ def test_detach_ignores_token_attached_on_another_thread():
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         executor.submit(
-            plugin.on_user_function_start, _step_start_info("step-1")
+            copy_context().run,
+            plugin.on_user_function_start,
+            _step_start_info("step-1"),
         ).result()
 
     plugin._detach_context("step-1:attempt:1")
@@ -1566,20 +1575,23 @@ def test_suspension_releases_the_scope_on_the_originating_worker():
     with ThreadPoolExecutor(max_workers=1) as worker:
 
         def suspend_on_worker() -> tuple[int, bool]:
+            worker_context = otel_context.get_current()
             plugin.on_user_function_start(_step_start_info("step-1"))
             attached_span_id = trace.get_current_span().get_span_context().span_id
             plugin.on_user_function_end(_step_incomplete_info("step-1"))
             return (
                 attached_span_id,
-                trace.get_current_span().get_span_context().is_valid,
+                otel_context.get_current() == worker_context,
             )
 
-        attached_span_id, span_still_current = worker.submit(suspend_on_worker).result()
+        attached_span_id, context_restored = worker.submit(
+            copy_context().run, suspend_on_worker
+        ).result()
         suspended_span = plugin._get_span(span_key)
 
         # The scope was released on the worker, and its span is left open.
         assert attached_span_id != 0
-        assert span_still_current is False
+        assert context_restored is True
         assert span_key not in plugin._context_tokens
         assert suspended_span is not None
         assert {s.name for s in exporter.get_finished_spans()} == {
