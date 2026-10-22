@@ -36,6 +36,7 @@ import datetime
 import decimal
 import json
 import math
+import re
 import threading
 import uuid
 from typing import TYPE_CHECKING, Any, Callable
@@ -191,7 +192,8 @@ def _decode_checkpoint_result(raw_result: str) -> Any:
     ...}`` envelope. An envelope is decoded with that default serializer and
     converted to plain JSON values (see ``_to_json_compatible``). A payload that
     is not an envelope is parsed JSON, or the raw string when it is not JSON;
-    its tree is only walked when it holds NaN or an infinite number. An
+    its tree is only walked when it holds NaN, an infinite number, or a run of
+    16 or more digits (a possible integer beyond ``2**53 - 1``). An
     envelope that fails to decode falls back to the parsed payload. Never
     raises.
 
@@ -229,8 +231,13 @@ def _decode_checkpoint_result(raw_result: str) -> Any:
                 return _to_json_compatible(decoded)
             except Exception:  # noqa: BLE001 - fall back to the parsed payload
                 pass
-        # Plain JSON is already JSON-compatible, except NaN and Infinity.
-        return _to_json_compatible(parsed) if non_finite else parsed
+        # Plain JSON is already JSON-compatible, except NaN, Infinity and
+        # integers beyond 2**53 - 1. Such an integer has at least 16 digits;
+        # the C-speed scan may also match digits in a string or a float, which
+        # only costs a walk that leaves them unchanged.
+        if non_finite or _LONG_DIGIT_RUN.search(raw_result):
+            return _to_json_compatible(parsed)
+        return parsed
     except Exception:  # noqa: BLE001 - one bad result never breaks the record
         return raw_result
 
@@ -239,9 +246,10 @@ def _decode_checkpoint_result(raw_result: str) -> Any:
 _MAX_SAFE_INTEGER = 2**53 - 1
 # 2**53 - 1 has 16 digits, so its leading digit's exponent is 15.
 _MAX_SAFE_INTEGER_ADJUSTED = 15
-# DynamoDB's number range, the narrowest of the record destinations: at most
-# 38 significant digits and a magnitude from 1E-130 to 9.99...E+125.
-_MAX_NUMBER_DIGITS = 38
+_LONG_DIGIT_RUN = re.compile(r"\d{16,}")
+# DynamoDB's number range, the narrowest of the record destinations: a
+# magnitude from 1E-130 to 9.99...E+125. Its 38-significant-digit limit needs
+# no check: a float written exactly has at most 17 significant digits.
 _MAX_NUMBER_ADJUSTED = 125
 _MIN_NUMBER_ADJUSTED = -130
 
@@ -249,11 +257,11 @@ _MIN_NUMBER_ADJUSTED = -130
 def _to_json_compatible(value: Any) -> Any:
     """Convert a decoded result into plain JSON values, without recursion.
 
+    ``int``: unchanged when ``abs(n) <= 2**53 - 1``, else ``str(n)``.
     ``Decimal``: an int when integral and ``abs(n) <= 2**53 - 1``, else a float
-    when it round-trips exactly and is within DynamoDB's number range (at most
-    38 significant digits, magnitude 1E-130 to 9.99...E+125), else
-    ``str(value)``; NaN and Infinity become ``None``. Negative zero becomes
-    ``0``. ``datetime`` / ``date`` -> ``isoformat()``, ``UUID`` -> string,
+    when it round-trips exactly and is within DynamoDB's number range
+    (magnitude 1E-130 to 9.99...E+125), else ``str(value)``; NaN and Infinity
+    become ``None``. Negative zero becomes ``0``. ``datetime`` / ``date`` -> ``isoformat()``, ``UUID`` -> string,
     ``bytes`` -> base64, ``tuple`` -> list, ``BatchResult`` -> ``to_dict()``.
     Non-finite floats become ``None``.
     """
@@ -284,8 +292,11 @@ def _to_json_compatible(value: Any) -> Any:
 def _scalar_to_json_compatible(value: Any) -> Any:
     if isinstance(value, float):
         return value if math.isfinite(value) else None
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None or isinstance(value, (str, bool)):
         return value
+    if isinstance(value, int):
+        # Beyond 2**53 - 1 a JavaScript reader would round it.
+        return value if abs(value) <= _MAX_SAFE_INTEGER else str(value)
     if isinstance(value, decimal.Decimal):
         if not value.is_finite():
             return None
@@ -304,11 +315,7 @@ def _scalar_to_json_compatible(value: Any) -> Any:
             return str(value)
         as_float = float(value)
         written = decimal.Decimal(repr(as_float))
-        if (
-            math.isfinite(as_float)
-            and written == value
-            and len(written.as_tuple().digits) <= _MAX_NUMBER_DIGITS
-        ):
+        if math.isfinite(as_float) and written == value:
             return as_float
         return str(value)
     if isinstance(value, (datetime.datetime, datetime.date)):
@@ -321,8 +328,16 @@ def _scalar_to_json_compatible(value: Any) -> Any:
     raise TypeError(msg)
 
 
-# A longer error message keeps its first 8,192 characters followed by "…".
-_MAX_ERROR_MESSAGE_CHARS = 8192
+# A longer error name or message keeps its first 8,192 code points followed
+# by "…". A Python str is a sequence of code points, so len() and slicing
+# count code points and never split a surrogate pair.
+_MAX_ERROR_TEXT_CHARS = 8192
+
+
+def _cap(text: Any) -> Any:
+    if isinstance(text, str) and len(text) > _MAX_ERROR_TEXT_CHARS:
+        return text[:_MAX_ERROR_TEXT_CHARS] + "\u2026"
+    return text
 
 
 def _error_shape(error: ErrorObject) -> dict[str, Any]:
@@ -330,13 +345,11 @@ def _error_shape(error: ErrorObject) -> dict[str, Any]:
 
     The plugin hooks carry an ``ErrorObject`` (type, message, data, stack
     trace) and no cause, so records written by this SDK never have ``cause``.
-    The name is the SDK's ErrorType, unchanged. A message longer than 8,192
-    characters is cut to its first 8,192 characters followed by ``…``.
+    The name is the SDK's ErrorType, otherwise unchanged. A name or message
+    longer than 8,192 code points is cut to its first 8,192 code points
+    followed by ``…``.
     """
-    message = error.message
-    if isinstance(message, str) and len(message) > _MAX_ERROR_MESSAGE_CHARS:
-        message = message[:_MAX_ERROR_MESSAGE_CHARS] + "\u2026"
-    return {"name": error.type, "message": message}
+    return {"name": _cap(error.type), "message": _cap(error.message)}
 
 
 class _ExecutionState:

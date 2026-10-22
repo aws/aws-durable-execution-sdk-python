@@ -278,6 +278,61 @@ def test_error_messages_are_capped_at_8192_characters(capsys):
     assert record["operationsByName"]["f"]["error"]["message"] == "m" * 8192 + "…"
 
 
+def test_error_names_are_capped_at_8192_code_points(capsys):
+    exporter = LambdaLogExporter(max_record_size_bytes=0)
+    _run(
+        exporter,
+        [],
+        error=ErrorObject(
+            message="\U0001f600" * 8193, type="N" * 70_000, data=None, stack_trace=None
+        ),
+    )
+    record = json.loads(json.loads(_printed_line(capsys))["message"])
+    assert record["error"]["name"] == "N" * 8192 + "\u2026"
+    # Code points, not UTF-16 units: 8,192 whole emoji are kept.
+    assert record["error"]["message"] == "\U0001f600" * 8192 + "\u2026"
+
+
+def test_long_error_name_fits_a_64_kb_line(capsys):
+    limit = 65_536
+    exporter = LambdaLogExporter(max_record_size_bytes=limit)
+    ops = [_op(f"q{i}", i, result=json.dumps('"' * 2000)) for i in range(20)]
+    _run(
+        exporter,
+        ops,
+        error=ErrorObject(
+            message="m" * 100, type="N" * 70_000, data=None, stack_trace=None
+        ),
+    )
+    line = _printed_line(capsys)
+    assert len(line.encode("utf-8")) <= limit
+    record = json.loads(json.loads(line)["message"])
+    assert record["error"]["name"] == "N" * 8192 + "\u2026"
+
+
+def test_worst_case_capped_name_and_message_fit_a_128_kb_line(capsys):
+    limit = 131_072
+    exporter = LambdaLogExporter(max_record_size_bytes=limit)
+    # \x01 is the worst case for both: 7 bytes each in the printed line.
+    ops = [_op(f"q{i}", i, result=json.dumps('"' * 2000)) for i in range(40)]
+    _run(
+        exporter,
+        ops,
+        execution_input='"' * 50_000,
+        error=ErrorObject(
+            message="\x01" * 70_000, type="\x01" * 70_000, data=None, stack_trace=None
+        ),
+    )
+    line = _printed_line(capsys)
+    assert len(line.encode("utf-8")) <= limit
+    record = json.loads(json.loads(line)["message"])
+    assert record["error"] == {
+        "name": "\x01" * 8192 + "\u2026",
+        "message": "\x01" * 8192 + "\u2026",
+    }
+    assert record["droppedInput"] is True
+
+
 # -- N-B1: a lone surrogate never drops the record -----------------------------
 
 
@@ -358,3 +413,56 @@ def test_lambda_log_measure_is_the_printed_line_size(capsys):
     exporter.export(record)
     assert size == len(_printed_line(capsys).encode("utf-8"))
     assert exporter.measure({"a": object()}) is None
+
+
+# -- non-blocking 2: integers beyond 2**53 - 1 ----------------------------------
+
+
+def _results(capsys: pytest.CaptureFixture[str], *results: str) -> list[Any]:
+    ops = [_op(f"op{i}", i, result=raw) for i, raw in enumerate(results)]
+    _run(LambdaLogExporter(), ops)
+    by_name = json.loads(json.loads(_printed_line(capsys))["message"])[
+        "operationsByName"
+    ]
+    return [by_name[f"op{i}"]["result"] for i in range(len(results))]
+
+
+def test_large_ints_become_strings(capsys):
+    big = 12345678901234567
+    safe = 2**53 - 1
+    results = _results(
+        capsys,
+        _envelope({"x": big, "y": safe, "z": -big}),
+        _envelope((1, -safe)),
+        str(big),
+        json.dumps([safe, -(2**60), {"k": 2**53}]),
+        # Long digit runs in strings and floats are left alone.
+        json.dumps({"s": "12345678901234567", "f": 0.12345678901234568}),
+        str(safe),
+    )
+    assert results == [
+        {"x": "12345678901234567", "y": safe, "z": "-12345678901234567"},
+        [1, -safe],
+        "12345678901234567",
+        [safe, str(-(2**60)), {"k": str(2**53)}],
+        {"s": "12345678901234567", "f": 0.12345678901234568},
+        safe,
+    ]
+
+
+# -- non-blocking 7: integers with trailing zeros stay DynamoDB numbers ---------
+
+
+def test_dynamodb_marshal_keeps_integers_with_few_significant_digits():
+    exporter = DynamoDBExporter(table_name="t", client=StubDynamoDBClient())
+    marshalled = exporter._marshal(
+        {"a": [10**38, -(10**38), 10**125, 10**126, 10**38 + 1, 1.0e38]}
+    )
+    assert marshalled["a"]["L"] == [
+        {"N": "1E+38"},
+        {"N": "-1E+38"},
+        {"N": "1E+125"},
+        {"S": str(10**126)},
+        {"S": str(10**38 + 1)},
+        {"N": "1E+38"},
+    ]

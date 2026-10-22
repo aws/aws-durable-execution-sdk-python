@@ -23,7 +23,9 @@ class DynamoDBExporter:
     Numbers DynamoDB cannot store (more than 38 significant digits, a
     magnitude outside 1E-130 to 9.99...E+125, NaN or Infinity) are written as
     their JSON text in a string attribute, so such a value never drops the
-    record.
+    record. A field can therefore be a number in one item and a string in
+    another. An integer with more than 38 digits but at most 38 significant
+    ones (for example ``10**38``) is stored as a number.
 
     The partition key holds ``executionArn``. With the default sort key
     (``sk`` = ``emittedAt``) every export adds a new item, keeping the full
@@ -83,7 +85,16 @@ class DynamoDBExporter:
         try:
             number = self._context.create_decimal(text)
         except decimal.DecimalException:
-            return text
+            # An integer with trailing zeros, such as 10**38, has more than 38
+            # digits but few significant ones; its normalized form fits.
+            digits = text.removeprefix("-")
+            significant = digits.rstrip("0")
+            if not digits.isdigit() or len(significant) > 38:
+                return text
+            sign = text[: len(text) - len(digits)]
+            exponent = len(digits) - len(significant)
+            number = decimal.Decimal(f"{sign}{significant}E{exponent}")
+            return number if number.adjusted() <= 125 else text
         if number and not -130 <= number.adjusted() <= 125:
             return text
         return decimal.Decimal(text)
