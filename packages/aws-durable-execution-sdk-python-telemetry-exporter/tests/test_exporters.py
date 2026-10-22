@@ -10,7 +10,9 @@ both the public re-export path and the concrete submodules.
 
 from __future__ import annotations
 
+import datetime
 import json
+import re
 from typing import Any
 
 import pytest
@@ -96,14 +98,32 @@ def test_lambda_log_default_size_and_render_is_operations_by_name():
     assert shaped["operationsByName"]["greet"]["count"] == 1
 
 
-def test_lambda_log_export_prints_compact_json_line(capsys):
-    LambdaLogExporter().export(_record())
-    out = capsys.readouterr().out.strip()
+def test_lambda_log_export_prints_one_envelope_line(capsys):
+    exporter = LambdaLogExporter()
+    before = datetime.datetime.now(datetime.UTC)
+    exporter.export(_record())
+    after = datetime.datetime.now(datetime.UTC)
+    out = capsys.readouterr().out
+    assert out.endswith("\n") and out.count("\n") == 1
+    line = out.rstrip("\n")
     # single compact JSON line, no whitespace separators
-    assert ", " not in out and '": ' not in out
-    parsed = json.loads(out)
-    assert parsed["recordType"] == "DurableExecutionTelemetry"
-    assert "operationsByName" in parsed
+    assert ", " not in line and '": ' not in line
+    envelope = json.loads(line)
+    assert list(envelope) == ["timestamp", "level", "message"]
+    assert envelope["level"] == "INFO"
+    # message parses back to exactly the rendered record
+    assert isinstance(envelope["message"], str)
+    assert json.loads(envelope["message"]) == exporter.render(_record())
+    assert envelope["message"] == json.dumps(
+        exporter.render(_record()), separators=(",", ":"), ensure_ascii=False
+    )
+    # UTC, millisecond precision, Z suffix
+    ts = envelope["timestamp"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", ts)
+    parsed_ts = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    assert parsed_ts.utcoffset() == datetime.timedelta(0)
+    assert before.replace(microsecond=before.microsecond // 1000 * 1000) <= parsed_ts
+    assert parsed_ts <= after
 
 
 def test_lambda_log_custom_size_and_flush_noop():

@@ -41,8 +41,8 @@ def handler(event, context):
 ```
 
 With no exporter configured, records are written to the function's own
-CloudWatch log group as single JSON lines (the `LambdaLogExporter` default),
-carrying the name-keyed `operationsByName` summary. The `S3Exporter` writes the
+CloudWatch log group as single JSON lines (the `LambdaLogExporter` default, see
+below), carrying the name-keyed `operationsByName` summary. The `S3Exporter` writes the
 lossless per-occurrence `operations` array, one object per execution
 (upsert-by-execution-name, so re-emission overwrites rather than appends).
 
@@ -73,6 +73,30 @@ the Lambda runtime's boto3 otherwise; none adds a required dependency.
 (`OperationsFormat`). `max_record_size_bytes` raises or lowers an exporter's
 size limit; omitting it keeps the default. `HttpExporter` and `FileExporter`
 have no default and do not truncate unless a limit is set.
+
+### LambdaLogExporter
+
+Prints one line per record to stdout, which Lambda sends to the function's own
+log group. The line is the Lambda JSON log envelope, with keys in this order:
+
+```json
+{"timestamp":"2026-01-01T00:00:01.234Z","level":"INFO","message":"<compact record JSON>"}
+```
+
+`timestamp` is UTC with millisecond precision and a `Z` suffix. `message` is
+the compact record JSON as a string; parse it to get the record. The exporter
+writes the envelope itself because Lambda captures Python `print` output as
+plain text, in both the plain text and the JSON log format, and Lambda does not
+double-encode output that is already JSON (see
+[Log and monitor Python Lambda functions](https://docs.aws.amazon.com/lambda/latest/dg/python-logging.html)
+and [Lambda log formats](https://docs.aws.amazon.com/lambda/latest/dg/monitoring-cloudwatchlogs-logformat.html)).
+
+`max_record_size_bytes` (default 256 KB) limits the record in `message`. The
+JSON escaping of `message` can make the line up to about 2x the record; a
+CloudWatch Logs event can be up to 1 MB
+([PutLogEvents](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutLogEvents.html)).
+The lines have `level` `INFO`, so Lambda drops them when the function's
+application log level is `WARN` or above.
 
 ### CloudWatchLogsExporter
 
@@ -222,6 +246,50 @@ Behavior is validated cross-SDK by the `telemetry` conformance suite
 > executions never coalesce with each other. An invocation that emits a record
 > drains every pending snapshot and flushes exporters before it returns;
 > invocations that emit nothing do not start or flush the worker.
+
+## Error names and causes
+
+Every error in a record (the execution `error`, each `operations[].error`, and
+each `operationsByName.<name>.error`) has the shape
+`{"name": ..., "message": ..., "cause": ...}`, with keys in that order. `name`
+is the SDK's error type, unchanged, and `message` is the error message. `cause`
+has the same shape, recursively, and is present only when the SDK provides a
+cause.
+
+In Python, the plugin hooks carry only an `ErrorObject` (type, message, data,
+stack trace) with no cause, so Python records have `name` and `message` and
+never have `cause`. The exporter does not build a cause from other operations
+or from `ErrorData`. `include_errors=False` removes operation errors.
+
+Names are each language's own and differ across SDKs. For example, a step that
+throws `PaymentError` can be reported as `StepError` in JS,
+`aws_durable_execution_sdk_python.exceptions.StepError` or `PaymentError` in
+Python, and `StepFailedException` or `PaymentError` in Java. Query error names
+per SDK, or query on `message` and the `cause` chain.
+
+## Operation results
+
+An opted-in operation `result` (`OperationOverride(result=...)`) is passed to
+the transform as a plain JSON value. When the checkpointed string is the
+default serializer's (`ExtendedTypeSerDes`) envelope, a JSON object whose keys
+are exactly `t` and `v` with a string `t`, it is decoded with that serializer
+and converted to plain JSON:
+
+- `Decimal`: an integer when it is integral and `adjusted() < 300`; otherwise a
+  number when the float round-trips exactly; otherwise `str(value)` (for
+  example `"12345678901234567.89"` or `"1E+5000"`). NaN and Infinity become
+  `null`.
+- `datetime` and `date`: `isoformat()`. `UUID`: string. `bytes`: base64.
+  `tuple`: list. `BatchResult`: `to_dict()`.
+
+Any other result is parsed as JSON, or kept as the raw string when it is not
+JSON. A result that fails to decode keeps its parsed or raw value, and the rest
+of the record is still emitted.
+
+The hooks do not say which serializer wrote a result, so the envelope is
+recognized by shape alone. A result written by `JsonSerDes` or a custom
+`SerDes` that has this exact shape is decoded too: `{"t": "s", "v": "x"}` is
+reported as `"x"`.
 
 ## Requirements
 
