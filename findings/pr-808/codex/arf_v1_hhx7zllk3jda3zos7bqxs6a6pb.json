@@ -1,0 +1,1 @@
+{"finding_digest":"39effcad6ada460de5d2f86179781e78695adc4d231a6f0a03843a8859e8dc2b","finding_id":"arf_v1_hhx7zllk3jda3zos7bqxs6a6pb","identity_key":"telemetry-exporter/plugin.py::_scalar_to_json_compatible::dynamodb-numeric-range","pull_request_number":808,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
