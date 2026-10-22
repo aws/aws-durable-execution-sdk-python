@@ -76,19 +76,18 @@ Build the core and OTel distributions with `hatch build` in each package, then r
 these commands from the repository root:
 
 ```bash
-hatch run test-wheel-otel:test        # full OTel suite on the two built wheels
-hatch run test-wheel-otel-legacy:test # released OTel 1.0.0 with the built core
+hatch run test-wheel-otel:test        # full OTel suite and lifecycle tests on built wheels
+hatch run test-wheel-otel-legacy:test # verify Core 3 rejects released OTel 1.0.0
 hatch run test-pypi-examples:test     # examples against the published core
 ```
 
 The wheel lanes have no editable workspace members. They verify installed source
-bytes and artifact hashes before exercising public handlers. OTel 1.1 requires
-the redesigned core 2.1.0 lifecycle; it no longer claims compatibility with core
-2.0.x. Publish core first. Building both wheels lets CI verify the intended pair
-before that minimum is available on PyPI. The legacy-plugin lane documents the
-actual core-only upgrade: host isolation is provided by the new core, while old
-Invocation OTel does not gain the new fallback. Workspace tests continue to cover
-the complete current implementation with `hatch run dev-otel:test`.
+bytes and artifact hashes before exercising public handlers. OTel 2 requires
+core 3.x and its per-invocation factory API. Publish core first; building both
+wheels lets CI validate the coordinated pair before core 3 is available on PyPI.
+The legacy-plugin lane verifies that core 3 clearly rejects actual released
+OTel 1.x plugin instances and entry points. Workspace tests cover the complete
+current implementation with `hatch run dev-otel:test`.
 
 ### Package-level commands
 

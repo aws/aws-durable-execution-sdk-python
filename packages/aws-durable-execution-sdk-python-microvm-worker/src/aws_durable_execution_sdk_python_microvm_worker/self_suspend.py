@@ -74,8 +74,15 @@ class SuspendOutcome(Enum):
     """The service did nothing, and a later call would most likely fail the
     same way, for example for a missing permission."""
     REFUSED_FOR_NOW = "refused_for_now"
-    """The service did nothing, and a later call can succeed: a throttle,
-    expired credentials, or a clock offset."""
+    """The service did nothing on the call's first and only attempt, and a
+    later call can succeed.
+
+    Examples are expired credentials and a signature error, with or without
+    a clock offset. botocore retries none of these, so they keep this
+    outcome. The default client retries a throttle. So a throttle usually
+    ends as :attr:`UNKNOWN`. A throttle has this outcome only when it
+    reaches the worker without a retry, for example from a caller's client
+    that does not retry it."""
     UNKNOWN = "unknown"
     """The service may have suspended the MicroVM."""
 
@@ -93,6 +100,12 @@ def create_microvms_client(region: str) -> LambdaMicrovmsClient:
 
     Each call gets its own session, because boto3's default session is not
     safe to use from several threads at once.
+
+    The client uses botocore's standard retry mode with 3 attempts. That
+    mode retries a throttle error code, such as ``ThrottlingException``, a
+    5xx answer, and a connection error. It retries no credential or
+    signature error, also with a clock offset. Each ``ClientError`` reports the
+    retries in ``ResponseMetadata.RetryAttempts``.
     """
     return boto3.session.Session().client(
         "lambda-microvms",
@@ -165,16 +178,21 @@ def classify_suspend_error(error: BaseException) -> SuspendOutcome:
 
     1. A botocore retry inside the call means that an earlier attempt may
        have suspended the MicroVM before its answer was lost. So any error
-       after a retry is :attr:`SuspendOutcome.UNKNOWN`.
-    2. Missing credentials stop the call before any request. They are
-       :attr:`SuspendOutcome.REJECTED`, as in the JavaScript worker.
+       after a retry is :attr:`SuspendOutcome.UNKNOWN`. The default client
+       retries a throttle. So a throttle from it usually ends here.
+    2. Missing credentials are :attr:`SuspendOutcome.REJECTED`, as in the
+       JavaScript worker. A later call in the same MicroVM most likely finds
+       no credentials either.
     3. A known rejection code is :attr:`SuspendOutcome.REJECTED`.
     4. A conflict is :attr:`SuspendOutcome.UNKNOWN`, whatever its status. It
        can mean that the MicroVM is already suspending.
-    5. A throttle, expired credentials, or a clock offset on the first
+    5. Expired credentials, a signature error, or a throttle on the first
        attempt is :attr:`SuspendOutcome.REFUSED_FOR_NOW`, whatever its
        status. The service answers them before it acts, and a later call can
-       succeed. Some services answer a throttle with HTTP 400.
+       succeed. Some services answer a throttle with HTTP 400. botocore
+       retries no credential or signature error, also with a clock offset.
+       So these errors reach this rule. A throttle reaches it only from a
+       client that did not retry it.
     6. Any other 4xx answer except 408, 409, and 429 is
        :attr:`SuspendOutcome.REJECTED`. A 429 is
        :attr:`SuspendOutcome.REFUSED_FOR_NOW`.

@@ -44,6 +44,8 @@ from aws_durable_execution_sdk_python.config import (
     ParallelConfig,
     NestingType,
 )
+from tests.test_helpers import plugin_factory, plugin_invocation
+
 from aws_durable_execution_sdk_python.context import (
     DurableContext,
     ExecutionContext,
@@ -5308,10 +5310,13 @@ def test_instrumented_executor_isolates_bindings_on_a_reused_worker() -> None:
         operation_id_namespace=_StubNamespace(),
     )
     state = Mock(spec=ExecutionState)
-    state._plugin_executor = PluginExecutor([DurableInstrumentationPlugin()])
+    state._plugin_executor = PluginExecutor(
+        [plugin_factory(DurableInstrumentationPlugin())]
+    )
     token = binding.set("coordinator")
     try:
-        result = executor.execute(state, Mock(spec=DurableContext))
+        with plugin_invocation(state._plugin_executor):
+            result = executor.execute(state, Mock(spec=DurableContext))
         assert result.get_results() == ["ok", "ok"]
         assert binding.get() == "coordinator"
         assert [value for value, _thread in seen] == ["coordinator", "coordinator"]

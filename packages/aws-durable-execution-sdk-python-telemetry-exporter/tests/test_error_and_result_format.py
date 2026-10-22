@@ -95,20 +95,20 @@ def _emit(
     content: ContentConfig | None = None,
 ) -> dict[str, Any]:
     exporter = CaptureExporter()
-    plugin = durable_execution_telemetry(
+    factory = durable_execution_telemetry(
         DurableExecutionTelemetryConfig(exporters=[exporter], content=content)
     )
     operations = {op.operation_id: op for op in ops}
-    plugin.on_invocation_start(
-        InvocationStartInfo(
-            request_id=None,
-            execution_arn=ARN,
-            is_first_invocation=True,
-            execution_start_time=T0,
-            execution_input=None,
-            operations=operations,
-        )
+    start = InvocationStartInfo(
+        request_id=None,
+        execution_arn=ARN,
+        is_first_invocation=True,
+        execution_start_time=T0,
+        execution_input=None,
+        operations=operations,
     )
+    plugin = factory.create_plugin(start)
+    plugin.on_invocation_start(start)
     plugin.on_invocation_end(
         InvocationEndInfo(
             request_id=None,

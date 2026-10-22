@@ -40,15 +40,60 @@ DURABLE_EXECUTION_PLUGINS=otel-invocation,example_audit
 The SDK resolves those names from the `aws_durable_execution.plugins` Python
 entry-point group when the decorated handler is initialized. An unset or blank
 variable preserves the existing behavior. The decorator's `plugins` argument
-remains supported; explicit plugins run first and take precedence when a
-dynamic provider creates the same concrete plugin type.
+remains supported; explicit factories run first, and a factory passed to the
+decorator is not registered a second time through the environment.
 
-Provider packages expose a versioned factory:
+A plugin is registered as a *factory*, not as an instance. A factory is an object
+with a `create_plugin(info)` method taking the invocation's `InvocationStartInfo`
+and returning a `DurableInstrumentationPlugin`; the SDK calls that method once per
+invocation, so the instance it returns serves that one invocation only and can
+hold **per-invocation** state in ordinary attributes.
+
+Per-invocation is narrower than per-execution, and the difference matters. A
+durable execution spans as many invocations as it waits, retries or resumes, and
+the instance is dropped when each of those returns — so anything a plugin keeps in
+its attributes is gone by the next invocation of the same execution. State that
+has to survive that has two honest homes: rebuild it from the operation map the
+invocation hooks carry (`InvocationStartInfo.operations` is a full snapshot,
+which is how the bundled Telemetry exporter reports operations that completed in an
+earlier invocation), or put it on the factory, which outlives every invocation —
+keyed by execution ARN, and pruned by the owner, because the SDK will not tell the
+factory when an execution ends for good.
+
+A factory is an object with a method rather than a plain callable so the
+registration type can grow a second, optional member later -- a process-level
+flush on execution-environment shutdown, for example -- without a second breaking
+change to this surface.
+
+Write a small factory class and construct the plugin in its `create_plugin`. The
+factory holds what outlives an invocation, such as an exporter or a resolved
+configuration, and setup work that can fail belongs in the factory's own
+constructor rather than the plugin's:
+
+```python
+class AuditPluginFactory:
+    def __init__(self, sink):
+        self._sink = sink
+
+    def create_plugin(self, info):
+        return AuditPlugin(self._sink)
+
+
+plugins=[AuditPluginFactory(sink)]
+```
+
+A plugin class is not a factory, and neither is a bare callable. `plugins=[MyPlugin]`
+and `plugins=[lambda info: MyPlugin(sink)]` raise `PluginLoadError` during handler
+initialization, because neither carries `create_plugin`. A class that declares
+`create_plugin` as a `@classmethod` is accepted, since the requirement is the
+member and not the kind of object.
+
+Provider packages expose such a factory:
 
 ```python
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
-    DurableInstrumentationPluginProvider,
+    InvocationStartInfo,
 )
 
 
@@ -56,40 +101,40 @@ class AuditPlugin(DurableInstrumentationPlugin):
     pass
 
 
-AUDIT_PLUGIN_PROVIDER = DurableInstrumentationPluginProvider(
-    plugin_type=AuditPlugin,
-    factory=AuditPlugin,
-    plugin_api_version=1,
-)
+class AuditPluginFactory:
+    def create_plugin(self, info: InvocationStartInfo) -> AuditPlugin:
+        return AuditPlugin()
+
+
+AUDIT_PLUGIN_FACTORY = AuditPluginFactory()
 ```
 
-Register the provider in the package's `pyproject.toml`:
+Register the factory instance in the package's `pyproject.toml`:
 
 ```toml
 [project.entry-points."aws_durable_execution.plugins"]
-example_audit = "example_audit:AUDIT_PLUGIN_PROVIDER"
+example_audit = "example_audit:AUDIT_PLUGIN_FACTORY"
 ```
 
-Set `plugin_api_version` to the literal API version the provider implements.
-Update it only after verifying the provider against that API version.
-
 Provider names must be unique across installed distributions. Missing,
-ambiguous, incompatible, or invalid providers raise `PluginLoadError` during
-handler initialization with the provider and distribution details.
+ambiguous, or wrongly shaped providers raise `PluginLoadError` during handler
+initialization with the provider and distribution details.
 
 ### Selecting an OpenTelemetry view
 
-Enable at most one of `InvocationOtelPlugin` and `ExecutionOtelPlugin`. This
+Enable at most one of `InvocationOtelPluginFactory` and
+`ExecutionOtelPluginFactory`. This
 constraint applies to the combined `plugins=[...]` argument and
 `DURABLE_EXECUTION_PLUGINS=otel-invocation` or `otel-execution` selection.
-Core 2.1+ with OTel 1.1+ rejects both at cold start with `PluginLoadError` naming the
+Core 3 with OTel 2 rejects both at cold start with `PluginLoadError` naming the
 conflicting views; keep only one. Choose Invocation for work within each Lambda
 invocation or Execution for logical operations across the durable execution.
-Unrelated instrumentation plugins can run alongside either view. OTel 1.1 requires core 2.1 or later for the invocation-worker lifecycle as well
-as view-exclusivity validation. Release core 2.1 before releasing OTel 1.1.
+Unrelated instrumentation plugin factories can run alongside either view.
+OTel 2 requires core 3.x and the per-invocation factory contract. Release the
+coordinated core version before releasing OTel 2.
 
 Plugin authors explicitly opt in by declaring
-`__durable_registration_api__ = 1` on a plugin class. That class and its subclasses
+`__durable_registration_api__ = 1` on a factory class. That class and its subclasses
 have their optional `exclusive_group` metadata validated and their
 optional `on_registration_result(registered)` callback invoked. A missing group
 or `None` adds no exclusivity constraint. The callback can release rejected
@@ -102,14 +147,14 @@ Once enabled, every class in the MRO explicitly declaring the integer `1`
 contributes its resolved `exclusive_group`. These constraints accumulate:
 repeating the marker with a new group adds to inherited groups rather than
 replacing them, and `None` does not erase an inherited constraint. A group is
-counted once per plugin registration even if several ancestors declare it.
+counted once per factory registration even if several ancestors declare it.
 Unmarked classes' coincidental same-named legacy fields/helpers remain inert.
-Subclasses of the bundled OTel views therefore retain the view group when they
+Subclasses of the bundled OTel factories therefore retain the view group when they
 add their own group. Repeat the marker to add a group or customize the callback;
-the callback is still notified once per plugin. Plugins with no marker anywhere
-in their hierarchy retain their existing attributes/helpers. The generic plugin base defines
-neither attribute nor hook, and provider API version 1 and existing plugin
-lifecycle order are unchanged.
+the callback is still notified once per factory. Factories with no marker anywhere
+in their hierarchy retain their existing attributes/helpers. The generic plugin
+base defines neither attribute nor hook. The registration API remains independent
+of the removed provider API version 1 contract.
 
 ### Invocation worker lifecycle
 
@@ -123,11 +168,14 @@ End before returning the outcome. The caller shuts down the handler executor.
 There is no separate handler-context hook or context-manager plugin API.
 
 When plugins are registered, the worker begins with a copy of the caller's
-context-variable bindings. Successful Start bindings flow into later Start hooks,
-the handler, serialization and resource cleanup. A later successful Start may
-replace an earlier binding. If a Start hook raises, its new bindings are discarded
-for subsequent work; its End still runs in the original Context so its tokens can
-be reset. End hooks retain forward registration order, not reverse stack order,
+context-variable bindings. Start hooks, the handler, serialization, resource
+cleanup and End hooks use that same Context. Changes made by a Start hook remain
+visible to later hooks and handler code even if that hook raises; the SDK contains
+the exception and retains the plugin without rolling back its bindings. A later
+Start hook may replace an earlier binding. Plugins are responsible for restoring
+partial bindings themselves when needed, either before raising or during End.
+End runs in the same Context as Start, so context-variable tokens retain their
+owner. End hooks retain forward registration order, not reverse stack order,
 so they must not rely on observing a stack-like unwind of other plugins' contexts.
 Each SDK-managed `map` or `parallel` branch admission, including an in-process
 resume, receives a fresh copy of the coordinator's bindings when plugins are
@@ -139,11 +187,11 @@ cleanup failures, leaving the host's bindings unchanged. This isolates bindings,
 not mutations to shared objects or external side effects. Without plugins, the
 handler retains its existing fresh-worker context behavior.
 
-These lifecycle guarantees require core 2.1.0 or later. The OTel 1.1 plugin
-requires that core version and uses the existing Start/End hooks. Upgrading the
-core alone with OTel 1.0 isolates worker bindings, but does not add the newer
-Invocation-view fallback to that older plugin; upgrade both packages for it.
-Provider API version 1 and the independent registration API are unchanged.
+Core 3 creates a fresh plugin instance per invocation through each registered
+factory. OTel 2 requires core 3.x and uses the existing Start/End hooks on those
+instances. Upgrade both packages together; core 3 rejects OTel 1.x registrations
+and the removed provider API version 1 contract. The independent registration
+API remains unchanged.
 
 ### Chained-invoke propagation
 
@@ -177,9 +225,8 @@ Python has no `DistributedMapOptions` wrapper
 or distributed-map START API: its existing map/parallel operations use CONTEXT.
 The design's corresponding distributed-map field awaits that future modeled path.
 
-Release coordination still requires the compatible core/OTel minor versions.
-Existing valid core/plugin combinations retain prior tracing behavior; older
-cores without this optional contract contribute no new propagation metadata.
+This release pairs core 3 with OTel 2 and its per-invocation factories. Custom
+plugins that omit the optional hook retain their existing tracing behavior.
 Backend rollout and deployed downstream trace-topology validation remain pending.
 
 ## 🚀 Quick Start

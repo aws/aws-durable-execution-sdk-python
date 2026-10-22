@@ -10,10 +10,10 @@ from typing import Any
 
 from aws_durable_execution_sdk_python import DurableContext, durable_execution
 from aws_durable_execution_sdk_python.config import Duration
-from common import long_delay_seconds, otel_plugin, require_scenario
+from common import long_delay_seconds, otel_plugin_factory, require_scenario
 
 
-@durable_execution(plugins=[otel_plugin()])
+@durable_execution(plugins=[otel_plugin_factory()])
 def handler(
     event: dict[str, Any],
     context: DurableContext,
@@ -26,7 +26,7 @@ def handler(
     )
 
 
-@durable_execution(plugins=[otel_plugin()])
+@durable_execution(plugins=[otel_plugin_factory()])
 def target_handler(
     event: dict[str, Any],
     context: DurableContext,

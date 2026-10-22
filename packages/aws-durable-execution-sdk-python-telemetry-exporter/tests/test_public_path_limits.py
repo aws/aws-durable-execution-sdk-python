@@ -79,23 +79,23 @@ def _run(
     error: ErrorObject | None = None,
 ) -> None:
     overrides = [OperationOverride(op.name or "", result=lambda r: r) for op in ops]
-    plugin = durable_execution_telemetry(
+    factory = durable_execution_telemetry(
         DurableExecutionTelemetryConfig(
             exporters=[exporter],
             content=ContentConfig(operations=ContentOperations(overrides=overrides)),
         )
     )
     operations: dict[str, OperationInfo] = {op.operation_id: op for op in ops}
-    plugin.on_invocation_start(
-        InvocationStartInfo(
-            request_id=None,
-            execution_arn=ARN,
-            is_first_invocation=True,
-            execution_start_time=T0,
-            execution_input=execution_input,
-            operations=operations,
-        )
+    start = InvocationStartInfo(
+        request_id=None,
+        execution_arn=ARN,
+        is_first_invocation=True,
+        execution_start_time=T0,
+        execution_input=execution_input,
+        operations=operations,
     )
+    plugin = factory.create_plugin(start)
+    plugin.on_invocation_start(start)
     plugin.on_invocation_end(
         InvocationEndInfo(
             request_id=None,

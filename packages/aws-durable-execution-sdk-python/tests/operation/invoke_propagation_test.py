@@ -25,6 +25,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 from aws_durable_execution_sdk_python.operation.invoke import InvokeOperationExecutor
 from aws_durable_execution_sdk_python.plugin import PropagationMetadata
 from aws_durable_execution_sdk_python.state import CheckpointedResult, ExecutionState
+from tests.test_helpers import plugin_factory, plugin_invocation
 
 
 IDENTIFIER = OperationIdentifier(
@@ -162,12 +163,12 @@ def test_fatal_hook_failure_prevents_start_checkpoint(
             raise failure("control flow")
 
     service = Mock()
-    state = ExecutionState(
-        "execution", "token", {}, service, PluginExecutor([FatalPlugin()])
-    )
+    plugins = PluginExecutor([plugin_factory(FatalPlugin())])
+    state = ExecutionState("execution", "token", {}, service, plugins)
     executor: InvokeOperationExecutor[str] = InvokeOperationExecutor(
         "child:live", {}, state, IDENTIFIER, InvokeConfig()
     )
-    with pytest.raises(failure, match="control flow"):
-        executor.check_result_status()
+    with plugin_invocation(plugins, execution_arn="execution"):
+        with pytest.raises(failure, match="control flow"):
+            executor.check_result_status()
     service.checkpoint.assert_not_called()

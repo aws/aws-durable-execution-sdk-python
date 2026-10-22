@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextvars
 from datetime import UTC, datetime
 from importlib.metadata import version
-import os
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -20,8 +19,10 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
 )
 from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
-from aws_durable_execution_sdk_python_otel.execution_plugin import ExecutionOtelPlugin
-from aws_durable_execution_sdk_python_otel.invocation_plugin import InvocationOtelPlugin
+from aws_durable_execution_sdk_python_otel.plugin_factory import (
+    ExecutionOtelPluginFactory,
+    InvocationOtelPluginFactory,
+)
 from aws_durable_execution_sdk_python_otel.otel_plugin_config import OtelPluginConfig
 from opentelemetry import baggage, context, trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -35,17 +36,14 @@ class NoNetworkClient:
         raise AssertionError(f"Unexpected service access: {name}")
 
 
-@pytest.mark.parametrize("view", [InvocationOtelPlugin, ExecutionOtelPlugin])
+@pytest.mark.parametrize(
+    "view", [InvocationOtelPluginFactory, ExecutionOtelPluginFactory]
+)
 @pytest.mark.parametrize("order", ["alone", "baggage-first", "baggage-last"])
 @pytest.mark.parametrize("ambient_present", [False, True])
-def test_installed_pair_preserves_context_and_documents_legacy_fallback(
-    view, order, ambient_present
-):
-    legacy = os.environ.get("OTEL_COMPAT_LEGACY") == "1"
-    assert Version(version("aws-durable-execution-sdk-python")) >= Version("2.1.0")
-    assert version("aws-durable-execution-sdk-python-otel") == (
-        "1.0.0" if legacy else "1.1.0"
-    )
+def test_installed_factory_pair_preserves_worker_context(view, order, ambient_present):
+    assert Version(version("aws-durable-execution-sdk-python")) == Version("3.0.0")
+    assert version("aws-durable-execution-sdk-python-otel") == "2.0.0"
     assert "site-packages" in Path(core_execution.__file__).resolve().parts
     import aws_durable_execution_sdk_python_otel as installed_otel
 
@@ -71,7 +69,19 @@ def test_installed_pair_preserves_context_and_documents_legacy_fallback(
                 phases.append("baggage-end")
                 worker_threads.append(threading.get_ident())
 
-        plugin = view(
+        class BaggageFactory:
+            def create_plugin(self, _info):
+                return BaggagePlugin()
+
+        instances = []
+
+        class RecordingFactory(view):
+            def create_plugin(self, info):
+                plugin = super().create_plugin(info)
+                instances.append(plugin)
+                return plugin
+
+        factory = RecordingFactory(
             OtelPluginConfig(
                 tracer_provider=provider,
                 enrich_logger=False,
@@ -79,9 +89,9 @@ def test_installed_pair_preserves_context_and_documents_legacy_fallback(
             )
         )
         plugins = {
-            "alone": [plugin],
-            "baggage-first": [BaggagePlugin(), plugin],
-            "baggage-last": [plugin, BaggagePlugin()],
+            "alone": [factory],
+            "baggage-first": [BaggageFactory(), factory],
+            "baggage-last": [factory, BaggageFactory()],
         }[order]
         body_parents = []
 
@@ -138,22 +148,23 @@ def test_installed_pair_preserves_context_and_documents_legacy_fallback(
                 else ["baggage-start", "body", "baggage-end"] * 2
             )
             spans = exporter.get_finished_spans()
-            if legacy and view is InvocationOtelPlugin:
-                # The released plugin does not attach an Invocation fallback.
-                assert body_parents == [ambient.get_span_context()] * 2
-            else:
-                name = "Invocation" if view is InvocationOtelPlugin else "Workflow"
-                contexts = [span.context for span in spans if span.name == name]
-                assert contexts
-                assert all(
-                    parent.is_valid and parent in contexts for parent in body_parents
-                )
+            name = "Invocation" if view is InvocationOtelPluginFactory else "Workflow"
+            contexts = [span.context for span in spans if span.name == name]
+            assert contexts
+            assert all(
+                parent.is_valid and parent in contexts for parent in body_parents
+            )
             users = [span for span in spans if span.name == "customer-span"]
             assert len(users) == 2
             assert [span.parent for span in users] == [
                 parent if parent.is_valid else None for parent in body_parents
             ]
-            assert plugin._context_tokens == {}
+            assert len(instances) == 2
+            assert instances[0] is not instances[1]
+            assert all(plugin._context_tokens == {} for plugin in instances)
+            width = 1 if order == "alone" else 3
+            for offset in range(0, len(worker_threads), width):
+                assert len(set(worker_threads[offset : offset + width])) == 1
         finally:
             context.detach(token)
             ambient.end()

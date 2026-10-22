@@ -39,6 +39,63 @@ IDLE = 10.0
 GRACE = 30.0
 TERMINATED_MESSAGE = "the MicroVM was terminated before the job finished"
 
+# The warnings for a failed SuspendMicrovm call. They match the JavaScript
+# worker's texts word for word.
+REJECTED = (
+    "could not suspend the idle MicroVM, because the service rejected the "
+    "call. It keeps running. A missing permission needs lambda:SuspendMicrovm "
+    "on the MicroVM image in its execution role."
+)
+REJECTED_TERMINATING = (
+    "could not suspend the idle MicroVM, because the service rejected the "
+    "call. The MicroVM is terminating, so the worker does not try the call "
+    "again. A missing permission needs lambda:SuspendMicrovm on the MicroVM "
+    "image in its execution role."
+)
+REJECTED_SUSPENDING = (
+    "could not suspend the idle MicroVM, because the service rejected the "
+    "call. A suspend hook arrived during the call, so the MicroVM is "
+    "suspending anyway. The hook's refusal of jobs stays until the resume "
+    "hook, or 30 seconds after the last suspend hook. A missing permission "
+    "needs lambda:SuspendMicrovm on the MicroVM image in its execution role."
+)
+REFUSED = (
+    "could not suspend the idle MicroVM, because the service refused the call "
+    "for now. It keeps running. The worker tries the call again after the "
+    "next idle time. That idle time lasts at least 30 seconds, unless a job or "
+    "a resume hook starts the idle time again."
+)
+REFUSED_TERMINATING = (
+    "could not suspend the idle MicroVM, because the service refused the call "
+    "for now. The MicroVM is terminating, so the worker does not try the call "
+    "again."
+)
+REFUSED_CLOSED = (
+    "could not suspend the idle MicroVM, because the service refused the call "
+    "for now. The worker is closed, so it does not try the call again."
+)
+REFUSED_SUSPENDING = (
+    "could not suspend the idle MicroVM, because the service refused the call "
+    "for now. A suspend hook arrived during the call, so this call does not "
+    "end the hook's refusal. The idle time starts again after the resume "
+    "hook, or 30 seconds after the last suspend hook."
+)
+REFUSED_AFTER_HOOK = (
+    "could not suspend the idle MicroVM, because the service refused the call "
+    "for now. A suspend hook arrived during the call, and the hook's refusal "
+    "of jobs ended before the call ended. So the worker accepts jobs. It "
+    "tries the call again one idle time after the call and every job end."
+)
+UNKNOWN = (
+    "the suspend call for the idle MicroVM had an unknown outcome. The worker "
+    "refuses jobs until the MicroVM resumes, or for 30 seconds."
+)
+UNKNOWN_TERMINATING = (
+    "the suspend call for the idle MicroVM had an unknown outcome. The "
+    "MicroVM is terminating, so the worker refuses jobs and does not try the "
+    "call again."
+)
+
 LAMBDA_HEADERS = {"Host": "localhost:8080"}
 FORWARDED_HEADERS = {
     "Host": "7ed0892b.lambda-microvm.us-east-1.on.aws",
@@ -416,6 +473,12 @@ class Harness:
     def settle(self) -> None:
         """Wait until no SuspendMicrovm call runs."""
         assert eventually(lambda: self.listener._suspend_calls == 0)  # noqa: SLF001
+        # The call's thread lowers the count and starts the idle time in one
+        # locked block. The check above reads without the lock, so it can see
+        # the lower count first. Taking the lock waits for the rest of the
+        # block.
+        with self.listener._lock:  # noqa: SLF001
+            pass
 
     def advance(self, seconds: float) -> None:
         """Advance the clock, and let a suspend call that it started end."""
@@ -828,7 +891,7 @@ def test_logs_a_rejected_suspend_accepts_jobs_at_once_and_does_not_retry(
     assert h.microvms.suspended == ["mvm-1"]
     warnings = [line for line in logger.lines if line[0] == "warning"]
     assert len(warnings) == 1
-    assert "lambda:SuspendMicrovm" in warnings[0][1]
+    assert warnings[0][1] == REJECTED
     assert warnings[0][2]["microvmId"] == "mvm-1"
     assert warnings[0][2]["error"]["name"] == "ClientError"
     assert h.job("cb-1") == 202
@@ -882,7 +945,7 @@ def test_keeps_refusing_jobs_after_an_unknown_outcome(
 
     h.run_hook(IDLE)
     h.advance(IDLE)
-    assert "unknown outcome" in logger.messages("warning")[0]
+    assert logger.messages("warning") == [UNKNOWN]
     assert h.job("cb-1") == 503
 
     h.advance(GRACE)
@@ -914,7 +977,7 @@ def test_accepts_jobs_at_once_after_a_rejection(
         suspend_error("ExpiredTokenException", 403),
         suspend_error("SignatureDoesNotMatch", 403),
     ],
-    ids=["throttle", "throttle-400", "expired-token", "clock-offset"],
+    ids=["throttle", "throttle-400", "expired-token", "signature-error"],
 )
 def test_accepts_jobs_at_once_and_retries_after_a_refusal_for_now(
     start: Any, logger: Any, failure: BaseException
@@ -924,7 +987,7 @@ def test_accepts_jobs_at_once_and_retries_after_a_refusal_for_now(
 
     h.run_hook(IDLE)
     h.advance(IDLE)
-    assert "refused the call for now" in logger.messages("warning")[0]
+    assert logger.messages("warning") == [REFUSED]
     assert h.job("cb-1") == 202
     h.finish_job("cb-1")
 
@@ -934,23 +997,211 @@ def test_accepts_jobs_at_once_and_retries_after_a_refusal_for_now(
     assert h.microvms.suspended == ["mvm-1", "mvm-1"]
 
 
-def test_retries_a_refusal_for_now_one_idle_time_later_without_a_job(
+@pytest.mark.parametrize(
+    ("idle", "wait"),
+    [(1.0, GRACE), (IDLE, GRACE), (45.0, 45.0)],
+    ids=["idle-1s", "idle-10s", "idle-45s"],
+)
+def test_retries_a_refusal_for_now_after_the_idle_time_or_30_seconds_if_longer(
+    start: Any, logger: Any, idle: float, wait: float
+) -> None:
+    # A wrong secret key gives the same error on every call. Without the
+    # floor, a 1-second idle time made one call per second.
+    h = start()
+    h.microvms.failure = suspend_error("InvalidSignatureException", 403)
+
+    h.run_hook(idle)
+    h.advance(idle)
+    assert h.microvms.suspended == ["mvm-1"]
+    assert h.job("cb-1") == 202
+    h.finish_job("cb-1")
+    # The job restarted the normal idle time. So the next call comes one
+    # idle time after it, and the floor applies to the restart after it.
+    h.advance(idle)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+    h.advance(wait - 0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1", "mvm-1"]
+    # One warning per refusal.
+    refusals = [m for m in logger.messages("warning") if "for now" in m]
+    assert len(refusals) == 3
+
+
+def test_makes_one_call_per_30_seconds_while_a_refusal_for_now_persists(
     start: Any,
 ) -> None:
     h = start()
-    h.microvms.failure = suspend_error("ThrottlingException", 429)
+    h.microvms.failure = suspend_error("ExpiredTokenException", 403)
 
-    h.run_hook(IDLE)
-    h.advance(IDLE)
-    h.advance(IDLE - 0.001)
+    h.run_hook(1.0)
+    h.advance(1.0)
+    for _ in range(4):
+        h.advance(GRACE)
+
+    assert h.microvms.suspended == ["mvm-1"] * 5
+
+
+def test_a_job_that_ends_after_a_refusal_for_now_restarts_the_normal_idle_time(
+    start: Any,
+) -> None:
+    h = start()
+    h.microvms.failure = suspend_error("InvalidSignatureException", 403)
+
+    h.run_hook(1.0)
+    h.advance(1.0)
+    h.advance(5.0)
+    assert h.job("cb-1") == 202
+    h.finish_job("cb-1")
+    h.advance(1.0 - 0.001)
     assert h.microvms.suspended == ["mvm-1"]
 
     h.advance(0.001)
     assert h.microvms.suspended == ["mvm-1", "mvm-1"]
 
 
-def test_keeps_a_hook_refusal_after_a_refusal_for_now_of_the_own_call(
+def test_a_resume_hook_after_a_refusal_for_now_restarts_the_normal_idle_time(
     start: Any,
+) -> None:
+    h = start()
+    h.microvms.failure = suspend_error("InvalidSignatureException", 403)
+
+    h.run_hook(1.0)
+    h.advance(1.0)
+    h.advance(5.0)
+    assert h.hook("resume") == 200
+    h.advance(1.0 - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_waits_30_seconds_after_a_refusal_for_now_that_follows_a_resume_hook(
+    start: Any,
+) -> None:
+    # The resume hook asks for the idle time while the call runs. The call
+    # then ends refused for now. That outcome is the later request, so the
+    # floor applies.
+    h = start()
+    h.microvms.hold = True
+    h.microvms.failure = suspend_error("InvalidSignatureException", 403)
+
+    h.run_hook(1.0)
+    h.advance(1.0)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    assert h.hook("resume") == 200
+    h.microvms.hold = False
+    h.microvms.finish()
+    h.settle()
+    h.advance(GRACE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_uses_the_normal_idle_time_after_a_job_that_ran_across_the_refused_call(
+    start: Any,
+) -> None:
+    # A resume hook during the call lets a job start. The call ends refused
+    # for now while the job runs. The job ends after the call. So the job's
+    # end is the latest restart, and the normal idle time applies.
+    h = start()
+    h.microvms.hold = True
+    h.microvms.failure = suspend_error("InvalidSignatureException", 403)
+
+    h.run_hook(1.0)
+    h.advance(1.0)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    assert h.hook("resume") == 200
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+    h.microvms.hold = False
+    h.microvms.finish()
+    h.settle()
+
+    # No call while the job runs.
+    h.advance(GRACE * 2)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.finish_job("cb-1")
+    h.advance(1.0 - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_waits_30_seconds_after_a_refusal_for_now_that_follows_a_job_end(
+    start: Any,
+) -> None:
+    # A job starts and ends during the call. The call then ends refused for
+    # now. That outcome is the later request, so the floor applies.
+    h = start()
+    h.microvms.hold = True
+    h.microvms.failure = suspend_error("InvalidSignatureException", 403)
+
+    h.run_hook(1.0)
+    h.advance(1.0)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+    assert h.hook("resume") == 200
+    assert h.job("cb-1") == 202
+    h.finish_job("cb-1")
+    h.microvms.hold = False
+    h.microvms.finish()
+    h.settle()
+    h.advance(GRACE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+
+
+class _ClosingClient(FakeMicrovmsClient):
+    """A default client whose ``close()`` waits until the test releases it.
+
+    The call is still counted as running during ``close()``. So a request to
+    start the idle time then waits for the call to end.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closing = threading.Event()
+        self.release_close = threading.Event()
+
+    def close(self) -> None:
+        self.closing.set()
+        self.release_close.wait(WAIT)
+        super().close()
+
+
+def test_a_job_that_ends_before_a_refused_call_has_ended_uses_the_normal_idle_time(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _ClosingClient()
+    client.failure = suspend_error("InvalidSignatureException", 403)
+    monkeypatch.setattr(worker_module, "create_microvms_client", lambda r: client)
+    h = start(create_microvms_client=None)
+
+    h.run_hook(1.0)
+    h.timers.advance(1.0)
+    # The refusal has ended. The call is still closing its client.
+    assert client.closing.wait(WAIT)
+    assert h.job("cb-1") == 202
+    h.finish_job("cb-1")
+    client.release_close.set()
+    h.settle()
+
+    # The job ended after the refusal. So the normal idle time applies.
+    h.advance(1.0 - 0.001)
+    assert client.suspended == ["mvm-1"]
+    h.advance(0.001)
+    assert client.suspended == ["mvm-1", "mvm-1"]
+
+
+def test_keeps_a_hook_refusal_after_a_refusal_for_now_of_the_own_call(
+    start: Any, logger: Any
 ) -> None:
     h = start()
     h.microvms.hold = True
@@ -964,6 +1215,273 @@ def test_keeps_a_hook_refusal_after_a_refusal_for_now_of_the_own_call(
     h.settle()
 
     assert h.job("cb-1") == 503
+    # No 30-second floor applies, so the warning does not promise one.
+    assert logger.messages("warning") == [REFUSED_SUSPENDING]
+
+
+def hold_failed_call(h: Harness, failure: BaseException) -> None:
+    """Start the first SuspendMicrovm call, and keep it open until
+    :func:`end_failed_call`."""
+    h.microvms.hold = True
+    h.microvms.failure = failure
+    h.run_hook(IDLE)
+    h.advance(IDLE)
+    assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+
+
+def end_failed_call(h: Harness) -> None:
+    """End the held call with its failure. Every later call succeeds, so it
+    logs no warning."""
+    h.microvms.hold = False
+    h.microvms.finish()
+    h.settle()
+    h.microvms.failure = None
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [["terminate"], ["suspend", "terminate"]],
+    ids=["terminate", "suspend-then-terminate"],
+)
+@pytest.mark.parametrize(
+    ("failure", "text"),
+    [
+        (suspend_error("AccessDeniedException", 403), REJECTED_TERMINATING),
+        (suspend_error("InvalidSignatureException", 403), REFUSED_TERMINATING),
+        (
+            suspend_error("InternalServerException", 500, retries=2),
+            UNKNOWN_TERMINATING,
+        ),
+    ],
+    ids=["rejected", "refused-for-now", "unknown"],
+)
+def test_never_calls_again_after_a_terminate_hook_during_a_failed_call(
+    start: Any, logger: Any, failure: BaseException, text: str, hooks: list[str]
+) -> None:
+    # A terminating listener refuses jobs for good, and starts no idle time.
+    # So the text names the terminate hook, also after a suspend hook.
+    h = start()
+    hold_failed_call(h, failure)
+    for hook in hooks:
+        assert h.hook(hook) == 200
+    end_failed_call(h)
+
+    assert h.job("cb-1") == 503
+    assert h.hook("resume") == 200
+    h.advance(GRACE * 4)
+    assert h.job("cb-2") == 503
+    assert h.microvms.suspended == ["mvm-1"]
+    assert logger.messages("warning") == [text]
+
+
+@pytest.mark.parametrize(
+    ("failure", "text"),
+    [
+        (suspend_error("InvalidSignatureException", 403), REFUSED_CLOSED),
+        # A rejection promises no retry. So its text stays true after close().
+        (suspend_error("AccessDeniedException", 403), REJECTED),
+    ],
+    ids=["refused-for-now", "rejected"],
+)
+def test_never_calls_again_after_close_during_a_failed_call(
+    start: Any, logger: Any, failure: BaseException, text: str
+) -> None:
+    h = start()
+    hold_failed_call(h, failure)
+    h.listener.close()
+    end_failed_call(h)
+
+    assert h.job("cb-1") == 202
+    h.finish_job("cb-1")
+    assert h.hook("resume") == 200
+    h.advance(GRACE * 4)
+    assert h.microvms.suspended == ["mvm-1"]
+    assert logger.messages("warning") == [text]
+
+
+def test_names_the_terminate_hook_when_close_also_came_during_a_refused_call(
+    start: Any, logger: Any
+) -> None:
+    h = start()
+    hold_failed_call(h, suspend_error("InvalidSignatureException", 403))
+    h.listener.close()
+    assert h.hook("terminate") == 200
+    end_failed_call(h)
+
+    assert h.job("cb-1") == 503
+    h.advance(GRACE * 4)
+    assert h.microvms.suspended == ["mvm-1"]
+    assert logger.messages("warning") == [REFUSED_TERMINATING]
+
+
+@pytest.mark.parametrize("end", ["resume", "grace"])
+@pytest.mark.parametrize(
+    ("failure", "text"),
+    [
+        (suspend_error("AccessDeniedException", 403), REJECTED_SUSPENDING),
+        (suspend_error("InvalidSignatureException", 403), REFUSED_SUSPENDING),
+    ],
+    ids=["rejected", "refused-for-now"],
+)
+def test_keeps_a_suspend_hook_refusal_in_effect_after_a_failed_call(
+    start: Any, logger: Any, failure: BaseException, text: str, end: str
+) -> None:
+    # Two suspend hooks arrive during the call, 10 seconds apart. The failed
+    # call does not end their refusal. The refusal ends on the resume hook,
+    # or 30 seconds after the last suspend hook. The idle time then starts
+    # without the 30-second floor.
+    h = start()
+    hold_failed_call(h, failure)
+    assert h.hook("suspend") == 200
+    h.advance(10)
+    assert h.hook("suspend") == 200
+    end_failed_call(h)
+
+    assert h.job("cb-1") == 503
+    if end == "resume":
+        assert h.hook("resume") == 200
+    else:
+        h.advance(GRACE - 0.001)
+        assert h.job("cb-2") == 503
+        h.advance(0.001)
+    h.advance(IDLE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+    assert logger.messages("warning") == [text]
+
+
+@pytest.mark.parametrize("then", ["no-job", "job"])
+@pytest.mark.parametrize("end", ["resume", "grace"])
+def test_accepts_jobs_after_a_refusal_for_now_when_the_hook_refusal_ended(
+    start: Any, logger: Any, end: str, then: str
+) -> None:
+    # A suspend hook arrives during the call. Its refusal ends before the
+    # call ends: on a resume hook, or after 30 seconds, because botocore
+    # cannot cancel an attempt in flight. The refused outcome then neither
+    # ends a refusal nor asks for the 30-second floor.
+    h = start()
+    hold_failed_call(h, suspend_error("InvalidSignatureException", 403))
+    assert h.hook("suspend") == 200
+    if end == "resume":
+        assert h.hook("resume") == 200
+    else:
+        h.advance(GRACE)
+    end_failed_call(h)
+
+    if then == "job":
+        assert h.job("cb-1") == 202
+        h.advance(GRACE)
+        assert h.microvms.suspended == ["mvm-1"]
+        h.finish_job("cb-1")
+    h.advance(IDLE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+    assert logger.messages("warning") == [REFUSED_AFTER_HOOK]
+
+
+@pytest.mark.parametrize("end", ["resume", "grace"])
+def test_says_the_microvm_keeps_running_after_a_rejection_when_the_hook_refusal_ended(
+    start: Any, logger: Any, end: str
+) -> None:
+    h = start()
+    hold_failed_call(h, suspend_error("AccessDeniedException", 403))
+    assert h.hook("suspend") == 200
+    if end == "resume":
+        assert h.hook("resume") == 200
+    else:
+        h.advance(GRACE)
+    end_failed_call(h)
+
+    assert h.job("cb-1") == 202
+    h.finish_job("cb-1")
+    h.advance(IDLE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+    assert logger.messages("warning") == [REJECTED]
+
+
+@pytest.mark.parametrize(
+    ("idle", "waited"), [(1.0, GRACE), (45.0, 45.0)], ids=["idle-1s", "idle-45s"]
+)
+def test_logs_the_idle_time_and_the_wait_before_each_call(
+    start: Any, logger: Any, idle: float, waited: float
+) -> None:
+    # After a refusal for now, the wait lasts at least 30 seconds. So it can
+    # differ from the session's idle time.
+    h = start()
+    h.microvms.failure = suspend_error("InvalidSignatureException", 403)
+
+    h.run_hook(idle)
+    h.advance(idle)
+    h.advance(waited)
+
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+    calls = [
+        data
+        for level, message, data in logger.lines
+        if level == "info" and message == "suspending the idle MicroVM"
+    ]
+    assert calls == [
+        {"microvmId": "mvm-1", "idleSeconds": idle, "waitedSeconds": idle},
+        {"microvmId": "mvm-1", "idleSeconds": idle, "waitedSeconds": waited},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("restart", "waited"),
+    [
+        ("job-end", 1.0),
+        ("resume", 1.0),
+        ("unknown-outcome-grace", 1.0),
+        ("resume-during-refused-call", GRACE),
+    ],
+    ids=["job-end", "resume", "unknown-outcome-grace", "resume-during-refused-call"],
+)
+def test_logs_the_wait_of_the_idle_time_that_started_the_call(
+    start: Any, logger: Any, restart: str, waited: float
+) -> None:
+    # waitedSeconds is the delay of the idle timer that started the call. A
+    # job end, a resume hook, and the end of the 30-second grace each start
+    # the normal idle time. A resume hook during a refused call asks for the
+    # idle time first. The refusal for now asks for it last, with the floor.
+    # So that wait lasts 30 seconds.
+    h = start()
+    if restart == "unknown-outcome-grace":
+        h.microvms.failure = suspend_error("InternalServerException", 500, retries=2)
+    else:
+        h.microvms.failure = suspend_error("InvalidSignatureException", 403)
+    h.microvms.hold = restart == "resume-during-refused-call"
+
+    h.run_hook(1.0)
+    h.advance(1.0)
+    if restart == "resume-during-refused-call":
+        assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+        assert h.hook("resume") == 200
+        h.microvms.hold = False
+        h.microvms.finish()
+        h.settle()
+    h.microvms.failure = None
+    if restart == "job-end":
+        assert h.job("cb-1") == 202
+        h.finish_job("cb-1")
+    elif restart == "resume":
+        assert h.hook("resume") == 200
+    elif restart == "unknown-outcome-grace":
+        h.advance(GRACE)
+    h.advance(waited - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.advance(0.001)
+
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+    waits = [
+        (data["idleSeconds"], data["waitedSeconds"])
+        for level, message, data in logger.lines
+        if level == "info" and message == "suspending the idle MicroVM"
+    ]
+    assert waits == [(1.0, 1.0), (1.0, waited)]
 
 
 def test_keeps_refusing_jobs_until_a_call_past_its_deadline_has_ended(

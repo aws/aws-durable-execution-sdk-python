@@ -9,10 +9,10 @@ import os
 from typing import Any
 
 from aws_durable_execution_sdk_python import DurableContext, durable_execution
-from common import otel_plugin, require_scenario
+from common import otel_plugin_factory, require_scenario
 
 
-@durable_execution(plugins=[otel_plugin()])
+@durable_execution(plugins=[otel_plugin_factory()])
 def handler(
     event: dict[str, Any],
     context: DurableContext,
@@ -25,7 +25,7 @@ def handler(
     )
 
 
-@durable_execution(plugins=[otel_plugin()])
+@durable_execution(plugins=[otel_plugin_factory()])
 def target_handler(
     event: dict[str, Any],
     _context: DurableContext,
