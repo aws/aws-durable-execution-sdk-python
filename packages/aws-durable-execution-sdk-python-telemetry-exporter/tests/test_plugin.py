@@ -909,6 +909,47 @@ def test_result_unsupported_decoded_type_falls_back_to_parsed_json(monkeypatch):
     assert _charge_result(raw) == {"t": "m", "v": {}}
 
 
+def test_result_deeply_nested_plain_json_is_converted():
+    # 600 nested arrays parse fine but used to exceed the recursion limit on
+    # conversion; the conversion is iterative.
+    raw = "[" * 600 + "]" * 600
+    assert json.dumps(_charge_result(raw)) == raw
+
+
+def test_json_conversion_does_not_recurse():
+    value: Any = 1.5
+    for _ in range(20_000):
+        value = [value]
+    converted = plugin_module._to_json_compatible(value)  # noqa: SLF001
+    for _ in range(20_000):
+        converted = converted[0]
+    assert converted == 1.5
+
+
+def test_json_conversion_keeps_dict_order_and_last_duplicate_key():
+    assert plugin_module._to_json_compatible(  # noqa: SLF001
+        {"b": (1, 2), 1: "first", "1": "second"}
+    ) == {"b": [1, 2], "1": "second"}
+    assert list(plugin_module._to_json_compatible({"b": 1, "a": 2})) == ["b", "a"]  # noqa: SLF001
+
+
+def test_result_normalization_failure_is_isolated_to_that_result(monkeypatch):
+    def fail(_value: Any) -> Any:
+        raise RecursionError("too deep")
+
+    monkeypatch.setattr(plugin_module, "_to_json_compatible", fail)
+    exporter = CaptureExporter()
+    _run(
+        _override_plugin(exporter),
+        ops=[_step("charge", result="[[1]]"), _step("other", result="[2]")],
+    )
+    (record,) = exporter.records
+    by_name = {op["name"]: op for op in record["operations"]}
+    # The failing result falls back to its raw string; the record is emitted.
+    assert by_name["charge"]["result"] == "[[1]]"
+    assert set(by_name) == {"charge", "other"}
+
+
 def test_result_in_operations_by_name_is_plain():
     exporter = CaptureExporter(render=LambdaLogExporter().render)
     _run(

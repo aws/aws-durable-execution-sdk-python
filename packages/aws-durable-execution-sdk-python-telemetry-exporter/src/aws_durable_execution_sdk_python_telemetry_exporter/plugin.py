@@ -43,18 +43,11 @@ from typing import Any, Callable
 from aws_durable_execution_sdk_python.concurrency.models import BatchResult
 from aws_durable_execution_sdk_python.exceptions import (
     CallbackExternalError,
-    CallbackSubmitterError,
     CallbackTimeoutError,
-    ChildContextError,
-    DurableOperationError,
-    InvokeError,
-    StepError,
-    WaitForConditionError,
 )
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationStatus,
-    OperationSubType,
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -219,17 +212,20 @@ def _decode_checkpoint_result(raw_result: str) -> Any:
     """
     try:
         parsed = json.loads(raw_result)
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError, RecursionError):
         return raw_result
-    if not _is_extended_type_envelope(parsed):
-        # Plain JSON already; only non-finite numbers (json.loads accepts NaN
-        # and Infinity) need mapping to null.
-        return _to_json_compatible(parsed)
     try:
-        decoded = EXTENDED_TYPES_SERDES.deserialize(raw_result, SerDesContext())
-        return _to_json_compatible(decoded)
-    except Exception:  # noqa: BLE001 - fall back to the parsed payload, never raise
-        return _to_json_compatible(parsed)
+        if not _is_extended_type_envelope(parsed):
+            # Plain JSON already; only non-finite numbers (json.loads accepts
+            # NaN and Infinity) need mapping to null.
+            return _to_json_compatible(parsed)
+        try:
+            decoded = EXTENDED_TYPES_SERDES.deserialize(raw_result, SerDesContext())
+            return _to_json_compatible(decoded)
+        except Exception:  # noqa: BLE001 - fall back to the parsed payload
+            return _to_json_compatible(parsed)
+    except Exception:  # noqa: BLE001 - one bad result never breaks the record
+        return raw_result
 
 
 # An integral Decimal becomes a JSON integer only up to this many digits; a
@@ -252,7 +248,39 @@ def _to_json_compatible(value: Any) -> Any:
     ``BatchResult`` becomes its ``to_dict()`` form. A non-finite ``Decimal`` or
     ``float`` (NaN, Infinity) becomes ``None`` (JSON ``null``), like
     ``JSON.stringify(NaN)`` in JS, so the record stays strict JSON.
+
+    Containers are converted with an explicit stack, so a deeply nested result
+    does not hit the interpreter's recursion limit.
     """
+    root: list[Any] = [None]
+    # (value, target container, key in target), processed in source order.
+    pending: list[tuple[Any, Any, Any]] = [(value, root, 0)]
+    while pending:
+        item, target, key = pending.pop()
+        if isinstance(item, BatchResult):
+            item = item.to_dict()
+        if isinstance(item, (list, tuple)):
+            converted_list: list[Any] = [None] * len(item)
+            target[key] = converted_list
+            pending.extend(
+                (child, converted_list, index)
+                for index, child in reversed(list(enumerate(item)))
+            )
+        elif isinstance(item, dict):
+            converted_dict: dict[str, Any] = {}
+            target[key] = converted_dict
+            entries = [(str(k), child) for k, child in item.items()]
+            for name, _child in entries:
+                converted_dict[name] = None
+            pending.extend(
+                (child, converted_dict, name) for name, child in reversed(entries)
+            )
+        else:
+            target[key] = _scalar_to_json_compatible(item)
+    return root[0]
+
+
+def _scalar_to_json_compatible(value: Any) -> Any:
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if value is None or isinstance(value, (str, bool, int)):
@@ -280,12 +308,6 @@ def _to_json_compatible(value: Any) -> Any:
         return str(value)
     if isinstance(value, (bytes, bytearray, memoryview)):
         return base64.b64encode(bytes(value)).decode("ascii")
-    if isinstance(value, (list, tuple)):
-        return [_to_json_compatible(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _to_json_compatible(item) for key, item in value.items()}
-    if isinstance(value, BatchResult):
-        return _to_json_compatible(value.to_dict())
     msg = f"Unsupported decoded result type: {type(value)!r}"
     raise TypeError(msg)
 
@@ -293,38 +315,24 @@ def _to_json_compatible(value: Any) -> Any:
 # -- error names ----------------------------------------------------------------
 #
 # The cross-SDK rule for ``error.name`` (execution ``error``, ``operations[].error``
-# and ``operationsByName.<name>.error``), spec version 2:
+# and ``operationsByName.<name>.error``), spec version 3. The core SDK
+# checkpoints the error a wrapper wraps, never the wrapper (it unwraps its own
+# wrappers, at most 16, stopping at a repeated cause), so every failed
+# operation and the execution carry the user's type. The exporter only reduces
+# that type:
 #
-# 1. A record names the error that caused the failure. A wrapper error that the
-#    SDK added is never the name, except in the bounded cases of rules 3 and 9.
-# 2. Only the SDK's own wrapper types are unwrapped. A user error is never
-#    unwrapped, even if it has a cause.
-# 3. Unwrapping follows the chain of SDK wrappers. The depth counts unwrap
-#    steps, one per wrapper passed, not levels in the operation tree. At most 16
-#    unwraps happen; if the error reached after 16 unwraps is still a wrapper,
-#    its name is reported. If the chain reaches an error it has already
-#    visited, the walk stops and the last error visited before the repeat is
-#    reported.
-# 4. A chain that ends at a user error is named by that error's type name.
-# 5. A chain that ends at an SDK error that is not a wrapper (for example a
-#    callback timeout) is named by that SDK error's simple class name.
-# 6. A qualified type string is reduced to its last segment after any ``.`` or
-#    ``$``; an empty segment keeps the string as it is. A missing type, or one
-#    made only of the six ASCII whitespace characters, is ``Error``. Names are
-#    never trimmed.
-# 7. A failure gets the same name live and from a replayed checkpoint.
-# 8. When an operation's error propagates to the execution, the execution name
-#    equals that operation's name.
-# 9. When the SDK cannot tell which of several failures caused a wrapper, it
-#    does not guess and reports the wrapper's name.
+# * An operation is named by its own ErrorType, reduced (Table A). A callback
+#   operation that timed out is ``CallbackTimeoutError``; one failed externally
+#   with a missing or blank type is ``CallbackExternalError``. An explicit type,
+#   ``"Error"`` included, is the sender's.
+# * The execution is named by the reduced type of its own ErrorType. A
+#   checkpoint written by an older core can still hold an SDK wrapper type; the
+#   wrapper's own name is then reported (rule 9). The exporter never infers a
+#   cause from other operations.
 #
-# Python hooks only carry checkpointed ``ErrorObject`` values, never a live
-# exception, so a wrapper's chain is recovered from the operation tree: the SDK
-# rebuilds a wrapper from the failed operation's ErrorObject with the same
-# message, data and stack trace (``ErrorObject.raise_as_operation_error``), on
-# the first run and on replay alike. One wrapper hand-off is therefore a failed
-# operation whose error has the same fields: a direct child, or an item or
-# branch of a direct map or parallel child (see ``_ErrorNameIndex._links``).
+# Reduction: the text after the last ``.`` or ``$``; an empty segment keeps the
+# string as it is. A missing type, or one made only of the six ASCII whitespace
+# characters, is ``Error``. Names are never trimmed.
 
 
 def _qualified(cls: type) -> str:
@@ -333,43 +341,10 @@ def _qualified(cls: type) -> str:
 
 _CALLBACK_TIMEOUT_TYPE = _qualified(CallbackTimeoutError)
 _CALLBACK_EXTERNAL_TYPE = _qualified(CallbackExternalError)
-_CALLBACK_SUBMITTER_TYPE = _qualified(CallbackSubmitterError)
 
-# Messages the core fills in when the error it re-raises has none. The core
-# has no constants for them (``context.py``); the e2e tests fail a callback
-# and a submitter with an empty message, so a change in the core is caught.
-_CALLBACK_TIMEOUT_MESSAGE = "Callback timed out"
-_CALLBACK_FAILED_MESSAGE = "Callback failed"
-_CALLBACK_SUBMITTER_MESSAGE = "Callback submitter failed"
-
-# SDK wrapper types, mapped to the operation types whose failure they re-raise
-# (``None``: any operation type). A wrapper carries the fields of the error that
-# escaped that operation; the cause's type lives on an operation in its subtree.
-# Every other type (user errors, and SDK errors such as CallbackTimeoutError,
-# SerDesError, ValidationError or BatchCompletionError) is never unwrapped.
-_WRAPPER_OPERATION_TYPES: dict[str, frozenset[OperationType] | None] = {
-    _qualified(DurableOperationError): None,
-    _qualified(StepError): frozenset({OperationType.STEP}),
-    _qualified(WaitForConditionError): frozenset({OperationType.STEP}),
-    _qualified(InvokeError): frozenset({OperationType.CHAINED_INVOKE}),
-    _qualified(ChildContextError): frozenset({OperationType.CONTEXT}),
-    # wait_for_callback: the submitter step failed inside the callback context.
-    _CALLBACK_SUBMITTER_TYPE: frozenset({OperationType.CONTEXT}),
-    # The external system failed the callback: raised from the callback
-    # operation directly, or from the wait_for_callback context around it.
-    _CALLBACK_EXTERNAL_TYPE: frozenset({OperationType.CONTEXT, OperationType.CALLBACK}),
-}
-
-# Operations that run items or branches as child contexts. Their own operation
-# is not a wrapper link; a failed item or branch below them is.
-_BATCH_SUB_TYPES = frozenset({OperationSubType.MAP, OperationSubType.PARALLEL})
-
-_MAX_UNWRAPS = 16
 _DEFAULT_ERROR_NAME = "Error"
-# Rule 6: only these six characters are blank (not str.isspace() or strip()).
+# Only these six characters are blank (not str.isspace() or strip()).
 _BLANK_CHARACTERS = frozenset(" \t\n\r\f\v")
-
-_ErrorKey = tuple[str | None, str | None, tuple[str, ...] | None]
 
 
 def _is_blank(type_name: str | None) -> bool:
@@ -392,186 +367,30 @@ def _simple_type_name(type_name: str | None) -> str:
     return segment or type_name
 
 
-def _error_key(error: ErrorObject) -> _ErrorKey:
-    stack = error.stack_trace
-    return (error.message, error.data, tuple(stack) if stack is not None else None)
-
-
-def _operation_error_type(op: OperationInfo) -> str | None:
-    """The type that names ``op``'s own failure before any unwrapping.
+def _operation_error_name(op: OperationInfo) -> str:
+    """``error.name`` of a failed operation: its own ErrorType, reduced.
 
     A callback operation's error comes from the service or the external sender:
     a timeout is named by the SDK's CallbackTimeoutError (the service type
-    ``Callback.Timeout`` would reduce to ``Timeout``), and an external failure
-    without a type (missing or blank) by the SDK's CallbackExternalError, which
-    is what the SDK raises for both. An explicit type, ``"Error"`` included, is
-    the sender's.
+    would reduce to ``Timeout``), and an external failure without a type
+    (missing or blank) by the SDK's CallbackExternalError, which is what the
+    SDK raises for both.
     """
     error_type = op.error.type if op.error is not None else None
     if op.operation_type == OperationType.CALLBACK:
         if op.status == OperationStatus.TIMED_OUT:
-            return _CALLBACK_TIMEOUT_TYPE
-        if _is_blank(error_type):
-            return _CALLBACK_EXTERNAL_TYPE
-    return error_type
+            error_type = _CALLBACK_TIMEOUT_TYPE
+        elif _is_blank(error_type):
+            error_type = _CALLBACK_EXTERNAL_TYPE
+    return _simple_type_name(error_type)
 
 
-def _operation_error_key(op: OperationInfo) -> _ErrorKey | None:
-    if op.error is None:
-        return None
-    message, data, stack = _error_key(op.error)
-    if op.operation_type == OperationType.CALLBACK and not message:
-        # The SDK fills in a default message when the callback error has none.
-        is_timeout = op.status == OperationStatus.TIMED_OUT
-        message = _CALLBACK_TIMEOUT_MESSAGE if is_timeout else _CALLBACK_FAILED_MESSAGE
-    return (message, data, stack)
+def _execution_error_name(error: ErrorObject) -> str:
+    """``error.name`` of the execution: its own ErrorType, reduced.
 
-
-class _ErrorNameIndex:
-    """Resolves ``error.name`` for one record build.
-
-    Built once per record from the operation snapshot in O(n): children by
-    parent, error keys by operation, and failed operations by key. An
-    operation's name is resolved by following its wrapper links (``_links``)
-    with a budget of ``_MAX_UNWRAPS`` unwraps. Each (operation, remaining
-    budget) result is cached, so an operation is resolved at most
-    ``_MAX_UNWRAPS + 1`` times per record and a record build stays linear in
-    the number of operations.
+    A wrapper type (from an older core) reduces to the wrapper's name.
     """
-
-    __slots__ = ("_operations", "_children", "_keys", "_by_key", "_links_of", "_names")
-
-    def __init__(self, operations: dict[str, OperationInfo]) -> None:
-        self._operations = operations
-        self._children: dict[str, list[OperationInfo]] = {}
-        self._keys: dict[str, _ErrorKey | None] = {}
-        self._by_key: dict[_ErrorKey, list[OperationInfo]] = {}
-        self._links_of: dict[str, list[OperationInfo]] = {}
-        self._names: dict[tuple[str, int], str] = {}
-        for op in operations.values():
-            if op.parent_id is not None:
-                self._children.setdefault(op.parent_id, []).append(op)
-            key = _operation_error_key(op)
-            self._keys[op.operation_id] = key
-            if key is not None:
-                self._by_key.setdefault(key, []).append(op)
-
-    def _links(self, op: OperationInfo) -> list[OperationInfo]:
-        """The operations ``op``'s wrapper hands off to: one unwrap each.
-
-        A failed direct child with the same error fields, or a failed item or
-        branch with those fields under a direct map or parallel child (the
-        batch operation is a tree level but not a wrapper). Other children are
-        not descended into, so a failure that user code handled inside the
-        subtree (in a child context that then succeeded) is never a cause.
-        """
-        links = self._links_of.get(op.operation_id)
-        if links is not None:
-            return links
-        key = self._keys[op.operation_id]
-        links = []
-        for child in self._children.get(op.operation_id, ()):
-            if self._keys[child.operation_id] == key:
-                links.append(child)
-            elif child.sub_type in _BATCH_SUB_TYPES:
-                links.extend(
-                    item
-                    for item in self._children.get(child.operation_id, ())
-                    if self._keys[item.operation_id] == key
-                )
-        self._links_of[op.operation_id] = links
-        return links
-
-    def _resolve(
-        self, op: OperationInfo, budget: int, visiting: set[str]
-    ) -> tuple[str, bool]:
-        """``op``'s name with ``budget`` unwraps left, and whether a cycle was hit.
-
-        A result that depends on a cycle depends on where the walk entered it,
-        so it is not cached.
-        """
-        error_type = _operation_error_type(op)
-        own_name = _simple_type_name(error_type)
-        if budget == 0 or error_type not in _WRAPPER_OPERATION_TYPES:
-            return own_name, False
-        cache_key = (op.operation_id, budget)
-        cached = self._names.get(cache_key)
-        if cached is not None:
-            return cached, False
-        visiting.add(op.operation_id)
-        names: set[str] = set()
-        cyclic = False
-        for link in self._links(op):
-            if link.operation_id in visiting:
-                # A repeat: report the last error visited before it (``op``).
-                names.add(own_name)
-                cyclic = True
-                continue
-            name, link_cyclic = self._resolve(link, budget - 1, visiting)
-            names.add(name)
-            cyclic = cyclic or link_cyclic
-        visiting.discard(op.operation_id)
-        # No link: the chain cannot be followed (the error reached is reported).
-        # Several distinct names: ambiguous, do not guess (rule 9).
-        result = next(iter(names)) if len(names) == 1 else own_name
-        if not cyclic:
-            self._names[cache_key] = result
-        return result, cyclic
-
-    def operation_name(self, op: OperationInfo) -> str:
-        """``error.name`` of a failed operation."""
-        return self._resolve(op, _MAX_UNWRAPS, set())[0]
-
-    def _has_candidate_ancestor(self, op: OperationInfo, candidates: set[str]) -> bool:
-        seen = {op.operation_id}
-        parent_id = op.parent_id
-        while parent_id is not None and parent_id not in seen:
-            if parent_id in candidates:
-                return True
-            seen.add(parent_id)
-            parent = self._operations.get(parent_id)
-            parent_id = parent.parent_id if parent is not None else None
-        return False
-
-    def execution_name(self, error: ErrorObject) -> str:
-        """``error.name`` of the execution error.
-
-        A wrapper is the SDK re-raising the failure of the operation it
-        propagated from: a failed operation of the wrapper's operation type
-        whose error carries the same fields. Only the outermost such operations
-        count (one whose ancestors include another is part of that one's
-        chain), and the execution takes their name (rule 8). This does not add
-        an unwrap, so the rule still holds at the depth bound. A failure handled
-        elsewhere in the execution has no such operation and is never used.
-        """
-        error_type = error.type
-        if error_type not in _WRAPPER_OPERATION_TYPES:
-            return _simple_type_name(error_type)
-        allowed = _WRAPPER_OPERATION_TYPES[error_type]
-        keys = [_error_key(error)]
-        message, data, stack = keys[0]
-        if (
-            error_type == _CALLBACK_SUBMITTER_TYPE
-            and message == _CALLBACK_SUBMITTER_MESSAGE
-        ):
-            # The submitter step failed with no message; the core re-raised it
-            # with its default message, and the context keeps the empty one.
-            keys += [("", data, stack), (None, data, stack)]
-        candidates = [
-            op
-            for key in keys
-            for op in self._by_key.get(key, ())
-            if allowed is None or op.operation_type in allowed
-        ]
-        ids = {op.operation_id for op in candidates}
-        outermost = [
-            op for op in candidates if not self._has_candidate_ancestor(op, ids)
-        ]
-        # Every candidate has a candidate ancestor only in a parent-id cycle.
-        names = {self.operation_name(op) for op in outermost or candidates}
-        if len(names) == 1:
-            return names.pop()
-        return _simple_type_name(error_type)
+    return _simple_type_name(error.type)
 
 
 class _ExecutionState:
@@ -749,14 +568,8 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin):
     # -- emission -------------------------------------------------------------
 
     def _build_operations(
-        self,
-        operations: dict[str, OperationInfo],
-        error_names: _ErrorNameIndex | None = None,
+        self, operations: dict[str, OperationInfo]
     ) -> list[dict[str, Any]]:
-        # One index per record build keeps error.name resolution linear in the
-        # number of operations (see _ErrorNameIndex).
-        if error_names is None:
-            error_names = _ErrorNameIndex(operations)
         records: list[dict[str, Any]] = []
         for op in operations.values():
             if op.operation_type == OperationType.EXECUTION:
@@ -789,7 +602,7 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin):
                 entry["attempt"] = op.attempt
             if self._include_errors and op.error is not None:
                 entry["error"] = {
-                    "name": error_names.operation_name(op),
+                    "name": _operation_error_name(op),
                     "message": op.error.message,
                 }
             if override is not None and override.result is not None:
@@ -857,13 +670,12 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin):
             record["input"] = input_value
         if output_value is not None:
             record["output"] = output_value
-        error_names = _ErrorNameIndex(operations)
         if error is not None:
             record["error"] = {
-                "name": error_names.execution_name(error),
+                "name": _execution_error_name(error),
                 "message": error.message,
             }
-        record["operations"] = self._build_operations(operations, error_names)
+        record["operations"] = self._build_operations(operations)
 
         self._scheduler.schedule(record)
 

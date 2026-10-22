@@ -27,7 +27,10 @@ from typing import Any, Callable
 
 import pytest
 from aws_durable_execution_sdk_python.config import (
+    CompletionConfig,
     Duration,
+    MapConfig,
+    ParallelConfig,
     StepConfig,
     WaitForCallbackConfig,
 )
@@ -273,12 +276,21 @@ def _b20(ctx: DurableContext) -> Any:
         # One raise site, so both items carry the same message and stack trace.
         raise (PaymentError if value == "a" else FraudError)(MESSAGE)
 
-    ctx.map(["a", "b"], item, name="fanout").throw_if_error()
+    # Both items run, one at a time, so item 0's error is the one raised.
+    config: MapConfig[Any] = MapConfig(
+        max_concurrency=1, completion_config=CompletionConfig.all_completed()
+    )
+    ctx.map(["a", "b"], item, name="fanout", config=config).throw_if_error()
 
 
 def _b21(ctx: DurableContext) -> Any:
+    config = ParallelConfig(
+        max_concurrency=1, completion_config=CompletionConfig.all_completed()
+    )
     ctx.parallel(
-        [_raise(PaymentError(MESSAGE)), _raise(FraudError(MESSAGE))], name="branches"
+        [_raise(PaymentError(MESSAGE)), _raise(FraudError(MESSAGE))],
+        name="branches",
+        config=config,
     ).throw_if_error()
 
 
@@ -314,10 +326,9 @@ def _nested(depth: int) -> Callable[[DurableContext], Any]:
     return level(1)
 
 
-def _depth_names(depth: int, bounded: dict[str, str]) -> dict[str, str]:
+def _depth_names(depth: int) -> dict[str, str]:
     names = {f"ctx-{i:02d}": "PaymentError" for i in range(1, depth + 1)}
     names["charge"] = "PaymentError"
-    names.update(bounded)
     return names
 
 
@@ -435,13 +446,13 @@ SCENARIOS = [
         "B20",
         _b20,
         {"map-item-0": "PaymentError", "map-item-1": "FraudError"},
-        "ChildContextError",
+        "PaymentError",
     ),
     Scenario(
         "B21",
         _b21,
         {"parallel-branch-0": "PaymentError", "parallel-branch-1": "FraudError"},
-        "ChildContextError",
+        "PaymentError",
     ),
     Scenario(
         "handled-in-subtree",
@@ -449,18 +460,9 @@ SCENARIOS = [
         {"outer": "PaymentError", "lookup": "ValueError", "charge": "PaymentError"},
         "PaymentError",
     ),
-    # Rule 3: ctx-01 needs `depth` unwraps (depth - 1 ChildContextErrors and the
-    # innermost context's StepError); at most 16 happen.
-    Scenario("depth-16", _nested(16), _depth_names(16, {}), "PaymentError"),
-    Scenario(
-        "depth-17", _nested(17), _depth_names(17, {"ctx-01": "StepError"}), "StepError"
-    ),
-    Scenario(
-        "depth-18",
-        _nested(18),
-        _depth_names(18, {"ctx-01": "ChildContextError", "ctx-02": "StepError"}),
-        "ChildContextError",
-    ),
+    # The core records the user's type at every level, so the depth of the
+    # operation tree is not an unwrap depth (rule 3 counts wrappers passed).
+    Scenario("depth-18", _nested(18), _depth_names(18), "PaymentError"),
     Scenario(
         "map-in-map-in-child",
         _map_in_map_in_child,

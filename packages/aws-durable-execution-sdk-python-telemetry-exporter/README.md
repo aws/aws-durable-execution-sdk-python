@@ -120,9 +120,9 @@ the execution-level `error`, every `operations[].error`, and every
    replayed checkpoint.
 8. When the execution fails because an operation's error propagated, the
    execution `error.name` equals that operation's `error.name`.
-9. If the SDK cannot tell which of several failures caused a wrapper, it does
-   not guess. It reports the wrapper's name. Two map items or parallel branches
-   that fail with the same message but different types are an example.
+9. If a checkpoint holds only a wrapper type, which an older SDK can write, the
+   name is that wrapper's name. The exporter never guesses a cause from other
+   operations.
 
 A callback that is failed externally with an explicit `ErrorType` is named
 after that type, after the reduction of rule 6. This includes the type
@@ -138,37 +138,27 @@ contains `Timeout`. An invoke timeout does not always: Java names it
 
 How Python applies the rule:
 
-- The SDK's wrapper types are `StepError`, `ChildContextError` (also used for
-  map items and parallel branches), `InvokeError`, `WaitForConditionError`,
-  `CallbackSubmitterError`, `CallbackExternalError` and the base
-  `DurableOperationError`. Every other type is never unwrapped: user errors,
-  and SDK errors such as `CallbackTimeoutError`, `SerDesError`,
+- The core SDK does the unwrapping (rules 2 to 5) when it checkpoints an
+  error: a failed step, child context, map item, parallel branch,
+  `wait_for_callback` context and the execution itself record the type of the
+  error that a wrapper wraps, not the wrapper. The SDK's wrapper types are
+  `StepError`, `ChildContextError` (also used for map items and parallel
+  branches), `InvokeError`, `WaitForConditionError`, `CallbackSubmitterError`,
+  `CallbackExternalError` and the base `DurableOperationError`. Every other
+  type is never unwrapped: user errors (including a user subclass of a
+  wrapper), and SDK errors such as `CallbackTimeoutError`, `SerDesError`,
   `ValidationError` and `BatchCompletionError`.
-- The hooks deliver checkpointed `ErrorObject`s, not live exceptions. The SDK
-  rebuilds a wrapper from the failed operation's `ErrorObject`, with the same
-  message, data and stack trace, on the first run and on replay. So one unwrap
-  of an operation's wrapper is a hand-off to a failed operation with the same
-  fields that is either a direct child, or an item or branch of a direct map or
-  parallel child (the map or parallel operation is a level in the tree but not
-  a wrapper). Other children are not searched. So a failure that user code
-  handled is never reported as the name. It is considered only when it is
-  such a direct child, item or branch with the same message and data as the
-  failure; the plugin then cannot tell the two apart, and the name is the
-  wrapper's (rule 9). A step in N nested child contexts takes N unwraps from the outermost
-  context: N - 1 `ChildContextError`s and the innermost context's `StepError`.
-  With 17 contexts the outermost one is `StepError`, and with 18 it is
-  `ChildContextError`; the inner contexts are `PaymentError`.
-- A wrapper on the execution is the SDK re-raising the failure of the
-  operation it propagated from: an operation of the wrapper's kind (a step for
-  `StepError`, a child context for `ChildContextError`, and so on) with the
-  same fields. Only the outermost such operations count, and the execution
-  takes their name, so rule 8 also holds at the depth bound.
-- When more than one distinct name is found, the plugin does not guess, and
-  the name is the wrapper's simple class name (for example
-  `ChildContextError`). This happens when two map items, or two parallel
-  branches, fail with the same message but different types, and
-  `throw_if_error()` raises for one of them. The items and branches keep their
-  own names.
+- The exporter names each failed operation by its own `ErrorType`, reduced by
+  rule 6, and the execution by the execution's own `ErrorType`, reduced. It
+  does not match errors by message, stack trace or position in the tree. The
+  depth of the operation tree does not matter: a step in 18 nested child
+  contexts is `PaymentError` at every level.
+- When two map items or parallel branches fail with different types and
+  `throw_if_error()` raises, each item or branch keeps its own name, and the
+  execution is named after the error that `throw_if_error()` raised.
+- A checkpoint written by an older SDK can hold a wrapper type such as
+  `aws_durable_execution_sdk_python.exceptions.StepError`. Its name is then the
+  wrapper's simple class name, for example `StepError` (rule 9).
 - A callback that times out is `CallbackTimeoutError` on the callback
   operation (the service type is `Callback.Timeout`), on the `wait_for_callback`
   context, and on the execution. A callback that an external system fails with
