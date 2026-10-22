@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from tests.test_helpers import plugin_factory
+
+
 from typing import Any
 
 import pytest
@@ -91,7 +94,7 @@ def test_builtin_operation_categories_survive_suspend_and_replay() -> None:
         context.wait(Duration.from_seconds(60), name="wait")
         return "done"
 
-    wrapped = durable_execution(handler, plugins=[plugin])
+    wrapped = durable_execution(handler, plugins=[plugin_factory(plugin)])
     with DurableFunctionTestRunner(handler=wrapped) as runner:
         runner.register_function("echo", lambda event, _context: event)
         result = runner.run(input="{}", execution_timeout=120)
@@ -156,7 +159,7 @@ def test_child_category_is_independent_of_subtype_on_resume(is_virtual: bool) ->
             config=ChildConfig(sub_type=OperationSubType.STEP, is_virtual=is_virtual),
         )
 
-    wrapped = durable_execution(handler, plugins=[plugin])
+    wrapped = durable_execution(handler, plugins=[plugin_factory(plugin)])
     with DurableFunctionTestRunner(handler=wrapped) as runner:
         result = runner.run(input="{}", execution_timeout=120)
 

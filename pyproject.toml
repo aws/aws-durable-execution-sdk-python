@@ -191,8 +191,8 @@ test = [
   "pytest .github/tests/otel_lifecycle_compatibility_test.py {args}",
 ]
 
-# A core-only upgrade retains the released plugin's more limited Invocation
-# fallback. Validate the real published plugin separately from the new pair.
+# Core 3 requires factories. Verify that real released OTel 1 registrations
+# fail clearly instead of silently running with the incompatible lifecycle API.
 [tool.hatch.envs.test-wheel-otel-legacy]
 template = "test-wheel-otel"
 detached = true
@@ -212,7 +212,7 @@ OTEL_COMPAT_LEGACY = "1"
 [tool.hatch.envs.test-wheel-otel-legacy.scripts]
 test = [
   "python .github/scripts/install_otel_test_wheels.py --legacy-plugin",
-  "pytest .github/tests/otel_lifecycle_compatibility_test.py {args}",
+  "pytest .github/tests/otel_legacy_registration_rejection_test.py {args}",
 ]
 
 [tool.hatch.envs.test-pypi-examples]

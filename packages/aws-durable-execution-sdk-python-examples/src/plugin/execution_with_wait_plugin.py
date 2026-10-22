@@ -42,7 +42,22 @@ class RecordingWaitPlugin(DurableInstrumentationPlugin):
         )
 
 
-@durable_execution(plugins=[RecordingWaitPlugin()])
+class RecordingWaitPluginFactory:
+    """Builds one :class:`RecordingWaitPlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> RecordingWaitPlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return RecordingWaitPlugin()
+
+
+@durable_execution(plugins=[RecordingWaitPluginFactory()])
 def handler(_event: Any, context: DurableContext) -> dict[str, Any]:
     context.wait(Duration.from_seconds(1), name="plugin-wait")
     return {

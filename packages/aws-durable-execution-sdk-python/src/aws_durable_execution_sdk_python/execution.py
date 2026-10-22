@@ -28,7 +28,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationUpdate,
 )
 from aws_durable_execution_sdk_python.plugin import (
-    DurableInstrumentationPlugin,
+    DurableInstrumentationPluginFactory,
     PluginExecutor,
 )
 from aws_durable_execution_sdk_python.plugin_discovery import (
@@ -170,7 +170,7 @@ def durable_execution(
     func: Callable[[Any, DurableContext], Any] | None = None,
     *,
     boto3_client: Boto3LambdaClient | None = None,
-    plugins: list[DurableInstrumentationPlugin] | None = None,
+    plugins: list[DurableInstrumentationPluginFactory] | None = None,
 ) -> Callable[[Any, LambdaContext], Any]:
     """
     Decorator to create a durable execution handler.
@@ -178,7 +178,10 @@ def durable_execution(
     Args:
         func: The user function to decorate
         boto3_client: Optional boto3 Lambda client to use
-        plugins: Optional list of instrumentation plugins to use
+        plugins: Optional list of instrumentation plugin factories. Each
+            factory's ``create_plugin`` is called once per invocation with that
+            invocation's ``InvocationStartInfo``, and the instance it returns
+            serves only that invocation.
     """
     # Decorator called with parameters
     if func is None:
@@ -190,9 +193,12 @@ def durable_execution(
     logger.debug("Starting durable execution handler...")
 
     configured_plugins = load_configured_plugins(plugins)
-    plugin_executor = PluginExecutor(configured_plugins)
 
+    @functools.wraps(func)
     def wrapper(event: Any, context: LambdaContext) -> MutableMapping[str, Any]:
+        # Only the factory list outlives an invocation. The worker below owns
+        # this fresh executor and all plugin lifecycle hooks.
+        plugin_executor = PluginExecutor(configured_plugins)
         invocation_input: DurableExecutionInvocationInput
         service_client: DurableServiceClient
 
@@ -487,10 +493,7 @@ def durable_execution(
                         # LIFO cleanup: branches join with checkpointing alive;
                         # then close stops checkpointing and the wait completes.
                         resources.callback(wait_for_checkpoint)
-                        resources.callback(
-                            plugin_executor._run_in_invocation_context,
-                            execution_state.close,
-                        )
+                        resources.callback(execution_state.close)
                         execution_operation = execution_state.get_execution_operation()
 
                         # execute the plugins
@@ -515,9 +518,7 @@ def durable_execution(
                         checkpoint_future = executor.submit(
                             execution_state.checkpoint_batches_forever
                         )
-                        output = plugin_executor._run_in_invocation_context(
-                            invoke_handler
-                        )
+                        output = invoke_handler()
                     # The ExitStack has now closed execution_state and joined the
                     # checkpoint thread. So any revocation observed while draining
                     # in-flight checkpoint work is visible here. A terminal status
@@ -539,17 +540,26 @@ def durable_execution(
                         output = (
                             DurableExecutionInvocationOutput.create_pending().to_dict()
                         )
-                    plugin_executor.on_invocation_end(
-                        DurableExecutionInvocationOutput.from_dict(output)
-                    )
-                    return output
-                except Exception as error:
-                    plugin_executor.on_invocation_end(
-                        DurableExecutionInvocationOutput.create_retry(
-                            ErrorObject.from_exception(error)
+                    completed = DurableExecutionInvocationOutput.from_dict(output)
+                except BaseException as error:
+                    # Every started plugin gets its End hook, including when
+                    # cancellation or a thread-control exception escapes. The
+                    # handler's original failure wins over an End-hook failure.
+                    try:
+                        plugin_executor.on_invocation_end(
+                            DurableExecutionInvocationOutput.create_retry(
+                                ErrorObject.from_exception(error)
+                            )
                         )
-                    )
+                    except BaseException:  # noqa: BLE001 - preserve the original failure
+                        logger.exception(
+                            "Plugin invocation-end hook failed while the invocation "
+                            "was already failing; the original failure is raised"
+                        )
                     raise
+                # End must run only once; its own failure is not a handler failure.
+                plugin_executor.on_invocation_end(completed)
+                return output
 
         with ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="dex-handler"

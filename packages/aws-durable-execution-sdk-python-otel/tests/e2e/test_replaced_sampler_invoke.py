@@ -14,6 +14,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationType,
     OperationUpdate,
 )
+from aws_durable_execution_sdk_python.plugin import InvocationStartInfo
 from opentelemetry import context
 from opentelemetry.sdk.trace import Tracer as SdkTracer, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -22,15 +23,19 @@ from opentelemetry.sdk.trace.sampling import ALWAYS_OFF, ALWAYS_ON
 
 from aws_durable_execution_sdk_python_otel import (
     ExecutionOtelPlugin,
+    ExecutionOtelPluginFactory,
     InvocationOtelPlugin,
+    InvocationOtelPluginFactory,
     OtelPluginConfig,
 )
 
 
-@pytest.mark.parametrize("view", [ExecutionOtelPlugin, InvocationOtelPlugin])
+@pytest.mark.parametrize(
+    "factory_type", [ExecutionOtelPluginFactory, InvocationOtelPluginFactory]
+)
 @pytest.mark.parametrize("invoke_sampled", [False, True])
 def test_replaced_sampler_carrier_and_public_replay(
-    view: type[ExecutionOtelPlugin] | type[InvocationOtelPlugin],
+    factory_type: type[ExecutionOtelPluginFactory] | type[InvocationOtelPluginFactory],
     invoke_sampled: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -38,13 +43,22 @@ def test_replaced_sampler_carrier_and_public_replay(
     provider = TracerProvider(sampler=ALWAYS_OFF if invoke_sampled else ALWAYS_ON)
     exporter = InMemorySpanExporter()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    plugin = view(
+    factory = factory_type(
         OtelPluginConfig(
             tracer_provider=provider,
             context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
+    instances: list[ExecutionOtelPlugin | InvocationOtelPlugin] = []
+    create_plugin = factory.create_plugin
+
+    def create(info: InvocationStartInfo) -> ExecutionOtelPlugin | InvocationOtelPlugin:
+        plugin = create_plugin(info)
+        instances.append(plugin)
+        return plugin
+
+    monkeypatch.setattr(factory, "create_plugin", create)
     updates_seen: list[OperationUpdate] = []
     saved: dict[str, Operation] = {}
     timestamp = datetime.now(UTC)
@@ -82,11 +96,12 @@ def test_replaced_sampler_carrier_and_public_replay(
     def user_handler(_event: Any, durable: DurableContext) -> str:
         # Reconfigure the actual instrumentation tracer after Start, not a
         # guessed sampler call or a fabricated operation span/context.
+        plugin = instances[-1]
         assert isinstance(plugin._tracer, SdkTracer)
         plugin._tracer.sampler = ALWAYS_ON if invoke_sampled else ALWAYS_OFF
         return durable.invoke("child:1", {"payload": 1}, name="invoke-target")
 
-    handler = durable_execution(user_handler, plugins=[plugin])
+    handler = durable_execution(user_handler, plugins=[factory])
 
     invocation: dict[str, Any] = dict(
         DurableExecutionArn=arn,
@@ -128,6 +143,7 @@ def test_replaced_sampler_carrier_and_public_replay(
                 op.to_json_dict() for op in saved.values()
             )
             assert handler(invocation, lambda_context) == result
+        assert len(instances) == 2 and instances[0] is not instances[1]
         assert len(updates_seen) == 1
         options = updates_seen[0].chained_invoke_options
         assert options is not None
