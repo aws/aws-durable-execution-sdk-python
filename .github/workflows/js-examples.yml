@@ -20,7 +20,10 @@ on:
       - ".github/workflows/js-examples.yml"
       - "pyproject.toml"
   pull_request:
-    branches: ["main"]
+    branches:
+      - main
+      - test/otel-conformance-feasibility
+      - fix/python-testing-replay-state-20261021
     paths:
       - "packages/aws-durable-execution-sdk-python-testing/**"
       - ".github/scripts/js_examples/**"

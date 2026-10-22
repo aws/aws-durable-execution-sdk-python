@@ -736,6 +736,10 @@ def test_pending_response_is_valid_when_an_operation_completed_after_the_handler
     mock_execution.consecutive_failed_invocation_attempts = 0
     mock_execution.seq_counter = 4
     mock_execution.handler_seen_seq = 2
+    mock_execution.token_sequence = 0
+    mock_execution.operations = []
+    mock_execution.updated_operation_ids = []
+    mock_execution.operation_last_touched_seq = {}
     mock_execution.has_pending_operations.return_value = False
     mock_execution.has_changes_after.side_effect = lambda seq: seq == 4
     mock_execution.has_unseen_changes.return_value = True

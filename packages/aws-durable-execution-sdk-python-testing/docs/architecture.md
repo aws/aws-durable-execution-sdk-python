@@ -234,10 +234,18 @@ list in a checkpoint response. The delta for the next response is the
 operations whose `operation_last_touched_seq` is greater than
 `handler_seen_seq`.
 
-The watermark advances only when a checkpoint response is built. It never
-advances when invocation input is built. That is what makes retries
-correct. A failed invocation never moves the watermark. So the retry
-delivers the same state again.
+The watermark advances when a checkpoint response is built or an invocation
+response passes validation, including a `PENDING` response. Building invocation
+input does not acknowledge it: input updates remain pending until delivery is
+confirmed. A failed call or rejected response does not consume that input, so a
+retry can receive it again.
+
+The invocation acknowledgment uses the sequence captured when its input was
+built, on the execution's worker. It never moves a higher checkpoint watermark
+backward or consumes operations that changed after the captured snapshot. This
+also prevents an input-only callback resume from receiving the same terminal
+update again at a later checkpoint. The acknowledgment concerns runner state
+delivery, not telemetry export.
 
 ```
       seq_counter    handler_seen_seq    delta next checkpoint

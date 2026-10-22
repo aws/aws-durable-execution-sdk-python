@@ -10,7 +10,10 @@ on:
     branches: [ main ]
 
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+      - test/otel-conformance-feasibility
+      - fix/python-testing-replay-state-20261021
 
 jobs:
   lint-commits:

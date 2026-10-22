@@ -7,8 +7,11 @@ import json
 
 import pytest
 from aws_durable_execution_sdk_python.lambda_service import (
+    ChainedInvokeDetails as ServiceChainedInvokeDetails,
+    ContextDetails as ServiceContextDetails,
     OperationStatus,
     OperationType,
+    StepDetails as ServiceStepDetails,
 )
 
 from aws_durable_execution_sdk_python_testing.exceptions import (
@@ -1459,6 +1462,117 @@ def test_event_error_with_payload_only():
         "Payload": {"ErrorMessage": "test error"},
         "Truncated": False,
     }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"ErrorMessage": ""},
+        {"ErrorType": ""},
+        {"ErrorData": ""},
+        {"StackTrace": []},
+    ],
+)
+def test_event_error_roundtrip_preserves_present_payload(payload):
+    wire = {"Payload": payload, "Truncated": False}
+    assert EventError.from_dict(wire).to_dict() == wire
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+@pytest.mark.parametrize("payload_field", [{}, {"Payload": None}])
+def test_event_error_absent_or_null_payload_retains_existing_meaning(
+    payload_field, truncated
+):
+    parsed = EventError.from_dict({**payload_field, "Truncated": truncated})
+    assert parsed.payload is None
+    assert parsed.to_dict() == {"Truncated": truncated}
+
+
+def test_event_error_empty_payload_retains_truncation_flag():
+    wire = {"Payload": {}, "Truncated": True}
+    assert EventError.from_dict(wire).to_dict() == wire
+
+
+@pytest.mark.parametrize(
+    "event_type,details_attribute,service_details",
+    [
+        ("StepFailed", "step_details", ServiceStepDetails),
+        ("ContextFailed", "context_details", ServiceContextDetails),
+        ("ChainedInvokeFailed", "chained_invoke_details", ServiceChainedInvokeDetails),
+    ],
+)
+@pytest.mark.parametrize(
+    "wire_error",
+    [
+        {"Truncated": False},
+        {"Payload": None, "Truncated": False},
+        {"Payload": {}, "Truncated": False},
+        {"Payload": {}, "Truncated": True},
+        {"Truncated": True},
+        {"Payload": {"ErrorMessage": ""}, "Truncated": False},
+        {"Payload": {"ErrorType": ""}, "Truncated": False},
+        {"Payload": {"ErrorData": ""}, "Truncated": False},
+        {"Payload": {"StackTrace": []}, "Truncated": False},
+        {
+            "Payload": {
+                "ErrorMessage": "failure",
+                "ErrorType": "RuntimeError",
+                "ErrorData": "details",
+                "StackTrace": [],
+            },
+            "Truncated": False,
+        },
+    ],
+)
+def test_failed_history_preserves_payload_and_matches_service_error_semantics(
+    event_type, details_attribute, service_details, wire_error
+):
+    from aws_durable_execution_sdk_python_testing.runner import (
+        DurableFunctionTestResult,
+    )
+
+    history = GetDurableExecutionHistoryResponse.from_dict(
+        {
+            "Events": [
+                {
+                    "EventType": event_type,
+                    "EventId": 1,
+                    "Id": "operation",
+                    "Name": "failed-operation",
+                    "EventTimestamp": TIMESTAMP_2023_01_01_00_01,
+                    event_type + "Details": {"Error": wire_error},
+                }
+            ]
+        }
+    )
+    history_wire = history.to_dict()
+    expected_history_error = dict(wire_error)
+    if expected_history_error.get("Payload") is None:
+        expected_history_error.pop("Payload", None)
+    assert history_wire["Events"][0][event_type + "Details"]["Error"] == (
+        expected_history_error
+    )
+    assert GetDurableExecutionHistoryResponse.from_dict(history_wire).to_dict() == (
+        history_wire
+    )
+
+    expected = service_details.from_dict({"Error": wire_error.get("Payload")}).error
+    (operation,) = events_to_operations(history.events)
+    assert operation.status is OperationStatus.FAILED
+
+    execution = GetDurableExecutionResponse(
+        durable_execution_arn="arn:aws:lambda:us-west-2:123456789012:function:test:execution:one",
+        durable_execution_name="one",
+        function_arn="arn:aws:lambda:us-west-2:123456789012:function:test",
+        status="FAILED",
+        start_timestamp=TIMESTAMP_2023_01_01_00_00,
+    )
+    result = DurableFunctionTestResult.from_execution_history(execution, history)
+    assert result.get_operation_by_name("failed-operation").error == expected
+    assert getattr(operation, details_attribute).error == expected
+    # Reconstructing SDK-facing state must not mutate detailed history payloads.
+    assert history.to_dict() == history_wire
 
 
 # Tests for RetryDetails

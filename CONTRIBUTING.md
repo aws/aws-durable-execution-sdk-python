@@ -72,7 +72,7 @@ hatch run dev-examples:test    # run examples tests only
 
 ### Installed package compatibility testing
 
-Build the core and OTel distributions with `hatch build` in each package, then run
+Build the core, OTel and testing-library distributions with `hatch build` in each package, then run
 these commands from the repository root:
 
 ```bash

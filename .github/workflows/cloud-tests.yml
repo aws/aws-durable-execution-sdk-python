@@ -2,7 +2,10 @@ name: Cloud tests
 
 on:
   pull_request:
-    branches: ["main"]
+    branches:
+      - main
+      - test/otel-conformance-feasibility
+      - fix/python-testing-replay-state-20261021
   workflow_dispatch:
     inputs:
       lambda_endpoint:

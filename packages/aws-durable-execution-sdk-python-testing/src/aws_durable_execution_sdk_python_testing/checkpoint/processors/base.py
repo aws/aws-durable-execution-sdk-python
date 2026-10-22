@@ -100,9 +100,11 @@ class OperationProcessor:
             ContextDetails(
                 result=update.payload,
                 error=update.error,
-                replay_children=update.context_options.replay_children
-                if update.context_options
-                else False,
+                replay_children=(
+                    update.action in (OperationAction.SUCCEED, OperationAction.FAIL)
+                    and update.context_options is not None
+                    and update.context_options.replay_children is True
+                ),
             )
             if update.operation_type == OperationType.CONTEXT
             else None
