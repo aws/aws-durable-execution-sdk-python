@@ -225,8 +225,8 @@ pipeline                       child context
 
 A failed `vm.invoke` raises its MicroVM error inside the handler. The handler can catch it and send another job to the same MicroVM. An error that leaves the handler ends the session:
 
-1. A MicroVM error that the handler raises itself reaches the caller with its own class, such as `MicrovmJobFailedError`.
-2. Any other error reaches the caller as the SDK's `ChildContextError`, as from `run_in_child_context`. This includes a MicroVM error that leaves a child context that the handler created: that child context records `ChildContextError` as its error type. The caller then gets the MicroVM error's message, but not its class. Inside the handler, the `ChildContextError` of that child context has the MicroVM error as its `__cause__`. An SDK error that leaves the handler, such as the `StepError` of a failed step, also reaches the caller as `ChildContextError`, with the SDK error as its `__cause__`. This rule matches `run_in_child_context`. The JavaScript operation differs here: it passes an SDK error to the caller with its own class.
+1. A MicroVM error that leaves the handler reaches the caller with its own class, such as `MicrovmJobFailedError`. This includes a MicroVM error that leaves a child context that the handler created: the SDK records the error that a `ChildContextError` wraps, not the `ChildContextError`. Inside the handler, the `ChildContextError` of that child context has the MicroVM error as its `__cause__`.
+2. Any other error reaches the caller as the SDK's `ChildContextError`, as from `run_in_child_context`. An SDK error that leaves the handler, such as the `StepError` of a failed step, also reaches the caller as `ChildContextError`. Its `error_type` is the type of the error that failed the step, for example `LookupError`. This rule matches `run_in_child_context`. The JavaScript operation differs here: it passes an SDK error to the caller with its own class.
 
 An invalid job raises `ValidationError` or `TypeError` from `vm.invoke`, before the job's durable operations start. The handler can catch it too.
 

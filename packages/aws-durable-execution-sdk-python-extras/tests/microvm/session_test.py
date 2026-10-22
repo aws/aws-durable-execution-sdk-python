@@ -1016,14 +1016,13 @@ def test_rejects_the_outer_context_before_the_job_starts(
     ]
 
 
-def test_wraps_a_job_error_that_leaves_a_child_context_of_the_handler(
+def test_keeps_a_job_error_that_leaves_a_child_context_of_the_handler(
     run: Any, fake_client: Any, fake_endpoint: Any
 ) -> None:
-    # Only an error that the handler raises itself keeps its MicroVM class.
-    # The SDK records one error type per child context. So an error from the
-    # handler's own child context reaches the caller as ChildContextError,
-    # with the MicroVM error's message. Inside the handler, the
-    # ChildContextError's __cause__ is still the MicroVM class.
+    # The SDK records the error a ChildContextError wraps. So a MicroVM error
+    # that leaves the handler's own child context reaches the caller with its
+    # MicroVM class. Inside the handler, the ChildContextError's __cause__ is
+    # the MicroVM class.
     client = fake_client(endpoint=fake_endpoint().url)
     config = session_config(client)
     inside: list[str] = []
@@ -1042,14 +1041,14 @@ def test_wraps_a_job_error_that_leaves_a_child_context_of_the_handler(
 
         try:
             microvm_session(context, "pipeline", config=config, handler=body)
-        except ChildContextError as error:
-            return [type(error.__cause__).__name__, error.message]
+        except MicrovmJobFailedError as error:
+            return [type(error).__name__, error.message]
         return None
 
     result = run(handler, None, [("build", fail_with("BuildError", "failed"))])
 
     assert outcome(result) == [
-        "ChildContextError",
+        "MicrovmJobFailedError",
         'MicroVM "build": the job failed (BuildError): failed',
     ]
     assert "MicrovmJobFailedError" in inside
@@ -1111,12 +1110,17 @@ def test_wraps_an_sdk_error_that_leaves_the_handler(
         try:
             microvm_session(context, "pipeline", config=config, handler=body)
         except ChildContextError as error:
-            return [type(error.__cause__).__name__, error.message]
+            return [
+                type(error.__cause__).__name__,
+                error.error_type,
+                error.message,
+            ]
         return None
 
     result = run(handler)
 
-    assert outcome(result) == ["StepError", "no artifact"]
+    # The session context records the step's LookupError, not StepError.
+    assert outcome(result) == ["DurableOperationError", "LookupError", "no artifact"]
     assert len(client.requests("terminate_microvm")) == 1
 
 
