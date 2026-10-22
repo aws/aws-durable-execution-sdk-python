@@ -1,12 +1,15 @@
 """Tests for execution."""
 
+import asyncio
 import datetime
+import inspect
 import json
+import threading
 import time
 import warnings
 from collections.abc import Sequence
 from copy import deepcopy
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -60,6 +63,8 @@ from aws_durable_execution_sdk_python.lambda_service import (
     WaitDetails,
 )
 from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
+from aws_durable_execution_sdk_python.state import ExecutionState
+from tests.test_helpers import plugin_factory
 
 
 LARGE_RESULT = "large_success" * 1024 * 1024
@@ -1000,9 +1005,358 @@ def test_durable_execution_suspend_execution():
 
     result = test_handler(invocation_input, lambda_context)
 
-    assert result["Status"] == InvocationStatus.PENDING.value
-    assert "Result" not in result
-    assert "Error" not in result
+    assert result == {"Status": InvocationStatus.PENDING.value}
+
+
+def test_checkpoint_without_token_answers_pending() -> None:
+    """A tokenless step checkpoint suspends through the real background thread."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token=None,
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> str:
+        return context.step(lambda _: "x", name="s1")
+
+    result = test_handler(_make_invocation_input(mock_client), _make_lambda_context())
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_called_once()
+    mock_client.get_execution_state.assert_not_called()
+
+
+def _revoke_checkpoint_token_instead_of_checkpointing(self: ExecutionState) -> None:
+    """Stand in for the background thread: simulate an already-revoked token.
+
+    Used to make the revoked condition deterministic in tests instead of
+    racing the real background thread against a mocked checkpoint response.
+    Mirrors what _handle_revoked_checkpoint_token does to the latch, without
+    exercising the checkpoint API call itself.
+    """
+    self._checkpoint_token_revoked.set()  # noqa: SLF001
+
+
+def test_durable_execution_returns_pending_when_token_revoked_after_return():
+    """Handler returns normally while the token was revoked -> PENDING, not SUCCEEDED.
+
+    Covers the handler-returned-while-an-unawaited-checkpoint-was-in-flight
+    case: from the wrapper's point of view this is indistinguishable from any
+    other point at which the background thread could have observed the
+    revoked token, so the fake target patches checkpoint_batches_forever
+    directly rather than racing a real one.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        _revoke_checkpoint_token_instead_of_checkpointing,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_not_called()
+
+
+def test_durable_execution_returns_pending_when_background_token_revoked_during_shutdown():
+    """A shutdown-time background revocation wins over provisional SUCCEEDED."""
+    mock_client = Mock(spec=DurableServiceClient)
+
+    def revoke_checkpoint_token_after_shutdown_starts(self: ExecutionState) -> None:
+        if self._checkpointing_stopped.wait(timeout=2.0):  # noqa: SLF001
+            self._checkpoint_token_revoked.set()  # noqa: SLF001
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        revoke_checkpoint_token_after_shutdown_starts,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_not_called()
+
+
+def test_durable_execution_returns_pending_when_token_revoked_during_close_after_error():
+    """A cleanup-time revoked token wins over a provisional FAILED response."""
+    mock_client = Mock(spec=DurableServiceClient)
+    original_close = ExecutionState.close
+
+    def close_with_revoked_token(self: ExecutionState) -> None:
+        self._checkpoint_token_revoked.set()  # noqa: SLF001
+        original_close(self)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "unexpected"
+        raise ValueError(msg)
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(ExecutionState, "close", close_with_revoked_token):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_not_called()
+
+
+def test_durable_execution_returns_pending_when_token_revoked_on_invocation_error():
+    """An InvocationError raised after the token is revoked answers PENDING, not FAILED.
+
+    A retryable InvocationError would otherwise trigger a Lambda retry.
+    Revocation requires the invocation to stop instead. So the response is
+    bare PENDING, without the handler error or a result.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "Retryable invocation error"
+        raise InvocationError(msg)
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        _revoke_checkpoint_token_instead_of_checkpointing,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+
+
+def test_durable_execution_returns_pending_when_token_revoked_on_execution_error():
+    """An ExecutionError raised after the token is revoked answers PENDING, not FAILED.
+
+    Bare PENDING with no Error, same as the InvocationError case above.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "Non-retryable execution error"
+        raise ExecutionError(msg)
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        _revoke_checkpoint_token_instead_of_checkpointing,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+
+
+def test_durable_execution_returns_pending_when_token_revoked_on_generic_error():
+    """A plain user exception raised after the token is revoked answers PENDING, not FAILED.
+
+    Bare PENDING with no Error, same as the InvocationError case above.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "unexpected"
+        raise ValueError(msg)
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        _revoke_checkpoint_token_instead_of_checkpointing,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_not_called()
+
+
+def test_durable_execution_returns_pending_when_token_revoked_on_checkpoint_error():
+    """A CheckpointError raised after the token is revoked answers PENDING, not FAILED.
+
+    Covers the CheckpointError exit's latch check added for symmetry with the
+    InvocationError/ExecutionError/generic-error exits above: bare PENDING
+    with no Error, and the checkpoint error classification in
+    handle_checkpoint_error is never reached.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        msg = "Checkpoint system failed"
+        raise CheckpointError(msg, CheckpointErrorCategory.EXECUTION)
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        _revoke_checkpoint_token_instead_of_checkpointing,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_not_called()
+
+
+def test_durable_execution_oversized_result_abandoned_after_revocation_returns_pending():
+    """An oversized result returns PENDING without checkpointing after token revocation."""
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": LARGE_RESULT}
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    with patch.object(
+        ExecutionState,
+        "checkpoint_batches_forever",
+        _revoke_checkpoint_token_instead_of_checkpointing,
+    ):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+    mock_client.checkpoint.assert_not_called()
+
+
+def test_durable_execution_oversized_result_accepted_with_revoked_token_succeeds():
+    """The terminal EXECUTION checkpoint itself getting a token-less response still succeeds.
+
+    A token-less response on the batch carrying the execution's own terminal
+    update means the execution is finished, so this reports SUCCEEDED even
+    though the same response revokes the token for any further call.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token=None,
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": LARGE_RESULT}
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    result = test_handler(invocation_input, lambda_context)
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert not result.get("Result")
+    mock_client.checkpoint.assert_called_once()
+
+
+def test_durable_execution_oversized_result_revoked_during_checkpoint_returns_pending():
+    """The token-revoked latch can flip strictly between the pre-checkpoint
+    check and the oversized-result checkpoint call itself.
+
+    create_checkpoint raising SuspendExecution there is only
+    caught by the wrapper's outer SuspendExecution handler (there is no
+    dedicated except around this call, unlike the symmetric FAILED/oversized-
+    error path). This proves that path still answers PENDING, not an
+    uncaught exception or FAILED.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": LARGE_RESULT}
+
+    invocation_input = _make_invocation_input(mock_client)
+    lambda_context = _make_lambda_context()
+
+    def _raise_suspended(self: ExecutionState, *args, **kwargs) -> None:
+        raise SuspendExecution(
+            "Checkpoint token revoked by the service; ending invocation with PENDING."
+        )
+
+    with patch.object(ExecutionState, "create_checkpoint", _raise_suspended):
+        result = test_handler(invocation_input, lambda_context)
+
+    assert result == {"Status": InvocationStatus.PENDING.value}
+
+
+def test_durable_execution_oversized_error_revoked_during_checkpoint_returns_pending() -> (
+    None
+):
+    """Revocation before an oversized-error checkpoint suspends the invocation.
+
+    Verifies:
+    * Checkpoint request is not sent and PENDING is returned.
+    * Plugins receive one PENDING invocation-end notification and no execution-end
+    notification.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    plugin = _RecordingPlugin()
+    attempted_updates: list[OperationUpdate | None] = []
+    original_checkpoint_method = ExecutionState.create_checkpoint_sync
+
+    def checkpoint_with_revoked_token(
+        self: ExecutionState, operation_update: OperationUpdate | None = None
+    ) -> None:
+        # Confirm revocation has not occurred yet.
+        assert not self.is_checkpoint_token_revoked
+        # Capture the update so the test can verify that the oversized error reached the checkpoint path.
+        attempted_updates.append(operation_update)
+        # Simulate the checkpoint worker recording revocation before this checkpoint proceeds.
+        self._checkpoint_token_revoked.set()  # noqa: SLF001
+        # Let the real checkpoint guard raise SuspendExecution rather than raising it in the test.
+        original_checkpoint_method(self, operation_update)
+
+    def user_handler(event: Any, context: DurableContext) -> dict:
+        raise ValueError(LARGE_RESULT)
+
+    test_handler = durable_execution(user_handler, plugins=[plugin_factory(plugin)])
+    with patch.object(
+        ExecutionState, "create_checkpoint_sync", checkpoint_with_revoked_token
+    ):
+        result = test_handler(
+            _make_invocation_input(mock_client), _make_lambda_context()
+        )
+
+    assert len(attempted_updates) == 1
+    update = attempted_updates[0]
+    assert update is not None
+    assert update.operation_type is OperationType.EXECUTION
+    assert update.action is OperationAction.FAIL
+    assert update.error is not None
+    assert update.error.message == LARGE_RESULT
+    assert result == {"Status": InvocationStatus.PENDING.value}
+
+    mock_client.checkpoint.assert_not_called()
+
+    invocation_end_calls = [
+        call for call in plugin.calls if call.startswith("invocation_end:")
+    ]
+    assert invocation_end_calls == ["invocation_end:PENDING"]
+    assert not any(call.startswith("execution_end:") for call in plugin.calls)
 
 
 def test_durable_execution_checkpoint_error_in_background_thread():
@@ -2728,10 +3082,10 @@ def _make_invocation_input(mock_client, next_marker="", input_payload="{}"):
     )
 
 
-def _make_lambda_context():
+def _make_lambda_context(request_id: str = "test-request"):
     """Helper to create a standard mock Lambda context."""
     ctx = Mock()
-    ctx.aws_request_id = "test-request"
+    ctx.aws_request_id = request_id
     ctx.client_context = None
     ctx.identity = None
     ctx._epoch_deadline_time_in_ms = 1000000  # noqa: SLF001
@@ -2955,6 +3309,86 @@ def test_durable_execution_replays_child_context_with_step_subtype():
 
     assert result["Status"] == InvocationStatus.SUCCEEDED.value
     assert child_body_calls == []
+
+
+@pytest.mark.parametrize(
+    "child_status",
+    [OperationStatus.SUCCEEDED, OperationStatus.FAILED, OperationStatus.STARTED],
+)
+def test_durable_execution_rejects_non_virtual_child_checkpoint_in_virtual_replay(
+    child_status: OperationStatus,
+):
+    """Replay rejects a child changed from non-virtual to virtual.
+
+    A virtual child never checkpoints itself, so a CONTEXT checkpoint at its id
+    comes from a non-virtual child. Replay fails before the cached result or
+    error is used and before the child body runs.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    child_id = OperationIdNamespace().create_id_for_step(1)
+    execution_operation = Operation(
+        operation_id="exec1",
+        operation_type=OperationType.EXECUTION,
+        status=OperationStatus.STARTED,
+        execution_details=ExecutionDetails(input_payload="{}"),
+    )
+    child_operation = Operation(
+        operation_id=child_id,
+        operation_type=OperationType.CONTEXT,
+        status=child_status,
+        sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT,
+        name="child",
+        context_details=ContextDetails(
+            result=(
+                json.dumps("cached")
+                if child_status is OperationStatus.SUCCEEDED
+                else None
+            ),
+            error=(
+                ErrorObject(
+                    message="child failed",
+                    type="ValueError",
+                    data=None,
+                    stack_trace=None,
+                )
+                if child_status is OperationStatus.FAILED
+                else None
+            ),
+        ),
+    )
+    invocation_input = DurableExecutionInvocationInputWithClient(
+        durable_execution_arn="arn:test:execution/exec1",
+        checkpoint_token="token123",  # noqa: S106
+        initial_execution_state=InitialExecutionState(
+            operations=[execution_operation, child_operation],
+            next_marker="",
+        ),
+        service_client=mock_client,
+    )
+    child_body_calls: list[bool] = []
+
+    def child_body(_child: DurableContext) -> str:
+        child_body_calls.append(True)
+        return "executed"
+
+    @durable_execution
+    def test_handler(event: Any, context: DurableContext) -> str:
+        return context.run_in_child_context(
+            child_body,
+            name="child",
+            config=ChildConfig(is_virtual=True),
+        )
+
+    result = test_handler(invocation_input, _make_lambda_context())
+
+    assert result["Status"] == InvocationStatus.FAILED.value
+    assert (
+        result["Error"]["ErrorType"]
+        == "aws_durable_execution_sdk_python.exceptions.NonDeterministicExecutionError"
+    )
+    assert "current child context is virtual" in result["Error"]["ErrorMessage"]
+    assert child_body_calls == []
+    mock_client.checkpoint.assert_not_called()
 
 
 @pytest.mark.parametrize("operation_kind", ["map", "parallel"])
@@ -3482,24 +3916,24 @@ class _FailingPlugin(DurableInstrumentationPlugin):
 
 
 def test_durable_execution_loads_plugins_when_handler_is_initialized():
-    """Configured plugins are resolved once while the decorator initializes."""
-    explicit_plugin = _RecordingPlugin()
-    resolved_plugin = _RecordingPlugin()
+    """Configured factories are resolved once while the decorator initializes."""
+    explicit_factory = plugin_factory(_RecordingPlugin())
+    resolved_factory = plugin_factory(_RecordingPlugin())
 
     with (
         warnings.catch_warnings(),
         patch(
             "aws_durable_execution_sdk_python.execution.load_configured_plugins",
-            return_value=[explicit_plugin, resolved_plugin],
+            return_value=[explicit_factory, resolved_factory],
         ) as load_plugins,
     ):
         warnings.simplefilter("error", FutureWarning)
 
-        @durable_execution(plugins=[explicit_plugin])
+        @durable_execution(plugins=[explicit_factory])
         def test_handler(event: Any, context: DurableContext) -> dict:
             return {"result": "success"}
 
-    load_plugins.assert_called_once_with([explicit_plugin])
+    load_plugins.assert_called_once_with([explicit_factory])
     assert callable(test_handler)
 
 
@@ -3514,7 +3948,7 @@ def test_durable_execution_with_plugins_success():
 
     plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"result": "success"}
 
@@ -3545,7 +3979,7 @@ def test_durable_execution_forwards_execution_input_to_plugins():
 
     plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"echoed": event["name"]}
 
@@ -3573,7 +4007,7 @@ def test_durable_execution_surfaces_empty_input_as_empty_mapping():
 
     plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> str:
         return "ok"
 
@@ -3608,7 +4042,7 @@ def test_durable_execution_isolates_execution_input_from_handler():
         def on_invocation_end(self, info):
             observed["end_input"] = dict(info.execution_input)
 
-    @durable_execution(plugins=[_MutatingPlugin()])
+    @durable_execution(plugins=[plugin_factory(_MutatingPlugin())])
     def test_handler(event: Any, context: DurableContext) -> dict:
         observed["handler_saw"] = dict(event)
         # Direction B: handler mutates its event after the start hook fired.
@@ -3642,7 +4076,7 @@ def test_durable_execution_isolates_nested_execution_input():
         def on_invocation_start(self, info):
             info.execution_input["outer"]["inner"].append("from_plugin")
 
-    @durable_execution(plugins=[_NestedMutatingPlugin()])
+    @durable_execution(plugins=[plugin_factory(_NestedMutatingPlugin())])
     def test_handler(event: Any, context: DurableContext) -> dict:
         observed["handler_saw"] = deepcopy(event)
         return {"ok": True}
@@ -3668,7 +4102,7 @@ def test_durable_execution_with_plugins_failure():
 
     plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         msg = "user error"
         raise ValueError(msg)
@@ -3694,7 +4128,7 @@ def test_durable_execution_with_plugins_pending():
 
     plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         raise SuspendExecution("test")
 
@@ -3717,7 +4151,7 @@ def test_durable_execution_with_plugins_retryable_error():
 
     plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         msg = "Retriable error"
         raise InvocationError(msg)
@@ -3744,7 +4178,7 @@ def test_durable_execution_with_multiple_plugins():
     plugin1 = _RecordingPlugin()
     plugin2 = _RecordingPlugin()
 
-    @durable_execution(plugins=[plugin1, plugin2])
+    @durable_execution(plugins=[plugin_factory(plugin1), plugin_factory(plugin2)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"result": "success"}
 
@@ -3772,7 +4206,9 @@ def test_durable_execution_with_failing_plugin_does_not_break_execution():
     failing_plugin = _FailingPlugin()
     recording_plugin = _RecordingPlugin()
 
-    @durable_execution(plugins=[failing_plugin, recording_plugin])
+    @durable_execution(
+        plugins=[plugin_factory(failing_plugin), plugin_factory(recording_plugin)]
+    )
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"result": "success"}
 
@@ -3784,6 +4220,199 @@ def test_durable_execution_with_failing_plugin_does_not_break_execution():
     # Execution should still succeed despite the failing plugin
     assert result["Status"] == InvocationStatus.SUCCEEDED.value
     # The recording plugin should still have been called
+    assert "invocation_start" in recording_plugin.calls
+    assert "invocation_end:SUCCEEDED" in recording_plugin.calls
+
+
+def test_durable_execution_builds_a_plugin_per_invocation():
+    """One handler, two invocations, two instances -- and no crosstalk.
+
+    This is the LMI-driven property: a plugin may hold per-execution state in
+    ordinary instance attributes because the instance never outlives the
+    invocation it was built for.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    built: list[_RecordingPlugin] = []
+    factory_arns: list[str | None] = []
+
+    class _BuildingFactory:
+        def create_plugin(self, info) -> _RecordingPlugin:
+            factory_arns.append(info.execution_arn)
+            plugin = _RecordingPlugin()
+            built.append(plugin)
+            return plugin
+
+    @durable_execution(plugins=[_BuildingFactory()])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    for _ in range(2):
+        result = test_handler(
+            _make_invocation_input(mock_client),
+            _make_lambda_context(),
+        )
+        assert result["Status"] == InvocationStatus.SUCCEEDED.value
+
+    assert len(built) == 2
+    assert built[0] is not built[1]
+    # The factory saw the execution it was being built for.
+    assert factory_arns == [
+        "arn:test:execution/exec1",
+        "arn:test:execution/exec1",
+    ]
+    # Each instance recorded exactly one invocation's worth of hooks.
+    for plugin in built:
+        assert plugin.calls.count("invocation_start") == 1
+        assert plugin.calls.count("invocation_end:SUCCEEDED") == 1
+
+
+class _TaggedRecordingPlugin(DurableInstrumentationPlugin):
+    """Records the hooks it receives, tagging each with its own identity."""
+
+    def __init__(self) -> None:
+        self.invocation_starts: list[str | None] = []
+        self.invocation_ends: list[str] = []
+        self.operation_names: list[str | None] = []
+
+    def on_invocation_start(self, info):
+        self.invocation_starts.append(info.request_id)
+
+    def on_invocation_end(self, info):
+        self.invocation_ends.append(f"{info.request_id}:{info.status.value}")
+
+    def on_operation_start(self, info):
+        self.operation_names.append(info.name)
+
+    def on_operation_end(self, info):
+        self.operation_names.append(info.name)
+
+    def on_user_function_start(self, info):
+        self.operation_names.append(info.name)
+
+    def on_user_function_end(self, info):
+        self.operation_names.append(info.name)
+
+
+def test_durable_execution_keeps_overlapping_invocations_isolated():
+    """Two invocations in flight at once never see each other's hooks.
+
+    This is the Lambda Managed Instances case: one decorated handler, one
+    process, two concurrent executions in separate threads. A barrier holds both
+    invocations inside their user function at the same time, so both
+    ``on_invocation_start`` hooks have already fired before either operation
+    runs, and neither invocation returns until the other has run its operation.
+    Running the two invocations sequentially would not pin this -- the defect it
+    guards against is a per-invocation slot being overwritten while both
+    invocations are live.
+    """
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    built: dict[str, _TaggedRecordingPlugin] = {}
+    built_lock = threading.Lock()
+
+    class _BuildingFactory:
+        def create_plugin(self, info) -> _TaggedRecordingPlugin:
+            plugin = _TaggedRecordingPlugin()
+            with built_lock:
+                built[str(info.request_id)] = plugin
+            return plugin
+
+    timeout = 30
+    # Released only once both invocations are inside their user function, so both
+    # invocation-start hooks have fired and both invocations are live.
+    both_in_user_code = threading.Barrier(2, timeout=timeout)
+    # b runs its operation first; a runs its operation afterwards, while b is
+    # still inside its user function waiting on a.
+    b_ran_operation = threading.Event()
+    a_ran_operation = threading.Event()
+
+    @durable_execution(plugins=[_BuildingFactory()])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        tag = event["tag"]
+        both_in_user_code.wait()
+        if tag == "b":
+            context.step(lambda _: "ok", name="step-b")
+            b_ran_operation.set()
+            assert a_ran_operation.wait(timeout)
+        else:
+            assert b_ran_operation.wait(timeout)
+            context.step(lambda _: "ok", name="step-a")
+            a_ran_operation.set()
+        return {"result": tag}
+
+    results: dict[str, Any] = {}
+
+    def invoke(tag: str) -> None:
+        results[tag] = test_handler(
+            _make_invocation_input(mock_client, input_payload=f'{{"tag": "{tag}"}}'),
+            _make_lambda_context(request_id=f"request-{tag}"),
+        )
+
+    threads = [
+        threading.Thread(target=invoke, args=(tag,), name=f"invocation-{tag}")
+        for tag in ("a", "b")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=timeout)
+    for thread in threads:
+        assert not thread.is_alive(), f"{thread.name} did not finish"
+
+    assert results["a"]["Status"] == InvocationStatus.SUCCEEDED.value
+    assert results["b"]["Status"] == InvocationStatus.SUCCEEDED.value
+
+    # One instance per invocation, and each one keyed to its own request.
+    assert sorted(built) == ["request-a", "request-b"]
+
+    for tag in ("a", "b"):
+        plugin = built[f"request-{tag}"]
+        # Exactly its own invocation hooks: not the other invocation's request
+        # id, not two copies of its own, not zero because the other invocation's
+        # teardown got there first.
+        assert plugin.invocation_starts == [f"request-{tag}"]
+        assert plugin.invocation_ends == [f"request-{tag}:SUCCEEDED"]
+        # Only its own operation. The other invocation's step ran while this one
+        # was live, so a shared plugin slot would show up here.
+        assert f"step-{tag}" in plugin.operation_names
+        other = "b" if tag == "a" else "a"
+        assert f"step-{other}" not in plugin.operation_names
+
+
+def test_durable_execution_with_failing_plugin_factory_does_not_break_execution():
+    """A factory that raises is contained exactly as a failing hook is."""
+    mock_client = Mock(spec=DurableServiceClient)
+    mock_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="new_token",  # noqa: S106
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+
+    recording_plugin = _RecordingPlugin()
+
+    class _ExplodingFactory:
+        def create_plugin(self, info) -> DurableInstrumentationPlugin:
+            raise RuntimeError("factory boom")
+
+    @durable_execution(plugins=[_ExplodingFactory(), plugin_factory(recording_plugin)])
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        return {"result": "success"}
+
+    result = test_handler(
+        _make_invocation_input(mock_client),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    # The other plugin is unaffected.
     assert "invocation_start" in recording_plugin.calls
     assert "invocation_end:SUCCEEDED" in recording_plugin.calls
 
@@ -3843,7 +4472,7 @@ def test_durable_execution_decorator_with_plugins_and_boto3_client():
 
     # When using DurableExecutionInvocationInputWithClient, boto3_client is ignored
     # but we verify the decorator accepts both parameters
-    @durable_execution(boto3_client=None, plugins=[plugin])
+    @durable_execution(boto3_client=None, plugins=[plugin_factory(plugin)])
     def test_handler(event: Any, context: DurableContext) -> dict:
         return {"result": "success"}
 
@@ -3857,3 +4486,258 @@ def test_durable_execution_decorator_with_plugins_and_boto3_client():
 
 
 # endregion Plugin Integration Tests
+
+
+# region Handler Metadata Tests
+
+
+def _bare_decorated_handler():
+    """The ``@durable_execution`` form, desugared so the test keeps both objects."""
+
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        """Handler docstring."""
+        return {"result": "success"}
+
+    return durable_execution(test_handler), test_handler
+
+
+def _plugin_decorated_handler():
+    """The ``@durable_execution(plugins=[...])`` form, desugared the same way.
+
+    This form takes a different path through the decorator: the first call
+    returns a ``functools.partial``, which the second call applies to the user
+    function.
+    """
+
+    def test_handler(event: Any, context: DurableContext) -> dict:
+        """Handler docstring."""
+        return {"result": "success"}
+
+    decorator = durable_execution(plugins=[plugin_factory(_RecordingPlugin())])
+    return decorator(test_handler), test_handler
+
+
+@pytest.mark.parametrize(
+    "build_handler",
+    [_bare_decorated_handler, _plugin_decorated_handler],
+    ids=["bare", "with_plugins"],
+)
+def test_decorated_handler_signature_is_event_and_context(build_handler) -> None:
+    """The decorated handler accepts exactly the two Lambda handler arguments.
+
+    A Lambda runtime, or a test harness that inspects a handler before calling
+    it, reads ``inspect.signature()``. Any parameter reported there that the
+    callable does not accept makes the handler look uninvokable, or invites a
+    caller to pass an argument that raises. The SDK's own invocation body takes a
+    third argument -- this invocation's ``PluginExecutor`` -- so this pins the
+    public signature to the two arguments the handler really takes, for both
+    decorator forms.
+    """
+    handler, _user_function = build_handler()
+
+    signature = inspect.signature(handler)
+
+    assert list(signature.parameters) == ["event", "context"]
+    assert "plugin_executor" not in signature.parameters
+    # Binding is the operation a signature-aware caller actually performs.
+    signature.bind({}, _make_lambda_context())
+
+
+@pytest.mark.parametrize(
+    "build_handler",
+    [_bare_decorated_handler, _plugin_decorated_handler],
+    ids=["bare", "with_plugins"],
+)
+def test_decorated_handler_reports_user_function_metadata(build_handler) -> None:
+    """The handler identifies itself as the user's function, not as SDK internals.
+
+    Logging, ``help()`` and error messages read ``__name__`` and ``__doc__``. The
+    SDK wraps the user function twice, so without the user function's metadata at
+    the head of the chain the handler names an internal wrapper instead.
+    ``inspect.unwrap()`` reaching the user function is what makes
+    ``inspect.signature()`` report that function's parameters.
+    """
+    handler, user_function = build_handler()
+
+    assert handler.__name__ == user_function.__name__
+    assert handler.__doc__ == user_function.__doc__
+    assert inspect.unwrap(handler) is user_function
+
+
+# endregion Handler Metadata Tests
+
+
+@pytest.mark.parametrize("handler_fails", [False, True])
+def test_worker_lifecycle_notifies_end_once_and_preserves_handler_failure(
+    handler_fails: bool,
+) -> None:
+    """The worker-owned lifecycle retains the factory major's End guarantees."""
+    received: list[tuple[str, str]] = []
+    handler_failure = KeyboardInterrupt("handler interrupted")
+    end_failure = SystemExit("plugin exit")
+
+    class First(DurableInstrumentationPlugin):
+        def on_invocation_end(self, info) -> None:
+            received.append(("first", info.status.value))
+            raise end_failure
+
+    class Second(DurableInstrumentationPlugin):
+        def on_invocation_end(self, info) -> None:
+            received.append(("second", info.status.value))
+
+    def body(event: Any, context: DurableContext) -> str:
+        if handler_fails:
+            raise handler_failure
+        return "done"
+
+    handler = durable_execution(
+        body, plugins=[plugin_factory(First()), plugin_factory(Second())]
+    )
+    expected = handler_failure if handler_fails else end_failure
+    with pytest.raises(type(expected)) as caught:
+        handler(
+            _make_invocation_input(Mock(spec=DurableServiceClient)),
+            _make_lambda_context(),
+        )
+
+    assert caught.value is expected
+    status = "RETRY" if handler_fails else "SUCCEEDED"
+    assert received == [("first", status), ("second", status)]
+
+
+def _proxy_with_raising_class(error: BaseException) -> DurableInstrumentationPlugin:
+    def raising_class(_instance: object) -> type[DurableInstrumentationPlugin]:
+        raise error
+
+    # A dynamic descriptor models a proxy without claiming a nominal subtype.
+    proxy = type("RaisingClassProxy", (), {"__class__": property(raising_class)})()
+    return cast(DurableInstrumentationPlugin, proxy)
+
+
+@pytest.mark.parametrize(
+    "error_type", [RuntimeError, asyncio.CancelledError, BaseException]
+)
+def test_factory_return_validation_failure_keeps_healthy_plugins_and_handler(
+    error_type: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    failure = error_type("factory return class lookup failed")
+    healthy = _RecordingPlugin()
+    handler_calls: list[bool] = []
+
+    def body(event: Any, context: DurableContext) -> str:
+        handler_calls.append(True)
+        return "ok"
+
+    handler = durable_execution(
+        body,
+        plugins=[
+            plugin_factory(_proxy_with_raising_class(failure)),
+            plugin_factory(healthy),
+        ],
+    )
+    result = handler(
+        _make_invocation_input(Mock(spec=DurableServiceClient)),
+        _make_lambda_context(),
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert json.loads(result["Result"]) == "ok"
+    assert handler_calls == [True]
+    assert healthy.calls == ["invocation_start", "invocation_end:SUCCEEDED"]
+    assert any(
+        record.exc_info and record.exc_info[1] is failure for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_factory_return_validation_preserves_thread_control(
+    error_type: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    failure = error_type("factory return control signal")
+    healthy = _RecordingPlugin()
+    handler_calls: list[bool] = []
+
+    def body(event: Any, context: DurableContext) -> None:
+        handler_calls.append(True)
+
+    handler = durable_execution(
+        body,
+        plugins=[
+            plugin_factory(_proxy_with_raising_class(failure)),
+            plugin_factory(healthy),
+        ],
+    )
+    with pytest.raises(error_type) as caught:
+        handler(
+            _make_invocation_input(Mock(spec=DurableServiceClient)),
+            _make_lambda_context(),
+        )
+
+    assert caught.value is failure
+    assert handler_calls == []
+    assert healthy.calls == []
+
+
+def test_factory_return_validation_partitions_mixed_control_group(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    control = SystemExit("proxy control")
+    failure = BaseExceptionGroup(
+        "proxy group", [RuntimeError("proxy ordinary failure"), control]
+    )
+    healthy = _RecordingPlugin()
+
+    def body(event: Any, context: DurableContext) -> None:
+        raise AssertionError("the control signal must stop invocation startup")
+
+    handler = durable_execution(
+        body,
+        plugins=[
+            plugin_factory(_proxy_with_raising_class(failure)),
+            plugin_factory(healthy),
+        ],
+    )
+    with pytest.raises(BaseExceptionGroup) as caught:
+        handler(
+            _make_invocation_input(Mock(spec=DurableServiceClient)),
+            _make_lambda_context(),
+        )
+
+    assert caught.value.exceptions == (control,)
+    assert healthy.calls == []
+    assert "proxy ordinary failure" in caplog.text
+
+
+def test_factory_return_validation_retains_supported_proxy_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
+    target = _RecordingPlugin()
+    proxy = type(
+        "PluginProxy",
+        (),
+        {
+            "__class__": property(lambda _instance: _RecordingPlugin),
+            "__getattr__": lambda _instance, name: getattr(target, name),
+        },
+    )()
+
+    def body(event: Any, context: DurableContext) -> str:
+        return "ok"
+
+    handler = durable_execution(
+        body, plugins=[plugin_factory(cast(DurableInstrumentationPlugin, proxy))]
+    )
+    result = handler(
+        _make_invocation_input(Mock(spec=DurableServiceClient)), _make_lambda_context()
+    )
+
+    assert result["Status"] == InvocationStatus.SUCCEEDED.value
+    assert target.calls == ["invocation_start", "invocation_end:SUCCEEDED"]

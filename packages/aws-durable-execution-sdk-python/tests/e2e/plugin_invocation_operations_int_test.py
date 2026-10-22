@@ -26,8 +26,11 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationStatus,
     OperationType,
 )
-from aws_durable_execution_sdk_python.plugin import DurableInstrumentationPlugin
-from tests.test_helpers import operation_id_sequence
+from aws_durable_execution_sdk_python.plugin import (
+    DurableInstrumentationPlugin,
+    InvocationStartInfo,
+)
+from tests.test_helpers import operation_id_sequence, plugin_factory
 
 
 class _MapRecordingPlugin(DurableInstrumentationPlugin):
@@ -114,7 +117,7 @@ def test_operation_maps_on_a_completing_invocation():
     """The start map holds the prior state; the end map sees the step added."""
     plugin = _MapRecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def my_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
         return context.step(lambda _ctx: "stepped", name="greet")
 
@@ -150,17 +153,30 @@ def test_operation_maps_across_suspend_and_replay():
     Invocation 1 suspends on a wait. Invocation 2 replays with the wait already
     SUCCEEDED and its id in ``UpdatedOperationIds``, which is exactly what
     ``updated_operations`` is derived from.
+
+    One handler serves both invocations, as in production. Previously this test
+    had to declare a second handler with its own plugin instance, because the
+    single shared instance would have interleaved both invocations' records into
+    one list. Now the factory builds an instance per invocation, so each
+    instance's ``starts[0]``/``ends[0]`` unambiguously describes its own
+    invocation -- and the test asserts that separation directly.
     """
     wait_id = next(operation_id_sequence())
 
-    # --- Invocation 1: the wait starts and the execution suspends.
-    first = _MapRecordingPlugin()
+    built: list[_MapRecordingPlugin] = []
 
-    @durable_execution(plugins=[first])
-    def suspending_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
+    class _BuildingFactory:
+        def create_plugin(self, info: InvocationStartInfo) -> _MapRecordingPlugin:
+            plugin = _MapRecordingPlugin()
+            built.append(plugin)
+            return plugin
+
+    @durable_execution(plugins=[_BuildingFactory()])
+    def wait_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
         context.wait(Duration.from_seconds(60))
         return "done"
 
+    # --- Invocation 1: the wait starts and the execution suspends.
     with patch(
         "aws_durable_execution_sdk_python.execution.LambdaClient"
     ) as mock_client_class:
@@ -168,9 +184,11 @@ def test_operation_maps_across_suspend_and_replay():
         mock_client.checkpoint = _tracking_checkpoint()
         mock_client_class.initialize_client.return_value = mock_client
 
-        first_result = suspending_handler(_event(), _lambda_context())
+        first_result = wait_handler(_event(), _lambda_context())
 
     assert first_result["Status"] == InvocationStatus.PENDING.value
+    assert len(built) == 1
+    first = built[0]
     start_operations, start_updated = first.starts[0]
     assert start_operations == ["execution-1"]
     assert start_updated == []
@@ -179,13 +197,6 @@ def test_operation_maps_across_suspend_and_replay():
     assert wait_id in end_operations
 
     # --- Invocation 2: replay with the wait completed externally.
-    replay = _MapRecordingPlugin()
-
-    @durable_execution(plugins=[replay])
-    def replayed_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
-        context.wait(Duration.from_seconds(60))
-        return "done"
-
     completed_wait = {
         "Id": wait_id,
         "Type": OperationType.WAIT.value,
@@ -200,12 +211,20 @@ def test_operation_maps_across_suspend_and_replay():
         mock_client.checkpoint = _tracking_checkpoint()
         mock_client_class.initialize_client.return_value = mock_client
 
-        replay_result = replayed_handler(
+        replay_result = wait_handler(
             _event(extra_operations=[completed_wait], updated_operation_ids=[wait_id]),
             _lambda_context(),
         )
 
     assert replay_result["Status"] == InvocationStatus.SUCCEEDED.value
+
+    # The second invocation got its own instance, and the first one recorded
+    # nothing further after it returned.
+    assert len(built) == 2
+    replay = built[1]
+    assert replay is not first
+    assert len(first.starts) == 1
+    assert len(first.ends) == 1
 
     start_operations, start_updated = replay.starts[0]
     # The replay start map carries the prior state, including the wait.
@@ -222,7 +241,7 @@ def test_updated_operations_ignores_ids_absent_from_the_map():
     """An id the execution state does not carry must not appear in the subset."""
     plugin = _MapRecordingPlugin()
 
-    @durable_execution(plugins=[plugin])
+    @durable_execution(plugins=[plugin_factory(plugin)])
     def my_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
         return "ok"
 

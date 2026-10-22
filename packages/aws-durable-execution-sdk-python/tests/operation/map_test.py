@@ -27,7 +27,10 @@ from aws_durable_execution_sdk_python.config import (
 )
 from aws_durable_execution_sdk_python.context import DurableContext, ExecutionContext
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
-from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+from aws_durable_execution_sdk_python.lambda_service import (
+    OperationSubType,
+    OperationType,
+)
 from aws_durable_execution_sdk_python.operation import child  # PLC0415
 from aws_durable_execution_sdk_python.operation.map import (
     MapExecutor,
@@ -198,7 +201,11 @@ def test_map_handler():
     execution_state = MockExecutionState()
     config = MapConfig()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.MAP, "parent", "test_map"
+        "test_op",
+        OperationSubType.MAP,
+        "parent",
+        "test_map",
+        operation_type=OperationType.CONTEXT,
     )
 
     result = map_handler(
@@ -237,7 +244,11 @@ def test_map_handler_with_none_config():
 
     execution_state = MockExecutionState()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.MAP, "parent", "test_map"
+        "test_op",
+        OperationSubType.MAP,
+        "parent",
+        "test_map",
+        operation_type=OperationType.CONTEXT,
     )
 
     # Since MapConfig() is called in map_handler when config is None,
@@ -372,7 +383,11 @@ def test_map_handler_calls_executor_execute():
         execution_state = MockExecutionState()
         config = MapConfig()
         operation_identifier = OperationIdentifier(
-            "test_op", OperationSubType.MAP, "parent", "test_map"
+            "test_op",
+            OperationSubType.MAP,
+            "parent",
+            "test_map",
+            operation_type=OperationType.CONTEXT,
         )
 
         result = map_handler(
@@ -426,7 +441,11 @@ def test_map_handler_with_none_config_creates_default():
 
         execution_state = MockExecutionState()
         operation_identifier = OperationIdentifier(
-            "test_op", OperationSubType.MAP, "parent", "test_map"
+            "test_op",
+            OperationSubType.MAP,
+            "parent",
+            "test_map",
+            operation_type=OperationType.CONTEXT,
         )
 
         result = map_handler(
@@ -483,7 +502,11 @@ def test_map_handler_with_serdes():
     execution_state = MockExecutionState()
     config = MapConfig(serdes=CustomStrSerDes())
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.MAP, "parent", "test_map"
+        "test_op",
+        OperationSubType.MAP,
+        "parent",
+        "test_map",
+        operation_type=OperationType.CONTEXT,
     )
 
     result = map_handler(
@@ -533,7 +556,11 @@ def test_map_handler_with_summary_generator():
 
     execution_state = MockExecutionState()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.MAP, "parent", "test_map"
+        "test_op",
+        OperationSubType.MAP,
+        "parent",
+        "test_map",
+        operation_type=OperationType.CONTEXT,
     )
 
     # Call map_handler
@@ -575,7 +602,11 @@ def test_map_handler_default_summary_generator():
 
     execution_state = MockExecutionState()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.MAP, "parent", "test_map"
+        "test_op",
+        OperationSubType.MAP,
+        "parent",
+        "test_map",
+        operation_type=OperationType.CONTEXT,
     )
 
     # Call map_handler with None config (should use default)
@@ -616,7 +647,11 @@ def test_map_handler_with_explicit_none_summary_generator():
 
     execution_state = MockExecutionState()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.MAP, "parent", "test_map"
+        "test_op",
+        OperationSubType.MAP,
+        "parent",
+        "test_map",
+        operation_type=OperationType.CONTEXT,
     )
 
     executor_context = Mock()
@@ -669,7 +704,11 @@ def test_map_handler_replay_mechanism():
     execution_state = MockExecutionState()
     config = MapConfig()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.MAP, "parent", "test_map"
+        "test_op",
+        OperationSubType.MAP,
+        "parent",
+        "test_map",
+        operation_type=OperationType.CONTEXT,
     )
 
     # Mock map context
@@ -739,7 +778,11 @@ def test_map_handler_replay_with_replay_children():
     execution_state = MockExecutionState()
     config = MapConfig()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.MAP, "parent", "test_map"
+        "test_op",
+        OperationSubType.MAP,
+        "parent",
+        "test_map",
+        operation_type=OperationType.CONTEXT,
     )
 
     # Mock map context
@@ -816,7 +859,11 @@ def test_map_handler_first_execution_then_replay_integration():
     items = ["a", "b"]
     config = MapConfig()
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.MAP, "parent", "test_map"
+        "test_op",
+        OperationSubType.MAP,
+        "parent",
+        "test_map",
+        operation_type=OperationType.CONTEXT,
     )
 
     # Track whether we're in first or second execution
@@ -1074,7 +1121,11 @@ def test_map_result_serialization_roundtrip():
     child_context.state.wrap_user_function = lambda func, *args, **kwargs: func
     map_context.create_child_context = Mock(return_value=child_context)
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.MAP, "parent", "test_map"
+        "test_op",
+        OperationSubType.MAP,
+        "parent",
+        "test_map",
+        operation_type=OperationType.CONTEXT,
     )
 
     # Execute map
@@ -1528,7 +1579,11 @@ def test_map_handler_defaults_summary_generator_for_user_config():
         return original_from_items(cls, items, func, config, operation_id_namespace)
 
     operation_identifier = OperationIdentifier(
-        "test_op", OperationSubType.MAP, "parent", "test_map"
+        "test_op",
+        OperationSubType.MAP,
+        "parent",
+        "test_map",
+        operation_type=OperationType.CONTEXT,
     )
     with patch.object(MapExecutor, "from_items", classmethod(capturing_from_items)):
         result = map_handler(
@@ -1595,7 +1650,11 @@ def test_map_handler_with_should_complete_predicate():
 
         execution_state = MockExecutionState()
         operation_identifier: OperationIdentifier = OperationIdentifier(
-            "test_op", OperationSubType.MAP, "parent", "test_map"
+            "test_op",
+            OperationSubType.MAP,
+            "parent",
+            "test_map",
+            operation_type=OperationType.CONTEXT,
         )
 
         result: BatchResult = map_handler(

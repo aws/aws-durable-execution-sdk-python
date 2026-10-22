@@ -109,6 +109,20 @@ class DurableFunctionsTestError(Exception):
     """Base class for testing errors."""
 
 
+class InvalidInvocationOutputError(DurableFunctionsTestError):
+    """The handler's output cannot be parsed as an invocation output."""
+
+    def __init__(self, message: str, request_id: str | None = None) -> None:
+        """Initialize with the message and the invocation's request ID.
+
+        Args:
+            message: Why the output cannot be parsed
+            request_id: Request ID of the invocation that returned the output
+        """
+        self.request_id = request_id
+        super().__init__(message)
+
+
 # endregion Testing
 
 

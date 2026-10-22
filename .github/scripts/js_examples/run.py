@@ -62,7 +62,7 @@ TESTING_SOURCE = REPO_ROOT / "packages/aws-durable-execution-sdk-python-testing/
 JS_SDK_URL = "https://github.com/aws/aws-durable-execution-sdk-js.git"
 EXAMPLES_REL = Path("packages/aws-durable-execution-sdk-js-examples")
 # The examples depend on these local workspaces. The root "npm run build"
-# also builds the insight tools and the VS Code extension, which the harness
+# also builds the telemetry tools and the VS Code extension, which the harness
 # does not need, so the script builds only these, in dependency order.
 JS_BUILD_WORKSPACES = (
     "packages/aws-durable-execution-sdk-js",
@@ -196,7 +196,7 @@ def build_js_sdk(js_dir: Path, *, force: bool) -> None:
     )
     # Some workspaces the examples do not use have install scripts that
     # download or compile native code. Electron downloads a ~100 MB binary.
-    # node-llama-cpp (an insight dependency) builds llama.cpp from source when
+    # node-llama-cpp (a telemetry dependency) builds llama.cpp from source when
     # its prebuilt binary does not fit the host, and that build fails on a
     # machine without a C++ toolchain. The harness needs neither, so both
     # install steps are skipped.

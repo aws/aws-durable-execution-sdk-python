@@ -78,7 +78,11 @@ def test_create_callback_handler_new_operation_with_config():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback1", OperationSubType.CALLBACK, None, "test_callback"
+            "callback1",
+            OperationSubType.CALLBACK,
+            None,
+            "test_callback",
+            operation_type=OperationType.CALLBACK,
         ),
         config=config,
     )
@@ -121,7 +125,10 @@ def test_create_callback_handler_new_operation_without_config():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback2", OperationSubType.CALLBACK, None
+            "callback2",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -158,7 +165,10 @@ def test_create_callback_handler_existing_started_operation():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback3", OperationSubType.CALLBACK, None
+            "callback3",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -188,7 +198,10 @@ def test_create_callback_handler_existing_failed_operation():
     callback_id = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback4", OperationSubType.CALLBACK, None
+            "callback4",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -214,7 +227,10 @@ def test_create_callback_handler_existing_started_missing_callback_details():
         create_callback_handler(
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "callback5", OperationSubType.CALLBACK, None
+                "callback5",
+                OperationSubType.CALLBACK,
+                None,
+                operation_type=OperationType.CALLBACK,
             ),
             config=None,
         )
@@ -239,7 +255,10 @@ def test_create_callback_handler_new_operation_missing_callback_details_after_ch
         create_callback_handler(
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "callback6", OperationSubType.CALLBACK, None
+                "callback6",
+                OperationSubType.CALLBACK,
+                None,
+                operation_type=OperationType.CALLBACK,
             ),
             config=None,
         )
@@ -262,7 +281,10 @@ def test_create_callback_handler_existing_timed_out_operation():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback_timed_out", OperationSubType.CALLBACK, None
+            "callback_timed_out",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -288,7 +310,10 @@ def test_create_callback_handler_existing_timed_out_missing_callback_details():
         create_callback_handler(
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "callback_timed_out_no_details", OperationSubType.CALLBACK, None
+                "callback_timed_out_no_details",
+                OperationSubType.CALLBACK,
+                None,
+                operation_type=OperationType.CALLBACK,
             ),
             config=None,
         )
@@ -376,7 +401,10 @@ def test_create_callback_handler_with_none_operation_in_result():
         create_callback_handler(
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "none_operation", OperationSubType.CALLBACK, None
+                "none_operation",
+                OperationSubType.CALLBACK,
+                None,
+                operation_type=OperationType.CALLBACK,
             ),
             config=None,
         )
@@ -502,7 +530,10 @@ def test_create_callback_handler_existing_succeeded_operation():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback_succeeded", OperationSubType.CALLBACK, None
+            "callback_succeeded",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -528,7 +559,10 @@ def test_create_callback_handler_existing_succeeded_missing_callback_details():
         create_callback_handler(
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                "callback_succeeded_no_details", OperationSubType.CALLBACK, None
+                "callback_succeeded_no_details",
+                OperationSubType.CALLBACK,
+                None,
+                operation_type=OperationType.CALLBACK,
             ),
             config=None,
         )
@@ -557,7 +591,10 @@ def test_create_callback_handler_config_with_zero_timeouts():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback_zero", OperationSubType.CALLBACK, None
+            "callback_zero",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=config,
     )
@@ -603,7 +640,10 @@ def test_create_callback_handler_config_with_large_timeouts():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback_large", OperationSubType.CALLBACK, None
+            "callback_large",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=config,
     )
@@ -643,7 +683,9 @@ def test_create_callback_handler_empty_operation_id():
 
     result = create_callback_handler(
         state=mock_state,
-        operation_identifier=OperationIdentifier("", OperationSubType.CALLBACK, None),
+        operation_identifier=OperationIdentifier(
+            "", OperationSubType.CALLBACK, None, operation_type=OperationType.CALLBACK
+        ),
         config=None,
     )
 
@@ -845,7 +887,10 @@ def test_callback_lifecycle_complete_flow():
     callback_id = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "lifecycle_callback", OperationSubType.CALLBACK, None
+            "lifecycle_callback",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=config,
     )
@@ -890,14 +935,20 @@ def test_callback_retry_scenario():
     callback_id_1 = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "retry_callback", OperationSubType.CALLBACK, None
+            "retry_callback",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
     callback_id_2 = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "retry_callback", OperationSubType.CALLBACK, None
+            "retry_callback",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -933,7 +984,10 @@ def test_callback_timeout_configuration():
         callback_id = create_callback_handler(
             state=mock_state,
             operation_identifier=OperationIdentifier(
-                f"timeout_callback_{timeout_seconds}", OperationSubType.CALLBACK, None
+                f"timeout_callback_{timeout_seconds}",
+                OperationSubType.CALLBACK,
+                None,
+                operation_type=OperationType.CALLBACK,
             ),
             config=config,
         )
@@ -960,7 +1014,10 @@ def test_callback_error_propagation():
     callback_id = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "error_callback", OperationSubType.CALLBACK, None
+            "error_callback",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -1034,7 +1091,10 @@ def test_callback_state_consistency():
     callback_id_1 = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "consistent_callback", OperationSubType.CALLBACK, None
+            "consistent_callback",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -1047,7 +1107,10 @@ def test_callback_state_consistency():
     callback_id_2 = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "consistent_callback", OperationSubType.CALLBACK, None
+            "consistent_callback",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -1111,13 +1174,21 @@ def test_callback_operation_update_creation(mock_operation_update):
     create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "update_test", OperationSubType.CALLBACK, None
+            "update_test",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=config,
     )
 
     mock_operation_update.create_callback.assert_called_once_with(
-        identifier=OperationIdentifier("update_test", OperationSubType.CALLBACK, None),
+        identifier=OperationIdentifier(
+            "update_test",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
+        ),
         callback_options=CallbackOptions(
             timeout_seconds=600, heartbeat_timeout_seconds=120
         ),
@@ -1148,7 +1219,10 @@ def test_callback_immediate_response_get_checkpoint_result_called_twice():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback_immediate_1", OperationSubType.CALLBACK, None
+            "callback_immediate_1",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -1179,7 +1253,10 @@ def test_callback_immediate_response_create_checkpoint_with_is_sync_true():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback_immediate_2", OperationSubType.CALLBACK, None
+            "callback_immediate_2",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -1216,7 +1293,10 @@ def test_callback_immediate_response_immediate_success():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback_immediate_3", OperationSubType.CALLBACK, None
+            "callback_immediate_3",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -1255,7 +1335,10 @@ def test_callback_immediate_response_immediate_failure_deferred():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback_immediate_4", OperationSubType.CALLBACK, None
+            "callback_immediate_4",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -1370,7 +1453,10 @@ def test_callback_immediate_response_no_immediate_response():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback_immediate_5", OperationSubType.CALLBACK, None
+            "callback_immediate_5",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -1406,7 +1492,10 @@ def test_callback_immediate_response_already_completed():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback_immediate_6", OperationSubType.CALLBACK, None
+            "callback_immediate_6",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -1443,7 +1532,10 @@ def test_callback_immediate_response_already_failed():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback_immediate_7", OperationSubType.CALLBACK, None
+            "callback_immediate_7",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -1486,7 +1578,10 @@ def test_callback_deferred_error_handling_code_execution_between_create_and_resu
     callback_id = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback_deferred_error", OperationSubType.CALLBACK, None
+            "callback_deferred_error",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=None,
     )
@@ -1540,7 +1635,10 @@ def test_callback_immediate_response_with_config():
     result = create_callback_handler(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback_with_config", OperationSubType.CALLBACK, None
+            "callback_with_config",
+            OperationSubType.CALLBACK,
+            None,
+            operation_type=OperationType.CALLBACK,
         ),
         config=config,
     )
@@ -1584,7 +1682,11 @@ def test_callback_returns_id_when_second_check_returns_started():
     executor = CallbackOperationExecutor(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback-1", OperationSubType.CALLBACK, None, "test_callback"
+            "callback-1",
+            OperationSubType.CALLBACK,
+            None,
+            "test_callback",
+            operation_type=OperationType.CALLBACK,
         ),
         config=CallbackConfig(),
     )
@@ -1620,7 +1722,11 @@ def test_callback_returns_id_when_second_check_returns_started_duplicate():
     executor = CallbackOperationExecutor(
         state=mock_state,
         operation_identifier=OperationIdentifier(
-            "callback-1", OperationSubType.CALLBACK, None, "test_callback"
+            "callback-1",
+            OperationSubType.CALLBACK,
+            None,
+            "test_callback",
+            operation_type=OperationType.CALLBACK,
         ),
         config=CallbackConfig(),
     )
