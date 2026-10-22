@@ -6,6 +6,9 @@ the SDK's instrumentation hooks and emits one curated `DurableExecutionTelemetry
 per execution to the configured exporters. The wire record keeps the JS
 camelCase field names so records read identically across SDKs.
 
+> **Experimental.** Like its JS counterpart, this plugin is experimental and may
+> change or be removed in future releases.
+
 ## Install
 
 ```bash
