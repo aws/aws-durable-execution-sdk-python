@@ -101,15 +101,13 @@ class OperationInfo:
     result: str | None = field(
         default=None,
         kw_only=True,
-        metadata={"experimental": True},
     )
-    """EXPERIMENTAL: The serialized operation result, when available."""
+    """The serialized operation result, when available."""
     error: ErrorObject | None = field(
         default=None,
         kw_only=True,
-        metadata={"experimental": True},
     )
-    """EXPERIMENTAL: The operation error, when available."""
+    """The operation error, when available."""
     attempt: int | None = field(default=None, kw_only=True)
 
     @staticmethod
@@ -256,9 +254,8 @@ class InvocationInfo:
         repr=False,
         compare=False,
         hash=False,
-        metadata={"experimental": True},
     )
-    """EXPERIMENTAL: The deserialized execution input, when available.
+    """The deserialized execution input, when available.
 
     Surfaced to instrumentation plugins that need to record it (e.g. Durable
     Execution Telemetry). Mirrors the JS SDK's ``InvocationInfo.executionInput``.
@@ -284,9 +281,8 @@ class InvocationInfo:
         repr=False,
         compare=False,
         hash=False,
-        metadata={"experimental": True},
     )
-    """EXPERIMENTAL: Checkpointed operations for this execution, keyed by id.
+    """Checkpointed operations for this execution, keyed by id.
 
     A point-in-time view of the execution's operation map: as observed at the
     start of the invocation on ``on_invocation_start``, and as observed at the
@@ -313,9 +309,8 @@ class InvocationStartInfo(InvocationInfo):
         repr=False,
         compare=False,
         hash=False,
-        metadata={"experimental": True},
     )
-    """EXPERIMENTAL: Operations updated externally while this execution was suspended.
+    """Operations updated externally while this execution was suspended.
 
     A wait timer that expired, a callback that was delivered, or a chained
     invoke that completed between the previous invocation and this one. This is
@@ -333,18 +328,16 @@ class InvocationEndInfo(InvocationInfo):
     status: InvocationStatus = field(kw_only=True)
     error: ErrorObject | None = field(
         default=None,
-        metadata={"experimental": True},
     )
-    """EXPERIMENTAL: The invocation error, when available."""
+    """The invocation error, when available."""
     execution_result: str | None = field(
         default=None,
         kw_only=True,
         repr=False,
         compare=False,
         hash=False,
-        metadata={"experimental": True},
     )
-    """EXPERIMENTAL: The serialized execution result, when available.
+    """The serialized execution result, when available.
 
     A JSON string, or ``""`` when the result was checkpointed out-of-band for a
     large payload. Mirrors the JS SDK's ``InvocationEndInfo.executionResult``.
