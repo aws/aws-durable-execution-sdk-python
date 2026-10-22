@@ -108,7 +108,7 @@ def _map_two_types(ctx: DurableContext) -> Any:
         raise (PaymentError if value == "a" else FraudError)(MESSAGE)
 
     # Both items run, one at a time, so item 0's error is the one raised.
-    config = MapConfig(
+    config: MapConfig[Any] = MapConfig(
         max_concurrency=1, completion_config=CompletionConfig.all_completed()
     )
     ctx.map(["a", "b"], item, name="fanout", config=config).throw_if_error()
