@@ -236,7 +236,7 @@ The handler's return value is checkpointed as the session's result. So it must b
 
 A running MicroVM pays compute charges. A suspended MicroVM pays only for snapshot storage, and it keeps its memory and files. A session can suspend its MicroVM between jobs in two ways:
 
-1. `auto_suspend_on_idle=True` asks the worker in the MicroVM to suspend its own MicroVM when no job has run for `auto_suspend_idle_time`. The default idle time is 60 seconds, or the session `timeout` if that is shorter. The idle time must be at least 10 seconds.
+1. `auto_suspend_on_idle=True` asks the worker in the MicroVM to suspend its own MicroVM when no job has run for `auto_suspend_idle_time`. The default idle time is 60 seconds, or the session `timeout` if that is shorter. The idle time must be at least 10 seconds. So a session whose `timeout` is under 10 seconds does not suspend by default, even with `auto_suspend_on_idle=True`.
 2. `idle_policy` sets the `RunMicrovm` idle policy. The service then suspends the MicroVM when its endpoint receives no traffic. A running job receives no traffic after its delivery. So `maxIdleDurationSeconds` must be longer than the longest job.
 
 For a session that launched with either setting, each request step calls `GetMicrovm` before it sends the job. It resumes a suspended MicroVM, and it sends the job to the endpoint that `GetMicrovm` reports. The MicroVM can suspend itself between that check and the request. The endpoint then answers 502, or the worker answers 503. So after a 502, 503, or 504, or a request without an answer, the step checks the state again before it retries. The wait for a resume counts toward the request's `retry_window`.
