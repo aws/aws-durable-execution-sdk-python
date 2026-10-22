@@ -1,0 +1,1 @@
+{"finding_digest":"18aeaedeae3978814f72d7047ba2abd4a05b5c5dc720c6eaddd218414b8ce2fa","finding_id":"arf_v1_dcxk5xvohf4ict3s24chxivl2s","identity_key":"otel/execution_plugin.py::_end_invocation_spans::completion-failure-isolation","pull_request_number":758,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
