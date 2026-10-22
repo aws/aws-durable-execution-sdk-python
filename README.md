@@ -70,6 +70,9 @@ def handler(event: dict, context: DurableContext) -> dict:
 
 ## 📚 Documentation
 
+- **[Migrating from 2.x to 3.0](docs/migration-2.x-to-3.0.md)** - Upgrade Core and OTel together and migrate plugin registrations and providers
+- **[Migrating from 1.x to 2.0](docs/migration-1.x-to-2.0.md)** - Earlier breaking changes for applications upgrading from 1.x
+
 The complete documentation for the AWS Durable Execution SDK for Python lives on the AWS Documentation site:
 
 - **[AWS Durable Execution Documentation](https://docs.aws.amazon.com/durable-execution/)** - Concepts, getting started, core operations, advanced topics, and API reference
