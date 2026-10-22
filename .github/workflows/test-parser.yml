@@ -18,6 +18,7 @@ on:
       - '.github/workflows/opentelemetry-conformance-tests.yml'
       - '.github/workflows/test-parser.yml'
       - '.github/workflows/ecr-release.yml'
+      - '.github/workflows/pypi-publish.yml'
       - 'packages/aws-durable-execution-sdk-python-otel/pyproject.toml'
   push:
     branches: [ main ]
@@ -37,6 +38,7 @@ on:
       - '.github/workflows/opentelemetry-conformance-tests.yml'
       - '.github/workflows/test-parser.yml'
       - '.github/workflows/ecr-release.yml'
+      - '.github/workflows/pypi-publish.yml'
       - 'packages/aws-durable-execution-sdk-python-otel/pyproject.toml'
 
 permissions:
@@ -81,5 +83,6 @@ jobs:
           .github/scripts/tests/test_opentelemetry_conformance_workflow.py \
           .github/scripts/tests/test_parse_sdk_branch.py \
           .github/scripts/tests/test_parse_testing_version.py \
+          .github/scripts/tests/test_release_workflow_dependencies.py \
           .github/scripts/tests/e2e/test_ecr_release_workflow.py \
           .github/scripts/tests/test_shared_workflow_runners.py

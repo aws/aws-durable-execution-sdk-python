@@ -85,3 +85,16 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist/
+
+  publish-emulator-image:
+    # The testing wheel requires the core SDK from this release on PyPI.
+    # Keep this in the same run so failed image jobs can be retried after publish.
+    needs: pypi-publish
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/ecr-release.yml
+    with:
+      release_tag: ${{ github.event.release.tag_name }}
+    secrets:
+      ECR_UPLOAD_IAM_ROLE_ARN: ${{ secrets.ECR_UPLOAD_IAM_ROLE_ARN }}
