@@ -475,6 +475,12 @@ pending for a later notification or invocation-End retry. If a processor deliver
 a span and then raises, retrying can repeat that delivery; the plugin has no
 exporter acknowledgment that would distinguish partial delivery from failure.
 
+During invocation End, an ordinary completion-export failure receives at most one
+retry. Failures do not prevent other completions or the Invocation/Workflow spans
+from finishing. Errors are reported after scope cleanup and flushing, including
+recovered transient failures. Control exceptions are not retried and propagate
+after cleanup; they are not converted into ordinary export failures.
+
 Invocation view can open another context segment within the same invocation
 when a timed branch resumes and re-enters a completed child, or when a virtual
 context runs again. Each new segment receives its own terminal outcome. Repeated

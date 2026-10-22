@@ -38,6 +38,7 @@ from opentelemetry.trace import (
 )
 
 from aws_durable_execution_sdk_python_otel._invocation_state import (
+    InvocationFinalization,
     completed_input_parents,
     terminal_updates,
 )
@@ -206,6 +207,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
         self._pending_completions: dict[str, OperationInfo] = {}
         self._ended_operation_ids: set[str] = set()
         self._ending_operation_ids: set[str] = set()
+        self._finalization: InvocationFinalization | None = None
         self._failed_operation_ids: set[str] = set()
         self._exception_recorded_spans: dict[str, Span] = {}
         self._completion_end_timestamps: dict[str, int] = {}
@@ -867,18 +869,49 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
             self._release_invocation_scope()
             return
 
+        finalization = InvocationFinalization()
+        self._finalization = finalization
         try:
-            # Start and End share the owner Context. Release its bindings before
-            # span processors run while closing this invocation's spans.
-            self._detach_remaining_contexts()
-            self._end_invocation_spans(info)
+            # Release owner bindings before invoking customer span processors.
+            finalization.run(self._detach_remaining_contexts)
+            finalization.run(lambda: self._end_invocation_spans(info))
         finally:
-            self._release_invocation_scope()
-            # Flush before Lambda freeze.
-            self._force_flush()
+            try:
+                finalization.run(self._release_invocation_scope)
+                finalization.run(self._force_flush)
+            finally:
+                self._finalization = None
+        finalization.raise_errors()
 
     def _end_invocation_spans(self, info: InvocationEndInfo) -> None:
-        """End this invocation's open spans and export the Workflow span."""
+        """Finish each phase even when another completion or root export fails."""
+        finalization = self._finalization
+        assert finalization is not None
+        finalization.run(self._drain_pending_completions)
+        # Failed completions already exhausted their bounded attempts. Do not
+        # retry them a third time as ordinary open-span cleanup.
+        with self._operation_spans_lock:
+            operation_ids = list(reversed(self._operation_spans))
+            incomplete_attempt_span_keys = set(self._incomplete_attempt_span_keys)
+        for operation_id in operation_ids:
+            if operation_id and operation_id not in self._pending_completions:
+                finalization.run(
+                    lambda: self._finish_open_span(
+                        operation_id, operation_id in incomplete_attempt_span_keys
+                    )
+                )
+        finalization.run(lambda: self._finish_invocation_span(info))
+        if info.status in _TERMINAL_INVOCATION_STATUSES:
+            finalization.run(lambda: self._export_workflow_span(info))
+
+    def _finish_open_span(self, operation_id: str, incomplete_attempt: bool) -> None:
+        span = self._get_span(operation_id)
+        if incomplete_attempt and span is not None and span.is_recording():
+            span.set_attribute("durable.span.truncated_at_invocation_boundary", True)
+        self._end_span(operation_id)
+
+    def _drain_pending_completions(self) -> None:
+        """Drain visible completions; the finalization ledger bounds retries."""
         with self._operation_spans_lock:
             pending = tuple(self._pending_completions.values())
         for operation in pending:
@@ -935,24 +968,7 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                 )
                 self._render_operation_end(operation, fallback_parent=invocation_span)
 
-        # Spans are registered parent-first, so close pending spans in reverse
-        # order to keep every child contained within its parent.
-        with self._operation_spans_lock:
-            operation_ids = list(reversed(self._operation_spans))
-            incomplete_attempt_span_keys = set(self._incomplete_attempt_span_keys)
-        for operation_id in operation_ids:
-            if operation_id:
-                span = self._get_span(operation_id)
-                if (
-                    operation_id in incomplete_attempt_span_keys
-                    and span is not None
-                    and span.is_recording()
-                ):
-                    span.set_attribute(
-                        "durable.span.truncated_at_invocation_boundary", True
-                    )
-                self._end_span(operation_id)
-
+    def _finish_invocation_span(self, info: InvocationEndInfo) -> None:
         invocation_span = self._get_span(None)
         if invocation_span:
             invocation_span.set_attribute(
@@ -975,13 +991,6 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
 
         # end the invocation span
         self._end_span(None)
-
-        # The Workflow span (execution view) is a non-recording placeholder
-        # during the invocation, so only a terminal status materializes and ends
-        # the recording span. SUCCEEDED -> OK, FAILED -> ERROR; RETRY/PENDING are
-        # non-terminal and leave it unexported until a later terminal invocation.
-        if info.status in _TERMINAL_INVOCATION_STATUSES:
-            self._export_workflow_span(info)
 
     def _force_flush(self) -> None:
         """Flush pending spans, containing any error the flush raises.
@@ -1138,6 +1147,11 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                     info.operation_id
                 ] = info
                 return
+            finalization = self._finalization
+            if finalization is not None and not finalization.claim_operation(
+                info.operation_id
+            ):
+                return
             self._ending_operation_ids.add(info.operation_id)
         try:
             self._finish_operation_end(info, span, fallback_parent)
@@ -1153,13 +1167,20 @@ class InvocationOtelPlugin(DurableInstrumentationPlugin):
                         siblings.pop(info.operation_id, None)
                         if not siblings:
                             del self._pending_operation_ends[info.parent_id]
-        except BaseException:
+        except BaseException as error:
             with self._operation_spans_lock:
                 self._failed_operation_ids.add(info.operation_id)
-            raise
+                if finalization is not None:
+                    finalization.operation_failed(info.operation_id, error)
+            if finalization is None:
+                raise
         finally:
             with self._operation_spans_lock:
                 self._ending_operation_ids.discard(info.operation_id)
+        if finalization is not None and finalization.can_retry(info.operation_id):
+            # Retry before falling back to a completed-parent reference, so
+            # descendants keep this invocation's actual parent segment.
+            self._render_operation_end(info, fallback_parent=fallback_parent)
 
     def _finish_operation_end(
         self, info: OperationInfo, span: Span | None, fallback_parent: Span | None
