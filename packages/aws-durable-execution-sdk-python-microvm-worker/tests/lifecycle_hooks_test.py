@@ -416,6 +416,12 @@ class Harness:
     def settle(self) -> None:
         """Wait until no SuspendMicrovm call runs."""
         assert eventually(lambda: self.listener._suspend_calls == 0)  # noqa: SLF001
+        # The call's thread lowers the count and starts the idle time in one
+        # locked block. The check above reads without the lock, so it can see
+        # the lower count first. Taking the lock waits for the rest of the
+        # block.
+        with self.listener._lock:  # noqa: SLF001
+            pass
 
     def advance(self, seconds: float) -> None:
         """Advance the clock, and let a suspend call that it started end."""
