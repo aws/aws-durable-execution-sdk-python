@@ -64,10 +64,12 @@ every SDK:
   ...}` envelope are decoded with that serializer and converted to JSON values:
   `datetime`/`date` become an ISO-8601 string from `isoformat()`, `UUID` a
   string, `bytes` a base64 string, `tuple` a list, and a map/parallel
-  `BatchResult` its `to_dict()` form. A `Decimal` keeps its exact value: an
-  integral one is a JSON integer, any other is a JSON number only when that
-  float converts back to exactly the same `Decimal`, and otherwise the string
-  `str(value)` (for example `"12345678901234567.89"`). A non-finite `Decimal`
+  `BatchResult` its `to_dict()` form. A `Decimal` keeps its numeric value, but
+  not its scale or trailing zeros (`Decimal("1.10")` is `1.1`, `Decimal("1E+2")`
+  is `100`): an integral one of at most 300 digits is a JSON integer, any other
+  is a JSON number only when that float converts back to exactly the same
+  `Decimal`, and otherwise the string `str(value)` (for example
+  `"12345678901234567.89"`, or `"1E+5000"`). A non-finite `Decimal`
   or `float` (NaN, Infinity) becomes `null`, so the record is strict JSON. A
   payload that is not an envelope is passed through as parsed JSON (non-finite
   numbers again become `null`), or as the raw string when it is not JSON; an

@@ -231,14 +231,21 @@ def _decode_checkpoint_result(raw_result: str) -> Any:
         return _to_json_compatible(parsed)
 
 
+# An integral Decimal becomes a JSON integer only up to this many digits; a
+# larger one keeps its exact string form (see _to_json_compatible).
+_MAX_INT_DIGITS = 300
+
+
 def _to_json_compatible(value: Any) -> Any:
     """Convert a value decoded by ``ExtendedTypeSerDes`` into plain JSON values.
 
     Non-JSON types follow what the Java SDK's default Jackson serializer writes
-    for the equivalent Java types, without losing the value: an integral
-    ``Decimal`` -> JSON integer; any other finite ``Decimal`` -> JSON number when
+    for the equivalent Java types, keeping the numeric value (not the scale:
+    ``Decimal("1.10")`` -> ``1.1``): an integral ``Decimal`` of at most 300
+    digits -> JSON integer; any other finite ``Decimal`` -> JSON number when
     that float converts back to exactly the same ``Decimal``, otherwise its exact
-    string form (``str(value)``, e.g. ``"12345678901234567.89"``); ``datetime``
+    string form (``str(value)``, e.g. ``"12345678901234567.89"`` or
+    ``"1E+5000"``); ``datetime``
     / ``date`` -> ISO-8601 string (``isoformat()``, offset and precision kept),
     ``UUID`` -> string, ``bytes`` -> base64 string, ``tuple`` -> list. A
     ``BatchResult`` becomes its ``to_dict()`` form. A non-finite ``Decimal`` or
@@ -252,8 +259,14 @@ def _to_json_compatible(value: Any) -> Any:
     if isinstance(value, decimal.Decimal):
         if not value.is_finite():
             return None
-        if value == value.to_integral_value() and not (
-            value.is_zero() and value.is_signed()
+        # adjusted() is the exponent of the leading digit, so the bound keeps
+        # int() to at most _MAX_INT_DIGITS digits: Decimal("1E+1000000") is 46
+        # bytes on the wire but a million-digit int, which takes tens of seconds
+        # to build and cannot be written by json (the int-to-str digit limit).
+        if (
+            value.adjusted() < _MAX_INT_DIGITS
+            and value == value.to_integral_value()
+            and not (value.is_zero() and value.is_signed())
         ):
             return int(value)
         as_float = float(value)

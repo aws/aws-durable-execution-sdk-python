@@ -17,6 +17,7 @@ import decimal
 import json
 import math
 import threading
+import time
 import uuid
 from typing import Any
 
@@ -807,6 +808,14 @@ def test_result_top_level_non_json_type_is_converted():
         (decimal.Decimal("-0.0"), -0.0),
         (decimal.Decimal("-Infinity"), None),
         (decimal.Decimal("sNaN"), None),
+        # The numeric value is kept, not the scale.
+        (decimal.Decimal("1.10"), 1.1),
+        (decimal.Decimal("1E+2"), 100),
+        # An integral Decimal of up to 300 digits is an integer; a longer one
+        # keeps its string form.
+        (decimal.Decimal("9" * 300), int("9" * 300)),
+        (decimal.Decimal("1" + "0" * 300), 1e300),
+        (decimal.Decimal("1" * 301), "1" * 301),
     ],
 )
 def test_result_decimal_keeps_its_exact_value(value, expected):
@@ -832,6 +841,20 @@ def test_result_non_finite_floats_become_null(raw):
     # The emitted line is strict JSON.
     line = json.dumps(exporter.render(exporter.records[0]), allow_nan=False)
     assert "NaN" not in line and "Infinity" not in line
+
+
+@pytest.mark.parametrize("exponent", [5000, 1_000_000])
+def test_result_decimal_with_huge_exponent_is_fast_and_emitted(exponent):
+    value = decimal.Decimal(f"1E+{exponent}")
+    exporter = CaptureExporter(render=LambdaLogExporter().render)
+    start = time.perf_counter()
+    _run(_override_plugin(exporter), ops=[_step("charge", result=_serialize({"x": value}))])
+    line = json.dumps(exporter.render(exporter.records[0]), allow_nan=False)
+    elapsed = time.perf_counter() - start
+    assert exporter.records[0]["operations"][0]["result"] == {"x": f"1E+{exponent}"}
+    assert json.loads(line)
+    # Converting to int would take tens of seconds for the larger value.
+    assert elapsed < 1
 
 
 def test_result_batch_result_becomes_its_dict_form():
