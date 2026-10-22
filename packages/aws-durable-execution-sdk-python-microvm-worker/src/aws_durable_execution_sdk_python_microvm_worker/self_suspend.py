@@ -180,8 +180,9 @@ def classify_suspend_error(error: BaseException) -> SuspendOutcome:
        have suspended the MicroVM before its answer was lost. So any error
        after a retry is :attr:`SuspendOutcome.UNKNOWN`. The default client
        retries a throttle. So a throttle from it usually ends here.
-    2. Missing credentials stop the call before any request. They are
-       :attr:`SuspendOutcome.REJECTED`, as in the JavaScript worker.
+    2. Missing credentials are :attr:`SuspendOutcome.REJECTED`, as in the
+       JavaScript worker. A later call in the same MicroVM most likely finds
+       no credentials either.
     3. A known rejection code is :attr:`SuspendOutcome.REJECTED`.
     4. A conflict is :attr:`SuspendOutcome.UNKNOWN`, whatever its status. It
        can mean that the MicroVM is already suspending.
