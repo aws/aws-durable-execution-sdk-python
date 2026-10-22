@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from aws_durable_execution_sdk_python_telemetry_exporter.operations_index import (
     OperationsFormat,
     apply_operations_format,
@@ -192,9 +194,33 @@ def test_truncation_without_causes_sets_no_dropped_causes():
     assert "droppedCauses" not in out
 
 
-def test_json_byte_size_counts_line_separators_as_escapes():
+def test_json_byte_size_is_exact_for_line_separators():
     from aws_durable_execution_sdk_python_telemetry_exporter.truncation import (
         json_byte_size,
     )
 
-    assert json_byte_size("\u2028\u2029") == len('"\\u2028\\u2029"')
+    # Written raw by every exporter except LambdaLogExporter: 3 bytes each.
+    assert json_byte_size({"a": "\u2028" * 10}) == 38
+    assert json_byte_size("\u2028\u2029") == len('"\u2028\u2029"'.encode())
+
+
+def test_json_byte_size_returns_none_for_a_lone_surrogate():
+    from aws_durable_execution_sdk_python_telemetry_exporter.truncation import (
+        json_byte_size,
+    )
+
+    assert json_byte_size({"a": "a\ud800b"}) is None
+
+
+def test_truncate_record_uses_the_given_measure():
+    record = _record_with_results([100])
+    sizes: list[Any] = []
+
+    def measure(value: Any) -> int:
+        sizes.append(value)
+        return 10**6
+
+    out = truncate_record(record, 1000, render=lambda r: r, measure=measure)
+    assert sizes and out["truncated"] is True
+    # The default measure would keep this small record unchanged.
+    assert truncate_record(record, 1000, render=lambda r: r) is record

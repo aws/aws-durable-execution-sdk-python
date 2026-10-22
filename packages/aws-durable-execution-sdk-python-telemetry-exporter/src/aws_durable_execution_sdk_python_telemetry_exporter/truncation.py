@@ -15,11 +15,13 @@ Direct port of the JS ``truncation.ts``. Drop order:
 
 Identity/timeline fields are never dropped. The input record is never mutated.
 ``render`` maps the record to the exact value the exporter serializes, so the
-size check measures what is actually emitted. Byte size is measured with
-JS-compatible compact JSON (no whitespace, non-ASCII preserved) to match
-``JSON.stringify`` byte counts. U+2028 and U+2029 are counted as their 6-byte
-``\\uXXXX`` escapes, which ``LambdaLogExporter`` prints; for every other
-exporter this overcounts by 3 bytes per such character.
+size check measures what is actually emitted. By default the byte size is that
+of JS-compatible compact JSON (no whitespace, non-ASCII preserved), matching
+``JSON.stringify`` byte counts. An exporter that writes the rendered value
+differently passes its own ``measure`` (``LambdaLogExporter`` does, because it
+escapes some characters in the printed line). A value that cannot be measured
+(for example one holding a lone surrogate, which has no UTF-8 encoding) is
+returned unchanged, never raised.
 """
 
 from __future__ import annotations
@@ -29,12 +31,16 @@ from typing import Any, Callable
 
 
 def json_byte_size(value: Any) -> int | None:
+    """Return the UTF-8 size of ``value`` as compact JSON, or ``None``.
+
+    ``None`` when the value is not JSON-serializable or has no UTF-8 encoding
+    (a lone surrogate raises ``UnicodeEncodeError``, a ``ValueError``).
+    """
     try:
         text = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+        return len(text.encode("utf-8"))
     except (TypeError, ValueError):
         return None
-    # Each U+2028 / U+2029 is 3 bytes raw and 6 bytes escaped.
-    return len(text.encode("utf-8")) + 3 * (text.count("\u2028") + text.count("\u2029"))
 
 
 def _has_cause(holder: dict[str, Any]) -> bool:
@@ -54,12 +60,14 @@ def truncate_record(
     record: dict[str, Any],
     max_bytes: int | None,
     render: Callable[[dict[str, Any]], Any] | None = None,
+    measure: Callable[[Any], int | None] | None = None,
 ) -> dict[str, Any]:
     render = render or (lambda r: r)
+    measure = measure or json_byte_size
     if max_bytes is None or max_bytes <= 0:
         return record
 
-    initial = json_byte_size(render(record))
+    initial = measure(render(record))
     if initial is None or initial <= max_bytes:
         return record
 
@@ -100,7 +108,7 @@ def truncate_record(
         return out
 
     def fits() -> bool:
-        size = json_byte_size(render(candidate()))
+        size = measure(render(candidate()))
         return size is not None and size <= max_bytes
 
     # Phase 1: drop operation results oldest-first.

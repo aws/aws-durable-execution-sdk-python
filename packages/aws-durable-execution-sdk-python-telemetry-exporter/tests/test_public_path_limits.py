@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import io
 import json
 import logging
+import sys
 from typing import Any
 
 import pytest
@@ -274,3 +276,85 @@ def test_error_messages_are_capped_at_8192_characters(capsys):
     # Exactly 8,192 characters is kept as is.
     assert record["error"]["message"] == "x" * 8192
     assert record["operationsByName"]["f"]["error"]["message"] == "m" * 8192 + "…"
+
+
+# -- N-B1: a lone surrogate never drops the record -----------------------------
+
+
+def test_lone_surrogate_in_error_message_keeps_the_dynamodb_item(caplog):
+    client = StubDynamoDBClient()
+    exporter = DynamoDBExporter(table_name="t", client=client)
+    with caplog.at_level(logging.WARNING):
+        _run(
+            exporter,
+            [],
+            error=ErrorObject(
+                message="a\ud800b", type="E", data=None, stack_trace=None
+            ),
+        )
+    assert "failed" not in caplog.text
+    assert len(client.items) == 1
+    assert client.items[0]["error"]["M"]["message"] == {"S": "a\ud800b"}
+
+
+def test_lone_surrogate_is_escaped_in_the_printed_line(monkeypatch, caplog):
+    # A strict UTF-8 stdout, as in a real process; printing a raw lone
+    # surrogate to it raises UnicodeEncodeError.
+    raw = io.BytesIO()
+    stdout = io.TextIOWrapper(raw, encoding="utf-8", errors="strict")
+    monkeypatch.setattr(sys, "stdout", stdout)
+    with caplog.at_level(logging.WARNING):
+        _run(
+            LambdaLogExporter(),
+            [],
+            error=ErrorObject(
+                message="a\ud800b", type="E", data=None, stack_trace=None
+            ),
+        )
+    stdout.flush()
+    assert "failed" not in caplog.text
+    line = raw.getvalue().decode("utf-8")
+    assert line.count("\n") == 1
+    assert "a\\ud800b" in line
+    record = json.loads(json.loads(line)["message"])
+    assert record["error"]["message"] == "a\ud800b"
+
+
+def test_lone_surrogates_are_counted_in_the_line_limit(capsys):
+    limit = 4096
+    exporter = LambdaLogExporter(max_record_size_bytes=limit)
+    ops = [_op(f"s{i}", i, result=json.dumps("\ud800" * 300)) for i in range(10)]
+    _run(exporter, ops)
+    line = _printed_line(capsys)
+    assert len(line.encode("utf-8")) <= limit
+    assert json.loads(json.loads(line)["message"])["truncated"] is True
+
+
+# -- non-blocking 1: sizes are exact per exporter -------------------------------
+
+
+def test_line_separators_are_counted_raw_for_other_exporters(caplog):
+    client = StubDynamoDBClient()
+    # 60,000 U+2028 are 180,000 bytes raw and 360,000 bytes escaped.
+    exporter = DynamoDBExporter(
+        table_name="t", client=client, max_record_size_bytes=200_000
+    )
+    with caplog.at_level(logging.WARNING):
+        _run(exporter, [_op("s", 0, result=json.dumps("\u2028" * 60_000))])
+    assert len(client.items) == 1
+    item = client.items[0]
+    assert "truncated" not in item
+    assert item["operationsByName"]["M"]["s"]["M"]["result"] == {"S": "\u2028" * 60_000}
+
+
+def test_lambda_log_measure_is_the_printed_line_size(capsys):
+    exporter = LambdaLogExporter()
+    record: dict[str, Any] = {
+        "executionArn": ARN,
+        "operations": [],
+        "error": {"name": "E", "message": '\u2028\u2029\ud800é\U0001f600"\x01'},
+    }
+    size = exporter.measure(exporter.render(record))
+    exporter.export(record)
+    assert size == len(_printed_line(capsys).encode("utf-8"))
+    assert exporter.measure({"a": object()}) is None
