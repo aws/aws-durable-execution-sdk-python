@@ -178,6 +178,113 @@ def _start_timer(delay: float, action: Callable[[], None]) -> Callable[[], None]
     return timer.cancel
 
 
+def _failed_call_warning(
+    outcome: SuspendOutcome,
+    *,
+    terminating: bool,
+    closed: bool,
+    suspend_hook_arrived: bool,
+    suspending: bool,
+) -> str:
+    """Return the warning for a failed SuspendMicrovm call.
+
+    The text depends on the outcome and on the listener state when the
+    outcome is handled. The caller reads that state under the lock, before
+    it changes it. The conditions, their order, and the texts match the
+    JavaScript worker's ``failedCallWarning``.
+
+    1. A terminate hook during the call: ``_start_idle_time`` starts no
+       idle time. So the listener never calls again. A rejection keeps its
+       permission hint. For an unknown outcome, the text also says that the
+       listener refuses jobs, because a terminating listener refuses jobs
+       for good.
+    2. A rejection with a suspend hook during the call, while the hook's
+       refusal is still in effect: the MicroVM is suspending anyway. So the
+       refusal stays until the resume hook, or 30 seconds after the last
+       suspend hook. The text keeps the permission hint.
+    3. A rejection otherwise: the MicroVM keeps running.
+    4. A refusal for now after ``close()`` during the call:
+       ``_start_idle_time`` starts no idle time. So the listener never
+       calls again.
+    5. A refusal for now with a suspend hook during the call, while the
+       hook's refusal is still in effect: the refusal stays, as in item 2.
+    6. A refusal for now with a suspend hook during the call, after the
+       hook's refusal ended: the listener accepts jobs, and calls again one
+       idle time after the call and every job end.
+    7. A refusal for now otherwise: the next idle time lasts at least 30
+       seconds, unless a job or a resume hook starts the idle time again.
+    8. An unknown outcome otherwise: the refusal continues until the resume
+       hook, or for 30 seconds.
+    """
+    if outcome is SuspendOutcome.UNKNOWN:
+        if terminating:
+            return (
+                "the suspend call for the idle MicroVM had an unknown outcome. "
+                "The MicroVM is terminating, so the worker refuses jobs and "
+                "does not try the call again."
+            )
+        return (
+            "the suspend call for the idle MicroVM had an unknown outcome. The "
+            "worker refuses jobs until the MicroVM resumes, or for 30 seconds."
+        )
+    if outcome is SuspendOutcome.REJECTED:
+        if terminating:
+            return (
+                "could not suspend the idle MicroVM, because the service "
+                "rejected the call. The MicroVM is terminating, so the worker "
+                "does not try the call again. A missing permission needs "
+                "lambda:SuspendMicrovm on the MicroVM image in its execution "
+                "role."
+            )
+        if suspend_hook_arrived and suspending:
+            return (
+                "could not suspend the idle MicroVM, because the service "
+                "rejected the call. A suspend hook arrived during the call, so "
+                "the MicroVM is suspending anyway. The hook's refusal of jobs "
+                "stays until the resume hook, or 30 seconds after the last "
+                "suspend hook. A missing permission needs lambda:SuspendMicrovm "
+                "on the MicroVM image in its execution role."
+            )
+        return (
+            "could not suspend the idle MicroVM, because the service rejected "
+            "the call. It keeps running. A missing permission needs "
+            "lambda:SuspendMicrovm on the MicroVM image in its execution role."
+        )
+    if terminating:
+        return (
+            "could not suspend the idle MicroVM, because the service refused "
+            "the call for now. The MicroVM is terminating, so the worker does "
+            "not try the call again."
+        )
+    if closed:
+        return (
+            "could not suspend the idle MicroVM, because the service refused "
+            "the call for now. The worker is closed, so it does not try the "
+            "call again."
+        )
+    if suspend_hook_arrived and suspending:
+        return (
+            "could not suspend the idle MicroVM, because the service refused "
+            "the call for now. A suspend hook arrived during the call, so this "
+            "call does not end the hook's refusal. The idle time starts again "
+            "after the resume hook, or 30 seconds after the last suspend hook."
+        )
+    if suspend_hook_arrived:
+        return (
+            "could not suspend the idle MicroVM, because the service refused "
+            "the call for now. A suspend hook arrived during the call, and the "
+            "hook's refusal of jobs ended before the call ended. So the worker "
+            "accepts jobs. It tries the call again one idle time after the "
+            "call and every job end."
+        )
+    return (
+        "could not suspend the idle MicroVM, because the service refused the "
+        "call for now. It keeps running. The worker tries the call again after "
+        "the next idle time. That idle time lasts at least 30 seconds, unless a "
+        "job or a resume hook starts the idle time again."
+    )
+
+
 @dataclass(frozen=True, kw_only=True)
 class _AutoSuspend:
     """The run hook's request to suspend the MicroVM when idle."""
@@ -305,7 +412,9 @@ class MicrovmWorkerListener:
        key. A job that ends after the refusal, or a ``resume`` hook after
        it, starts the normal idle time instead. A ``resume`` hook or a job
        that ends during the call does not, because the refused outcome
-       arrives after it.
+       arrives after it. A ``suspend`` hook whose refusal is still in
+       effect when the call ends is the exception, as in item 6. Its
+       refusal stays, and the idle time starts when it ends.
        The default client retries a throttle. So a throttle from it usually
        ends as an unknown outcome, as in item 8. A throttle is refused for
        now only from a caller's client that does not retry it.
@@ -1458,66 +1567,45 @@ class MicrovmWorkerListener:
             suspend_microvm(client, target, SUSPEND_CALL_TIMEOUT_SECONDS)
         except Exception as error:  # noqa: BLE001
             outcome = classify_suspend_error(error)
-            if outcome is not SuspendOutcome.UNKNOWN:
-                if outcome is SuspendOutcome.REJECTED:
-                    self._logger.warning(
-                        "could not suspend the idle MicroVM, because the "
-                        "service rejected the call. It keeps running. A "
-                        "missing permission needs lambda:SuspendMicrovm on the "
-                        "MicroVM image in its execution role.",
-                        extra={**fields, "error": describe(error)},
-                    )
+            deferred = []
+            with self._lock:
+                # The warning depends on this state. The block reads it
+                # before it changes it. So the text matches the decision
+                # below, whatever another thread does after the lock is
+                # released.
+                hook_arrived = self._suspend_hooks != hooks_before
+                terminating = self._terminating
+                closed = self._closed
+                suspending = self._suspending
                 # The service did nothing. So jobs can run again at once. A
                 # suspend hook that arrived since the idle time ended means
                 # that the MicroVM is suspending anyway, so its refusal stays.
-                with self._lock:
-                    deferred = []
-                    hook_arrived = self._suspend_hooks != hooks_before
-                    if not hook_arrived:
-                        deferred = self._stop_refusing()
-                        # A rejection, such as a missing permission, is not
-                        # retried until a job ends. A refusal for now is
-                        # retried after the next idle time. That idle time
-                        # lasts at least 30 seconds, because the same error
-                        # can repeat on every call.
-                        if outcome is SuspendOutcome.REFUSED_FOR_NOW:
-                            self._start_idle_time(after_refusal=True)
-                if outcome is SuspendOutcome.REFUSED_FOR_NOW:
-                    if hook_arrived:
-                        # The hook's refusal stays, so no 30-second floor
-                        # applies. The idle time starts when that refusal
-                        # ends.
-                        self._logger.warning(
-                            "could not suspend the idle MicroVM, because the "
-                            "service refused the call for now. A suspend hook "
-                            "arrived during the call, so its refusal of jobs "
-                            "stays. That refusal ends when the resume hook "
-                            "arrives, or 30 seconds after the suspend hook. "
-                            "The idle time then starts again.",
-                            extra={**fields, "error": describe(error)},
-                        )
-                    else:
-                        self._logger.warning(
-                            "could not suspend the idle MicroVM, because the "
-                            "service refused the call for now. It keeps "
-                            "running, and the worker tries again after the "
-                            "next idle time. That idle time lasts at least 30 "
-                            "seconds, unless a job or a resume hook starts the "
-                            "idle time again.",
-                            extra={**fields, "error": describe(error)},
-                        )
+                if outcome is not SuspendOutcome.UNKNOWN and not hook_arrived:
+                    deferred = self._stop_refusing()
+                    # A rejection, such as a missing permission, is not
+                    # retried until a job ends. A refusal for now is retried
+                    # after the next idle time. That idle time lasts at least
+                    # 30 seconds, because the same error can repeat on every
+                    # call.
+                    if outcome is SuspendOutcome.REFUSED_FOR_NOW:
+                        self._start_idle_time(after_refusal=True)
+            self._logger.warning(
+                _failed_call_warning(
+                    outcome,
+                    terminating=terminating,
+                    closed=closed,
+                    suspend_hook_arrived=hook_arrived,
+                    suspending=suspending,
+                ),
+                extra={**fields, "error": describe(error)},
+            )
+            if outcome is not SuspendOutcome.UNKNOWN:
                 self._launch_deferred(deferred)
                 return
             # A timeout, a conflict, a server error, or an error after a
             # retried attempt does not show whether the service suspended
             # the MicroVM. So the refusal continues, as after a successful
             # call.
-            self._logger.warning(
-                "the suspend call for the idle MicroVM had an unknown outcome. "
-                "The worker refuses jobs until the MicroVM resumes, or for 30 "
-                "seconds.",
-                extra={**fields, "error": describe(error)},
-            )
         finally:
             if owns_client:
                 # Each suspend creates its own client. Closing it releases
