@@ -1,0 +1,1 @@
+{"finding_digest":"46c8527e0405d71740a861eee79330c6cc1a6d24e5b9ded8a607142f308116e8","finding_id":"arf_v1_i3efe7qeaxlroqfimhxopezqy3","identity_key":"telemetry-exporter/truncation.py::json_byte_size::utf8-encoding-error-isolation","pull_request_number":808,"repository":{"full_name":"aws/aws-durable-execution-sdk-python","id":1052903600},"reviewer":"codex","schema_version":1}
