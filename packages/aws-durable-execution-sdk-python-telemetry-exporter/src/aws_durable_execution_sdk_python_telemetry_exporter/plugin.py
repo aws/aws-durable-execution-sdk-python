@@ -42,14 +42,19 @@ from typing import Any, Callable
 
 from aws_durable_execution_sdk_python.concurrency.models import BatchResult
 from aws_durable_execution_sdk_python.exceptions import (
+    CallbackExternalError,
     CallbackSubmitterError,
+    CallbackTimeoutError,
     ChildContextError,
     DurableOperationError,
     InvokeError,
     StepError,
     WaitForConditionError,
 )
-from aws_durable_execution_sdk_python.lambda_service import ErrorObject
+from aws_durable_execution_sdk_python.lambda_service import (
+    ErrorObject,
+    OperationStatus,
+)
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationEndInfo,
@@ -250,72 +255,201 @@ def _to_json_compatible(value: Any) -> Any:
 
 
 # -- error names ----------------------------------------------------------------
+#
+# The cross-SDK rule for ``error.name`` (execution ``error``, ``operations[].error``
+# and ``operationsByName.<name>.error``):
+#
+# 1. A record names the error that caused the failure. A wrapper error that the
+#    SDK added is never the name.
+# 2. Only the SDK's own wrapper types are unwrapped. A user error is never
+#    unwrapped, even if it has a cause.
+# 3. Unwrapping follows the whole chain of SDK wrappers, up to a depth of 16. A
+#    cycle stops the walk.
+# 4. A chain that ends at a user error is named by that error's type name.
+# 5. A chain that ends at an SDK error that is not a wrapper (for example a
+#    callback timeout) is named by that SDK error's simple class name.
+# 6. A qualified type string is reduced to its last segment after any ``.`` or
+#    ``$``; an empty segment keeps the string as it is. A blank or missing type
+#    is ``Error``.
+# 7. A failure gets the same name live and from a replayed checkpoint.
+# 8. When an operation's error propagates to the execution, the execution name
+#    equals that operation's name.
+#
+# Python hooks only carry checkpointed ``ErrorObject`` values, never a live
+# exception, so a wrapper's chain is recovered from the operation tree: the SDK
+# rebuilds a wrapper from the failed operation's ErrorObject with the same
+# message, data and stack trace (``ErrorObject.raise_as_operation_error``), on
+# the first run and on replay alike. The cause of a wrapper is therefore the
+# non-wrapper error with those fields inside the failing operation's own subtree.
 
-# SDK operation wrappers whose ErrorObject stands for an error raised by user
-# code inside the operation. Their checkpointed ErrorObject.type is the wrapper's
-# own class; the user's error type lives on the failed operation's ErrorObject.
-# Callback timeout/external errors and other SDK errors are not listed: they have
-# no user cause, so they are reported under their own name.
-_USER_CAUSE_WRAPPER_TYPES: frozenset[str] = frozenset(
-    f"{cls.__module__}.{cls.__qualname__}"
-    for cls in (
-        DurableOperationError,
-        StepError,
-        InvokeError,
-        ChildContextError,
-        WaitForConditionError,
-        CallbackSubmitterError,
-    )
-)
-_SDK_TYPE_PREFIX = "aws_durable_execution_sdk_python."
+
+def _qualified(cls: type) -> str:
+    return f"{cls.__module__}.{cls.__qualname__}"
 
 
-def _simple_type_name(type_name: str) -> str:
-    """Return the last segment of a type string after any ``.`` and any ``$``.
+_CALLBACK_TIMEOUT_TYPE = _qualified(CallbackTimeoutError)
+_CALLBACK_EXTERNAL_TYPE = _qualified(CallbackExternalError)
 
-    ``"__main__.PaymentError"`` -> ``"PaymentError"``; also handles Java's
-    ``"pkg.Outer$Inner"`` and ``"builtins"``-style unqualified names.
+# SDK wrapper types, mapped to the operation types whose failure they re-raise
+# (``None``: any operation type). A wrapper carries the fields of the error that
+# escaped that operation; the cause's type lives on an operation in its subtree.
+# Every other type (user errors, and SDK errors such as CallbackTimeoutError,
+# SerDesError, ValidationError or BatchCompletionError) is never unwrapped.
+_WRAPPER_OPERATION_TYPES: dict[str, frozenset[OperationType] | None] = {
+    _qualified(DurableOperationError): None,
+    _qualified(StepError): frozenset({OperationType.STEP}),
+    _qualified(WaitForConditionError): frozenset({OperationType.STEP}),
+    _qualified(InvokeError): frozenset({OperationType.CHAINED_INVOKE}),
+    _qualified(ChildContextError): frozenset({OperationType.CONTEXT}),
+    # wait_for_callback: the submitter step failed inside the callback context.
+    _qualified(CallbackSubmitterError): frozenset({OperationType.CONTEXT}),
+    # The external system failed the callback: raised from the callback
+    # operation directly, or from the wait_for_callback context around it.
+    _CALLBACK_EXTERNAL_TYPE: frozenset({OperationType.CONTEXT, OperationType.CALLBACK}),
+}
+
+_MAX_UNWRAP_DEPTH = 16
+_DEFAULT_ERROR_NAME = "Error"
+
+_ErrorKey = tuple[str | None, str | None, tuple[str, ...] | None]
+
+
+def _simple_type_name(type_name: str | None) -> str:
+    """Reduce a type string to the reported ``error.name`` (Table A).
+
+    The text after the last ``.`` or ``$``: ``"__main__.PaymentError"`` and
+    ``"pkg.Outer$PaymentError"`` -> ``"PaymentError"``. When that segment is
+    empty (``"trailing."``, ``"Outer$"``, ``"."``) the string is kept as it is.
+    A missing, empty or whitespace-only type is ``"Error"``. Other whitespace
+    is not trimmed.
     """
-    return type_name.rsplit(".", 1)[-1].rsplit("$", 1)[-1]
+    if type_name is None or not type_name.strip():
+        return _DEFAULT_ERROR_NAME
+    segment = type_name[max(type_name.rfind("."), type_name.rfind("$")) + 1 :]
+    return segment or type_name
 
 
-def _user_cause_type(
-    error: ErrorObject, operations: dict[str, OperationInfo]
-) -> str | None:
-    # A wrapper is rebuilt from the failed operation's ErrorObject with the same
-    # message, data and stack trace (ErrorObject.raise_as_operation_error), on
-    # the first run and on replay alike, so the cause is the operation error
-    # carrying those fields under a non-SDK type.
-    key = (error.message, error.data, error.stack_trace)
-    names = {
-        _simple_type_name(op_error.type)
-        for op in operations.values()
-        if (op_error := op.error) is not None
-        and op_error.type
-        and not op_error.type.startswith(_SDK_TYPE_PREFIX)
-        and (op_error.message, op_error.data, op_error.stack_trace) == key
-    }
-    # Ambiguous (several different user types share the fields): do not guess.
-    return names.pop() if len(names) == 1 else None
+def _error_key(error: ErrorObject) -> _ErrorKey:
+    stack = error.stack_trace
+    return (error.message, error.data, tuple(stack) if stack is not None else None)
 
 
-def _error_name(error: ErrorObject, operations: dict[str, OperationInfo]) -> str | None:
-    """Cross-SDK ``error.name``: the simple type name of the user's error.
+def _operation_error_type(op: OperationInfo) -> str | None:
+    """The type that names ``op``'s own failure before any unwrapping.
 
-    Python hooks only carry checkpointed ``ErrorObject`` values (no live
-    exception), so: for an SDK wrapper with a user cause, the cause's simple
-    type name (recovered from the failed operation); otherwise the simple name
-    of ``ErrorObject.type`` (the SDK error's own name when there is no user
-    error). The same snapshot yields the same name on a live run and on replay.
+    A callback operation's error comes from the service or the external sender:
+    a timeout is named by the SDK's CallbackTimeoutError (the service type
+    ``Callback.Timeout`` would reduce to ``Timeout``), and an external failure
+    without a type by the SDK's CallbackExternalError, which is what the SDK
+    raises for both.
     """
-    type_name = error.type
-    if not type_name:
-        return type_name
-    if type_name in _USER_CAUSE_WRAPPER_TYPES:
-        cause = _user_cause_type(error, operations)
-        if cause is not None:
-            return cause
-    return _simple_type_name(type_name)
+    error_type = op.error.type if op.error is not None else None
+    if op.operation_type == OperationType.CALLBACK:
+        if op.status == OperationStatus.TIMED_OUT:
+            return _CALLBACK_TIMEOUT_TYPE
+        if error_type is None or not error_type.strip():
+            return _CALLBACK_EXTERNAL_TYPE
+    return error_type
+
+
+def _operation_error_key(op: OperationInfo) -> _ErrorKey | None:
+    if op.error is None:
+        return None
+    message, data, stack = _error_key(op.error)
+    if op.operation_type == OperationType.CALLBACK and not message:
+        # The SDK fills in a default message when the callback error has none.
+        is_timeout = op.status == OperationStatus.TIMED_OUT
+        message = "Callback timed out" if is_timeout else "Callback failed"
+    return (message, data, stack)
+
+
+class _ErrorNameIndex:
+    """Resolves ``error.name`` for one record build.
+
+    Built once per record from the operation snapshot in O(n): children by
+    parent, and failed operations by error fields. A wrapper is resolved by
+    walking only its own operation's subtree, at most ``_MAX_UNWRAP_DEPTH``
+    levels deep, and each operation's result is cached. An operation is
+    therefore visited by at most that many enclosing walks, so a record build
+    stays linear in the number of operations.
+    """
+
+    __slots__ = ("_children", "_by_key", "_causes")
+
+    def __init__(self, operations: dict[str, OperationInfo]) -> None:
+        self._children: dict[str, list[OperationInfo]] = {}
+        self._by_key: dict[_ErrorKey, list[OperationInfo]] = {}
+        self._causes: dict[str, frozenset[str]] = {}
+        for op in operations.values():
+            if op.parent_id is not None:
+                self._children.setdefault(op.parent_id, []).append(op)
+            key = _operation_error_key(op)
+            if key is not None:
+                self._by_key.setdefault(key, []).append(op)
+
+    def _subtree_causes(self, root: OperationInfo) -> frozenset[str]:
+        """Simple names of the errors that end ``root``'s wrapper chain.
+
+        Walks ``root``'s subtree (``root`` included) breadth-first, up to
+        ``_MAX_UNWRAP_DEPTH`` levels, and collects every non-wrapper error that
+        carries ``root``'s error fields. A matching non-wrapper error ends the
+        chain, so the walk does not descend below it. Cycle-safe.
+        """
+        cached = self._causes.get(root.operation_id)
+        if cached is not None:
+            return cached
+        key = _operation_error_key(root)
+        names: set[str] = set()
+        seen: set[str] = {root.operation_id}
+        level = [root]
+        for _depth in range(_MAX_UNWRAP_DEPTH + 1):
+            next_level: list[OperationInfo] = []
+            for op in level:
+                if _operation_error_key(op) == key:
+                    error_type = _operation_error_type(op)
+                    if error_type not in _WRAPPER_OPERATION_TYPES:
+                        names.add(_simple_type_name(error_type))
+                        continue
+                for child in self._children.get(op.operation_id, ()):
+                    if child.operation_id not in seen:
+                        seen.add(child.operation_id)
+                        next_level.append(child)
+            if not next_level:
+                break
+            level = next_level
+        result = frozenset(names)
+        self._causes[root.operation_id] = result
+        return result
+
+    def operation_name(self, op: OperationInfo) -> str:
+        """``error.name`` of a failed operation."""
+        error_type = _operation_error_type(op)
+        if error_type in _WRAPPER_OPERATION_TYPES:
+            causes = self._subtree_causes(op)
+            # More than one distinct type: ambiguous, do not guess.
+            if len(causes) == 1:
+                return next(iter(causes))
+        return _simple_type_name(error_type)
+
+    def execution_name(self, error: ErrorObject) -> str:
+        """``error.name`` of the execution error.
+
+        A wrapper is resolved through the operation(s) it propagated from: the
+        failed operations of the wrapper's operation type whose error carries the
+        same fields. Their subtrees give the cause, so the name equals that
+        operation's own name (rule 8). A handled failure elsewhere in the
+        execution is never used.
+        """
+        error_type = error.type
+        if error_type in _WRAPPER_OPERATION_TYPES:
+            allowed = _WRAPPER_OPERATION_TYPES[error_type]
+            causes: set[str] = set()
+            for op in self._by_key.get(_error_key(error), ()):
+                if allowed is None or op.operation_type in allowed:
+                    causes |= self._subtree_causes(op)
+            if len(causes) == 1:
+                return causes.pop()
+        return _simple_type_name(error_type)
 
 
 class _ExecutionState:
@@ -493,8 +627,14 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin):
     # -- emission -------------------------------------------------------------
 
     def _build_operations(
-        self, operations: dict[str, OperationInfo]
+        self,
+        operations: dict[str, OperationInfo],
+        error_names: _ErrorNameIndex | None = None,
     ) -> list[dict[str, Any]]:
+        # One index per record build keeps error.name resolution linear in the
+        # number of operations (see _ErrorNameIndex).
+        if error_names is None:
+            error_names = _ErrorNameIndex(operations)
         records: list[dict[str, Any]] = []
         for op in operations.values():
             if op.operation_type == OperationType.EXECUTION:
@@ -527,7 +667,7 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin):
                 entry["attempt"] = op.attempt
             if self._include_errors and op.error is not None:
                 entry["error"] = {
-                    "name": _error_name(op.error, operations),
+                    "name": error_names.operation_name(op),
                     "message": op.error.message,
                 }
             if override is not None and override.result is not None:
@@ -595,12 +735,13 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin):
             record["input"] = input_value
         if output_value is not None:
             record["output"] = output_value
+        error_names = _ErrorNameIndex(operations)
         if error is not None:
             record["error"] = {
-                "name": _error_name(error, operations),
+                "name": error_names.execution_name(error),
                 "message": error.message,
             }
-        record["operations"] = self._build_operations(operations)
+        record["operations"] = self._build_operations(operations, error_names)
 
         self._scheduler.schedule(record)
 
