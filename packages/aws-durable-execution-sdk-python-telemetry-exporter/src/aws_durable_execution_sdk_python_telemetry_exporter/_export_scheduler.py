@@ -619,8 +619,13 @@ class _ExportScheduler:
     def _export(self, record: dict[str, Any]) -> None:
         for exporter in self._exporters:
             try:
+                # ``measure`` is optional: an exporter that writes its rendered
+                # value as something other than compact JSON supplies it.
                 shaped = truncate_record(
-                    record, exporter.max_record_size_bytes, exporter.render
+                    record,
+                    exporter.max_record_size_bytes,
+                    exporter.render,
+                    getattr(exporter, "measure", None),
                 )
                 exporter.export(shaped)
             except BaseException as exc:  # noqa: BLE001 - one exporter must not break others

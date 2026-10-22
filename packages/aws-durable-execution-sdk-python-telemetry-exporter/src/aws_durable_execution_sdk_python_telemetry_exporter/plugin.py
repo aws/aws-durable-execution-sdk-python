@@ -42,15 +42,20 @@ Operation-map sourcing:
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import datetime
+import decimal
 import json
 import math
+import re
 import threading
+import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
+from aws_durable_execution_sdk_python.concurrency.models import BatchResult
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
     InvocationEndInfo,
@@ -59,6 +64,10 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationChangeInfo,
     OperationInfo,
     OperationType,
+)
+from aws_durable_execution_sdk_python.serdes import (
+    EXTENDED_TYPES_SERDES,
+    SerDesContext,
 )
 
 from aws_durable_execution_sdk_python_telemetry_exporter._export_scheduler import (
@@ -76,6 +85,9 @@ from aws_durable_execution_sdk_python_telemetry_exporter.types import (
     OperationOverride,
     DurableExecutionTelemetryConfig,
 )
+
+if TYPE_CHECKING:
+    from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 
 
 # Maps the SDK invocation status onto the record status. A durable execution
@@ -167,14 +179,192 @@ def _apply_result_override(
 ) -> Any:
     if raw_result is None:
         return None
-    try:
-        parsed = json.loads(raw_result)
-    except (json.JSONDecodeError, TypeError):
-        parsed = raw_result
+    parsed = _decode_checkpoint_result(raw_result)
     try:
         return transform(parsed)
     except Exception:  # noqa: BLE001 - untrusted transform must never break emission
         return None
+
+
+# -- operation results ----------------------------------------------------------
+
+
+def _is_extended_type_envelope(value: Any) -> bool:
+    # ExtendedTypeSerDes wraps every non-primitive value in exactly
+    # {"t": <type tag>, "v": <encoded value>} at the root.
+    return (
+        isinstance(value, dict)
+        and value.keys() == {"t", "v"}
+        and isinstance(value["t"], str)
+    )
+
+
+def _decode_checkpoint_result(raw_result: str) -> Any:
+    """Return an operation's checkpointed result as a plain JSON value.
+
+    The SDK's default serializer (``ExtendedTypeSerDes``) writes primitives and
+    primitive lists as plain JSON, and everything else as a ``{"t": ..., "v":
+    ...}`` envelope. An envelope is decoded with that default serializer and
+    converted to plain JSON values (see ``_to_json_compatible``). A payload that
+    is not an envelope is parsed JSON, or the raw string when it is not JSON;
+    its tree is only walked when it holds NaN, an infinite number, or a run of
+    16 or more digits (a possible integer beyond ``2**53 - 1``). An
+    envelope that fails to decode falls back to the parsed payload. Never
+    raises.
+
+    The hooks do not say which serializer wrote a result, so the envelope is
+    recognised by shape alone: a result written by ``JsonSerDes`` or a custom
+    ``SerDes`` that has this exact shape is decoded too. Only the core's known
+    tags are decoded, and the core may coerce ``v`` while decoding (for
+    example ``{"t": "b", "v": "yes"}`` becomes ``True``). An unknown tag fails
+    to decode and passes through unchanged.
+    """
+    non_finite = False
+
+    def parse_constant(name: str) -> float:
+        nonlocal non_finite
+        non_finite = True
+        return float(name)
+
+    def parse_float(text: str) -> float:
+        nonlocal non_finite
+        number = float(text)
+        if not math.isfinite(number):  # for example 1e999
+            non_finite = True
+        return number
+
+    try:
+        parsed = json.loads(
+            raw_result, parse_constant=parse_constant, parse_float=parse_float
+        )
+    except (ValueError, TypeError, RecursionError):
+        return raw_result
+    try:
+        if _is_extended_type_envelope(parsed):
+            try:
+                decoded = EXTENDED_TYPES_SERDES.deserialize(raw_result, SerDesContext())
+                return _to_json_compatible(decoded)
+            except Exception:  # noqa: BLE001 - fall back to the parsed payload
+                pass
+        # Plain JSON is already JSON-compatible, except NaN, Infinity and
+        # integers beyond 2**53 - 1. Such an integer has at least 16 digits;
+        # the C-speed scan may also match digits in a string or a float, which
+        # only costs a walk that leaves them unchanged.
+        if non_finite or _LONG_DIGIT_RUN.search(raw_result):
+            return _to_json_compatible(parsed)
+        return parsed
+    except Exception:  # noqa: BLE001 - one bad result never breaks the record
+        return raw_result
+
+
+# Largest integer that every JSON reader (including JavaScript) parses exactly.
+_MAX_SAFE_INTEGER = 2**53 - 1
+# 2**53 - 1 has 16 digits, so its leading digit's exponent is 15.
+_MAX_SAFE_INTEGER_ADJUSTED = 15
+_LONG_DIGIT_RUN = re.compile(r"\d{16,}")
+# DynamoDB's number range, the narrowest of the record destinations: a
+# magnitude from 1E-130 to 9.99...E+125. Its 38-significant-digit limit needs
+# no check: a float written exactly has at most 17 significant digits.
+_MAX_NUMBER_ADJUSTED = 125
+_MIN_NUMBER_ADJUSTED = -130
+
+
+def _to_json_compatible(value: Any) -> Any:
+    """Convert a decoded result into plain JSON values, without recursion.
+
+    ``int``: unchanged when ``abs(n) <= 2**53 - 1``, else ``str(n)``.
+    ``Decimal``: an int when integral and ``abs(n) <= 2**53 - 1``, else a float
+    when it round-trips exactly and is within DynamoDB's number range
+    (magnitude 1E-130 to 9.99...E+125), else ``str(value)``; NaN and Infinity
+    become ``None``. Negative zero becomes ``0``. ``datetime`` / ``date`` -> ``isoformat()``, ``UUID`` -> string,
+    ``bytes`` -> base64, ``tuple`` -> list, ``BatchResult`` -> ``to_dict()``.
+    Non-finite floats become ``None``.
+    """
+    root: list[Any] = [None]
+    # (value, target container, key in target)
+    pending: list[tuple[Any, Any, Any]] = [(value, root, 0)]
+    while pending:
+        item, target, key = pending.pop()
+        if isinstance(item, BatchResult):
+            item = item.to_dict()
+        if isinstance(item, (list, tuple)):
+            converted_list: list[Any] = [None] * len(item)
+            target[key] = converted_list
+            pending.extend(
+                (child, converted_list, index) for index, child in enumerate(item)
+            )
+        elif isinstance(item, dict):
+            converted_dict: dict[str, Any] = {}
+            target[key] = converted_dict
+            for name, child in item.items():
+                converted_dict[str(name)] = None
+                pending.append((child, converted_dict, str(name)))
+        else:
+            target[key] = _scalar_to_json_compatible(item)
+    return root[0]
+
+
+def _scalar_to_json_compatible(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        # Beyond 2**53 - 1 a JavaScript reader would round it.
+        return value if abs(value) <= _MAX_SAFE_INTEGER else str(value)
+    if isinstance(value, decimal.Decimal):
+        if not value.is_finite():
+            return None
+        # adjusted() is checked first so Decimal("1E+1000000") never builds a
+        # million-digit int.
+        if (
+            value.adjusted() <= _MAX_SAFE_INTEGER_ADJUSTED
+            and value == value.to_integral_value()
+        ):
+            as_int = int(value)
+            if abs(as_int) <= _MAX_SAFE_INTEGER:
+                return as_int
+        if value and not (
+            _MIN_NUMBER_ADJUSTED <= value.adjusted() <= _MAX_NUMBER_ADJUSTED
+        ):
+            return str(value)
+        as_float = float(value)
+        written = decimal.Decimal(repr(as_float))
+        if math.isfinite(as_float) and written == value:
+            return as_float
+        return str(value)
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.isoformat()
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(value)).decode("ascii")
+    msg = f"Unsupported decoded result type: {type(value)!r}"
+    raise TypeError(msg)
+
+
+# A longer error name or message keeps its first 8,192 code points followed
+# by "…". A Python str is a sequence of code points, so len() and slicing
+# count code points and never split a surrogate pair.
+_MAX_ERROR_TEXT_CHARS = 8192
+
+
+def _cap(text: Any) -> Any:
+    if isinstance(text, str) and len(text) > _MAX_ERROR_TEXT_CHARS:
+        return text[:_MAX_ERROR_TEXT_CHARS] + "\u2026"
+    return text
+
+
+def _error_shape(error: ErrorObject) -> dict[str, Any]:
+    """Return an error as ``{name, message}`` in that key order.
+
+    The plugin hooks carry an ``ErrorObject`` (type, message, data, stack
+    trace) and no cause, so records written by this SDK never have ``cause``.
+    The name is the SDK's ErrorType, otherwise unchanged. A name or message
+    longer than 8,192 code points is cut to its first 8,192 code points
+    followed by ``…``.
+    """
+    return {"name": _cap(error.type), "message": _cap(error.message)}
 
 
 @dataclass(frozen=True)
@@ -526,7 +716,7 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
             if op.attempt is not None:
                 entry["attempt"] = op.attempt
             if shared._include_errors and op.error is not None:
-                entry["error"] = {"name": op.error.type, "message": op.error.message}
+                entry["error"] = _error_shape(op.error)
             if override is not None and override.result is not None:
                 value = _apply_result_override(override.result, op.result)
                 if value is not None:
@@ -592,7 +782,7 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
         if output_value is not None:
             record["output"] = output_value
         if error is not None:
-            record["error"] = {"name": error.type, "message": error.message}
+            record["error"] = _error_shape(error)
         record["operations"] = self._build_operations(operations)
 
         # Admission and hand-off use one lock, but building does not. A newer
