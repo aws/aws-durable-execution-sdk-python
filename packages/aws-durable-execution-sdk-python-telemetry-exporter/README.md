@@ -91,12 +91,17 @@ double-encode output that is already JSON (see
 [Log and monitor Python Lambda functions](https://docs.aws.amazon.com/lambda/latest/dg/python-logging.html)
 and [Lambda log formats](https://docs.aws.amazon.com/lambda/latest/dg/monitoring-cloudwatchlogs-logformat.html)).
 
-`max_record_size_bytes` (default 256 KB) limits the record in `message`. The
-JSON escaping of `message` can make the line up to about 2x the record; a
-CloudWatch Logs event can be up to 1 MB
+`max_record_size_bytes` (default 256,000 bytes) limits the printed line: the
+envelope, including the JSON escaping of `message`, in UTF-8 bytes without the
+trailing newline. Truncation measures that line in one pass. A CloudWatch Logs
+event can be up to 1 MB
 ([PutLogEvents](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutLogEvents.html)).
-The lines have `level` `INFO`, so Lambda drops them when the function's
-application log level is `WARN` or above.
+U+2028 and U+2029 are written as `\u2028` and `\u2029`, so a tool that treats
+them as line breaks still sees one line per record.
+
+The lines have `level` `INFO`. With the JSON log format and an application log
+level of `WARN` or above, Lambda drops them. With the Text log format, Lambda
+does not filter them.
 
 ### CloudWatchLogsExporter
 
@@ -113,6 +118,9 @@ CloudWatchLogsExporter(log_group_name="/custom/durable-execution-telemetry")
 `PutItem` keyed by `partition_key` (default `pk`) = `executionArn`. With the
 default `sort_key="sk"` (= `emittedAt`) every export adds an item; pass
 `sort_key=None` for a key-only table that upserts. IAM: `dynamodb:PutItem`.
+A number DynamoDB cannot store (more than 38 significant digits, a magnitude
+outside 1E-130 to 9.99...E+125, NaN or Infinity) is written as a string
+attribute holding its JSON text, so it never drops the item.
 
 ```python
 DynamoDBExporter(table_name="durable-execution-telemetry")
@@ -257,9 +265,20 @@ has the same shape, recursively, and is present only when the SDK provides a
 cause.
 
 In Python, the plugin hooks carry only an `ErrorObject` (type, message, data,
-stack trace) with no cause, so Python records have `name` and `message` and
-never have `cause`. The exporter does not build a cause from other operations
-or from `ErrorData`. `include_errors=False` removes operation errors.
+stack trace) with no cause, so no error in a Python record has a `cause`: not
+the execution `error`, not an operation error. The exporter does not build a
+cause from other operations or from `ErrorData`. `include_errors=False`
+removes operation errors.
+
+Every `message` is capped at 8,192 characters. A longer message keeps its first
+8,192 characters followed by `…`.
+
+When a record is over its exporter's size limit, truncation first removes every
+`cause` and sets `droppedCauses: true`, then runs its usual steps (operation
+results, then whole operations, then input, then output). Python records have
+no cause, so the first step never changes them. With the message cap, a record
+whose operations, input and output are dropped fits any limit of 64 KB or
+more.
 
 Names are each language's own and differ across SDKs. For example, a step that
 throws `PaymentError` can be reported as `StepError` in JS,
@@ -275,21 +294,29 @@ default serializer's (`ExtendedTypeSerDes`) envelope, a JSON object whose keys
 are exactly `t` and `v` with a string `t`, it is decoded with that serializer
 and converted to plain JSON:
 
-- `Decimal`: an integer when it is integral and `adjusted() < 300`; otherwise a
-  number when the float round-trips exactly; otherwise `str(value)` (for
-  example `"12345678901234567.89"` or `"1E+5000"`). NaN and Infinity become
-  `null`.
+- `Decimal`: an integer when it is integral and its absolute value is at most
+  `2**53 - 1` (9007199254740991), the largest integer a JavaScript reader parses
+  exactly. Otherwise a float when the float round-trips exactly and is within
+  DynamoDB's number range (at most 38 significant digits, magnitude 1E-130 to
+  9.99...E+125). Otherwise `str(value)`, for example `"9007199254740993"`,
+  `"12345678901234567.89"` or `"1E+299"`. NaN and Infinity become `null`.
+  Negative zero (`Decimal("-0")`, `Decimal("-0.0")`) is integral, so it becomes
+  `0` and loses its sign.
 - `datetime` and `date`: `isoformat()`. `UUID`: string. `bytes`: base64.
   `tuple`: list. `BatchResult`: `to_dict()`.
 
 Any other result is parsed as JSON, or kept as the raw string when it is not
-JSON. A result that fails to decode keeps its parsed or raw value, and the rest
-of the record is still emitted.
+JSON. In parsed JSON, NaN and Infinity become `null`; nothing else changes. A
+result that fails to decode keeps its parsed or raw value, and the rest of the
+record is still emitted.
 
 The hooks do not say which serializer wrote a result, so the envelope is
 recognized by shape alone. A result written by `JsonSerDes` or a custom
 `SerDes` that has this exact shape is decoded too: `{"t": "s", "v": "x"}` is
-reported as `"x"`.
+reported as `"x"`. Only the core serializer's known tags are decoded, and the
+core may coerce `v` while decoding: `{"t": "b", "v": "yes"}` is reported as
+`true`. An unknown tag, such as `{"t": "temperature", "v": 21.5}`, fails to
+decode and passes through unchanged.
 
 ## Requirements
 
