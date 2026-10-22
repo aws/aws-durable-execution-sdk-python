@@ -217,11 +217,12 @@ def test_callback_result_failed():
     callback = Callback("callback5", "op5", mock_state)
 
     # A FAILED callback (external SendDurableExecutionCallbackFailure) surfaces
-    # as CallbackExternalError. The external error's own type stays on the
-    # callback operation, and there is no synthetic __cause__.
+    # as CallbackExternalError carrying the sender's type as error_type, and
+    # there is no synthetic __cause__.
     with pytest.raises(CallbackExternalError) as exc_info:
         callback.result()
     assert exc_info.value.message == "Callback failed"
+    assert exc_info.value.error_type == "CallbackError"
     assert isinstance(exc_info.value, CallbackError)
     assert exc_info.value.__cause__ is None
 
@@ -1582,6 +1583,10 @@ def test_wait_for_callback_reraises_unrelated_child_context_error():
     """A non-callback, non-step failure re-raises the original ChildContextError."""
     mock_state = Mock(spec=ExecutionState)
     mock_state.durable_execution_arn = "test_arn"
+    # Neither the callback nor the submitter step failed.
+    mock_state.get_checkpoint_result.return_value = (
+        CheckpointedResult.create_not_found()
+    )
     context = create_test_context(state=mock_state)
 
     inner = InvokeError("nested invoke failed")

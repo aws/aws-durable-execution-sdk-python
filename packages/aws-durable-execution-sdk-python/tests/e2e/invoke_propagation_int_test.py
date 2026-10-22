@@ -192,7 +192,8 @@ def test_public_invoke_pending_and_terminal_replay_do_not_recollect(
     else:
         assert result["Status"] == "FAILED"
         assert result["Error"]["ErrorMessage"] == "saved child error"
-        assert result["Error"]["ErrorType"].endswith("InvokeError")
+        # The result records the invoked function's error, not InvokeError.
+        assert result["Error"]["ErrorType"] == "ChildError"
 
 
 @pytest.mark.parametrize(

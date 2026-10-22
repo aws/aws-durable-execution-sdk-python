@@ -24,13 +24,10 @@ def test_fail_after_exhausting_retries_when_submitter_always_fails(durable_runne
     # Execution should fail after retries are exhausted
     assert result.status is InvocationStatus.FAILED
 
-    # A failed submitter step surfaces as CallbackSubmitterError (the submitter's
-    # StepError is translated at the wait_for_callback call site). The type is
-    # identical on first run and replay, so the execution-level record pins it.
+    # User code sees CallbackSubmitterError, and the execution records the
+    # error it wraps: the submitter's own exception. The type is identical on
+    # first run and replay, so the execution-level record pins it.
     error = result.error
     assert error is not None
-    assert (
-        error.type
-        == "aws_durable_execution_sdk_python.exceptions.CallbackSubmitterError"
-    )
+    assert error.type == "Exception"
     assert "Simulated submitter failure" in error.message

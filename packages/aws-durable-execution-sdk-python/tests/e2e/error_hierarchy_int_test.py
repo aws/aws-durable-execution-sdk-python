@@ -94,13 +94,10 @@ def test_step_failure_surfaces_typed_step_error():
 
         result = my_handler(event, _lambda_context())
 
-        # Execution failed; the result (one level up from the step) carries the
-        # StepError wrapper, and StepError.error_type is the original error type.
+        # Execution failed; the result records the error the StepError wraps,
+        # not the wrapper.
         assert result["Status"] == InvocationStatus.FAILED.value
-        assert (
-            result["Error"]["ErrorType"]
-            == "aws_durable_execution_sdk_python.exceptions.StepError"
-        )
+        assert result["Error"]["ErrorType"] == "ValueError"
         assert result["Error"]["ErrorMessage"] == "step boom"
 
         # The step's own FAIL checkpoint records the raw escaping error type.
@@ -174,12 +171,9 @@ def test_failed_step_reconstructs_step_error_on_replay():
         result = my_handler(event, _lambda_context())
 
         # Reconstructed as a StepError with the checkpointed message; the step
-        # body is never re-executed.
+        # body is never re-executed. The result records the wrapped error.
         assert result["Status"] == InvocationStatus.FAILED.value
-        assert (
-            result["Error"]["ErrorType"]
-            == "aws_durable_execution_sdk_python.exceptions.StepError"
-        )
+        assert result["Error"]["ErrorType"] == "ValueError"
         assert result["Error"]["ErrorMessage"] == "prior boom"
         assert executed["count"] == 0
 
@@ -268,8 +262,10 @@ def test_failed_callback_reconstructs_typed_error_on_replay(
 
 
 def test_failed_submitter_reconstructs_callback_submitter_error_on_replay():
-    """A failed submitter records StepError at the context level but surfaces
-    CallbackSubmitterError to the caller on replay (console-parity contract)."""
+    """A context checkpoint written before contexts recorded the wrapped error
+    holds StepError. It still surfaces CallbackSubmitterError to the caller on
+    replay, and the result records the deepest wrapper type the checkpoint
+    holds (StepError)."""
     submitter_runs = {"count": 0}
 
     def submitter(_callback_id, _ctx) -> None:
@@ -325,7 +321,7 @@ def test_failed_submitter_reconstructs_callback_submitter_error_on_replay():
         assert result["Status"] == InvocationStatus.FAILED.value
         assert (
             result["Error"]["ErrorType"]
-            == "aws_durable_execution_sdk_python.exceptions.CallbackSubmitterError"
+            == "aws_durable_execution_sdk_python.exceptions.StepError"
         )
         assert result["Error"]["ErrorMessage"] == "submitter boom"
         assert submitter_runs["count"] == 0

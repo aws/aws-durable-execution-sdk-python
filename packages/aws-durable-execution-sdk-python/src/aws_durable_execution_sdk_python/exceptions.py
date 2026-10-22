@@ -414,6 +414,28 @@ _DURABLE_OPERATION_ERROR_REGISTRY: dict[str, type[DurableOperationError]] = {
 }
 
 
+# SDK wrapper types: each re-raises the failure that escaped an operation and
+# carries that failure's fields (error_type, message, data, stack_trace). A
+# checkpoint records the wrapped error, never the wrapper. Matched by exact
+# class, so a user subclass is never unwrapped. CallbackTimeoutError, the base
+# CallbackError, SerDesError, BatchCompletionError and ValidationError are SDK
+# errors in their own right and are not wrappers.
+SDK_WRAPPER_ERROR_TYPES: frozenset[type[DurableOperationError]] = frozenset(
+    {
+        DurableOperationError,
+        StepError,
+        InvokeError,
+        ChildContextError,
+        WaitForConditionError,
+        CallbackExternalError,
+        CallbackSubmitterError,
+    }
+)
+SDK_WRAPPER_ERROR_TYPE_NAMES: frozenset[str] = frozenset(
+    f"{cls.__module__}.{cls.__qualname__}" for cls in SDK_WRAPPER_ERROR_TYPES
+)
+
+
 def register_operation_error(error_cls: type[DurableOperationError]) -> None:
     """Register an SDK-owned operation-error subclass for replay reconstruction.
 
