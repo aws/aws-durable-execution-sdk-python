@@ -1,8 +1,16 @@
 name: Upload Testing SDK Emulator Image
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Release tag whose packages have been published to PyPI
+        required: true
+        type: string
+    secrets:
+      ECR_UPLOAD_IAM_ROLE_ARN:
+        description: ECR upload role, required when the release names the testing package
+        required: false
 
 permissions:
   contents: read
@@ -33,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ inputs.release_tag }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -47,7 +55,7 @@ jobs:
         id: tag
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           tag_version="$(python .github/scripts/parse_testing_version.py)"
           if [[ -z "$tag_version" ]]; then
@@ -170,7 +178,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ inputs.release_tag }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -281,7 +289,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ inputs.release_tag }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -412,7 +420,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ inputs.release_tag }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
