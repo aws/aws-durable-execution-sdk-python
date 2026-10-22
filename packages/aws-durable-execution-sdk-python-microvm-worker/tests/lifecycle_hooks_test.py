@@ -1430,6 +1430,60 @@ def test_logs_the_idle_time_and_the_wait_before_each_call(
     ]
 
 
+@pytest.mark.parametrize(
+    ("restart", "waited"),
+    [
+        ("job-end", 1.0),
+        ("resume", 1.0),
+        ("unknown-outcome-grace", 1.0),
+        ("resume-during-refused-call", GRACE),
+    ],
+    ids=["job-end", "resume", "unknown-outcome-grace", "resume-during-refused-call"],
+)
+def test_logs_the_wait_of_the_idle_time_that_started_the_call(
+    start: Any, logger: Any, restart: str, waited: float
+) -> None:
+    # waitedSeconds is the delay of the idle timer that started the call. A
+    # job end, a resume hook, and the end of the 30-second grace each start
+    # the normal idle time. A resume hook during a refused call asks for the
+    # idle time first. The refusal for now asks for it last, with the floor.
+    # So that wait lasts 30 seconds.
+    h = start()
+    if restart == "unknown-outcome-grace":
+        h.microvms.failure = suspend_error("InternalServerException", 500, retries=2)
+    else:
+        h.microvms.failure = suspend_error("InvalidSignatureException", 403)
+    h.microvms.hold = restart == "resume-during-refused-call"
+
+    h.run_hook(1.0)
+    h.advance(1.0)
+    if restart == "resume-during-refused-call":
+        assert eventually(lambda: h.microvms.suspended == ["mvm-1"])
+        assert h.hook("resume") == 200
+        h.microvms.hold = False
+        h.microvms.finish()
+        h.settle()
+    h.microvms.failure = None
+    if restart == "job-end":
+        assert h.job("cb-1") == 202
+        h.finish_job("cb-1")
+    elif restart == "resume":
+        assert h.hook("resume") == 200
+    elif restart == "unknown-outcome-grace":
+        h.advance(GRACE)
+    h.advance(waited - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.advance(0.001)
+
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+    waits = [
+        (data["idleSeconds"], data["waitedSeconds"])
+        for level, message, data in logger.lines
+        if level == "info" and message == "suspending the idle MicroVM"
+    ]
+    assert waits == [(1.0, 1.0), (1.0, waited)]
+
+
 def test_keeps_refusing_jobs_until_a_call_past_its_deadline_has_ended(
     start: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
