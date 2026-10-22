@@ -15,8 +15,10 @@ import pytest
 from aws_durable_execution_sdk_python import DurableContext, durable_execution
 from aws_durable_execution_sdk_python import deadline as deadline_module
 from aws_durable_execution_sdk_python.config import (
+    ChildConfig,
     CompletionConfig,
     Duration,
+    MapConfig,
     ParallelConfig,
     StepConfig,
     StepSemantics,
@@ -49,6 +51,9 @@ from aws_durable_execution_sdk_python.plugin import (
     OperationChangeInfo,
 )
 from aws_durable_execution_sdk_python.retries import RetryPresets
+from aws_durable_execution_sdk_python.deadline import InvocationDeadline
+from aws_durable_execution_sdk_python.state import ExecutionState
+from aws_durable_execution_sdk_python.threading import CompletionEvent
 
 
 class RecordingService:
@@ -86,7 +91,12 @@ class RecordingService:
                 if update.operation_type is OperationType.STEP
                 else None,
                 context_details=ContextDetails(
-                    result=update.payload, error=update.error
+                    result=update.payload,
+                    error=update.error,
+                    replay_children=bool(
+                        update.context_options
+                        and update.context_options.replay_children
+                    ),
                 )
                 if update.operation_type is OperationType.CONTEXT
                 else None,
@@ -138,6 +148,93 @@ def test_expired_invocation_never_enters_handler_or_dispatches_checkpoint() -> N
         wrapped(service.event(), context(0))
     body.assert_not_called()
     assert not service.calls
+
+
+@pytest.mark.parametrize("kind", ["map", "parallel"])
+@pytest.mark.parametrize("virtual", [False, True])
+def test_completed_children_replay_during_same_invocation_resume(
+    monkeypatch: pytest.MonkeyPatch, kind: str, virtual: bool
+) -> None:
+    monkeypatch.setattr(
+        "aws_durable_execution_sdk_python.operation.child.CHECKPOINT_SIZE_LIMIT_BYTES",
+        100,
+    )
+    resumed = threading.Event()
+    visits: list[str] = []
+    effects: list[str] = []
+
+    class WaitService(RecordingService):
+        def checkpoint(
+            self, *, updates: list[OperationUpdate], **kwargs: Any
+        ) -> CheckpointOutput:
+            response = super().checkpoint(updates=updates, **kwargs)
+            if updates:
+                return response
+            completed = []
+            for operation in list(self.operations.values()):
+                if operation.operation_type is OperationType.WAIT:
+                    operation = Operation.from_dict(
+                        {**operation.to_dict(), "Status": "SUCCEEDED"}
+                    )
+                    self.operations[operation.operation_id] = operation
+                    completed.append(operation)
+            return CheckpointOutput(
+                "next-token", CheckpointUpdatedExecutionState(operations=completed)
+            )
+
+    service = WaitService()
+
+    def saved(child: DurableContext) -> str:
+        visits.append("saved")
+
+        def step(_: Any) -> str:
+            effects.append("once")
+            return "large" * 100
+
+        return child.step(step, name="value")
+
+    def reconstruct(child: DurableContext) -> str:
+        visits.append("reconstruct")
+        return child.run_in_child_context(
+            saved, name="inner", config=ChildConfig(is_virtual=virtual)
+        )
+
+    def first(child: DurableContext) -> str:
+        result = child.run_in_child_context(reconstruct, name="saved-child")
+        child.wait(Duration.from_seconds(1), name="resume")
+        resumed.set()
+        return result
+
+    def sibling(_child: DurableContext) -> str:
+        assert resumed.wait(5)
+        return "sibling"
+
+    def handler(_event: Any, ctx: DurableContext) -> Any:
+        if kind == "parallel":
+            return ctx.parallel(
+                [first, sibling], config=ParallelConfig(max_concurrency=2)
+            ).get_results()
+        return ctx.map(
+            [0, 1],
+            lambda child, item, _index, _items: [first, sibling][item](child),
+            config=MapConfig(max_concurrency=2),
+        ).get_results()
+
+    wrapped = durable_execution(handler, plugins=[])
+    outcome = wrapped(service.event(), context())
+    assert outcome["Status"] == "SUCCEEDED"
+    assert json.loads(outcome["Result"]) == ["large" * 100, "sibling"]
+    assert visits == ["reconstruct", "saved", "reconstruct", "saved"]
+    assert effects == ["once"]
+    saved_checkpoints = [
+        update
+        for batch in service.calls
+        for update in batch
+        if update.name == "saved-child" and update.action is OperationAction.SUCCEED
+    ]
+    assert len(saved_checkpoints) == 1
+    assert saved_checkpoints[0].context_options is not None
+    assert saved_checkpoints[0].context_options.replay_children
 
 
 def test_deadline_retry_replays_saved_success_and_failure(
@@ -427,6 +524,101 @@ def test_accepted_terminal_result_survives_slow_delivery_hook(
     assert updates[0].action is (
         OperationAction.FAIL if fail else OperationAction.SUCCEED
     )
+
+
+@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("transport_error", [False, True])
+@pytest.mark.parametrize("checkpoint_token", ["next-token", None])
+def test_terminal_checkpoint_in_flight_at_cutoff_keeps_its_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    fail: bool,
+    transport_error: bool,
+    checkpoint_token: str | None,
+) -> None:
+    now = [100.0]
+    monkeypatch.setattr(
+        deadline_module, "time", SimpleNamespace(monotonic=lambda: now[0])
+    )
+    monkeypatch.setattr(
+        "aws_durable_execution_sdk_python.execution.LAMBDA_RESPONSE_SIZE_LIMIT", 20
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    settling = threading.Event()
+    failure = OSError("terminal transport failed")
+    ends: list[InvocationEndInfo] = []
+
+    class TerminalService(RecordingService):
+        def checkpoint(
+            self, *, updates: list[OperationUpdate], **kwargs: Any
+        ) -> CheckpointOutput:
+            entered.set()
+            assert release.wait(5)
+            if transport_error:
+                raise failure
+            response = super().checkpoint(updates=updates, **kwargs)
+            return CheckpointOutput(checkpoint_token, response.new_execution_state)
+
+    class Recorder(DurableInstrumentationPlugin):
+        def on_invocation_end(self, info: InvocationEndInfo) -> None:
+            ends.append(info)
+
+    original_deadline_wait = InvocationDeadline.wait
+    original_completion_wait = CompletionEvent.wait
+    original_close = ExecutionState.close
+
+    def expire_wait(
+        deadline: InvocationDeadline,
+        event: CompletionEvent,
+        timeout: float | None = None,
+    ) -> bool:
+        assert entered.wait(5)
+        now[0] += 1000
+        return original_deadline_wait(deadline, event, timeout)
+
+    def observe_settlement(
+        event: CompletionEvent, timeout: float | None = None
+    ) -> bool:
+        if timeout is None:
+            settling.set()
+        return original_completion_wait(event, timeout)
+
+    def observe_cleanup(state: ExecutionState) -> None:
+        settling.set()
+        original_close(state)
+
+    monkeypatch.setattr(InvocationDeadline, "wait", expire_wait)
+    monkeypatch.setattr(CompletionEvent, "wait", observe_settlement)
+    monkeypatch.setattr(ExecutionState, "close", observe_cleanup)
+
+    def handler(_event: Any, _ctx: DurableContext) -> str:
+        if fail:
+            raise ValueError("a large persisted failure" * 10)
+        return "a large persisted result" * 10
+
+    service = TerminalService()
+    wrapped = durable_execution(handler, plugins=[Recorder()])
+    with ThreadPoolExecutor(max_workers=1) as callers:
+        future = callers.submit(wrapped, service.event(), context())
+        try:
+            # Release only once the timed wait has expired and the wrapper is
+            # either settling that request or joining it during cleanup.
+            assert settling.wait(5)
+            assert not future.done()
+            assert not ends
+        finally:
+            release.set()
+        if transport_error:
+            with pytest.raises(OSError) as caught:
+                future.result(timeout=5)
+            assert caught.value is failure
+            expected_status = "RETRY"
+        else:
+            outcome = future.result(timeout=5)
+            expected_status = "FAILED" if fail else "SUCCEEDED"
+            assert outcome["Status"] == expected_status
+    assert len(ends) == 1
+    assert ends[0].status.value == expected_status
 
 
 @pytest.mark.parametrize("fail", [False, True])

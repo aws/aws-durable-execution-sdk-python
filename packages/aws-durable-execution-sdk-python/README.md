@@ -163,6 +163,11 @@ the cutoff, allowing invocation cleanup to join it. A newly created descendant
 of a completed context is rejected before its body, START hook, or checkpoint
 runs, even if it did not exist when its ancestor completed.
 
+Saved checkpoint reads and `ReplayChildren` reconstruction, including virtual
+children, remain available when a concurrent branch resumes in the same
+invocation. Reconstructing a saved result does not permit new durable work
+under that completed context.
+
 This is cooperative interruption, **not a guarantee of bounded invocation
 shutdown or LMI worker reclamation**. Python cannot safely terminate arbitrary
 running threads. The SDK still joins invocation-owned workers before returning:
@@ -177,9 +182,11 @@ tracks that remaining work, with real-LMI coverage in [test PR #743](https://git
 An expired invocation does not report an unacknowledged result as `SUCCEEDED` or
 `PENDING`. If the service has already acknowledged this invocation's terminal
 execution success/failure checkpoint, that outcome remains authoritative while
-local delivery hooks finish. At the cutoff, further response metadata pages are
-skipped for that accepted terminal checkpoint; inline and already-read operations
-are retained. Already-running side effects cannot be undone;
+local delivery hooks finish. A terminal checkpoint already in flight at the
+cutoff is settled before reporting the invocation outcome, including an
+acknowledgment received during cleanup. At the cutoff, further response metadata
+pages are skipped for that accepted terminal checkpoint; inline and already-read
+operations are retained. Already-running side effects cannot be undone;
 interrupted work continues to require the documented retry/idempotency strategy.
 
 ### Chained-invoke propagation

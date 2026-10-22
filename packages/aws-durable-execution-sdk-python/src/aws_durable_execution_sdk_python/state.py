@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import heapq
 import itertools
@@ -60,6 +61,12 @@ _STOP_SIGNAL_POLL_SECONDS = 0.1
 # Long enough for sibling branch threads to arrive. Short enough that the
 # blocked caller stays fast.
 _BLOCKED_CALLER_WAIT_SECONDS = 0.001
+
+# Only saved ReplayChildren reconstruction may enter checkpointless virtual
+# children. Keep the permission local to that body and that invocation's state.
+_RECONSTRUCTING_COMPLETED_CONTEXT: contextvars.ContextVar[ExecutionState | None] = (
+    contextvars.ContextVar("reconstructing_completed_context", default=None)
+)
 
 
 @dataclass(frozen=True)
@@ -678,11 +685,24 @@ class ExecutionState:
             operation_id=operation_id,
         )
 
-    def check_operation_active(self, identifier: OperationIdentifier) -> None:
+    def check_operation_active(
+        self,
+        identifier: OperationIdentifier,
+        *,
+        allow_replay: bool = False,
+        is_virtual: bool = False,
+    ) -> None:
         """Reject new work under an expired invocation or completed ancestor."""
         self.invocation_deadline.check()
+        # A terminal checkpoint is immutable. Reading it (or reconstructing its
+        # ReplayChildren result) does not admit new work under a completed parent.
+        replay = allow_replay and (
+            self.get_checkpoint_result(identifier.operation_id).is_terminal()
+            or (is_virtual and _RECONSTRUCTING_COMPLETED_CONTEXT.get() is self)
+        )
         with self._parent_done_lock:
-            self._reject_if_parent_done(identifier)
+            if not replay:
+                self._reject_if_parent_done(identifier)
             if identifier.parent_id:
                 self._parent_to_children.setdefault(identifier.parent_id, set()).add(
                     identifier.operation_id
@@ -909,10 +929,11 @@ class ExecutionState:
                     and operation_update.operation_type is OperationType.EXECUTION
                     and operation_update.action
                     in {OperationAction.SUCCEED, OperationAction.FAIL}
-                    and self._terminal_execution_acknowledged.is_set()
                 ):
-                    # The service already accepted this terminal outcome. Finish
-                    # its local processing rather than report a retry after it.
+                    # Settle this terminal request before reporting a retry.
+                    # The batcher rejects unsent work at expiry; a request
+                    # already in flight must be joined regardless, and may
+                    # still succeed or return its original transport error.
                     completion_event.wait()
                 else:
                     raise
@@ -1549,17 +1570,30 @@ class ExecutionState:
         operation_identifier: OperationIdentifier,
         is_replay_children: bool = False,
         attempt: int | None = None,
+        *,
+        is_virtual: bool = False,
     ):
         @functools.wraps(user_function)
         def wrapper(*args, **kwargs):
-            self.check_operation_active(operation_identifier)
+            self.check_operation_active(
+                operation_identifier,
+                allow_replay=is_replay_children or is_virtual,
+                is_virtual=is_virtual,
+            )
             start_info = self._plugin_executor.on_user_function_start(
                 operation_identifier, is_replay_children, attempt
             )
             outcome = UserFunctionOutcome.INCOMPLETE
             error = None
+            replay_token = None
             try:
-                self.check_operation_active(operation_identifier)
+                self.check_operation_active(
+                    operation_identifier,
+                    allow_replay=is_replay_children or is_virtual,
+                    is_virtual=is_virtual,
+                )
+                if is_replay_children:
+                    replay_token = _RECONSTRUCTING_COMPLETED_CONTEXT.set(self)
                 result = user_function(*args, **kwargs)
             except Exception as exception:
                 outcome = UserFunctionOutcome.FAILED
@@ -1569,6 +1603,8 @@ class ExecutionState:
                 outcome = UserFunctionOutcome.SUCCEEDED
                 return result
             finally:
+                if replay_token is not None:
+                    _RECONSTRUCTING_COMPLETED_CONTEXT.reset(replay_token)
                 # Runs on the thread that executed the user function, which is
                 # the only thread that can release state bound to it.
                 self._plugin_executor.on_user_function_end(
