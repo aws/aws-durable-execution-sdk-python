@@ -1403,6 +1403,32 @@ def test_says_the_microvm_keeps_running_after_a_rejection_when_the_hook_refusal_
     assert logger.messages("warning") == [REJECTED]
 
 
+@pytest.mark.parametrize(
+    ("idle", "waited"), [(1.0, GRACE), (45.0, 45.0)], ids=["idle-1s", "idle-45s"]
+)
+def test_logs_the_idle_time_and_the_wait_before_each_call(
+    start: Any, logger: Any, idle: float, waited: float
+) -> None:
+    # After a refusal for now, the wait lasts at least 30 seconds. So it can
+    # differ from the session's idle time.
+    h = start()
+    h.microvms.failure = suspend_error("InvalidSignatureException", 403)
+
+    h.run_hook(idle)
+    h.advance(idle)
+    h.advance(waited)
+
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+    calls = [
+        data
+        for level, message, data in logger.lines
+        if level == "info" and message == "suspending the idle MicroVM"
+    ]
+    assert calls == [
+        {"microvmId": "mvm-1", "idleSeconds": idle, "waitedSeconds": idle},
+        {"microvmId": "mvm-1", "idleSeconds": idle, "waitedSeconds": waited},
+    ]
+
 
 def test_keeps_refusing_jobs_until_a_call_past_its_deadline_has_ended(
     start: Any, monkeypatch: pytest.MonkeyPatch

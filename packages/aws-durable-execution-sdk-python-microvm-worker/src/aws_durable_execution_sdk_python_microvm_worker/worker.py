@@ -1448,8 +1448,11 @@ class MicrovmWorkerListener:
             idle_seconds = max(idle_seconds, SUSPEND_GRACE_SECONDS)
         generation = self._idle_generation
         try:
+            # The timer keeps the delay that it waits, so that the call can
+            # log it.
             self._cancel_idle_timer = _start_timer(
-                idle_seconds, lambda: self._idle_time_ended(generation)
+                idle_seconds,
+                lambda: self._idle_time_ended(generation, idle_seconds),
             )
         except Exception as error:  # noqa: BLE001
             # Without a timer thread, the MicroVM keeps running until a job
@@ -1465,7 +1468,7 @@ class MicrovmWorkerListener:
             self._cancel_idle_timer()
             self._cancel_idle_timer = None
 
-    def _idle_time_ended(self, generation: int) -> None:
+    def _idle_time_ended(self, generation: int, waited_seconds: float) -> None:
         with self._lock:
             auto_suspend = self._auto_suspend
             # A job that started after the timer was set cancels it. This
@@ -1490,7 +1493,7 @@ class MicrovmWorkerListener:
         try:
             threading.Thread(
                 target=self._suspend_self,
-                args=(auto_suspend, hooks_before),
+                args=(auto_suspend, hooks_before, waited_seconds),
                 name="microvm-suspend",
                 daemon=True,
             ).start()
@@ -1506,9 +1509,11 @@ class MicrovmWorkerListener:
                 self._suspend_call_ended()
             self._launch_deferred(deferred)
 
-    def _suspend_self(self, auto_suspend: _AutoSuspend, hooks_before: int) -> None:
+    def _suspend_self(
+        self, auto_suspend: _AutoSuspend, hooks_before: int, waited_seconds: float
+    ) -> None:
         try:
-            self._call_suspend(auto_suspend, hooks_before)
+            self._call_suspend(auto_suspend, hooks_before, waited_seconds)
         finally:
             with self._changed:
                 self._suspend_call_ended()
@@ -1536,7 +1541,9 @@ class MicrovmWorkerListener:
             self._start_idle_time(after_refusal=self._idle_after_call_floor)
         self._changed.notify_all()
 
-    def _call_suspend(self, auto_suspend: _AutoSuspend, hooks_before: int) -> None:
+    def _call_suspend(
+        self, auto_suspend: _AutoSuspend, hooks_before: int, waited_seconds: float
+    ) -> None:
         target = auto_suspend.microvm_id
         fields = {"microvmId": target}
         # The listener closes only a client that it created itself. A client
@@ -1559,9 +1566,15 @@ class MicrovmWorkerListener:
                 deferred = self._end_own_refusal(hooks_before)
             self._launch_deferred(deferred)
             return
+        # waitedSeconds differs from idleSeconds after a refusal for now,
+        # because that idle time lasts at least SUSPEND_GRACE_SECONDS.
         self._logger.info(
             "suspending the idle MicroVM",
-            extra={**fields, "idleSeconds": auto_suspend.idle_seconds},
+            extra={
+                **fields,
+                "idleSeconds": auto_suspend.idle_seconds,
+                "waitedSeconds": waited_seconds,
+            },
         )
         try:
             suspend_microvm(client, target, SUSPEND_CALL_TIMEOUT_SECONDS)
