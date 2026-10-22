@@ -99,28 +99,42 @@ the execution-level `error`, every `operations[].error`, and every
 `operationsByName.<name>.error`.
 
 1. A record names the error that caused the failure. A wrapper error that the
-   SDK added is never the name.
+   SDK added is never the name, except in the bounded cases of rules 3 and 9.
 2. The SDK unwraps an error only when the error's type is one of the SDK's own
    wrapper types. A user error is never unwrapped, even if it has a cause.
-3. Unwrapping follows the whole chain of SDK wrappers, up to a depth of 16. A
-   cycle stops the walk.
+3. Unwrapping follows the chain of SDK wrappers. The depth counts unwrap steps,
+   one per wrapper passed, not levels in the operation tree. At most 16 unwraps
+   happen. If the error reached after 16 unwraps is still a wrapper, its name
+   is reported. If the chain reaches an error it has already visited, the walk
+   stops and the last error visited before the repeat is reported.
 4. If the chain ends at a user error, the name is that error's type name.
 5. If the chain ends at an SDK error that is not a wrapper, the name is that SDK
    error's simple class name. A callback timeout is an example.
 6. A type name that is a qualified string is reduced to its last segment after
-   any `.` or `$`. If that segment is empty, the string is kept as it is.
+   any `.` or `$`. If that segment is empty, the string is kept as it is. A
+   missing type, or a type made only of blank characters, is `Error`. The blank
+   characters are the six ASCII whitespace characters: space, `\t`, `\n`,
+   `\r`, `\f` and `\v`. No other character counts as blank, and names are
+   never trimmed.
 7. A failure gets the same name whether the record is built live or from a
    replayed checkpoint.
 8. When the execution fails because an operation's error propagated, the
    execution `error.name` equals that operation's `error.name`.
+9. If the SDK cannot tell which of several failures caused a wrapper, it does
+   not guess. It reports the wrapper's name. Two map items or parallel branches
+   that fail with the same message but different types are an example.
 
-A blank or missing type name is reported as `Error`. Whitespace is not trimmed.
+A callback that is failed externally with an explicit `ErrorType` is named
+after that type, after the reduction of rule 6. This includes the type
+`"Error"`, which reports `Error`. Only a missing or blank type reports the SDK
+callback-failure class.
 
 User error types have the same name in every SDK, because the user names them.
 SDK error types keep each language's own class name. For example, a callback
 timeout is `CallbackTimeoutError` in JS and Python and
-`CallbackTimeoutException` in Java. Every SDK name for a timeout contains
-`Timeout`, so a `/Timeout/` query keeps working.
+`CallbackTimeoutException` in Java. Every SDK name for a callback timeout
+contains `Timeout`. An invoke timeout does not always: Java names it
+`InvokeTimedOutException`.
 
 How Python applies the rule:
 
@@ -132,25 +146,36 @@ How Python applies the rule:
   `ValidationError` and `BatchCompletionError`.
 - The hooks deliver checkpointed `ErrorObject`s, not live exceptions. The SDK
   rebuilds a wrapper from the failed operation's `ErrorObject`, with the same
-  message, data and stack trace, on the first run and on replay. So a wrapper
-  on an operation is resolved to the non-wrapper error with those fields in
-  that operation's own subtree (the operation and its descendants). A wrapper
-  on the execution is resolved through the failed operation it propagated
-  from: an operation of the wrapper's kind (a step for `StepError`, a child
-  context for `ChildContextError`, and so on) with the same fields, and that
-  operation's subtree. A failure that the user's code handled elsewhere in the
-  execution is never used as the cause.
-- When the subtree holds more than one distinct candidate type, the plugin does
-  not guess, and the name is the wrapper's simple class name (for example
-  `ChildContextError`). This happens, for example, when two map items fail with
-  the same message but different types, and the map's `throw_if_error()`
-  raises for the first one.
+  message, data and stack trace, on the first run and on replay. So one unwrap
+  of an operation's wrapper is a hand-off to a failed operation with the same
+  fields that is either a direct child, or an item or branch of a direct map or
+  parallel child (the map or parallel operation is a level in the tree but not
+  a wrapper). Other children are not searched, so a failure that user code
+  handled, in this operation's subtree or anywhere else, is never used as the
+  cause. A step in N nested child contexts takes N unwraps from the outermost
+  context: N - 1 `ChildContextError`s and the innermost context's `StepError`.
+  With 17 contexts the outermost one is `StepError`, and with 18 it is
+  `ChildContextError`; the inner contexts are `PaymentError`.
+- A wrapper on the execution is the SDK re-raising the failure of the
+  operation it propagated from: an operation of the wrapper's kind (a step for
+  `StepError`, a child context for `ChildContextError`, and so on) with the
+  same fields. Only the outermost such operations count, and the execution
+  takes their name, so rule 8 also holds at the depth bound.
+- When more than one distinct name is found, the plugin does not guess, and
+  the name is the wrapper's simple class name (for example
+  `ChildContextError`). This happens when two map items, or two parallel
+  branches, fail with the same message but different types, and
+  `throw_if_error()` raises for one of them. The items and branches keep their
+  own names.
 - A callback that times out is `CallbackTimeoutError` on the callback
   operation (the service type is `Callback.Timeout`), on the `wait_for_callback`
   context, and on the execution. A callback that an external system fails with
   an error type is named by that type's simple name, for example
-  `PaymentError` for `com.acme.PaymentError`. With no error type it is
-  `CallbackExternalError`, the class the SDK raises.
+  `PaymentError` for `com.acme.PaymentError`, and `Error` for `Error`. With
+  no error type, or a blank one, it is `CallbackExternalError`, the class the
+  SDK raises. A `wait_for_callback` submitter that fails with an empty message
+  is reported with the SDK's message `Callback submitter failed` on the
+  execution and is still named after the submitter's error.
 - A user error class with no explicit name is named by its class name.
 
 ## Exporters

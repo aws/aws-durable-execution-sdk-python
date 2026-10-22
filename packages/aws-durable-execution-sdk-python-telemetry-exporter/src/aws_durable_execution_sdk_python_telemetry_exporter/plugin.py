@@ -54,6 +54,7 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationStatus,
+    OperationSubType,
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
@@ -292,30 +293,38 @@ def _to_json_compatible(value: Any) -> Any:
 # -- error names ----------------------------------------------------------------
 #
 # The cross-SDK rule for ``error.name`` (execution ``error``, ``operations[].error``
-# and ``operationsByName.<name>.error``):
+# and ``operationsByName.<name>.error``), spec version 2:
 #
 # 1. A record names the error that caused the failure. A wrapper error that the
-#    SDK added is never the name.
+#    SDK added is never the name, except in the bounded cases of rules 3 and 9.
 # 2. Only the SDK's own wrapper types are unwrapped. A user error is never
 #    unwrapped, even if it has a cause.
-# 3. Unwrapping follows the whole chain of SDK wrappers, up to a depth of 16. A
-#    cycle stops the walk.
+# 3. Unwrapping follows the chain of SDK wrappers. The depth counts unwrap
+#    steps, one per wrapper passed, not levels in the operation tree. At most 16
+#    unwraps happen; if the error reached after 16 unwraps is still a wrapper,
+#    its name is reported. If the chain reaches an error it has already
+#    visited, the walk stops and the last error visited before the repeat is
+#    reported.
 # 4. A chain that ends at a user error is named by that error's type name.
 # 5. A chain that ends at an SDK error that is not a wrapper (for example a
 #    callback timeout) is named by that SDK error's simple class name.
 # 6. A qualified type string is reduced to its last segment after any ``.`` or
-#    ``$``; an empty segment keeps the string as it is. A blank or missing type
-#    is ``Error``.
+#    ``$``; an empty segment keeps the string as it is. A missing type, or one
+#    made only of the six ASCII whitespace characters, is ``Error``. Names are
+#    never trimmed.
 # 7. A failure gets the same name live and from a replayed checkpoint.
 # 8. When an operation's error propagates to the execution, the execution name
 #    equals that operation's name.
+# 9. When the SDK cannot tell which of several failures caused a wrapper, it
+#    does not guess and reports the wrapper's name.
 #
 # Python hooks only carry checkpointed ``ErrorObject`` values, never a live
 # exception, so a wrapper's chain is recovered from the operation tree: the SDK
 # rebuilds a wrapper from the failed operation's ErrorObject with the same
 # message, data and stack trace (``ErrorObject.raise_as_operation_error``), on
-# the first run and on replay alike. The cause of a wrapper is therefore the
-# non-wrapper error with those fields inside the failing operation's own subtree.
+# the first run and on replay alike. One wrapper hand-off is therefore a failed
+# operation whose error has the same fields: a direct child, or an item or
+# branch of a direct map or parallel child (see ``_ErrorNameIndex._links``).
 
 
 def _qualified(cls: type) -> str:
@@ -324,6 +333,14 @@ def _qualified(cls: type) -> str:
 
 _CALLBACK_TIMEOUT_TYPE = _qualified(CallbackTimeoutError)
 _CALLBACK_EXTERNAL_TYPE = _qualified(CallbackExternalError)
+_CALLBACK_SUBMITTER_TYPE = _qualified(CallbackSubmitterError)
+
+# Messages the core fills in when the error it re-raises has none. The core
+# has no constants for them (``context.py``); the e2e tests fail a callback
+# and a submitter with an empty message, so a change in the core is caught.
+_CALLBACK_TIMEOUT_MESSAGE = "Callback timed out"
+_CALLBACK_FAILED_MESSAGE = "Callback failed"
+_CALLBACK_SUBMITTER_MESSAGE = "Callback submitter failed"
 
 # SDK wrapper types, mapped to the operation types whose failure they re-raise
 # (``None``: any operation type). A wrapper carries the fields of the error that
@@ -337,16 +354,26 @@ _WRAPPER_OPERATION_TYPES: dict[str, frozenset[OperationType] | None] = {
     _qualified(InvokeError): frozenset({OperationType.CHAINED_INVOKE}),
     _qualified(ChildContextError): frozenset({OperationType.CONTEXT}),
     # wait_for_callback: the submitter step failed inside the callback context.
-    _qualified(CallbackSubmitterError): frozenset({OperationType.CONTEXT}),
+    _CALLBACK_SUBMITTER_TYPE: frozenset({OperationType.CONTEXT}),
     # The external system failed the callback: raised from the callback
     # operation directly, or from the wait_for_callback context around it.
     _CALLBACK_EXTERNAL_TYPE: frozenset({OperationType.CONTEXT, OperationType.CALLBACK}),
 }
 
-_MAX_UNWRAP_DEPTH = 16
+# Operations that run items or branches as child contexts. Their own operation
+# is not a wrapper link; a failed item or branch below them is.
+_BATCH_SUB_TYPES = frozenset({OperationSubType.MAP, OperationSubType.PARALLEL})
+
+_MAX_UNWRAPS = 16
 _DEFAULT_ERROR_NAME = "Error"
+# Rule 6: only these six characters are blank (not str.isspace() or strip()).
+_BLANK_CHARACTERS = frozenset(" \t\n\r\f\v")
 
 _ErrorKey = tuple[str | None, str | None, tuple[str, ...] | None]
+
+
+def _is_blank(type_name: str | None) -> bool:
+    return type_name is None or all(ch in _BLANK_CHARACTERS for ch in type_name)
 
 
 def _simple_type_name(type_name: str | None) -> str:
@@ -355,10 +382,11 @@ def _simple_type_name(type_name: str | None) -> str:
     The text after the last ``.`` or ``$``: ``"__main__.PaymentError"`` and
     ``"pkg.Outer$PaymentError"`` -> ``"PaymentError"``. When that segment is
     empty (``"trailing."``, ``"Outer$"``, ``"."``) the string is kept as it is.
-    A missing, empty or whitespace-only type is ``"Error"``. Other whitespace
-    is not trimmed.
+    A missing or empty type, or one made only of space, ``\\t``, ``\\n``,
+    ``\\r``, ``\\f`` and ``\\v``, is ``"Error"``. Nothing is trimmed, and other
+    whitespace (U+00A0, U+2003, U+FEFF, U+001C, ...) is kept.
     """
-    if type_name is None or not type_name.strip():
+    if type_name is None or _is_blank(type_name):
         return _DEFAULT_ERROR_NAME
     segment = type_name[max(type_name.rfind("."), type_name.rfind("$")) + 1 :]
     return segment or type_name
@@ -375,14 +403,15 @@ def _operation_error_type(op: OperationInfo) -> str | None:
     A callback operation's error comes from the service or the external sender:
     a timeout is named by the SDK's CallbackTimeoutError (the service type
     ``Callback.Timeout`` would reduce to ``Timeout``), and an external failure
-    without a type by the SDK's CallbackExternalError, which is what the SDK
-    raises for both.
+    without a type (missing or blank) by the SDK's CallbackExternalError, which
+    is what the SDK raises for both. An explicit type, ``"Error"`` included, is
+    the sender's.
     """
     error_type = op.error.type if op.error is not None else None
     if op.operation_type == OperationType.CALLBACK:
         if op.status == OperationStatus.TIMED_OUT:
             return _CALLBACK_TIMEOUT_TYPE
-        if error_type is None or not error_type.strip():
+        if _is_blank(error_type):
             return _CALLBACK_EXTERNAL_TYPE
     return error_type
 
@@ -394,7 +423,7 @@ def _operation_error_key(op: OperationInfo) -> _ErrorKey | None:
     if op.operation_type == OperationType.CALLBACK and not message:
         # The SDK fills in a default message when the callback error has none.
         is_timeout = op.status == OperationStatus.TIMED_OUT
-        message = "Callback timed out" if is_timeout else "Callback failed"
+        message = _CALLBACK_TIMEOUT_MESSAGE if is_timeout else _CALLBACK_FAILED_MESSAGE
     return (message, data, stack)
 
 
@@ -402,88 +431,146 @@ class _ErrorNameIndex:
     """Resolves ``error.name`` for one record build.
 
     Built once per record from the operation snapshot in O(n): children by
-    parent, and failed operations by error fields. A wrapper is resolved by
-    walking only its own operation's subtree, at most ``_MAX_UNWRAP_DEPTH``
-    levels deep, and each operation's result is cached. An operation is
-    therefore visited by at most that many enclosing walks, so a record build
-    stays linear in the number of operations.
+    parent, error keys by operation, and failed operations by key. An
+    operation's name is resolved by following its wrapper links (``_links``)
+    with a budget of ``_MAX_UNWRAPS`` unwraps. Each (operation, remaining
+    budget) result is cached, so an operation is resolved at most
+    ``_MAX_UNWRAPS + 1`` times per record and a record build stays linear in
+    the number of operations.
     """
 
-    __slots__ = ("_children", "_by_key", "_causes")
+    __slots__ = ("_operations", "_children", "_keys", "_by_key", "_links_of", "_names")
 
     def __init__(self, operations: dict[str, OperationInfo]) -> None:
+        self._operations = operations
         self._children: dict[str, list[OperationInfo]] = {}
+        self._keys: dict[str, _ErrorKey | None] = {}
         self._by_key: dict[_ErrorKey, list[OperationInfo]] = {}
-        self._causes: dict[str, frozenset[str]] = {}
+        self._links_of: dict[str, list[OperationInfo]] = {}
+        self._names: dict[tuple[str, int], str] = {}
         for op in operations.values():
             if op.parent_id is not None:
                 self._children.setdefault(op.parent_id, []).append(op)
             key = _operation_error_key(op)
+            self._keys[op.operation_id] = key
             if key is not None:
                 self._by_key.setdefault(key, []).append(op)
 
-    def _subtree_causes(self, root: OperationInfo) -> frozenset[str]:
-        """Simple names of the errors that end ``root``'s wrapper chain.
+    def _links(self, op: OperationInfo) -> list[OperationInfo]:
+        """The operations ``op``'s wrapper hands off to: one unwrap each.
 
-        Walks ``root``'s subtree (``root`` included) breadth-first, up to
-        ``_MAX_UNWRAP_DEPTH`` levels, and collects every non-wrapper error that
-        carries ``root``'s error fields. A matching non-wrapper error ends the
-        chain, so the walk does not descend below it. Cycle-safe.
+        A failed direct child with the same error fields, or a failed item or
+        branch with those fields under a direct map or parallel child (the
+        batch operation is a tree level but not a wrapper). Other children are
+        not descended into, so a failure that user code handled inside the
+        subtree (in a child context that then succeeded) is never a cause.
         """
-        cached = self._causes.get(root.operation_id)
+        links = self._links_of.get(op.operation_id)
+        if links is not None:
+            return links
+        key = self._keys[op.operation_id]
+        links = []
+        for child in self._children.get(op.operation_id, ()):
+            if self._keys[child.operation_id] == key:
+                links.append(child)
+            elif child.sub_type in _BATCH_SUB_TYPES:
+                links.extend(
+                    item
+                    for item in self._children.get(child.operation_id, ())
+                    if self._keys[item.operation_id] == key
+                )
+        self._links_of[op.operation_id] = links
+        return links
+
+    def _resolve(
+        self, op: OperationInfo, budget: int, visiting: set[str]
+    ) -> tuple[str, bool]:
+        """``op``'s name with ``budget`` unwraps left, and whether a cycle was hit.
+
+        A result that depends on a cycle depends on where the walk entered it,
+        so it is not cached.
+        """
+        error_type = _operation_error_type(op)
+        own_name = _simple_type_name(error_type)
+        if budget == 0 or error_type not in _WRAPPER_OPERATION_TYPES:
+            return own_name, False
+        cache_key = (op.operation_id, budget)
+        cached = self._names.get(cache_key)
         if cached is not None:
-            return cached
-        key = _operation_error_key(root)
+            return cached, False
+        visiting.add(op.operation_id)
         names: set[str] = set()
-        seen: set[str] = {root.operation_id}
-        level = [root]
-        for _depth in range(_MAX_UNWRAP_DEPTH + 1):
-            next_level: list[OperationInfo] = []
-            for op in level:
-                if _operation_error_key(op) == key:
-                    error_type = _operation_error_type(op)
-                    if error_type not in _WRAPPER_OPERATION_TYPES:
-                        names.add(_simple_type_name(error_type))
-                        continue
-                for child in self._children.get(op.operation_id, ()):
-                    if child.operation_id not in seen:
-                        seen.add(child.operation_id)
-                        next_level.append(child)
-            if not next_level:
-                break
-            level = next_level
-        result = frozenset(names)
-        self._causes[root.operation_id] = result
-        return result
+        cyclic = False
+        for link in self._links(op):
+            if link.operation_id in visiting:
+                # A repeat: report the last error visited before it (``op``).
+                names.add(own_name)
+                cyclic = True
+                continue
+            name, link_cyclic = self._resolve(link, budget - 1, visiting)
+            names.add(name)
+            cyclic = cyclic or link_cyclic
+        visiting.discard(op.operation_id)
+        # No link: the chain cannot be followed (the error reached is reported).
+        # Several distinct names: ambiguous, do not guess (rule 9).
+        result = next(iter(names)) if len(names) == 1 else own_name
+        if not cyclic:
+            self._names[cache_key] = result
+        return result, cyclic
 
     def operation_name(self, op: OperationInfo) -> str:
         """``error.name`` of a failed operation."""
-        error_type = _operation_error_type(op)
-        if error_type in _WRAPPER_OPERATION_TYPES:
-            causes = self._subtree_causes(op)
-            # More than one distinct type: ambiguous, do not guess.
-            if len(causes) == 1:
-                return next(iter(causes))
-        return _simple_type_name(error_type)
+        return self._resolve(op, _MAX_UNWRAPS, set())[0]
+
+    def _has_candidate_ancestor(self, op: OperationInfo, candidates: set[str]) -> bool:
+        seen = {op.operation_id}
+        parent_id = op.parent_id
+        while parent_id is not None and parent_id not in seen:
+            if parent_id in candidates:
+                return True
+            seen.add(parent_id)
+            parent = self._operations.get(parent_id)
+            parent_id = parent.parent_id if parent is not None else None
+        return False
 
     def execution_name(self, error: ErrorObject) -> str:
         """``error.name`` of the execution error.
 
-        A wrapper is resolved through the operation(s) it propagated from: the
-        failed operations of the wrapper's operation type whose error carries the
-        same fields. Their subtrees give the cause, so the name equals that
-        operation's own name (rule 8). A handled failure elsewhere in the
-        execution is never used.
+        A wrapper is the SDK re-raising the failure of the operation it
+        propagated from: a failed operation of the wrapper's operation type
+        whose error carries the same fields. Only the outermost such operations
+        count (one whose ancestors include another is part of that one's
+        chain), and the execution takes their name (rule 8). This does not add
+        an unwrap, so the rule still holds at the depth bound. A failure handled
+        elsewhere in the execution has no such operation and is never used.
         """
         error_type = error.type
-        if error_type in _WRAPPER_OPERATION_TYPES:
-            allowed = _WRAPPER_OPERATION_TYPES[error_type]
-            causes: set[str] = set()
-            for op in self._by_key.get(_error_key(error), ()):
-                if allowed is None or op.operation_type in allowed:
-                    causes |= self._subtree_causes(op)
-            if len(causes) == 1:
-                return causes.pop()
+        if error_type not in _WRAPPER_OPERATION_TYPES:
+            return _simple_type_name(error_type)
+        allowed = _WRAPPER_OPERATION_TYPES[error_type]
+        keys = [_error_key(error)]
+        message, data, stack = keys[0]
+        if (
+            error_type == _CALLBACK_SUBMITTER_TYPE
+            and message == _CALLBACK_SUBMITTER_MESSAGE
+        ):
+            # The submitter step failed with no message; the core re-raised it
+            # with its default message, and the context keeps the empty one.
+            keys += [("", data, stack), (None, data, stack)]
+        candidates = [
+            op
+            for key in keys
+            for op in self._by_key.get(key, ())
+            if allowed is None or op.operation_type in allowed
+        ]
+        ids = {op.operation_id for op in candidates}
+        outermost = [
+            op for op in candidates if not self._has_candidate_ancestor(op, ids)
+        ]
+        # Every candidate has a candidate ancestor only in a parent-id cycle.
+        names = {self.operation_name(op) for op in outermost or candidates}
+        if len(names) == 1:
+            return names.pop()
         return _simple_type_name(error_type)
 
 

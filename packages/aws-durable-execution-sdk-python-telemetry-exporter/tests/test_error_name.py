@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from aws_durable_execution_sdk_python.exceptions import (
     CallbackExternalError,
+    CallbackSubmitterError,
     CallbackTimeoutError,
     ChildContextError,
     DurableOperationError,
@@ -31,6 +32,7 @@ from aws_durable_execution_sdk_python.exceptions import (
 from aws_durable_execution_sdk_python.lambda_service import (
     ErrorObject,
     OperationStatus,
+    OperationSubType,
 )
 from aws_durable_execution_sdk_python.plugin import (
     InvocationEndInfo,
@@ -90,7 +92,7 @@ def test_table_a_applies_to_execution_and_operation_records(
 
 
 def test_vectors_file_is_the_shared_version() -> None:
-    assert _VECTORS["version"] == 1
+    assert _VECTORS["version"] == 2
     assert [v["id"] for v in _VECTORS["reduce"]][:2] == ["A1", "A2"]
 
 
@@ -119,11 +121,12 @@ def _op(
     parent: str | None = None,
     op_type: OperationType = OperationType.STEP,
     status: OperationStatus | None = None,
+    sub_type: OperationSubType | None = None,
 ) -> OperationInfo:
     return OperationInfo(
         operation_id=name,
         operation_type=op_type,
-        sub_type=None,
+        sub_type=sub_type,
         name=name,
         parent_id=parent,
         start_time=T0,
@@ -326,26 +329,194 @@ def _chain(depth: int) -> list[OperationInfo]:
     return ops
 
 
-def test_unwrap_follows_chain_up_to_depth_16() -> None:
-    rec, _ = _record(_chain(16), _wrap(STEP_WRAPPER, ChildContextError))
-    assert rec["error"]["name"] == "PaymentError"
-    assert _names(rec)["c0"] == "PaymentError"
+def _nested_contexts(depth: int) -> tuple[list[OperationInfo], ErrorObject]:
+    """A step that throws PaymentError inside ``depth`` nested child contexts,
+    shaped as the SDK checkpoints it: the innermost context fails with the
+    step's StepError, every outer one with the ChildContextError of the context
+    inside it. Returns the operations and the execution error (the outermost
+    context's failure re-raised as ChildContextError)."""
+    names = [f"ctx-{i:02d}" for i in range(1, depth + 1)]
+    errors = [STEP_WRAPPER]
+    for _ in range(depth - 1):
+        errors.insert(0, _wrap(errors[0], ChildContextError))
+    ops = [
+        _ctx(name, error=errors[i], parent=names[i - 1] if i else None)
+        for i, name in enumerate(names)
+    ]
+    ops.append(_op("charge", error=PAYMENT, parent=names[-1]))
+    return ops, _wrap(errors[0], ChildContextError)
 
 
-def test_unwrap_stops_beyond_depth_16() -> None:
-    rec, _ = _record(_chain(17), None)
+@pytest.mark.parametrize(
+    ("depth", "expected"),
+    [
+        # ctx-01 needs `depth` unwraps: depth - 1 ChildContextErrors and the
+        # StepError of the innermost context.
+        (1, {"ctx-01": "PaymentError"}),
+        (16, {"ctx-01": "PaymentError", "ctx-02": "PaymentError"}),
+        # After 16 unwraps ctx-01's chain is at ctx-17's StepError.
+        (17, {"ctx-01": "StepError", "ctx-02": "PaymentError"}),
+        # After 16 unwraps ctx-01's chain is at ctx-17's ChildContextError.
+        (
+            18,
+            {
+                "ctx-01": "ChildContextError",
+                "ctx-02": "StepError",
+                "ctx-03": "PaymentError",
+            },
+        ),
+    ],
+)
+def test_depth_bound_counts_unwraps_and_keeps_rule_8(
+    depth: int, expected: dict[str, str]
+) -> None:
+    ops, execution_error = _nested_contexts(depth)
+    rec, rendered = _record(ops, execution_error)
+    names = _names(rec)
+    for name, value in expected.items():
+        assert names[name] == value
+    assert all(
+        names[f"ctx-{i:02d}"] == "PaymentError" for i in range(len(expected), depth + 1)
+    )
+    assert names["charge"] == "PaymentError"
+    # Rule 8 at the bound: the execution takes the outermost context's name.
+    assert rec["error"]["name"] == names["ctx-01"]
+    assert rendered["operationsByName"]["ctx-01"]["error"]["name"] == names["ctx-01"]
+
+
+def test_all_step_error_chain_is_bounded_at_16_unwraps() -> None:
+    rec, _ = _record(_chain(17), _wrap(STEP_WRAPPER, ChildContextError))
     names = _names(rec)
     assert names["c0"] == "StepError"
     assert names["c1"] == "PaymentError"
+    assert rec["error"]["name"] == "StepError"
 
 
-def test_parent_cycle_stops_the_walk() -> None:
+def _nested_maps(levels: int) -> tuple[list[OperationInfo], ErrorObject]:
+    """``levels`` maps nested in each other inside a child context; the
+    innermost item throws PaymentError. Each map adds two tree levels (the map
+    operation and its item) but one wrapper hand-off."""
+    ops = [_ctx("child", error=_wrap(PAYMENT, ChildContextError))]
+    parent = "child"
+    for level in range(levels):
+        innermost = level == levels - 1
+        ops.append(_ctx(f"map-{level}", parent=parent, sub_type=OperationSubType.MAP))
+        ops.append(
+            _ctx(
+                f"item-{level}",
+                parent=f"map-{level}",
+                sub_type=OperationSubType.MAP_ITERATION,
+                error=PAYMENT if innermost else _wrap(PAYMENT, ChildContextError),
+            )
+        )
+        parent = f"item-{level}"
+    return ops, _wrap(ops[0].error, ChildContextError)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("levels", [2, 9])
+def test_map_in_map_in_child_counts_one_unwrap_per_map(levels: int) -> None:
+    # 9 levels: 19 tree levels below "child", but only 9 unwraps.
+    ops, execution_error = _nested_maps(levels)
+    rec, _ = _record(ops, execution_error)
+    names = _names(rec)
+    assert set(names.values()) == {"PaymentError"}
+    assert rec["error"]["name"] == "PaymentError"
+
+
+def test_map_chain_beyond_16_unwraps_is_bounded() -> None:
+    # child -> 16 map items is 16 unwraps to item-15, a ChildContextError.
+    ops, execution_error = _nested_maps(17)
+    rec, _ = _record(ops, execution_error)
+    names = _names(rec)
+    assert names["child"] == "ChildContextError"
+    assert names["item-0"] == "PaymentError"
+    assert rec["error"]["name"] == "ChildContextError"
+
+
+def test_two_cycle_reports_the_last_error_before_the_repeat() -> None:
+    # a and b are each other's parent and carry the same error fields.
     ops = [
-        _ctx("a", error=STEP_WRAPPER, parent="b"),
+        _ctx("a", error=_wrap(STEP_WRAPPER, ChildContextError), parent="b"),
         _ctx("b", error=STEP_WRAPPER, parent="a"),
     ]
+    rec, _ = _record(ops, _wrap(STEP_WRAPPER, ChildContextError))
+    # a -> b -> a (repeat): b is reported for a, and a for b.
+    assert _names(rec) == {"a": "StepError", "b": "ChildContextError"}
+    # Both are candidates and neither is outermost: two names, no guess.
+    assert rec["error"]["name"] == "ChildContextError"
+
+
+def test_self_cycle_reports_the_operation_itself() -> None:
+    ops = [_ctx("a", error=_wrap(STEP_WRAPPER, ChildContextError), parent="a")]
+    rec, _ = _record(ops, _wrap(ops[0].error, ChildContextError))  # type: ignore[arg-type]
+    assert _names(rec) == {"a": "ChildContextError"}
+    assert rec["error"]["name"] == "ChildContextError"
+
+
+def test_cycle_below_a_tree_is_not_cached_across_entry_points() -> None:
+    ops = [
+        _ctx("root", error=STEP_WRAPPER),
+        _ctx("a", error=STEP_WRAPPER, parent="b"),
+        _ctx("b", error=_wrap(STEP_WRAPPER, ChildContextError), parent="a"),
+    ]
     rec, _ = _record(ops, None)
-    assert _names(rec) == {"a": "StepError", "b": "StepError"}
+    assert _names(rec) == {
+        "root": "StepError",
+        "a": "ChildContextError",
+        "b": "StepError",
+    }
+
+
+def test_n2_failure_handled_inside_the_subtree_is_not_a_cause() -> None:
+    # In "outer", the child "inner" catches a step's ValueError("x") and returns
+    # normally. Then the step "charge" raises PaymentError("x").
+    value_error = _err("ValueError", "x")
+    payment = _err("__main__.PaymentError", "x")
+    ops = [
+        _ctx("outer", error=_wrap(payment, StepError)),
+        _ctx("inner", parent="outer", sub_type=OperationSubType.RUN_IN_CHILD_CONTEXT),
+        _op("lookup", error=value_error, parent="inner"),
+        _op("charge", error=payment, parent="outer"),
+    ]
+    rec, _ = _record(ops, _wrap(_wrap(payment, StepError), ChildContextError))
+    assert _names(rec) == {
+        "outer": "PaymentError",
+        "lookup": "ValueError",
+        "charge": "PaymentError",
+    }
+    assert rec["error"]["name"] == "PaymentError"
+
+
+def test_failed_batch_operation_with_the_same_fields_is_a_link() -> None:
+    ops = [
+        _ctx("child", error=_wrap(PAYMENT, ChildContextError)),
+        _ctx("fanout", parent="child", sub_type=OperationSubType.MAP, error=PAYMENT),
+    ]
+    rec, _ = _record(ops, None)
+    assert _names(rec) == {"child": "PaymentError", "fanout": "PaymentError"}
+
+
+def test_wrapper_whose_chain_cannot_be_followed_keeps_its_name() -> None:
+    rec, _ = _record([_ctx("ctx", error=STEP_WRAPPER)], None)
+    assert _names(rec) == {"ctx": "StepError"}
+
+
+@pytest.mark.parametrize("sub_type", [OperationSubType.MAP, OperationSubType.PARALLEL])
+def test_b20_b21_same_message_items_do_not_guess(sub_type: OperationSubType) -> None:
+    item_type = (
+        OperationSubType.MAP_ITERATION
+        if sub_type == OperationSubType.MAP
+        else OperationSubType.PARALLEL_BRANCH
+    )
+    fraud = _err("__main__.FraudError")
+    ops = [
+        _ctx("batch", sub_type=sub_type),
+        _ctx("item-0", parent="batch", sub_type=item_type, error=PAYMENT),
+        _ctx("item-1", parent="batch", sub_type=item_type, error=fraud),
+    ]
+    rec, _ = _record(ops, _wrap(PAYMENT, ChildContextError))
+    assert _names(rec) == {"item-0": "PaymentError", "item-1": "FraudError"}
+    assert rec["error"]["name"] == "ChildContextError"
 
 
 # -- callbacks ---------------------------------------------------------------------
@@ -414,6 +585,66 @@ def test_external_failure_without_message_matches_the_sdk_default() -> None:
     rec, _ = _record([callback], external)
     assert rec["error"]["name"] == "PaymentError"
     assert _names(rec) == {"cb": "PaymentError"}
+
+
+def test_b13b_external_failure_with_type_error_is_error() -> None:
+    sender = _err("Error")
+    external = ErrorObject.from_exception(CallbackExternalError("card declined"))
+    rec, _ = _record(_callback_ops(sender, OperationStatus.FAILED, external), external)
+    assert rec["error"]["name"] == "Error"
+    assert _names(rec) == {"approval": "Error", "approval create callback id": "Error"}
+
+
+@pytest.mark.parametrize("blank", ["", "   ", " \t\n\r\f\v"])
+def test_external_failure_with_blank_type_is_the_sdk_callback_class(blank: str) -> None:
+    external = ErrorObject.from_exception(CallbackExternalError("card declined"))
+    ops = _callback_ops(_err(blank), OperationStatus.FAILED, external)
+    rec, _ = _record(ops, external)
+    assert rec["error"]["name"] == "CallbackExternalError"
+
+
+def test_external_failure_with_non_ascii_space_type_is_kept() -> None:
+    external = ErrorObject.from_exception(CallbackExternalError("card declined"))
+    ops = _callback_ops(_err("\u00a0"), OperationStatus.FAILED, external)
+    rec, _ = _record(ops, external)
+    assert rec["error"]["name"] == "\u00a0"
+
+
+@pytest.mark.parametrize("empty", ["", None])
+def test_n3_submitter_without_message_matches_the_sdk_default(
+    empty: str | None,
+) -> None:
+    payment = _err("__main__.PaymentError", empty)
+    step_error = _wrap(payment, StepError)
+    ops = [
+        _ctx("approval", error=step_error),
+        _op("approval submitter", error=payment, parent="approval"),
+    ]
+    execution_error = ErrorObject.from_exception(
+        CallbackSubmitterError("Callback submitter failed")
+    )
+    rec, _ = _record(ops, execution_error)
+    assert _names(rec) == {
+        "approval": "PaymentError",
+        "approval submitter": "PaymentError",
+    }
+    assert rec["error"] == {
+        "name": "PaymentError",
+        "message": "Callback submitter failed",
+    }
+
+
+def test_submitter_default_message_with_a_real_message_operation_is_not_matched() -> (
+    None
+):
+    # The fallback applies to an empty message only.
+    payment = _err("__main__.PaymentError", "other")
+    ops = [_ctx("approval", error=_wrap(payment, StepError))]
+    execution_error = ErrorObject.from_exception(
+        CallbackSubmitterError("Callback submitter failed")
+    )
+    rec, _ = _record(ops, execution_error)
+    assert rec["error"]["name"] == "CallbackSubmitterError"
 
 
 # -- options and cost -------------------------------------------------------------
