@@ -56,6 +56,9 @@ class TelemetryExporter(Protocol):
     ``render`` maps the canonical record dict to the exact shape the exporter
     serializes (identity for array exporters, the ``operationsByName`` expansion
     for point-access exporters).
+    An exporter may also define ``measure(rendered) -> int | None``, the
+    byte size of what it writes for a rendered value; without it the size is
+    that of compact JSON.
     """
 
     max_record_size_bytes: int | None
