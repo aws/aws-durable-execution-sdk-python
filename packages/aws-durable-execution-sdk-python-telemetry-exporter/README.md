@@ -97,7 +97,10 @@ trailing newline. Truncation measures that line in one pass. A CloudWatch Logs
 event can be up to 1 MB
 ([PutLogEvents](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutLogEvents.html)).
 U+2028 and U+2029 are written as `\u2028` and `\u2029`, so a tool that treats
-them as line breaks still sees one line per record.
+them as line breaks still sees one line per record. A lone surrogate (a string
+character with no UTF-8 encoding) is written as its `\uXXXX` escape, so
+printing it never fails. The limit counts these escapes; other exporters'
+limits count the characters as they write them.
 
 The lines have `level` `INFO`. With the JSON log format and an application log
 level of `WARN` or above, Lambda drops them. With the Text log format, Lambda
@@ -120,7 +123,11 @@ default `sort_key="sk"` (= `emittedAt`) every export adds an item; pass
 `sort_key=None` for a key-only table that upserts. IAM: `dynamodb:PutItem`.
 A number DynamoDB cannot store (more than 38 significant digits, a magnitude
 outside 1E-130 to 9.99...E+125, NaN or Infinity) is written as a string
-attribute holding its JSON text, so it never drops the item.
+attribute holding its JSON text, so it never drops the item. The same field can
+therefore be a number (`N`) in one item and a string (`S`) in another; readers
+that filter or compare on the attribute type should allow for both. An integer
+with more than 38 digits but at most 38 significant digits, such as `10**38`,
+is stored as a number.
 
 ```python
 DynamoDBExporter(table_name="durable-execution-telemetry")
@@ -270,15 +277,20 @@ the execution `error`, not an operation error. The exporter does not build a
 cause from other operations or from `ErrorData`. `include_errors=False`
 removes operation errors.
 
-Every `message` is capped at 8,192 characters. A longer message keeps its first
-8,192 characters followed by `…`.
+Every `name` and `message` is capped at 8,192 characters, counted as Unicode
+code points (a Python `str` is a sequence of code points, so a cut never splits
+a character). A longer value keeps its first 8,192 code points followed by `…`.
 
 When a record is over its exporter's size limit, truncation first removes every
 `cause` and sets `droppedCauses: true`, then runs its usual steps (operation
 results, then whole operations, then input, then output). Python records have
-no cause, so the first step never changes them. With the message cap, a record
-whose operations, input and output are dropped fits any limit of 64 KB or
-more.
+no cause, so the first step never changes them. With the name and message
+caps, a record whose operations, input and output are dropped fits any limit of
+64 KB or more, assuming ARN fields of normal length (a few hundred bytes, as in
+real Lambda ARNs) and an error `name` of normal length (a type name such as
+`module.QualName`). Without the `name` assumption, the worst case (a name and
+message of 8,192 control characters, each escaped as `\u00XX`) fits any limit
+of 128 KB (131,072 bytes) or more.
 
 Names are each language's own and differ across SDKs. For example, a step that
 throws `PaymentError` can be reported as `StepError` in JS,
@@ -294,11 +306,12 @@ default serializer's (`ExtendedTypeSerDes`) envelope, a JSON object whose keys
 are exactly `t` and `v` with a string `t`, it is decoded with that serializer
 and converted to plain JSON:
 
+- `int`: unchanged when its absolute value is at most `2**53 - 1`
+  (9007199254740991), the largest integer a JavaScript reader parses exactly.
+  Otherwise `str(value)`, for example `"12345678901234567"`.
 - `Decimal`: an integer when it is integral and its absolute value is at most
-  `2**53 - 1` (9007199254740991), the largest integer a JavaScript reader parses
-  exactly. Otherwise a float when the float round-trips exactly and is within
-  DynamoDB's number range (at most 38 significant digits, magnitude 1E-130 to
-  9.99...E+125). Otherwise `str(value)`, for example `"9007199254740993"`,
+  `2**53 - 1`. Otherwise a float when the float round-trips exactly and is
+  within DynamoDB's number range (magnitude 1E-130 to 9.99...E+125). Otherwise `str(value)`, for example `"9007199254740993"`,
   `"12345678901234567.89"` or `"1E+299"`. NaN and Infinity become `null`.
   Negative zero (`Decimal("-0")`, `Decimal("-0.0")`) is integral, so it becomes
   `0` and loses its sign.
@@ -306,7 +319,9 @@ and converted to plain JSON:
   `tuple`: list. `BatchResult`: `to_dict()`.
 
 Any other result is parsed as JSON, or kept as the raw string when it is not
-JSON. In parsed JSON, NaN and Infinity become `null`; nothing else changes. A
+JSON. In parsed JSON, NaN and Infinity become `null`, and an integer whose
+absolute value is greater than `2**53 - 1` becomes its decimal string, as
+above; nothing else changes. A
 result that fails to decode keeps its parsed or raw value, and the rest of the
 record is still emitted.
 
