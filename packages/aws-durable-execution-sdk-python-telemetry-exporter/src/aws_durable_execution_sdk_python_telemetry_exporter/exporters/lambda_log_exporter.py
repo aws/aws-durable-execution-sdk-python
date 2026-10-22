@@ -33,7 +33,10 @@ class LambdaLogExporter:
 
     ``max_record_size_bytes`` limits the rendered record (the ``message``
     string), as for every exporter; the envelope keys and the JSON escaping of
-    ``message`` add bytes on top of it.
+    ``message`` add bytes on top of it. The line can be up to about twice the
+    record (escaping doubles each ``"`` and ``\\``), about 20% more for a
+    typical record. CloudWatch Logs accepts events of up to 1 MB, so a record
+    at the default 256 KB limit fits.
     """
 
     def __init__(self, max_record_size_bytes: int | None = None) -> None:

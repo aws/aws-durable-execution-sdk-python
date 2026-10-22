@@ -201,8 +201,13 @@ application log level above `INFO` (`WARN`, `ERROR`, `FATAL`), Lambda filters
 these lines out, as it does for the JS exporter's lines. `requestId` is not
 included, because exporters do not receive the request id.
 `max_record_size_bytes` (default 256 KB) is measured on the rendered record,
-that is the `message` string; the envelope keys and the JSON escaping of
-`message` add bytes on top of it.
+that is the `message` string. The envelope keys and the JSON escaping of
+`message` add bytes on top of it, so the printed line can be up to about twice
+the record size: escaping turns each `"` and `\` in the record into two bytes.
+A typical record grows by about 20%. CloudWatch Logs accepts log events of up
+to 1 MB (see the `PutLogEvents` API reference), so a line written for a record
+at the default limit fits. A larger `max_record_size_bytes` should stay at or
+below about 500 KB for this exporter to keep that margin.
 
 ### CloudWatchLogsExporter
 
