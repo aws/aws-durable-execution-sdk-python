@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import contextvars
 import copy
 import datetime
 import functools
@@ -678,8 +677,6 @@ class PluginExecutor:
         self._invocation_status: InvocationStartInfo | None = None
         self._operations_provider: Callable[[], Mapping[str, Operation]] | None = None
         self._run_entered = False
-        self._startup_context: contextvars.Context | None = None
-        self._invocation_contexts: list[contextvars.Context | None] = []
 
     def provide_propagation_metadata(
         self, info: PropagationInput
@@ -790,8 +787,6 @@ class PluginExecutor:
             # work still holding one.
             self._plugins = []
             self._started = []
-            self._startup_context = None
-            self._invocation_contexts.clear()
 
     def _create_plugins(self, info: InvocationStartInfo) -> None:
         """Build this invocation's plugin instances from its start info.
@@ -854,12 +849,12 @@ class PluginExecutor:
         self._plugins = plugins
 
     @staticmethod
-    def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> bool:
-        """Invoke a plugin on the calling thread and report contained failures.
+    def _dispatch_plugin(plugin: DurableInstrumentationPlugin, info) -> None:
+        """Invoke a plugin on the calling thread, preserving its context changes.
 
         Thread-control exceptions propagate; other failures are contained using
-        the same rule as factory creation. Start uses the result to restore the
-        pre-hook Context when a failed hook leaves thread-affine bindings behind.
+        the same rule as factory creation. Plugins own cleanup of any partial
+        bindings left by a failed hook.
         """
         try:
             match info:
@@ -885,8 +880,6 @@ class PluginExecutor:
             )
             if control is not None:
                 raise control from None
-            return False
-        return True
 
     def execute_plugins(self, info):
         """Dispatch one hook to this invocation's plugins.
@@ -934,50 +927,23 @@ class PluginExecutor:
             return
         starting = isinstance(info, InvocationStartInfo)
         ending = isinstance(info, InvocationEndInfo)
-        if starting:
-            self._startup_context = None
-            self._invocation_contexts.clear()
         deferred_control: BaseException | None = None
-        for index, plugin in enumerate(self._plugins if starting else self._started):
+        for plugin in self._plugins if starting else self._started:
             if starting:
-                owner = self._startup_context
-                before = (
-                    owner.copy() if owner is not None else contextvars.copy_context()
-                )
                 # Count a hook before dispatch: even a failed Start can own state
-                # that only its End hook can release.
+                # that only its End hook can release. All lifecycle hooks share
+                # the invocation worker's Context, including after a failure.
                 self._started.append(plugin)
-                self._invocation_contexts.append(owner)
-                succeeded = (
-                    owner.run(self._dispatch_plugin, plugin, info)
-                    if owner is not None
-                    else self._dispatch_plugin(plugin, info)
-                )
-                if not succeeded:
-                    self._startup_context = before
-                continue
             if not ending:
                 self._dispatch_plugin(plugin, info)
                 continue
-            # End resets tokens in the Context that created them. A failed Start
-            # may have moved later hooks and handler execution to a snapshot.
-            owner = self._invocation_contexts[index]
             try:
-                if owner is not None:
-                    owner.run(self._dispatch_plugin, plugin, info)
-                else:
-                    self._dispatch_plugin(plugin, info)
+                self._dispatch_plugin(plugin, info)
             except BaseException as control:  # noqa: BLE001 - held and re-raised below
                 if deferred_control is None:
                     deferred_control = control
         if deferred_control is not None:
             raise deferred_control
-
-    def _run_in_invocation_context(self, invoke: Callable[[], Any]) -> Any:
-        """Continue in the pre-hook Context only after a failed Start hook."""
-        if self._startup_context is not None:
-            return self._startup_context.run(invoke)
-        return invoke()
 
     def _snapshot_operation_infos(
         self,

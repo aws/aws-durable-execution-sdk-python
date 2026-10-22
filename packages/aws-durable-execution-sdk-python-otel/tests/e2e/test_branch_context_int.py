@@ -69,6 +69,12 @@ def test_public_branch_context_propagation_and_isolation(
 ) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
     marker = contextvars.ContextVar("branch-invocation-marker", default="unset")
+    expected_binding = (
+        "unset" if view is None else "partial" if failed_start else "plugin"
+    )
+    expected_baggage = (
+        None if view is None else "partial" if failed_start else "present"
+    )
     observations: list[tuple[int, str, Any, bool]] = []
     bodies: list[int] = []
     visits = {0: 0, 1: 0}
@@ -144,9 +150,8 @@ def test_public_branch_context_propagation_and_isolation(
         return saved
 
     def handler(_event: Any, durable: DurableContext) -> list[str]:
-        expected = "unset" if view is None else "plugin"
-        assert marker.get() == expected
-        token = marker.set("handler" if view is None else "plugin")
+        assert marker.get() == expected_binding
+        token = marker.set("handler" if view is None else expected_binding)
         try:
             result: BatchResult[str] = (
                 durable.map(
@@ -162,7 +167,7 @@ def test_public_branch_context_propagation_and_isolation(
                     config=ParallelConfig(max_concurrency=concurrency),
                 )
             )
-            assert marker.get() == ("handler" if view is None else "plugin")
+            assert marker.get() == ("handler" if view is None else expected_binding)
             if resume:
                 durable.wait(Duration.from_seconds(1), name="resume")
             return result.get_results()
@@ -177,10 +182,8 @@ def test_public_branch_context_propagation_and_isolation(
         assert json.loads(result.result) == ["saved-0", "saved-1"]
         assert sorted(bodies) == [0, 1]
         assert {item[0] for item in observations} == {0, 1}
-        expected = "unset" if view is None else "plugin"
         assert all(
-            item[1:]
-            == (expected, None if view is None else "present", view is not None)
+            item[1:] == (expected_binding, expected_baggage, view is not None)
             for item in observations
         )
         # The final wait replays the completed batch without rerunning branches.

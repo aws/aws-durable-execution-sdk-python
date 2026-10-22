@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import contextvars
 import datetime
 import logging
 import pickle
@@ -41,6 +42,55 @@ from aws_durable_execution_sdk_python.plugin import (
 )
 from aws_durable_execution_sdk_python.plugin_discovery import _is_plugin_factory
 from tests.test_helpers import plugin_factory
+
+
+def test_failed_start_keeps_bindings_for_later_hooks_and_end() -> None:
+    marker = contextvars.ContextVar("failed-start-binding", default="original")
+    events: list[tuple[str, str]] = []
+
+    class Broken(DurableInstrumentationPlugin):
+        def on_invocation_start(self, info: InvocationStartInfo) -> None:
+            self.token = marker.set("partial")
+            raise ValueError("failed after binding")
+
+        def on_operation_end(self, info: OperationEndInfo) -> None:
+            events.append(("broken-operation", marker.get()))
+
+        def on_invocation_end(self, info: InvocationEndInfo) -> None:
+            events.append(("broken-end", marker.get()))
+            marker.reset(self.token)
+
+    class Healthy(DurableInstrumentationPlugin):
+        def on_invocation_start(self, info: InvocationStartInfo) -> None:
+            events.append(("healthy-start", marker.get()))
+
+        def on_operation_end(self, info: OperationEndInfo) -> None:
+            events.append(("healthy-operation", marker.get()))
+
+        def on_invocation_end(self, info: InvocationEndInfo) -> None:
+            events.append(("healthy-end", marker.get()))
+
+    executor = PluginExecutor([plugin_factory(Broken()), plugin_factory(Healthy())])
+    with executor.run():
+        executor.on_invocation_start(
+            execution_arn="arn:exec",
+            lambda_context=LAMBDA_CTX,
+            execution_start_time=START_TS,
+            is_first_invocation=True,
+        )
+        executor.execute_plugins(OPERATION_END_INFO)
+        executor.on_invocation_end(
+            DurableExecutionInvocationOutput(status=ServiceInvocationStatus.SUCCEEDED)
+        )
+
+    assert events == [
+        ("healthy-start", "partial"),
+        ("broken-operation", "partial"),
+        ("healthy-operation", "partial"),
+        ("broken-end", "partial"),
+        ("healthy-end", "original"),
+    ]
+    assert marker.get() == "original"
 
 
 # region Dataclass Tests

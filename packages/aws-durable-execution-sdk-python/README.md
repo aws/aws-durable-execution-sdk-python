@@ -168,11 +168,14 @@ End before returning the outcome. The caller shuts down the handler executor.
 There is no separate handler-context hook or context-manager plugin API.
 
 When plugins are registered, the worker begins with a copy of the caller's
-context-variable bindings. Successful Start bindings flow into later Start hooks,
-the handler, serialization and resource cleanup. A later successful Start may
-replace an earlier binding. If a Start hook raises, its new bindings are discarded
-for subsequent work; its End still runs in the original Context so its tokens can
-be reset. End hooks retain forward registration order, not reverse stack order,
+context-variable bindings. Start hooks, the handler, serialization, resource
+cleanup and End hooks use that same Context. Changes made by a Start hook remain
+visible to later hooks and handler code even if that hook raises; the SDK contains
+the exception and retains the plugin without rolling back its bindings. A later
+Start hook may replace an earlier binding. Plugins are responsible for restoring
+partial bindings themselves when needed, either before raising or during End.
+End runs in the same Context as Start, so context-variable tokens retain their
+owner. End hooks retain forward registration order, not reverse stack order,
 so they must not rely on observing a stack-like unwind of other plugins' contexts.
 Each SDK-managed `map` or `parallel` branch admission, including an in-process
 resume, receives a fresh copy of the coordinator's bindings when plugins are

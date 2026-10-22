@@ -413,13 +413,15 @@ remains in `durable.operation.status`.
 ### Invocation context isolation
 
 With core 3.x, invocation hooks and the handler run on one worker in an
-invocation-local Context initialized from the host's bindings. Successful Start
-bindings are visible to later hooks, the handler and resource cleanup. The host's
-bindings remain unchanged after return, even if a plugin fails during Start or
-End. A failed Start's bindings are discarded for subsequent work, while End runs
-in that Start's original Context to preserve token ownership. This isolates
-context-variable bindings; it does not undo mutations to shared objects or
-external side effects. The isolation applies when plugins are registered.
+invocation-local Context initialized from the host's bindings. Start bindings
+remain visible to later hooks, the handler and resource cleanup even when Start
+raises. The SDK retains the plugin and contains ordinary hook exceptions without
+rolling back context changes. Plugins own cleanup of partial bindings; End runs
+in the same Context as Start and can reset its tokens. The host's bindings remain
+unchanged after return, including after Start or End failures. This isolates the
+invocation's context-variable bindings from its caller; it does not undo mutations
+to shared objects or external side effects. The isolation applies when plugins
+are registered.
 
 ### Log Correlation
 

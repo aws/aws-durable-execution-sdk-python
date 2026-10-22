@@ -493,10 +493,7 @@ def durable_execution(
                         # LIFO cleanup: branches join with checkpointing alive;
                         # then close stops checkpointing and the wait completes.
                         resources.callback(wait_for_checkpoint)
-                        resources.callback(
-                            plugin_executor._run_in_invocation_context,
-                            execution_state.close,
-                        )
+                        resources.callback(execution_state.close)
                         execution_operation = execution_state.get_execution_operation()
 
                         # execute the plugins
@@ -521,9 +518,7 @@ def durable_execution(
                         checkpoint_future = executor.submit(
                             execution_state.checkpoint_batches_forever
                         )
-                        output = plugin_executor._run_in_invocation_context(
-                            invoke_handler
-                        )
+                        output = invoke_handler()
                     # The ExitStack has now closed execution_state and joined the
                     # checkpoint thread. So any revocation observed while draining
                     # in-flight checkpoint work is visible here. A terminal status
