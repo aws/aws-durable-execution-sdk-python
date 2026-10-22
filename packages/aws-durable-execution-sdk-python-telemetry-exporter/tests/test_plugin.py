@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import json
+import math
 import threading
 import uuid
 from typing import Any
@@ -786,6 +787,51 @@ def test_result_non_json_types_become_json_compatible_values():
 def test_result_top_level_non_json_type_is_converted():
     assert _charge_result(_serialize(decimal.Decimal("12.5"))) == 12.5
     assert _charge_result(_serialize(("x", 2))) == ["x", 2]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # A float is used only when it converts back to exactly the same Decimal.
+        (decimal.Decimal("99.99"), 99.99),
+        (decimal.Decimal("-0.5"), -0.5),
+        (decimal.Decimal("3"), 3),
+        (decimal.Decimal("12345678901234567890"), 12345678901234567890),
+        # Otherwise the exact string form, so precision and sign are kept.
+        (
+            decimal.Decimal("3.14159265358979323846264338327950288"),
+            "3.14159265358979323846264338327950288",
+        ),
+        (decimal.Decimal("12345678901234567.89"), "12345678901234567.89"),
+        (decimal.Decimal("1E-400"), "1E-400"),
+        (decimal.Decimal("-0.0"), -0.0),
+        (decimal.Decimal("-Infinity"), None),
+        (decimal.Decimal("sNaN"), None),
+    ],
+)
+def test_result_decimal_keeps_its_exact_value(value, expected):
+    result = _charge_result(_serialize({"d": value}))["d"]
+    assert result == expected
+    assert type(result) is type(expected)
+    if isinstance(expected, float):
+        assert math.copysign(1, result) == math.copysign(1, expected)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        _serialize({"x": float("nan"), "y": float("inf"), "z": [float("-inf"), 1.5]}),
+        '{"x": NaN, "y": Infinity, "z": [-Infinity, 1.5]}',  # plain JSON payload
+    ],
+)
+def test_result_non_finite_floats_become_null(raw):
+    exporter = CaptureExporter(render=LambdaLogExporter().render)
+    _run(_override_plugin(exporter), ops=[_step("charge", result=raw)])
+    result = exporter.records[0]["operations"][0]["result"]
+    assert result == {"x": None, "y": None, "z": [None, 1.5]}
+    # The emitted line is strict JSON.
+    line = json.dumps(exporter.render(exporter.records[0]), allow_nan=False)
+    assert "NaN" not in line and "Infinity" not in line
 
 
 def test_result_batch_result_becomes_its_dict_form():

@@ -206,38 +206,60 @@ def _decode_checkpoint_result(raw_result: str) -> Any:
     run: a payload that is not an envelope keeps the previous behaviour (parsed
     JSON, or the raw string when it is not JSON), and so does an envelope that
     fails to decode. Never raises.
+
+    The plugin does not know which serializer wrote a result (the hooks do not
+    carry it), so the envelope is recognised by shape alone: a JSON object
+    with exactly the keys ``t`` and ``v`` where ``t`` is a string. A result
+    written by another serializer (``JsonSerDes``, a custom ``SerDes``, or a
+    chained invoke's JSON payload) that has this exact shape, and whose ``t``
+    is one of the default serializer's tags, is decoded as if the default
+    serializer wrote it; for example ``{"t": "s", "v": "x"}`` is reported as
+    ``"x"``. Any other ``t`` fails to decode and is passed through unchanged.
     """
     try:
         parsed = json.loads(raw_result)
     except (json.JSONDecodeError, TypeError):
         return raw_result
     if not _is_extended_type_envelope(parsed):
-        return parsed
+        # Plain JSON already; only non-finite numbers (json.loads accepts NaN
+        # and Infinity) need mapping to null.
+        return _to_json_compatible(parsed)
     try:
         decoded = EXTENDED_TYPES_SERDES.deserialize(raw_result, SerDesContext())
         return _to_json_compatible(decoded)
     except Exception:  # noqa: BLE001 - fall back to the parsed payload, never raise
-        return parsed
+        return _to_json_compatible(parsed)
 
 
 def _to_json_compatible(value: Any) -> Any:
     """Convert a value decoded by ``ExtendedTypeSerDes`` into plain JSON values.
 
     Non-JSON types follow what the Java SDK's default Jackson serializer writes
-    for the equivalent Java types: ``Decimal`` -> JSON number, ``datetime`` /
-    ``date`` -> ISO-8601 string (``isoformat()``, offset and precision kept),
+    for the equivalent Java types, without losing the value: an integral
+    ``Decimal`` -> JSON integer; any other finite ``Decimal`` -> JSON number when
+    that float converts back to exactly the same ``Decimal``, otherwise its exact
+    string form (``str(value)``, e.g. ``"12345678901234567.89"``); ``datetime``
+    / ``date`` -> ISO-8601 string (``isoformat()``, offset and precision kept),
     ``UUID`` -> string, ``bytes`` -> base64 string, ``tuple`` -> list. A
-    ``BatchResult`` becomes its ``to_dict()`` form. A non-finite ``Decimal``
-    becomes ``None`` (JSON ``null``), like ``JSON.stringify(NaN)`` in JS.
+    ``BatchResult`` becomes its ``to_dict()`` form. A non-finite ``Decimal`` or
+    ``float`` (NaN, Infinity) becomes ``None`` (JSON ``null``), like
+    ``JSON.stringify(NaN)`` in JS, so the record stays strict JSON.
     """
-    if value is None or isinstance(value, (str, bool, int, float)):
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, decimal.Decimal):
         if not value.is_finite():
             return None
-        if value == value.to_integral_value():
+        if value == value.to_integral_value() and not (
+            value.is_zero() and value.is_signed()
+        ):
             return int(value)
-        return float(value)
+        as_float = float(value)
+        if decimal.Decimal(repr(as_float)) == value:
+            return as_float
+        return str(value)
     if isinstance(value, (datetime.datetime, datetime.date)):
         return value.isoformat()
     if isinstance(value, uuid.UUID):

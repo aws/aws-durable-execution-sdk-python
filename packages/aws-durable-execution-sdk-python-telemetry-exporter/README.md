@@ -61,14 +61,28 @@ every SDK:
   `operationsByName.<name>.result`, and the value passed to an override's
   `result` transform) is the plain JSON value, for example `{"amount": 99.99}`.
   Results checkpointed by the SDK's default serializer as a `{"t": ..., "v":
-  ...}` envelope are decoded with that serializer and converted to JSON values
-  the way the Java SDK's default serializer writes them: `Decimal` becomes a
-  number (`null` when not finite), `datetime`/`date` an ISO-8601 string from
-  `isoformat()`, `UUID` a string, `bytes` a base64 string, `tuple` a list, and
-  a map/parallel `BatchResult` its `to_dict()` form. A payload that is not an
-  envelope (for example from a custom `SerDes`, which is never run) is passed
-  through as parsed JSON, or as the raw string when it is not JSON; an
+  ...}` envelope are decoded with that serializer and converted to JSON values:
+  `datetime`/`date` become an ISO-8601 string from `isoformat()`, `UUID` a
+  string, `bytes` a base64 string, `tuple` a list, and a map/parallel
+  `BatchResult` its `to_dict()` form. A `Decimal` keeps its exact value: an
+  integral one is a JSON integer, any other is a JSON number only when that
+  float converts back to exactly the same `Decimal`, and otherwise the string
+  `str(value)` (for example `"12345678901234567.89"`). A non-finite `Decimal`
+  or `float` (NaN, Infinity) becomes `null`, so the record is strict JSON. A
+  payload that is not an envelope is passed through as parsed JSON (non-finite
+  numbers again become `null`), or as the raw string when it is not JSON; an
   envelope that cannot be decoded is passed through as parsed JSON.
+- The plugin cannot tell which serializer wrote a result, because the hooks do
+  not carry it, so an envelope is recognised by its shape alone: a JSON object
+  with exactly the keys `t` and `v`, where `t` is a string. A result written by
+  `JsonSerDes`, a custom `SerDes` (which the plugin never runs) or a chained
+  invoke that has this exact shape, and whose `t` is one of the default
+  serializer's type tags, is decoded as if the default serializer wrote it. For
+  example `{"t": "s", "v": "x"}` is reported as `"x"`, `{"t": "b", "v": 0}` as
+  `false`, and `{"t": "l", "v": [...]}` as the decoded list. A shape-matching
+  object whose `t` is not a default tag, or whose `v` does not decode, is
+  passed through unchanged. Avoid a root object of exactly `{"t", "v"}` in
+  results that you opt in when they do not use the default serializer.
 - Every record built at invocation end carries `endTime` (the emission time)
   and `durationMs` (`endTime - startTime`), including the `RUNNING` record of
   an invocation that suspends or retries (`on-change` mode). Records built at
