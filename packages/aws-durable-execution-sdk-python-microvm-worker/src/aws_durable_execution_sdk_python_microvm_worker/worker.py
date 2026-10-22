@@ -404,6 +404,15 @@ class MicrovmWorkerListener:
     6. A call that the service rejected on its first attempt, for example
        for a missing permission, ends the refusal at once. The MicroVM keeps
        running, and the listener does not retry the call until a job ends.
+       The exception is a ``resume`` hook that arrived during the call. The
+       idle time then starts when the call ends. So the listener retries the
+       call one idle time after the call ends, if no job runs and no
+       ``suspend`` hook refusal is in effect when the call ends. A second
+       exception is a ``suspend`` hook that arrived during the call and
+       whose refusal is still in effect when the call ends. The MicroVM is
+       then suspending anyway. So the rejection does not end the hook's
+       refusal. That refusal ends on the ``resume`` hook, or 30 seconds
+       after the last ``suspend`` hook. The idle time then starts again.
     7. A call that the service refused for now on its first attempt, such
        as expired credentials or a signature error, ends the refusal at
        once too. The idle time then starts again, so the listener tries the
