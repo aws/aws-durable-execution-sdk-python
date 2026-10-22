@@ -3,6 +3,7 @@
 import inspect
 from collections.abc import Callable
 from io import StringIO
+from tempfile import TemporaryFile
 from typing import cast
 from unittest.mock import patch
 
@@ -429,3 +430,46 @@ def test_factory_inspection_failure_preserves_error_and_rejects_registration(
 
     assert error.value is failure
     assert observer.results == ([False] if isinstance(failure, Exception) else [])
+
+
+@pytest.mark.parametrize("invalid_first", [False, True])
+def test_class_inspection_failure_cleans_every_factory_and_preserves_error(
+    invalid_first: bool,
+) -> None:
+    class ResourceFactory(_RegistrationObserver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.resource = TemporaryFile()
+
+        # Repeat the marker to opt this cleanup implementation into the contract.
+        __durable_registration_api__ = 1
+
+        def on_registration_result(self, registered: bool) -> None:
+            super().on_registration_result(registered)
+            if not registered:
+                self.resource.close()
+
+    class BrokenClassFactory(ResourceFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inspection_errors: list[RuntimeError] = []
+
+        @property  # type: ignore[misc]  # Deliberately malformed customer descriptor.
+        def __class__(self) -> type:  # type: ignore[override]
+            error = RuntimeError(f"class inspection {len(self.inspection_errors) + 1}")
+            self.inspection_errors.append(error)
+            raise error
+
+    broken = BrokenClassFactory()
+    healthy = ResourceFactory()
+    entries = [broken, healthy] if invalid_first else [healthy, broken]
+    try:
+        with pytest.raises(RuntimeError) as error:
+            load_configured_plugins(entries, environment={})
+        assert error.value is broken.inspection_errors[0]
+        assert len(broken.inspection_errors) == 1
+        assert broken.results == healthy.results == [False]
+        assert broken.resource.closed and healthy.resource.closed
+    finally:
+        broken.resource.close()
+        healthy.resource.close()

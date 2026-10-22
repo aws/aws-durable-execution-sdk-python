@@ -189,7 +189,10 @@ def _accepts_one_positional_argument(create_plugin: object) -> bool:
 
 
 def _load_factory(
-    plugin_name: str, entry_point: metadata.EntryPoint
+    plugin_name: str,
+    entry_point: metadata.EntryPoint,
+    *,
+    registration_candidates: list[object],
 ) -> DurableInstrumentationPluginFactory:
     """Resolve an entry point to a plugin factory.
 
@@ -209,6 +212,9 @@ def _load_factory(
             f"({_distribution_name(entry_point)}): {error}"
         ) from error
 
+    # A loaded singleton can own resources even when its factory interface is
+    # invalid. Retain it for rejection cleanup before inspecting that interface.
+    registration_candidates.append(factory)
     if not _is_plugin_factory(factory):
         raise PluginLoadError(
             f"Durable instrumentation plugin entry point '{plugin_name}' must "
@@ -267,9 +273,17 @@ def _validate_explicit_factories(
     return factories
 
 
-def _factory_type(factory: DurableInstrumentationPluginFactory) -> type[object]:
-    """Factory classes with class/static create_plugin methods are valid too."""
-    return factory if isinstance(factory, type) else type(factory)
+def _factory_type(factory: object) -> type[object]:
+    """Find the real factory class without reading an instance's __class__."""
+    concrete_type = type(factory)
+    # Classes with class/static create_plugin methods are valid factories too.
+    # Testing the actual metaclass avoids isinstance(factory, type), which can
+    # invoke a proxy's __class__ descriptor during rejection cleanup.
+    return (
+        cast(type[object], factory)
+        if issubclass(concrete_type, type)
+        else concrete_type
+    )
 
 
 def _registration_api_owner(plugin_type: type[object]) -> type[object] | None:
@@ -292,9 +306,7 @@ def _registration_api_owner(plugin_type: type[object]) -> type[object] | None:
     return None
 
 
-def _registration_result_callback(
-    plugin: DurableInstrumentationPluginFactory, owner: type[object]
-) -> object | None:
+def _registration_result_callback(plugin: object, owner: type[object]) -> object | None:
     """Bind the opted-in contract without calling a legacy subclass helper."""
     if owner is _factory_type(plugin):
         return getattr(plugin, "on_registration_result", None)
@@ -368,16 +380,21 @@ def _validate_exclusive_groups(
 
 
 def _notify_registration_result(
-    plugins: Sequence[DurableInstrumentationPluginFactory],
+    plugins: Sequence[object],
     *,
     registered: bool,
 ) -> None:
-    """Let a plugin release rejected constructor resources without failing loading."""
+    """Notify each candidate once, containing ordinary metadata/callback failures."""
+    notified: set[int] = set()
     for plugin in plugins:
-        owner = _registration_api_owner(_factory_type(plugin))
-        if owner is None:
+        identity = id(plugin)
+        if identity in notified:
             continue
+        notified.add(identity)
         try:
+            owner = _registration_api_owner(_factory_type(plugin))
+            if owner is None:
+                continue
             callback = _registration_result_callback(plugin, owner)
             if callable(callback):
                 callback(registered)
@@ -411,15 +428,18 @@ def load_configured_plugins(
     """
 
     resolved_factories = list(explicit_plugins or [])
+    registration_candidates: list[object] = list(resolved_factories)
     try:
         resolved_factories = _validate_explicit_factories(resolved_factories)
         result = _resolve_configured_factories(
-            resolved_factories, environment=environment
+            resolved_factories,
+            environment=environment,
+            registration_candidates=registration_candidates,
         )
     except Exception:
         # Customer descriptors and signature inspection can raise ordinary
         # exceptions too. Release rejected resources and preserve the cause.
-        _notify_registration_result(resolved_factories, registered=False)
+        _notify_registration_result(registration_candidates, registered=False)
         raise
     _notify_registration_result(result, registered=True)
     return result
@@ -429,6 +449,7 @@ def _resolve_configured_factories(
     resolved_factories: list[DurableInstrumentationPluginFactory],
     *,
     environment: Mapping[str, str] | None,
+    registration_candidates: list[object],
 ) -> list[DurableInstrumentationPluginFactory]:
     resolved_environment = os.environ if environment is None else environment
     plugin_names = _parse_configured_plugin_names(resolved_environment)
@@ -475,7 +496,11 @@ def _resolve_configured_factories(
                 "duplicate provider package."
             )
 
-        factory = _load_factory(plugin_name, matching_entry_points[0])
+        factory = _load_factory(
+            plugin_name,
+            matching_entry_points[0],
+            registration_candidates=registration_candidates,
+        )
         if any(factory is registered for registered in resolved_factories):
             logger.warning(
                 "Skipping dynamically configured plugin '%s' because the same "
