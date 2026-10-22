@@ -150,9 +150,11 @@ How Python applies the rule:
   of an operation's wrapper is a hand-off to a failed operation with the same
   fields that is either a direct child, or an item or branch of a direct map or
   parallel child (the map or parallel operation is a level in the tree but not
-  a wrapper). Other children are not searched, so a failure that user code
-  handled, in this operation's subtree or anywhere else, is never used as the
-  cause. A step in N nested child contexts takes N unwraps from the outermost
+  a wrapper). Other children are not searched. So a failure that user code
+  handled is never reported as the name. It is considered only when it is
+  such a direct child, item or branch with the same message and data as the
+  failure; the plugin then cannot tell the two apart, and the name is the
+  wrapper's (rule 9). A step in N nested child contexts takes N unwraps from the outermost
   context: N - 1 `ChildContextError`s and the innermost context's `StepError`.
   With 17 contexts the outermost one is `StepError`, and with 18 it is
   `ChildContextError`; the inner contexts are `PaymentError`.

@@ -487,6 +487,22 @@ def test_n2_failure_handled_inside_the_subtree_is_not_a_cause() -> None:
     assert rec["error"]["name"] == "PaymentError"
 
 
+def test_handled_sibling_with_the_same_fields_gives_the_wrapper_name() -> None:
+    # A handled step directly inside the failing context, with the same message
+    # and data, cannot be told apart from the cause: the wrapper name is
+    # reported (rule 9), never the handled error's type.
+    value_error = _err("ValueError", "x")
+    payment = _err("__main__.PaymentError", "x")
+    ops = [
+        _ctx("outer", error=_wrap(payment, StepError)),
+        _op("lookup", error=value_error, parent="outer"),
+        _op("charge", error=payment, parent="outer"),
+    ]
+    rec, _ = _record(ops, _wrap(_wrap(payment, StepError), ChildContextError))
+    assert _names(rec)["outer"] == "StepError"
+    assert rec["error"]["name"] == "StepError"
+
+
 def test_failed_batch_operation_with_the_same_fields_is_a_link() -> None:
     ops = [
         _ctx("child", error=_wrap(PAYMENT, ChildContextError)),
