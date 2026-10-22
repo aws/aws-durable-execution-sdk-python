@@ -17,6 +17,8 @@ from aws_durable_execution_sdk_python.exceptions import (
     CheckpointError,
     DurableOperationError,
     GetExecutionStateError,
+    SDK_WRAPPER_ERROR_TYPE_NAMES,
+    SDK_WRAPPER_ERROR_TYPES,
     SerDesError,
 )
 
@@ -200,6 +202,15 @@ def _qualified_error_type(exception: BaseException) -> str:
     return f"{module}{cls_.__qualname__}"
 
 
+# Bound on the SDK wrappers unwrapped when recording an error.
+_MAX_WRAPPER_UNWRAPS: int = 16
+
+
+def _is_sdk_wrapper(exception: BaseException) -> bool:
+    # Exact class match: a user subclass of an SDK wrapper is the user's error.
+    return type(exception) in SDK_WRAPPER_ERROR_TYPES
+
+
 @dataclass(frozen=True)
 class ErrorObject:
     message: str | None
@@ -218,6 +229,46 @@ class ErrorObject:
 
     @classmethod
     def from_exception(cls, exception: Exception) -> ErrorObject:
+        """Build the ErrorObject that records ``exception``.
+
+        An SDK wrapper (StepError, ChildContextError, InvokeError,
+        CallbackExternalError, ...) is unwrapped first, so the record carries
+        the type, message, data and stack trace of the error it wraps rather
+        than the wrapper's class. A wrapper keeps those fields itself: its
+        ``error_type`` names the wrapped error. When ``error_type`` names
+        another wrapper, the walk continues with ``__cause__``. The walk takes
+        at most ``_MAX_WRAPPER_UNWRAPS`` steps and stops at a cause it has
+        already visited; a wrapper it stops at is recorded by its
+        ``error_type``.
+        """
+        current: Exception = exception
+        visited: set[int] = {id(current)}
+        for _ in range(_MAX_WRAPPER_UNWRAPS):
+            if not _is_sdk_wrapper(current):
+                break
+            wrapper = cast(DurableOperationError, current)
+            if wrapper.error_type not in SDK_WRAPPER_ERROR_TYPE_NAMES:
+                return cls._from_wrapper(wrapper)
+            cause = wrapper.__cause__
+            if not isinstance(cause, Exception) or id(cause) in visited:
+                break
+            visited.add(id(cause))
+            current = cause
+        if _is_sdk_wrapper(current):
+            return cls._from_wrapper(cast(DurableOperationError, current))
+        return cls._from_unwrapped_exception(current)
+
+    @classmethod
+    def _from_wrapper(cls, wrapper: DurableOperationError) -> ErrorObject:
+        return cls(
+            message=wrapper.message,
+            type=wrapper.error_type,
+            data=wrapper.data,
+            stack_trace=wrapper.stack_trace,
+        )
+
+    @classmethod
+    def _from_unwrapped_exception(cls, exception: Exception) -> ErrorObject:
         # SerDesError and subclasses pin to the base discriminator so replay
         # always reconstructs them as SerDesError.
         if isinstance(exception, SerDesError):

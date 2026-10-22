@@ -305,25 +305,45 @@ class Callback(Generic[T], CallbackProtocol[T]):  # noqa: PYI059
     def _raise_terminal_failure(
         self, checkpointed_result: CheckpointedResult
     ) -> NoReturn:
-        """Raise the graded error for a terminal callback failure.
+        _raise_callback_terminal_failure(checkpointed_result)
 
-        TIMED_OUT -> CallbackTimeoutError; any other non-succeeded terminal
-        (external FAILED, cancelled, stopped) -> CallbackExternalError.
-        Carries the message/data/stack_trace; the external error's own type
-        stays on the callback operation's details.
-        """
-        error: ErrorObject | None = checkpointed_result.error
-        is_timeout: bool = checkpointed_result.is_timed_out()
-        error_cls: type[CallbackError] = (
-            CallbackTimeoutError if is_timeout else CallbackExternalError
-        )
-        default_message: str = "Callback timed out" if is_timeout else "Callback failed"
-        message: str = error.message if error and error.message else default_message
-        raise error_cls(
-            message=message,
-            data=error.data if error else None,
-            stack_trace=error.stack_trace if error else None,
-        )
+
+def _is_blank_type(error_type: str | None) -> bool:
+    """A missing type, or one made only of ASCII whitespace."""
+    return error_type is None or all(ch in " \t\n\r\f\v" for ch in error_type)
+
+
+def _raise_callback_terminal_failure(
+    checkpointed_result: CheckpointedResult,
+) -> NoReturn:
+    """Raise the graded error for a terminal callback failure.
+
+    TIMED_OUT -> CallbackTimeoutError; any other non-succeeded terminal
+    (external FAILED, cancelled, stopped) -> CallbackExternalError.
+    Carries the message/data/stack_trace. An external failure also carries
+    the sender's ErrorType as ``error_type``.
+    """
+    error: ErrorObject | None = checkpointed_result.error
+    is_timeout: bool = checkpointed_result.is_timed_out()
+    error_cls: type[CallbackError] = (
+        CallbackTimeoutError if is_timeout else CallbackExternalError
+    )
+    default_message: str = "Callback timed out" if is_timeout else "Callback failed"
+    message: str = error.message if error and error.message else default_message
+    # An external failure keeps the sender's ErrorType, the explicit type
+    # "Error" included, so it is recorded and surfaced as that type. Only a
+    # missing or blank type falls back to the SDK class.
+    error_type: str | None = (
+        error.type
+        if not is_timeout and error is not None and not _is_blank_type(error.type)
+        else None
+    )
+    raise error_cls(
+        message=message,
+        error_type=error_type,
+        data=error.data if error else None,
+        stack_trace=error.stack_trace if error else None,
+    )
 
 
 class DurableContext(DurableContextProtocol):
@@ -908,9 +928,11 @@ class DurableContext(DurableContextProtocol):
         def wait_in_child_context(context: DurableContext):
             return wait_for_callback_handler(context, submitter, step_name, config)
 
-        # run_in_child_context is generic and raises ChildContextError with the
-        # inner failure on __cause__; translate to callback-typed errors here, at
-        # the call site, so it re-fires identically on replay.
+        # The context records the wrapped error's type, so the callback-typed
+        # error is recovered from which child failed: the submitter step or the
+        # callback. Both are read from checkpoints, so first run and replay
+        # raise the same error.
+        context_operation_id: str = self._peek_next_operation_id()
         try:
             return self.run_in_child_context(
                 wait_in_child_context,
@@ -918,19 +940,53 @@ class DurableContext(DurableContextProtocol):
                 ChildConfig(sub_type=OperationSubType.WAIT_FOR_CALLBACK),
             )
         except ChildContextError as e:
-            inner: BaseException | None = e.__cause__
-            # Callback failures (external/timeout/base) pass through.
-            if isinstance(inner, CallbackError):
-                raise inner
-            # A failed submitter step surfaces as CallbackSubmitterError, keeping
-            # the step's data/stack_trace (the StepError stays as its cause).
-            if isinstance(inner, StepError):
-                raise CallbackSubmitterError(
-                    inner.message or "Callback submitter failed",
-                    data=inner.data,
-                    stack_trace=inner.stack_trace,
-                ) from inner
-            raise
+            self._raise_wait_for_callback_error(e, context_operation_id)
+
+    def _raise_wait_for_callback_error(
+        self, error: ChildContextError, context_operation_id: str
+    ) -> NoReturn:
+        """Translate a failed wait_for_callback context to a callback error.
+
+        A failed submitter step surfaces as CallbackSubmitterError and a
+        callback failure as CallbackExternalError or CallbackTimeoutError.
+        Checkpoints written before the context recorded the wrapped error hold
+        the callback error or StepError itself; those surface as before.
+        """
+        inner: BaseException | None = error.__cause__
+        # The context holds a callback error type: a timeout, a callback
+        # failure without a sender type, or the base CallbackError.
+        if isinstance(inner, CallbackError):
+            raise inner
+        if isinstance(inner, StepError):
+            # The context holds StepError itself.
+            raise CallbackSubmitterError(
+                inner.message or "Callback submitter failed",
+                data=inner.data,
+                stack_trace=inner.stack_trace,
+            ) from inner
+        namespace = OperationIdNamespace(prefix=context_operation_id)
+        # wait_for_callback_handler creates the callback first, then the step.
+        callback_result: CheckpointedResult = self.state.get_checkpoint_result(
+            namespace.create_id_for_step(1)
+        )
+        submitter_result: CheckpointedResult = self.state.get_checkpoint_result(
+            namespace.create_id_for_step(2)
+        )
+        if submitter_result.is_failed():
+            raise CallbackSubmitterError(
+                error.message or "Callback submitter failed",
+                error_type=error.error_type,
+                data=error.data,
+                stack_trace=error.stack_trace,
+            ) from inner
+        if (
+            callback_result.is_failed()
+            or callback_result.is_cancelled()
+            or callback_result.is_timed_out()
+            or callback_result.is_stopped()
+        ):
+            _raise_callback_terminal_failure(callback_result)
+        raise error
 
     def wait_for_condition(
         self,

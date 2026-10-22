@@ -1,6 +1,7 @@
 """Tests for the service module."""
 
 import datetime
+import itertools
 from datetime import UTC
 from unittest.mock import Mock, patch
 
@@ -8,11 +9,18 @@ import pytest
 
 from aws_durable_execution_sdk_python.__about__ import __version__
 from aws_durable_execution_sdk_python.exceptions import (
+    CallbackError,
+    CallbackExternalError,
+    CallbackSubmitterError,
+    CallbackTimeoutError,
     CheckpointError,
+    ChildContextError,
     DurableOperationError,
     GetExecutionStateError,
+    InvokeError,
     SerDesError,
     StepError,
+    WaitForConditionError,
 )
 from aws_durable_execution_sdk_python.identifier import OperationIdentifier
 from aws_durable_execution_sdk_python.lambda_service import (
@@ -301,14 +309,139 @@ def test_error_object_to_durable_operation_error_unknown_type_falls_back():
     assert operation_error.message == "Test error"
 
 
-def test_error_object_from_exception_preserves_operation_error_fields():
-    """from_exception keeps a DurableOperationError's typed discriminator/data."""
-    cause = ValueError("boom")
-    step_error = StepError(message="step failed", data="payload")
-    step_error.__cause__ = cause
+def test_error_object_from_exception_records_the_wrapped_error():
+    """An SDK wrapper is recorded as the error it wraps, not as the wrapper."""
+    step_error = StepError(
+        message="step failed",
+        error_type="ValueError",
+        data="payload",
+        stack_trace=["frame"],
+    )
     error_object = ErrorObject.from_exception(step_error)
-    assert error_object.type == "aws_durable_execution_sdk_python.exceptions.StepError"
-    assert error_object.message == "step failed"
+    assert error_object == ErrorObject(
+        message="step failed", type="ValueError", data="payload", stack_trace=["frame"]
+    )
+
+
+@pytest.mark.parametrize(
+    "wrapper_cls",
+    [
+        DurableOperationError,
+        StepError,
+        InvokeError,
+        ChildContextError,
+        WaitForConditionError,
+        CallbackExternalError,
+        CallbackSubmitterError,
+    ],
+)
+def test_error_object_from_exception_unwraps_every_sdk_wrapper(wrapper_cls):
+    wrapper = wrapper_cls(message="card declined", error_type="app.PaymentError")
+    assert ErrorObject.from_exception(wrapper).type == "app.PaymentError"
+
+
+def test_error_object_from_exception_follows_cause_through_wrapper_types():
+    """A wrapper whose error_type names another wrapper is unwrapped via __cause__."""
+    step_error = StepError(message="card declined", error_type="app.PaymentError")
+    child_error = ChildContextError(
+        message="card declined",
+        error_type="aws_durable_execution_sdk_python.exceptions.StepError",
+    )
+    child_error.__cause__ = step_error
+    assert ErrorObject.from_exception(child_error).type == "app.PaymentError"
+
+
+def test_error_object_from_exception_unwraps_to_a_user_cause():
+    """A wrapper with no wrapped type is unwrapped to its __cause__."""
+    step_error = StepError(message="step failed", data="payload")
+    step_error.__cause__ = ValueError("boom")
+    error_object = ErrorObject.from_exception(step_error)
+    assert error_object.type == "ValueError"
+    assert error_object.message == "boom"
+    assert error_object.data is None
+
+
+def test_error_object_from_exception_keeps_deepest_wrapper_without_cause():
+    """A chain that ends at a wrapper records that wrapper's type."""
+    child_error = ChildContextError(
+        message="m", error_type="aws_durable_execution_sdk_python.exceptions.StepError"
+    )
+    child_error.__cause__ = StepError(message="m")
+    assert (
+        ErrorObject.from_exception(child_error).type
+        == "aws_durable_execution_sdk_python.exceptions.StepError"
+    )
+    assert (
+        ErrorObject.from_exception(StepError(message="m")).type
+        == "aws_durable_execution_sdk_python.exceptions.StepError"
+    )
+
+
+def test_error_object_from_exception_unwraps_at_most_16_wrappers():
+    wrapper_classes = [
+        StepError,
+        ChildContextError,
+        InvokeError,
+        CallbackSubmitterError,
+    ]
+
+    def chain(length: int) -> Exception:
+        wrappers = [wrapper_classes[i % 4](message=f"w{i}") for i in range(length)]
+        for outer, inner in itertools.pairwise(wrappers):
+            outer.__cause__ = inner
+        wrappers[-1].__cause__ = ValueError("root")
+        return wrappers[0]
+
+    assert ErrorObject.from_exception(chain(16)).type == "ValueError"
+    # After 16 unwraps the 17th wrapper (index 16) is still a wrapper: reported.
+    deep = ErrorObject.from_exception(chain(20))
+    assert deep.type == "aws_durable_execution_sdk_python.exceptions.StepError"
+    assert deep.message == "w16"
+
+
+def test_error_object_from_exception_stops_at_a_cause_cycle():
+    """A repeat stops the walk at the last error visited before it."""
+    first = StepError(message="first")
+    second = ChildContextError(message="second")
+    first.__cause__ = second
+    second.__cause__ = first
+    error_object = ErrorObject.from_exception(first)
+    assert error_object.message == "second"
+    assert (
+        error_object.type
+        == "aws_durable_execution_sdk_python.exceptions.ChildContextError"
+    )
+
+
+class _UserStepError(StepError):
+    pass
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        CallbackTimeoutError(message="Callback timed out"),
+        CallbackError(message="internal"),
+        _UserStepError(message="user subclass", error_type="ValueError"),
+    ],
+)
+def test_error_object_from_exception_does_not_unwrap_other_errors(error):
+    """Only the SDK's own wrapper classes are unwrapped, matched exactly."""
+    error_object = ErrorObject.from_exception(error)
+    assert error_object.type == f"{type(error).__module__}.{type(error).__qualname__}"
+    assert error_object.message == error.message
+
+
+def test_error_object_from_exception_preserves_operation_error_fields():
+    """A non-wrapper DurableOperationError keeps its own type and data."""
+    timeout = CallbackTimeoutError(message="timed out", data="payload")
+    timeout.__cause__ = ValueError("boom")
+    error_object = ErrorObject.from_exception(timeout)
+    assert (
+        error_object.type
+        == "aws_durable_execution_sdk_python.exceptions.CallbackTimeoutError"
+    )
+    assert error_object.message == "timed out"
     assert error_object.data == "payload"
 
 
