@@ -113,13 +113,13 @@ def microvm_session(
     error that leaves the handler ends the session, and the MicroVM is
     terminated:
 
-    1. A MicroVM error, such as :class:`MicrovmJobFailedError`, that the
-       handler raises itself reaches the caller with its own class.
+    1. A MicroVM error, such as :class:`MicrovmJobFailedError`, that leaves
+       the handler reaches the caller with its own class. This includes a
+       MicroVM error that leaves a child context that the handler created:
+       the SDK records the error that the child context's
+       ``ChildContextError`` wraps.
     2. Any other error reaches the caller as ``ChildContextError``, as from
-       ``run_in_child_context``. This includes a MicroVM error that leaves
-       a child context that the handler created: that child context records
-       ``ChildContextError`` as its error type. The caller then gets the
-       MicroVM error's message, but not its class.
+       ``run_in_child_context``.
 
     The session's value is the handler's return value, checkpointed as the
     child context result. So it must be serializable by the SDK's default
