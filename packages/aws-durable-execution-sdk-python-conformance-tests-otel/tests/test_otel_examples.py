@@ -50,6 +50,12 @@ EXPECTED_MAPPINGS: list[tuple[str, str]] = [
     ("Otel18ChainedInvokeFailure", "otel-invocation-18"),
     ("Otel19ExecutionFailure", "otel-invocation-19"),
     ("Otel20VirtualContext", "otel-invocation-20"),
+    ("Otel21CompletedStepReplay", "otel-invocation-21"),
+    ("Otel22UserFunctionContext", "otel-invocation-22"),
+    ("Otel23CallbackFunctionContext", "otel-invocation-23"),
+    ("Otel24InvocationRetryStatus", "otel-invocation-24"),
+    ("Otel25CallbackFailureWithoutError", "otel-invocation-25"),
+    ("Otel26ExternalCallbackReplay", "otel-invocation-26"),
     ("OtelExecution1Success", "otel-execution-1"),
     ("OtelExecution2WaitResume", "otel-execution-2"),
     ("OtelExecution3Retry", "otel-execution-3"),
@@ -70,6 +76,12 @@ EXPECTED_MAPPINGS: list[tuple[str, str]] = [
     ("OtelExecution18ChainedInvokeFailure", "otel-execution-18"),
     ("OtelExecution19ExecutionFailure", "otel-execution-19"),
     ("OtelExecution20VirtualContext", "otel-execution-20"),
+    ("OtelExecution21CompletedStepReplay", "otel-execution-21"),
+    ("OtelExecution22UserFunctionContext", "otel-execution-22"),
+    ("OtelExecution23CallbackFunctionContext", "otel-execution-23"),
+    ("OtelExecution24InvocationRetryStatus", "otel-execution-24"),
+    ("OtelExecution25CallbackFailureWithoutError", "otel-execution-25"),
+    ("OtelExecution26ExternalCallbackReplay", "otel-execution-26"),
 ]
 EXPECTED_LONG_RUNNING_MAPPINGS: list[tuple[str, str]] = [
     ("OtelLongRunning1Wait", "otel-long-running-1"),
@@ -152,6 +164,12 @@ EXPECTED_MODULES: frozenset[str] = frozenset(
         "otel_18_chained_invoke_failure",
         "otel_19_execution_failure",
         "otel_20_virtual_context",
+        "otel_21_completed_step_replay",
+        "otel_22_user_function_context",
+        "otel_23_callback_function_context",
+        "otel_24_invocation_retry_status",
+        "otel_25_caught_callback_failure_replay",
+        "otel_26_external_callback_completion_replay",
         "otel_long_running_1_wait",
         "otel_long_running_2_retry",
         "otel_long_running_3_callback",
@@ -389,6 +407,25 @@ def test_every_registered_handler_exists(
         assert function_name in exported, (
             f"{module_name} does not define {function_name}"
         )
+
+
+def test_case25_uses_its_caught_replay_handler_without_retargeting_other_cases(
+    template: dict[str, Any],
+) -> None:
+    resources = template["Resources"]
+    for prefix in ("Otel", "OtelExecution"):
+        assert resources[prefix + "25CallbackFailureWithoutError"]["Properties"][
+            "Handler"
+        ] == ("otel_25_caught_callback_failure_replay.handler")
+        assert resources[prefix + "17WaitForCallbackFailure"]["Properties"][
+            "Handler"
+        ] == ("otel_17_wait_for_callback_failure.handler")
+        assert resources[prefix + "24InvocationRetryStatus"]["Properties"][
+            "Handler"
+        ] == ("otel_24_invocation_retry_status.handler")
+        assert resources[prefix + "26ExternalCallbackReplay"]["Properties"][
+            "Handler"
+        ] == ("otel_26_external_callback_completion_replay.handler")
 
 
 def test_template_deploys_only_the_selected_view(template: dict[str, Any]) -> None:
