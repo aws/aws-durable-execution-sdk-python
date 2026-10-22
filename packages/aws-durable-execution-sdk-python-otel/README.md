@@ -14,6 +14,9 @@ OpenTelemetry instrumentation plugin for the [AWS Durable Execution SDK for Pyth
 
 ## Installation
 
+For an existing Core 2.x / OTel 1.x application, start with the
+[Core 3.0 / OTel 2.0 migration guide](../../docs/migration-2.x-to-3.0.md#migrate-opentelemetry-registrations).
+
 When using an ADOT or community OpenTelemetry Lambda layer:
 
 ```bash
