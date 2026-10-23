@@ -262,8 +262,13 @@ class BotoImageService:
                 **create_image_request(self.name, self.bucket, self.key, self.settings)
             )
         except Exception as error:
-            # Two CI runs can build the same image at the same time. The
-            # service rejects the second create with a ValidationException,
+            # Two runs can build the same image at the same time. CI runs the
+            # build only in the Python 3.13 job. All runs of that job share
+            # one serialized concurrency group, cloud-tests-Py313, with
+            # queue: max. So two CI runs never build at the same time. So
+            # this case covers a manual run that overlaps a CI run.
+            #
+            # The service rejects the second create with a ValidationException,
             # because the name exists. The image is then the one this run
             # needs, because its name carries the hash of the inputs. So the
             # run waits for it.
@@ -285,11 +290,16 @@ class BotoImageService:
         try:
             self.microvms.delete_microvm_image(imageIdentifier=self.image_arn)
         except Exception:
-            # Two CI runs can see the same failed image and delete it at the
+            # Two runs can see the same failed image and delete it at the
             # same time. The later delete then fails, because the image is
             # gone or is being deleted. The poll loop handles both states. So
             # the run continues when the image is missing or DELETING after
             # the error.
+            #
+            # CI runs the build only in the Python 3.13 job. All runs of that
+            # job share one serialized concurrency group, cloud-tests-Py313,
+            # with queue: max. So this case covers a manual run that overlaps
+            # a CI run.
             image = self.get()
             if image is None or image.get("state") == "DELETING":
                 self.log(f"MicroVM image {self.name} was deleted by another run")
