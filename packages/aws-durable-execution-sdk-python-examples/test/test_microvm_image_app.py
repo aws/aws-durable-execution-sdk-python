@@ -1,7 +1,8 @@
 """Tests for the handlers of microvm-image/app.py.
 
-The app imports the MicroVM worker. The dev-examples and test-pypi-examples
-environments do not install the worker. So these tests skip there.
+The app imports the MicroVM worker. The examples package does not depend on
+the worker. So an environment without the worker skips these tests. The
+dev-examples environment is one such environment.
 """
 
 import hashlib

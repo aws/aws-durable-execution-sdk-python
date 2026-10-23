@@ -13,9 +13,9 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 
 
-# test-pypi-examples installs the SDK from PyPI. The extras are not published
-# there. So that environment skips this module instead of failing to import
-# the example.
+# The examples package does not depend on the extras. So an environment
+# without the extras skips this module instead of failing to import the
+# example.
 pytest.importorskip("aws_durable_execution_sdk_python_extras")
 
 from src.microvm import microvm_session  # noqa: E402

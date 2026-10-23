@@ -3,7 +3,8 @@
 import pytest
 
 
-# The examples import the extras. test-pypi-examples does not install them.
+# The examples import the extras. So an environment without the extras skips
+# this module.
 pytest.importorskip("aws_durable_execution_sdk_python_extras")
 
 from src.microvm import microvm_run_job, microvm_session  # noqa: E402
