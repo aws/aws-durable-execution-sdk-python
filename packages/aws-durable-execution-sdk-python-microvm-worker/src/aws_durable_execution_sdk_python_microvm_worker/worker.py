@@ -213,8 +213,16 @@ def _failed_call_warning(
        idle time after the call and every job end.
     7. A refusal for now otherwise: the next idle time lasts at least 30
        seconds, unless a job or a resume hook starts the idle time again.
-    8. An unknown outcome otherwise: the refusal continues until the resume
-       hook, or for 30 seconds.
+    8. An unknown outcome after the refusal of jobs ended during the call:
+       a resume hook ended it, or the 30-second limit of a suspend hook's
+       refusal. The listener starts no new refusal after an unknown outcome
+       when ``suspending`` is false. So it accepts jobs. The idle time starts
+       again when the call and every job have ended.
+    9. The same after ``close()`` during the call: the listener accepts
+       jobs. ``_start_idle_time`` starts no idle time. So the listener never
+       calls again.
+    10. An unknown outcome otherwise: the refusal continues until the resume
+        hook, or for 30 seconds.
     """
     if outcome is SuspendOutcome.UNKNOWN:
         if terminating:
@@ -222,6 +230,21 @@ def _failed_call_warning(
                 "the suspend call for the idle MicroVM had an unknown outcome. "
                 "The MicroVM is terminating, so the worker refuses jobs and "
                 "does not try the call again."
+            )
+        if not suspending:
+            if closed:
+                return (
+                    "the suspend call for the idle MicroVM had an unknown "
+                    "outcome. The refusal of jobs already ended during the "
+                    "call, on a resume hook or after 30 seconds. So the worker "
+                    "accepts jobs. The worker is closed, so it does not try "
+                    "the call again."
+                )
+            return (
+                "the suspend call for the idle MicroVM had an unknown outcome. "
+                "The refusal of jobs already ended during the call, on a "
+                "resume hook or after 30 seconds. So the worker accepts jobs, "
+                "and the idle time starts again."
             )
         return (
             "the suspend call for the idle MicroVM had an unknown outcome. The "
