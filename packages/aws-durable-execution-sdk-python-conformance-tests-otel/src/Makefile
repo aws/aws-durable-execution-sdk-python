@@ -1,7 +1,7 @@
 .PHONY: build-Otel1Success build-Otel2WaitResume build-Otel3Retry build-Otel4TerminalFailure \
 	build-Otel5ChildContext build-Otel6Parallel build-Otel7Map build-Otel8HandledFailure \
 	build-Otel9WaitForCondition build-Otel10WaitForCallback build-Otel11ChainedInvoke \
-	build-Otel11InvokeTarget build-Otel12ChildContextFailure build-Otel13ParallelFailure \
+	build-Otel27ChainedInvokeSuspend build-Otel27InvokeTarget build-Otel11InvokeTarget build-Otel12ChildContextFailure build-Otel13ParallelFailure \
 	build-Otel14MapFailure build-Otel15WaitInterrupted build-Otel16WaitForConditionFailure \
 	build-Otel17WaitForCallbackFailure build-Otel18ChainedInvokeFailure \
 	build-Otel18InvokeTarget build-Otel19ExecutionFailure build-Otel20VirtualContext \
@@ -12,7 +12,7 @@
 	build-OtelExecution4TerminalFailure build-OtelExecution5ChildContext \
 	build-OtelExecution6Parallel build-OtelExecution7Map build-OtelExecution8HandledFailure \
 	build-OtelExecution9WaitForCondition build-OtelExecution10WaitForCallback \
-	build-OtelExecution11ChainedInvoke build-OtelExecution11InvokeTarget \
+	build-OtelExecution11ChainedInvoke build-OtelExecution27ChainedInvokeSuspend build-OtelExecution27InvokeTarget build-OtelExecution11InvokeTarget \
 	build-OtelExecution12ChildContextFailure build-OtelExecution13ParallelFailure \
 	build-OtelExecution14MapFailure build-OtelExecution15WaitInterrupted \
 	build-OtelExecution16WaitForConditionFailure \
@@ -29,7 +29,7 @@
 build-Otel1Success build-Otel2WaitResume build-Otel3Retry build-Otel4TerminalFailure \
 build-Otel5ChildContext build-Otel6Parallel build-Otel7Map build-Otel8HandledFailure \
 build-Otel9WaitForCondition build-Otel10WaitForCallback build-Otel11ChainedInvoke \
-build-Otel11InvokeTarget build-Otel12ChildContextFailure build-Otel13ParallelFailure \
+build-Otel27ChainedInvokeSuspend build-Otel27InvokeTarget build-Otel11InvokeTarget build-Otel12ChildContextFailure build-Otel13ParallelFailure \
 build-Otel14MapFailure build-Otel15WaitInterrupted build-Otel16WaitForConditionFailure \
 build-Otel17WaitForCallbackFailure build-Otel18ChainedInvokeFailure \
 build-Otel18InvokeTarget build-Otel19ExecutionFailure build-Otel20VirtualContext \
@@ -40,7 +40,7 @@ build-OtelExecution2WaitResume build-OtelExecution3Retry \
 build-OtelExecution4TerminalFailure build-OtelExecution5ChildContext \
 build-OtelExecution6Parallel build-OtelExecution7Map build-OtelExecution8HandledFailure \
 build-OtelExecution9WaitForCondition build-OtelExecution10WaitForCallback \
-build-OtelExecution11ChainedInvoke build-OtelExecution11InvokeTarget \
+build-OtelExecution11ChainedInvoke build-OtelExecution27ChainedInvokeSuspend build-OtelExecution27InvokeTarget build-OtelExecution11InvokeTarget \
 build-OtelExecution12ChildContextFailure build-OtelExecution13ParallelFailure \
 build-OtelExecution14MapFailure build-OtelExecution15WaitInterrupted \
 build-OtelExecution16WaitForConditionFailure \

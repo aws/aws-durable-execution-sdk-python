@@ -56,6 +56,7 @@ EXPECTED_MAPPINGS: list[tuple[str, str]] = [
     ("Otel24InvocationRetryStatus", "otel-invocation-24"),
     ("Otel25CallbackFailureWithoutError", "otel-invocation-25"),
     ("Otel26ExternalCallbackReplay", "otel-invocation-26"),
+    ("Otel27ChainedInvokeSuspend", "otel-invocation-27"),
     ("OtelExecution1Success", "otel-execution-1"),
     ("OtelExecution2WaitResume", "otel-execution-2"),
     ("OtelExecution3Retry", "otel-execution-3"),
@@ -82,6 +83,7 @@ EXPECTED_MAPPINGS: list[tuple[str, str]] = [
     ("OtelExecution24InvocationRetryStatus", "otel-execution-24"),
     ("OtelExecution25CallbackFailureWithoutError", "otel-execution-25"),
     ("OtelExecution26ExternalCallbackReplay", "otel-execution-26"),
+    ("OtelExecution27ChainedInvokeSuspend", "otel-execution-27"),
 ]
 EXPECTED_LONG_RUNNING_MAPPINGS: list[tuple[str, str]] = [
     ("OtelLongRunning1Wait", "otel-long-running-1"),
@@ -92,6 +94,8 @@ EXPECTED_LONG_RUNNING_MAPPINGS: list[tuple[str, str]] = [
 # Invoke targets carry no requirement of their own; the chained-invoke cases
 # assert on the telemetry the target produces.
 EXPECTED_TARGETS: dict[str, str] = {
+    "Otel27InvokeTarget": "otel-invocation-27-target",
+    "OtelExecution27InvokeTarget": "otel-execution-27-target",
     "Otel11InvokeTarget": "otel-invocation-11-target",
     "Otel18InvokeTarget": "otel-invocation-18-target",
     "OtelExecution11InvokeTarget": "otel-execution-11-target",
@@ -101,6 +105,12 @@ EXPECTED_LONG_RUNNING_TARGETS: dict[str, str] = {
     "OtelLongRunning4InvokeTarget": "otel-long-running-4-target",
 }
 CHAINED_INVOKE_PAIRS: list[tuple[Path, str, str]] = [
+    (TEMPLATE_PATH, "Otel27ChainedInvokeSuspend", "Otel27InvokeTarget"),
+    (
+        TEMPLATE_PATH,
+        "OtelExecution27ChainedInvokeSuspend",
+        "OtelExecution27InvokeTarget",
+    ),
     (TEMPLATE_PATH, "Otel11ChainedInvoke", "Otel11InvokeTarget"),
     (TEMPLATE_PATH, "Otel18ChainedInvokeFailure", "Otel18InvokeTarget"),
     (TEMPLATE_PATH, "OtelExecution11ChainedInvoke", "OtelExecution11InvokeTarget"),
@@ -155,6 +165,7 @@ EXPECTED_MODULES: frozenset[str] = frozenset(
         "otel_9_wait_for_condition",
         "otel_10_wait_for_callback",
         "otel_11_chained_invoke",
+        "otel_27_chained_invoke_suspend",
         "otel_12_child_context_failure",
         "otel_13_parallel_failure",
         "otel_14_map_failure",
