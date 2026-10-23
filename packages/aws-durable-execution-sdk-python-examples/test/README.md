@@ -133,6 +133,16 @@ def test_my_example(durable_runner):
 
 ## Configuration
 
+### Catalog Keys for Deployment
+`scripts/generate_sam_template.py` reads these optional keys from each entry in `examples-catalog.json`:
+- `timeout` - Lambda function timeout in seconds. Without it, the function uses the global timeout of 60 seconds.
+- `usesMicrovm` - `true` marks an example that launches a MicroVM. The template then gives its function and log group the condition `HasMicrovmImage`. The condition holds only when the parameters `MicrovmImageArn` and `MicrovmExecutionRoleArn` are both set. The function receives them as `MICROVM_IMAGE_ARN` and `MICROVM_EXECUTION_ROLE_ARN`. So a deploy without an image leaves the example out of the stack.
+
+`scripts/generate_function_name_map.py` leaves out the `usesMicrovm` examples unless you pass `--include-microvm`. Pass it only when the stack was deployed with an image. A test whose example is missing from the map is skipped.
+
+### Cloud-Only Tests
+`@pytest.mark.durable_execution(..., cloud_only=True)` marks a test that needs a service the local runner cannot provide, such as a MicroVM. Local mode skips the test with the reason `cloud_only: runs only against the deployed function`. Cloud mode runs it.
+
 ### Environment Variables (Cloud Mode)
 - `AWS_REGION` - AWS region for Lambda invocation (default: us-west-2)
 - `LAMBDA_ENDPOINT` - Optional Lambda endpoint URL for testing
