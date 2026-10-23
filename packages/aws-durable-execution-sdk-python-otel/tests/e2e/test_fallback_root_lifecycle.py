@@ -1,13 +1,15 @@
 """Fallback anchor coverage through the decorator and local durable runner."""
 
 import inspect
-from typing import Any
+from typing import Any, Generic, TypeVar
+from collections.abc import Callable
 
 import pytest
 from aws_durable_execution_sdk_python import DurableContext
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.execution import durable_execution
 from aws_durable_execution_sdk_python.plugin import (
+    InvocationStartInfo,
     DurableInstrumentationPlugin,
     InvocationEndInfo,
     InvocationStatus,
@@ -25,6 +27,22 @@ from aws_durable_execution_sdk_python_otel import (
     InvocationOtelPlugin,
     OtelPluginConfig,
 )
+
+
+_PluginT = TypeVar("_PluginT", bound=DurableInstrumentationPlugin)
+
+
+class _RecordingFactory(Generic[_PluginT]):
+    """Build fresh invocation plugins and retain them for teardown assertions."""
+
+    def __init__(self, build: Callable[[], _PluginT]) -> None:
+        self.build = build
+        self.instances: list[_PluginT] = []
+
+    def create_plugin(self, info: InvocationStartInfo) -> _PluginT:
+        plugin = self.build()
+        self.instances.append(plugin)
+        return plugin
 
 
 class _CaptureInvocationEnd(DurableInstrumentationPlugin):
@@ -47,11 +65,13 @@ def test_fallback_anchor_survives_suspension(
     provider.add_span_processor(
         BatchSpanProcessor(exporter, schedule_delay_millis=60000)
     )
-    plugin = plugin_type(
-        OtelPluginConfig(
-            tracer_provider=provider,
-            context_extractor=lambda _: None,
-            enrich_logger=False,
+    factory = _RecordingFactory(
+        lambda: plugin_type(
+            OtelPluginConfig(
+                tracer_provider=provider,
+                context_extractor=lambda _: None,
+                enrich_logger=False,
+            )
         )
     )
     observer = _CaptureInvocationEnd(exporter)
@@ -71,7 +91,9 @@ def test_fallback_anchor_survives_suspension(
             raise ValueError("failed after resume")
         return value
 
-    wrapped = durable_execution(handler, plugins=[plugin, observer])
+    wrapped = durable_execution(
+        handler, plugins=[factory, _RecordingFactory(lambda: observer)]
+    )
     try:
         # Published runners use real time; newer workspace runners default to
         # skipping durable waits. Exercise timeout without advancing that wait.
@@ -155,11 +177,13 @@ def test_public_resume_keeps_anchor_stable_and_processor_sampling_independent(
     provider.add_span_processor(
         BatchSpanProcessor(exporter, schedule_delay_millis=60000)
     )
-    plugin = plugin_type(
-        OtelPluginConfig(
-            tracer_provider=provider,
-            context_extractor=lambda _: None,
-            enrich_logger=False,
+    factory = _RecordingFactory(
+        lambda: plugin_type(
+            OtelPluginConfig(
+                tracer_provider=provider,
+                context_extractor=lambda _: None,
+                enrich_logger=False,
+            )
         )
     )
     observed_probes: list[bool] = []
@@ -168,7 +192,7 @@ def test_public_resume_keeps_anchor_stable_and_processor_sampling_independent(
         def on_start(self, span: Span, parent_context: Any = None) -> None:
             if span.name == "processor-probe":
                 return
-            with plugin._tracer.start_as_current_span(
+            with factory.instances[-1]._tracer.start_as_current_span(
                 "processor-probe", context=parent_context
             ) as probe:
                 observed_probes.append(probe.is_recording())
@@ -187,7 +211,9 @@ def test_public_resume_keeps_anchor_stable_and_processor_sampling_independent(
         durable.wait(Duration.from_seconds(1), name="resume")
         return result
 
-    wrapped = durable_execution(handler, plugins=[plugin, observer])
+    wrapped = durable_execution(
+        handler, plugins=[factory, _RecordingFactory(lambda: observer)]
+    )
     try:
         with DurableFunctionTestRunner(handler=wrapped) as runner:
             arn = runner.run_async(input="{}", timeout=15)

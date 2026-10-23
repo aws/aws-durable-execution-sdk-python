@@ -1,11 +1,10 @@
-# AWS Durable Execution SDK for Python — Durable Execution Telemetry Exporter
+# AWS Durable Execution SDK for Python — Durable Execution Telemetry plugin
 
-Durable Execution Telemetry instrumentation plugin for the AWS Durable
-Execution SDK for Python. A port of the JavaScript SDK's
-`durableExecutionTelemetry()` plugin: it listens to the SDK's instrumentation
-hooks and emits one curated `DurableExecutionTelemetry` record per execution
-to the configured exporters. The wire record keeps the JS camelCase field
-names so records read identically across SDKs.
+Durable Execution Telemetry instrumentation plugin for the AWS Durable Execution SDK for
+Python. A port of the JavaScript SDK's `durableExecutionTelemetry()` plugin: it listens to
+the SDK's instrumentation hooks and emits one curated `DurableExecutionTelemetry` record
+per execution to the configured exporters. The wire record keeps the JS
+camelCase field names so records read identically across SDKs.
 
 ## Install
 
@@ -40,9 +39,16 @@ def handler(event, context):
     ...
 ```
 
+`durable_execution_telemetry()` returns a plugin *factory*, which is what the SDK's
+`plugins` argument takes: the SDK calls its `create_plugin` once per invocation to
+build that invocation's plugin instance. The factory holds the resolved
+configuration and the exporters, so configuration is per handler while record
+state is per invocation. Its type is `DurableExecutionTelemetryPluginFactory`, exported from
+the package root for annotating a value you hold.
+
 With no exporter configured, records are written to the function's own
-CloudWatch log group as single JSON lines (the `LambdaLogExporter` default),
-carrying the name-keyed `operationsByName` summary. The `S3Exporter` writes the
+CloudWatch log group as single JSON lines (the `LambdaLogExporter` default, see
+below), carrying the name-keyed `operationsByName` summary. The `S3Exporter` writes the
 lossless per-occurrence `operations` array, one object per execution
 (upsert-by-execution-name, so re-emission overwrites rather than appends).
 
@@ -74,6 +80,38 @@ the Lambda runtime's boto3 otherwise; none adds a required dependency.
 size limit; omitting it keeps the default. `HttpExporter` and `FileExporter`
 have no default and do not truncate unless a limit is set.
 
+### LambdaLogExporter
+
+Prints one line per record to stdout, which Lambda sends to the function's own
+log group. The line is the Lambda JSON log envelope, with keys in this order:
+
+```json
+{"timestamp":"2026-01-01T00:00:01.234Z","level":"INFO","message":"<compact record JSON>"}
+```
+
+`timestamp` is UTC with millisecond precision and a `Z` suffix. `message` is
+the compact record JSON as a string; parse it to get the record. The exporter
+writes the envelope itself because Lambda captures Python `print` output as
+plain text, in both the plain text and the JSON log format, and Lambda does not
+double-encode output that is already JSON (see
+[Log and monitor Python Lambda functions](https://docs.aws.amazon.com/lambda/latest/dg/python-logging.html)
+and [Lambda log formats](https://docs.aws.amazon.com/lambda/latest/dg/monitoring-cloudwatchlogs-logformat.html)).
+
+`max_record_size_bytes` (default 256,000 bytes) limits the printed line: the
+envelope, including the JSON escaping of `message`, in UTF-8 bytes without the
+trailing newline. Truncation measures that line in one pass. A CloudWatch Logs
+event can be up to 1 MB
+([PutLogEvents](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutLogEvents.html)).
+U+2028 and U+2029 are written as `\u2028` and `\u2029`, so a tool that treats
+them as line breaks still sees one line per record. A lone surrogate (a string
+character with no UTF-8 encoding) is written as its `\uXXXX` escape, so
+printing it never fails. The limit counts these escapes; other exporters'
+limits count the characters as they write them.
+
+The lines have `level` `INFO`. With the JSON log format and an application log
+level of `WARN` or above, Lambda drops them. With the Text log format, Lambda
+does not filter them.
+
 ### CloudWatchLogsExporter
 
 Writes one `PutLogEvents` event per record to `log_group_name`, in a stream
@@ -89,6 +127,13 @@ CloudWatchLogsExporter(log_group_name="/custom/durable-execution-telemetry")
 `PutItem` keyed by `partition_key` (default `pk`) = `executionArn`. With the
 default `sort_key="sk"` (= `emittedAt`) every export adds an item; pass
 `sort_key=None` for a key-only table that upserts. IAM: `dynamodb:PutItem`.
+A number DynamoDB cannot store (more than 38 significant digits, a magnitude
+outside 1E-130 to 9.99...E+125, NaN or Infinity) is written as a string
+attribute holding its JSON text, so it never drops the item. The same field can
+therefore be a number (`N`) in one item and a string (`S`) in another; readers
+that filter or compare on the attribute type should allow for both. An integer
+with more than 38 digits but at most 38 significant digits, such as `10**38`,
+is stored as a number.
 
 ```python
 DynamoDBExporter(table_name="durable-execution-telemetry")
@@ -212,16 +257,116 @@ and `top-level` vs `full-tree` operation detail all mirror the JS plugin.
 Behavior is validated cross-SDK by the `telemetry` conformance suite
 (`aws-durable-execution-conformance-tests-telemetry`).
 
+Record timestamps (`emittedAt`, `startTime`, `endTime`, and each operation's
+`startTime` and `endTime`) use one fixed-width UTC format:
+`YYYY-MM-DDTHH:MM:SS.sssZ`, for example `2026-10-23T18:42:40.784Z`. The
+fraction always has exactly 3 digits, and the suffix is always `Z`. The plugin
+converts each time to UTC and truncates it to milliseconds. JavaScript's
+`Date.prototype.toISOString()` writes the same format. Stores such as DynamoDB
+compare these values as text. Text order equals time order only when every
+value has the same width. So a text comparison of two record timestamps orders
+them by time.
+
+`emittedAt` strictly increases within one invocation. In `on-change` mode, one
+invocation can build two records in the same millisecond. The SQS FIFO
+deduplication id and the default DynamoDB sort key both use `emittedAt`. So
+equal values would drop or overwrite a record. So when the clock has not
+passed the previous `emittedAt`, the plugin writes the previous value plus 1
+millisecond.
+
 > **Note (asynchronous export).** Export rendering, truncation, `export()`, and
-> `flush()` run on one lazy background worker per plugin. Checkpoint hooks only
-> replace that execution's latest pending snapshot and wake the worker.
-> Consecutive `on-change` snapshots for one execution coalesce whenever the
-> worker has not yet claimed the previous one, including when no export is
-> running, so under fast in-memory checkpoints (the local runner) a burst may
-> deliver only its first and latest snapshots. Snapshots from different
-> executions never coalesce with each other. An invocation that emits a record
-> drains every pending snapshot and flushes exporters before it returns;
-> invocations that emit nothing do not start or flush the worker.
+> `flush()` run on one lazy background worker per registered factory. Checkpoint
+> hooks only replace the latest pending snapshot and wake the worker. Consecutive
+> `on-change` snapshots may coalesce while an export is in flight. Every
+> sampled-in invocation end waits for a covering flush to complete after its
+> drain starts, including an end that emitted no record. Overlapping ends may
+> share a flush when it covers both entry snapshots. Only a sampled-out execution
+> neither exports nor flushes. Exporter failures are logged and isolated; this is
+> best-effort telemetry, not a guarantee of delivery to the destination.
+
+> **Note (invocation-end latency under concurrency).** The drain an invocation
+> end performs captures a finite snapshot of work already scheduled across the
+> factory's executions. It waits until those records have been offered to the
+> exporters and a covering flush completes. If a pending record is coalesced, its
+> replacement satisfies the earlier obligation. Once the worker takes that
+> replacement, later records for the same execution belong to a new queue slot.
+> Later drains cannot extend an earlier flush target: they share a covering
+> target or queue a subsequent one. Thus continuing arrivals do not move an
+> earlier drain's finish line. One worker serializes exports and flushes, so
+> invocation-end latency still includes other executions' work present at entry
+> and any earlier flushes. Budget for that finite backlog, especially when an
+> exporter makes a network call per record.
+
+## Error names and causes
+
+Every error in a record (the execution `error`, each `operations[].error`, and
+each `operationsByName.<name>.error`) has the shape
+`{"name": ..., "message": ..., "cause": ...}`, with keys in that order. `name`
+is the SDK's error type, unchanged, and `message` is the error message. `cause`
+has the same shape, recursively, and is present only when the SDK provides a
+cause.
+
+In Python, the plugin hooks carry only an `ErrorObject` (type, message, data,
+stack trace) with no cause, so no error in a Python record has a `cause`: not
+the execution `error`, not an operation error. The exporter does not build a
+cause from other operations or from `ErrorData`. `include_errors=False`
+removes operation errors.
+
+Every `name` and `message` is capped at 8,192 characters, counted as Unicode
+code points (a Python `str` is a sequence of code points, so a cut never splits
+a character). A longer value keeps its first 8,192 code points followed by `…`.
+
+When a record is over its exporter's size limit, truncation first removes every
+`cause` and sets `droppedCauses: true`, then runs its usual steps (operation
+results, then whole operations, then input, then output). Python records have
+no cause, so the first step never changes them. With the name and message
+caps, a record whose operations, input and output are dropped fits any limit of
+64 KB or more, assuming ARN fields of normal length (a few hundred bytes, as in
+real Lambda ARNs) and an error `name` of normal length (a type name such as
+`module.QualName`). Without the `name` assumption, the worst case (a name and
+message of 8,192 control characters, each escaped as `\u00XX`) fits any limit
+of 128 KB (131,072 bytes) or more.
+
+Names are each language's own and differ across SDKs. For example, a step that
+throws `PaymentError` can be reported as `StepError` in JS,
+`aws_durable_execution_sdk_python.exceptions.StepError` or `PaymentError` in
+Python, and `StepFailedException` or `PaymentError` in Java. Query error names
+per SDK, or query on `message` and the `cause` chain.
+
+## Operation results
+
+An opted-in operation `result` (`OperationOverride(result=...)`) is passed to
+the transform as a plain JSON value. When the checkpointed string is the
+default serializer's (`ExtendedTypeSerDes`) envelope, a JSON object whose keys
+are exactly `t` and `v` with a string `t`, it is decoded with that serializer
+and converted to plain JSON:
+
+- `int`: unchanged when its absolute value is at most `2**53 - 1`
+  (9007199254740991), the largest integer a JavaScript reader parses exactly.
+  Otherwise `str(value)`, for example `"12345678901234567"`.
+- `Decimal`: an integer when it is integral and its absolute value is at most
+  `2**53 - 1`. Otherwise a float when the float round-trips exactly and is
+  within DynamoDB's number range (magnitude 1E-130 to 9.99...E+125). Otherwise `str(value)`, for example `"9007199254740993"`,
+  `"12345678901234567.89"` or `"1E+299"`. NaN and Infinity become `null`.
+  Every zero, of any sign or exponent (`Decimal("-0")`, `Decimal("-0E+20")`),
+  becomes `0` and loses its sign.
+- `datetime` and `date`: `isoformat()`. `UUID`: string. `bytes`: base64.
+  `tuple`: list. `BatchResult`: `to_dict()`.
+
+Any other result is parsed as JSON, or kept as the raw string when it is not
+JSON. In parsed JSON, NaN and Infinity become `null`, and an integer whose
+absolute value is greater than `2**53 - 1` becomes its decimal string, as
+above; nothing else changes. A
+result that fails to decode keeps its parsed or raw value, and the rest of the
+record is still emitted.
+
+The hooks do not say which serializer wrote a result, so the envelope is
+recognized by shape alone. A result written by `JsonSerDes` or a custom
+`SerDes` that has this exact shape is decoded too: `{"t": "s", "v": "x"}` is
+reported as `"x"`. Only the core serializer's known tags are decoded, and the
+core may coerce `v` while decoding: `{"t": "b", "v": "yes"}` is reported as
+`true`. An unknown tag, such as `{"t": "temperature", "v": 21.5}`, fails to
+decode and passes through unchanged.
 
 ## Requirements
 

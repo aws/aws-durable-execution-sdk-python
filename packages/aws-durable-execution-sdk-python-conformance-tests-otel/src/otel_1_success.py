@@ -13,7 +13,7 @@ from aws_durable_execution_sdk_python import (
     durable_execution,
     durable_step,
 )
-from common import otel_plugin, require_scenario
+from common import otel_plugin_factory, require_scenario
 
 
 @durable_step
@@ -21,7 +21,7 @@ def complete_successfully(_step_context: StepContext) -> str:
     return "success"
 
 
-@durable_execution(plugins=[otel_plugin()])
+@durable_execution(plugins=[otel_plugin_factory()])
 def handler(event: dict[str, Any], context: DurableContext) -> str:
     require_scenario(event, "success")
     return context.step(complete_successfully(), name="otel-success")

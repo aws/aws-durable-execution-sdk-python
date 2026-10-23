@@ -463,6 +463,48 @@ def test_sends_every_job_over_http_to_a_configured_route(
     assert client.requests("create_microvm_auth_token")[0]["allowedPorts"] == [
         {"port": 3000}
     ]
+    # A single job never resumes its MicroVM. So its launch checkpoint has no
+    # resume mode.
+    launch = result.get_context("build").get_step("build.launch")
+    assert launch.result is not None
+    assert json.loads(launch.result) == {
+        "microvmId": "mvm-1",
+        "endpoint": endpoint.url,
+        "delivery": "http",
+    }
+
+
+@pytest.mark.parametrize("resume_before_delivery", [True, False])
+def test_launch_result_writes_and_reads_a_resume_mode(
+    resume_before_delivery: bool,  # noqa: FBT001 - a pytest parameter
+) -> None:
+    launched = operation.LaunchResult(
+        microvm_id="mvm-1",
+        delivery="http",
+        endpoint="mvm-1.lambda-microvm.us-east-1.on.aws",
+        resume_before_delivery=resume_before_delivery,
+    )
+
+    data = launched.to_dict()
+
+    assert data == {
+        "microvmId": "mvm-1",
+        "endpoint": "mvm-1.lambda-microvm.us-east-1.on.aws",
+        "delivery": "http",
+        "resumeBeforeDelivery": resume_before_delivery,
+    }
+    assert operation.LaunchResult.from_dict(json.loads(json.dumps(data))) == launched
+
+
+@pytest.mark.parametrize("value", ["false", "true", 1, 0, None, [], {}])
+def test_launch_result_reads_only_a_bool_as_a_resume_mode(value: Any) -> None:
+    # In Python True == 1. So a check by equality would read 1 as True.
+    launched = operation.LaunchResult.from_dict(
+        {"microvmId": "mvm-1", "delivery": "http", "resumeBeforeDelivery": value}
+    )
+
+    assert launched.resume_before_delivery is None
+    assert "resumeBeforeDelivery" not in launched.to_dict()
 
 
 def test_keeps_the_configured_ingress_for_http(

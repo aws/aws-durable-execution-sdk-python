@@ -15,9 +15,16 @@ from aws_durable_execution_sdk_python.plugin import (
     PropagationInput,
     PropagationMetadata,
 )
+from tests.test_helpers import plugin_factory, plugin_invocation
 
 
 INFO = PropagationInput("execution", "invoke-1", "target:1", "parent-1")
+
+
+def _collect(plugins: list[DurableInstrumentationPlugin]) -> PropagationMetadata:
+    executor = PluginExecutor([plugin_factory(plugin) for plugin in plugins])
+    with plugin_invocation(executor, execution_arn=INFO.execution_arn):
+        return executor.provide_propagation_metadata(INFO)
 
 
 class _Alpha(DurableInstrumentationPlugin):
@@ -75,31 +82,22 @@ def test_contract_is_immutable_and_existing_plugins_default_to_no_metadata() -> 
         metadata.x_amzn_trace_id = "changed"  # type: ignore[misc]
     legacy = DurableInstrumentationPlugin()
     assert legacy.provide_propagation_metadata(INFO) is None
-    assert (
-        PluginExecutor([legacy]).provide_propagation_metadata(INFO)
-        == PropagationMetadata()
-    )
+    assert _collect([legacy]) == PropagationMetadata()
 
 
 def test_first_non_blank_wins_and_equal_values_do_not_conflict(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    result = PluginExecutor(
-        [_Alpha(None), _Beta("first"), _Gamma("first")]
-    ).provide_propagation_metadata(INFO)
+    result = _collect([_Alpha(None), _Beta("first"), _Gamma("first")])
     assert result == PropagationMetadata("first")
     assert "conflict" not in caplog.text
-    assert PluginExecutor([_Alpha(""), _Beta("later")]).provide_propagation_metadata(
-        INFO
-    ) == PropagationMetadata("later")
+    assert _collect([_Alpha(""), _Beta("later")]) == PropagationMetadata("later")
 
 
 def test_conflicts_name_both_plugins_and_count(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    result = PluginExecutor(
-        [_Alpha("first"), _Beta("second"), _Gamma("third")]
-    ).provide_propagation_metadata(INFO)
+    result = _collect([_Alpha("first"), _Beta("second"), _Gamma("third")])
     assert result == PropagationMetadata("first")
     warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 2
@@ -122,9 +120,7 @@ def test_conflicts_name_both_plugins_and_count(
 def test_ordinary_failures_leave_healthy_plugins_runnable(
     broken: DurableInstrumentationPlugin,
 ) -> None:
-    result = PluginExecutor([broken, _Alpha("healthy")]).provide_propagation_metadata(
-        INFO
-    )
+    result = _collect([broken, _Alpha("healthy")])
     assert result == PropagationMetadata("healthy")
 
 
@@ -138,9 +134,7 @@ def test_collection_is_synchronous_and_uses_readonly_input() -> None:
             calls.append((threading.get_ident(), info))
             return PropagationMetadata("header")
 
-    assert PluginExecutor([Capturing()]).provide_propagation_metadata(
-        INFO
-    ) == PropagationMetadata("header")
+    assert _collect([Capturing()]) == PropagationMetadata("header")
     assert calls == [(threading.get_ident(), INFO)]
 
 
@@ -149,9 +143,7 @@ def test_diagnostic_failures_do_not_replace_healthy_results() -> None:
         "aws_durable_execution_sdk_python.plugin.logger.log",
         side_effect=ValueError("broken log handler"),
     ):
-        result = PluginExecutor(
-            [_Broken(), _Alpha("first"), _Beta("second")]
-        ).provide_propagation_metadata(INFO)
+        result = _collect([_Broken(), _Alpha("first"), _Beta("second")])
     assert result == PropagationMetadata("first")
 
 
@@ -160,9 +152,7 @@ def test_accidental_async_return_is_rejected_and_closed() -> None:
         return PropagationMetadata("async")
 
     coroutine = metadata()
-    result = PluginExecutor(
-        [_InvalidResult(coroutine), _Alpha("sync")]
-    ).provide_propagation_metadata(INFO)
+    result = _collect([_InvalidResult(coroutine), _Alpha("sync")])
     assert result == PropagationMetadata("sync")
     assert getattr(coroutine, "cr_frame") is None
 
@@ -180,7 +170,7 @@ def test_existing_fatal_and_cancellation_policy_is_preserved(
             raise failure()
 
     with pytest.raises(failure):
-        PluginExecutor([Fatal(), _Alpha("later")]).provide_propagation_metadata(INFO)
+        _collect([Fatal(), _Alpha("later")])
 
 
 def test_string_subclass_comparison_cannot_break_aggregation() -> None:
@@ -191,12 +181,12 @@ def test_string_subclass_comparison_cannot_break_aggregation() -> None:
         def __str__(self) -> str:
             return self
 
-    result = PluginExecutor(
+    result = _collect(
         [
             _Alpha(StringWithHooks("first")),
             _Beta(StringWithHooks("second")),
         ]
-    ).provide_propagation_metadata(INFO)
+    )
     assert result == PropagationMetadata("first")
     assert type(result.x_amzn_trace_id) is str
 
@@ -204,10 +194,5 @@ def test_string_subclass_comparison_cannot_break_aggregation() -> None:
 @pytest.mark.parametrize("empty", ["", " ", "\t\n"])
 def test_blank_contribution_does_not_block_later_opaque_value(empty: str) -> None:
     value = "  opaque-header  "
-    assert PluginExecutor([_Alpha(empty), _Beta(value)]).provide_propagation_metadata(
-        INFO
-    ) == PropagationMetadata(value)
-    assert (
-        PluginExecutor([_Alpha(empty)]).provide_propagation_metadata(INFO)
-        == PropagationMetadata()
-    )
+    assert _collect([_Alpha(empty), _Beta(value)]) == PropagationMetadata(value)
+    assert _collect([_Alpha(empty)]) == PropagationMetadata()

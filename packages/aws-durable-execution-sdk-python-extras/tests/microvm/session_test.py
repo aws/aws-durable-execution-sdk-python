@@ -9,6 +9,7 @@ import datetime
 import hashlib
 import json
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import boto3
@@ -1148,3 +1149,268 @@ def test_passes_an_execution_error_of_a_job_wait_through(
     assert result.error is not None
     assert "history does not match" in (result.error.message or "")
     assert client.requests("terminate_microvm") == []
+
+
+IDLE_POLICY = {
+    "maxIdleDurationSeconds": 60,
+    "suspendedDurationSeconds": 3600,
+    "autoResumeEnabled": False,
+}
+
+
+def launch_checkpoint(result: DurableFunctionTestResult) -> dict[str, Any]:
+    """The document that the session's launch step checkpointed."""
+    launch = result.get_context("pipeline").get_step("pipeline.launch")
+    assert launch.result is not None
+    checkpoint: dict[str, Any] = json.loads(launch.result)
+    return checkpoint
+
+
+def handler_across_deploy(
+    client: Any,
+    first: dict[str, Any],
+    later: dict[str, Any],
+    body: Callable[[MicrovmSession, DurableContext, Any], Any],
+) -> tuple[Callable[..., Any], list[int]]:
+    """A durable handler whose first invocation uses the session config
+    ``first``, and every later invocation uses ``later``. So it behaves as a
+    deploy between the launch and a replay. The list counts the invocations.
+    """
+    invocations: list[int] = []
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        invocations.append(len(invocations) + 1)
+        fields = first if len(invocations) == 1 else later
+        try:
+            return {
+                "result": microvm_session(
+                    context,
+                    "pipeline",
+                    config=session_config(client, **fields),
+                    handler=lambda vm, ctx: body(vm, ctx, event),
+                )
+            }
+        except MicrovmError as error:
+            return {"error": type(error).__name__, "message": error.message}
+
+    return handler, invocations
+
+
+class _InvocationLog(list[Any]):
+    """A request list for the fake endpoint. It also records, for each
+    request, the number of the invocation that sent it."""
+
+    def __init__(self, invocations: list[int]) -> None:
+        super().__init__()
+        self._invocations = invocations
+        self.sent_in: list[int] = []
+
+    def append(self, request: Any) -> None:
+        # The request step blocks its invocation until the POST gets an
+        # answer or times out. The fake endpoint answers at once. The local
+        # runner runs one invocation at a time. So the invocation that sent
+        # the request is the last one that started.
+        self.sent_in.append(len(self._invocations))
+        super().append(request)
+
+
+def record_invocation_of_each_request(
+    endpoint: Any, invocations: list[int]
+) -> list[int]:
+    """Return a list that gets the invocation number of each request that
+    ``endpoint`` receives, in order. ``invocations`` is the counter of
+    :func:`handler_across_deploy`."""
+    log = _InvocationLog(invocations)
+    endpoint.requests = log
+    return log.sent_in
+
+
+def two_jobs_with_a_wait_between(
+    vm: MicrovmSession, ctx: DurableContext, event: Any
+) -> Any:
+    """Two jobs with a durable wait between them.
+
+    In the local runner, a durable wait ends the invocation. So the second
+    job is delivered in a later invocation than the first, after the deploy
+    of :func:`handler_across_deploy`."""
+    build = vm.invoke(ctx, "build", job_input=event, options=job("/build"))
+    ctx.wait(Duration.from_seconds(1), name="pause")
+    test = vm.invoke(ctx, "test", job_input=build, options=job())
+    return {"build": build, "test": test, "microvm": vm.microvm_id}
+
+
+def checkpoint_launch_as(monkeypatch: pytest.MonkeyPatch, **fields: Any) -> None:
+    """Make the launch step checkpoint the MicroVM fields of a real launch,
+    plus ``fields``, and no resume mode of its own. So a test controls the
+    launch checkpoint that every replay reads."""
+    original = operation._MicrovmScope._launch_call  # noqa: SLF001
+
+    def launch(self: Any, *args: Any) -> Any:
+        data = original(self, *args).to_dict()
+        data.pop("resumeBeforeDelivery", None)
+        data.update(fields)
+        return SimpleNamespace(to_dict=lambda: data)
+
+    monkeypatch.setattr(operation._MicrovmScope, "_launch_call", launch)  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("fields", "resume_before_delivery"),
+    [
+        ({"auto_suspend_on_idle": True}, True),
+        ({"idle_policy": IDLE_POLICY}, True),
+        ({}, False),
+    ],
+    ids=["auto_suspend_on_idle", "idle_policy", "neither"],
+)
+def test_records_the_resume_mode_in_the_launch_checkpoint(
+    run: Any,
+    fake_client: Any,
+    fields: dict[str, Any],
+    resume_before_delivery: bool,  # noqa: FBT001 - a pytest parameter
+) -> None:
+    client = fake_client()
+
+    result = run(
+        session_handler(session_config(client, **fields), lambda vm, ctx, e: None)
+    )
+
+    assert outcome(result) == {"result": None}
+    assert launch_checkpoint(result) == {
+        "microvmId": "mvm-1",
+        "endpoint": client.endpoint,
+        "delivery": "http",
+        "resumeBeforeDelivery": resume_before_delivery,
+    }
+
+
+@pytest.mark.parametrize(
+    "first",
+    [{"auto_suspend_on_idle": True}, {"idle_policy": IDLE_POLICY}],
+    ids=["auto_suspend_on_idle", "idle_policy"],
+)
+def test_still_resumes_before_each_job_when_a_deploy_turns_suspending_off(
+    run: Any, fake_client: Any, fake_endpoint: Any, first: dict[str, Any]
+) -> None:
+    # The worker reads its idle time from the run hook payload of the launch.
+    # RunMicrovm sets the idle policy at the launch. So the MicroVM still
+    # suspends during the first job's wait, after the deploy.
+    endpoint = fake_endpoint()
+    client = fake_client(
+        endpoint=endpoint.url, states=["RUNNING", "SUSPENDED", "RUNNING"]
+    )
+    handler, invocations = handler_across_deploy(
+        client, first, {}, two_jobs_with_a_wait_between
+    )
+    sent_in = record_invocation_of_each_request(endpoint, invocations)
+
+    result = run(handler, None, [("build", succeed_with(1)), ("test", succeed_with(2))])
+
+    assert outcome(result)["result"]["test"] == 2
+    # The first job runs in the first invocation, with the launch's config.
+    # The second job runs in a later invocation, after the deploy.
+    assert len(sent_in) == 2
+    assert sent_in[0] == 1
+    assert sent_in[1] > sent_in[0]
+    # The first job checks the state once: RUNNING. The second job checks it
+    # after the deploy: SUSPENDED. It resumes the MicroVM, and checks the
+    # state again before delivery: RUNNING.
+    assert len(client.requests("get_microvm")) == 3
+    assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
+    assert len(endpoint.requests) == 2
+    assert launch_checkpoint(result)["resumeBeforeDelivery"] is True
+
+
+def test_makes_no_state_check_when_a_deploy_turns_suspending_on(
+    run: Any, fake_client: Any, fake_endpoint: Any
+) -> None:
+    # The launch asked the worker for no suspend and set no idle policy. So
+    # the MicroVM never suspends, and a state check would need
+    # lambda:GetMicrovm for nothing.
+    endpoint = fake_endpoint()
+    client = fake_client(endpoint=endpoint.url)
+    handler, invocations = handler_across_deploy(
+        client, {}, {"auto_suspend_on_idle": True}, two_jobs_with_a_wait_between
+    )
+    sent_in = record_invocation_of_each_request(endpoint, invocations)
+
+    result = run(handler, None, [("build", succeed_with(1)), ("test", succeed_with(2))])
+
+    assert outcome(result)["result"]["test"] == 2
+    # The first job runs in the first invocation, with the launch's config.
+    # The second job runs in a later invocation, after the deploy.
+    assert len(sent_in) == 2
+    assert sent_in[0] == 1
+    assert sent_in[1] > sent_in[0]
+    [launch] = client.requests("run_microvm")
+    assert "autoSuspendIdleSeconds" not in json.loads(launch["runHookPayload"])
+    # The second job runs after the deploy. It still checks no state.
+    assert client.requests("get_microvm") == []
+    assert len(endpoint.requests) == 2
+    assert launch_checkpoint(result)["resumeBeforeDelivery"] is False
+
+
+@pytest.mark.parametrize(
+    ("suspend", "state_checks"),
+    [(True, 2), (False, 0)],
+    ids=["current-config-can-suspend", "current-config-cannot-suspend"],
+)
+def test_follows_the_current_config_for_a_launch_checkpoint_without_a_resume_mode(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    suspend: bool,  # noqa: FBT001 - a pytest parameter
+    state_checks: int,
+) -> None:
+    # Code that predates the field checkpointed the launch without
+    # resumeBeforeDelivery. That code computed the mode from the current
+    # config on every replay.
+    checkpoint_launch_as(monkeypatch)
+    client = fake_client(endpoint=fake_endpoint().url)
+    config = session_config(client, auto_suspend_on_idle=suspend)
+
+    result = run(
+        session_handler(config, two_jobs),
+        None,
+        [("build", succeed_with(1)), ("test", succeed_with(2))],
+    )
+
+    assert outcome(result)["result"]["test"] == 2
+    assert "resumeBeforeDelivery" not in launch_checkpoint(result)
+    assert len(client.requests("get_microvm")) == state_checks
+
+
+@pytest.mark.parametrize(
+    ("recorded", "suspend", "state_checks"),
+    [("false", False, 0), (1, False, 0), (0, True, 2)],
+    ids=["string-false", "one", "zero"],
+)
+def test_follows_the_current_config_for_a_resume_mode_that_is_not_a_bool(
+    run: Any,
+    fake_client: Any,
+    fake_endpoint: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: Any,
+    suspend: bool,  # noqa: FBT001 - a pytest parameter
+    state_checks: int,
+) -> None:
+    # Only a bool is a resume mode. A truthy or falsy value of another type
+    # must not decide whether a job checks the MicroVM state. In Python
+    # True == 1, so a check by equality would read 1 as True and 0 as False.
+    checkpoint_launch_as(monkeypatch, resumeBeforeDelivery=recorded)
+    client = fake_client(endpoint=fake_endpoint().url)
+    config = session_config(client, auto_suspend_on_idle=suspend)
+
+    result = run(
+        session_handler(config, two_jobs),
+        None,
+        [("build", succeed_with(1)), ("test", succeed_with(2))],
+    )
+
+    assert outcome(result)["result"]["test"] == 2
+    checkpointed = launch_checkpoint(result)["resumeBeforeDelivery"]
+    assert type(checkpointed) is type(recorded)
+    assert checkpointed == recorded
+    assert len(client.requests("get_microvm")) == state_checks

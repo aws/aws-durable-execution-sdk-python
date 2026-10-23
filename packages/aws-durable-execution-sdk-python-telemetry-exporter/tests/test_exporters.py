@@ -10,7 +10,9 @@ both the public re-export path and the concrete submodules.
 
 from __future__ import annotations
 
+import datetime
 import json
+import re
 from typing import Any
 
 import pytest
@@ -31,6 +33,9 @@ from aws_durable_execution_sdk_python_telemetry_exporter.exporters.s3_exporter i
 )
 from aws_durable_execution_sdk_python_telemetry_exporter.exporters.s3_exporter import (
     S3Partitioning as S3PartitioningFromModule,
+)
+from aws_durable_execution_sdk_python_telemetry_exporter.operations_index import (
+    with_operations_by_name,
 )
 
 
@@ -88,22 +93,45 @@ def test_every_exporter_is_re_exported_from_the_package_root():
 # -- LambdaLogExporter --------------------------------------------------------
 
 
-def test_lambda_log_default_size_and_render_is_operations_by_name():
+def test_lambda_log_default_size_and_render_is_the_envelope():
     exporter = LambdaLogExporter()
     assert exporter.max_record_size_bytes == 256_000
-    shaped = exporter.render(_record())
+    envelope = exporter.render(_record())
+    # render returns the printed envelope, so truncation measures the line.
+    assert list(envelope) == ["timestamp", "level", "message"]
+    shaped = json.loads(envelope["message"])
     assert "operations" not in shaped
     assert shaped["operationsByName"]["greet"]["count"] == 1
 
 
-def test_lambda_log_export_prints_compact_json_line(capsys):
-    LambdaLogExporter().export(_record())
-    out = capsys.readouterr().out.strip()
+def test_lambda_log_export_prints_one_envelope_line(capsys):
+    exporter = LambdaLogExporter()
+    before = datetime.datetime.now(datetime.UTC)
+    exporter.export(_record())
+    after = datetime.datetime.now(datetime.UTC)
+    out = capsys.readouterr().out
+    assert out.endswith("\n") and out.count("\n") == 1
+    line = out.rstrip("\n")
     # single compact JSON line, no whitespace separators
-    assert ", " not in out and '": ' not in out
-    parsed = json.loads(out)
-    assert parsed["recordType"] == "DurableExecutionTelemetry"
-    assert "operationsByName" in parsed
+    assert ", " not in line and '": ' not in line
+    envelope = json.loads(line)
+    assert list(envelope) == ["timestamp", "level", "message"]
+    assert envelope["level"] == "INFO"
+    # message parses back to exactly the rendered record
+    assert isinstance(envelope["message"], str)
+    expected = with_operations_by_name(_record())
+    assert json.loads(envelope["message"]) == expected
+    assert envelope["message"] == json.dumps(
+        expected, separators=(",", ":"), ensure_ascii=False
+    )
+    assert envelope["message"] == exporter.render(_record())["message"]
+    # UTC, millisecond precision, Z suffix
+    ts = envelope["timestamp"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", ts)
+    parsed_ts = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    assert parsed_ts.utcoffset() == datetime.timedelta(0)
+    assert before.replace(microsecond=before.microsecond // 1000 * 1000) <= parsed_ts
+    assert parsed_ts <= after
 
 
 def test_lambda_log_custom_size_and_flush_noop():

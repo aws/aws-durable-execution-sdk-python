@@ -34,6 +34,7 @@ dist/
 **/build/
 **/*.zip
 .aws-sam/
+.microvm-image-build/
 **/template.generated.json
 
 .env

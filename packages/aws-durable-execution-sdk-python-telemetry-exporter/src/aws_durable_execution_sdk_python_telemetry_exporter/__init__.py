@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Durable Execution Telemetry instrumentation plugin.
-
-Instruments the AWS Durable Execution Python SDK.
-"""
+"""Durable Execution Telemetry instrumentation plugin for the AWS Durable Execution Python SDK."""
 
 from aws_durable_execution_sdk_python_telemetry_exporter.__about__ import __version__
 from aws_durable_execution_sdk_python_telemetry_exporter.exporters import (
@@ -36,6 +33,7 @@ from aws_durable_execution_sdk_python_telemetry_exporter.operations_index import
 )
 from aws_durable_execution_sdk_python_telemetry_exporter.plugin import (
     DurableExecutionTelemetryPlugin,
+    DurableExecutionTelemetryPluginFactory,
     durable_execution_telemetry,
 )
 from aws_durable_execution_sdk_python_telemetry_exporter.truncation import (
@@ -82,6 +80,7 @@ __all__ = [
     "SQSExporter",
     "DurableExecutionTelemetryConfig",
     "DurableExecutionTelemetryPlugin",
+    "DurableExecutionTelemetryPluginFactory",
     "apply_operations_format",
     "build_operations_by_name",
     "truncate_record",

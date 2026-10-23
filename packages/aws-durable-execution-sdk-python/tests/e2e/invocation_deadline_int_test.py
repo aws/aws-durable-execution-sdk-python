@@ -47,6 +47,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
+    DurableInstrumentationPluginFactory,
     InvocationEndInfo,
     OperationChangeInfo,
 )
@@ -54,6 +55,7 @@ from aws_durable_execution_sdk_python.retries import RetryPresets
 from aws_durable_execution_sdk_python.deadline import InvocationDeadline
 from aws_durable_execution_sdk_python.state import ExecutionState
 from aws_durable_execution_sdk_python.threading import CompletionEvent
+from tests.test_helpers import plugin_factory
 
 
 class RecordingService:
@@ -419,8 +421,8 @@ def test_noncooperative_work_is_joined_and_other_invocations_stay_healthy(
             entered.set()
             assert release.wait(5)
 
-    plugins: list[DurableInstrumentationPlugin] = (
-        [HeldUpdate()] if blocked_part == "plugin" else []
+    plugins: list[DurableInstrumentationPluginFactory] = (
+        [plugin_factory(HeldUpdate())] if blocked_part == "plugin" else []
     )
     if blocked_part == "transport":
         service.block_transport.set()
@@ -500,7 +502,7 @@ def test_accepted_terminal_result_survives_slow_delivery_hook(
         def on_invocation_end(self, info: InvocationEndInfo) -> None:
             ends.append(info)
 
-    @durable_execution(plugins=[HeldUpdate()])  # type: ignore[call-arg]
+    @durable_execution(plugins=[plugin_factory(HeldUpdate())])  # type: ignore[call-arg]
     def handler(_event: Any, _ctx: DurableContext) -> str:
         if fail:
             raise ValueError("a large persisted failure" * 10)
@@ -597,7 +599,7 @@ def test_terminal_checkpoint_in_flight_at_cutoff_keeps_its_outcome(
         return "a large persisted result" * 10
 
     service = TerminalService()
-    wrapped = durable_execution(handler, plugins=[Recorder()])
+    wrapped = durable_execution(handler, plugins=[plugin_factory(Recorder())])
     with ThreadPoolExecutor(max_workers=1) as callers:
         future = callers.submit(wrapped, service.event(), context())
         try:

@@ -27,6 +27,12 @@ from aws_durable_execution_sdk_python_otel.log_filter import (
 from aws_durable_execution_sdk_python_otel.invocation_plugin import (
     InvocationOtelPlugin,
 )
+from aws_durable_execution_sdk_python_otel.plugin_factory import (
+    EXECUTION_OTEL_PLUGIN_FACTORY,
+    INVOCATION_OTEL_PLUGIN_FACTORY,
+    ExecutionOtelPluginFactory,
+    InvocationOtelPluginFactory,
+)
 from aws_durable_execution_sdk_python_otel.provider import (
     ProviderResult,
     create_tracer_provider,
@@ -35,12 +41,16 @@ from aws_durable_execution_sdk_python_otel.provider import (
 
 __all__ = [
     "__version__",
+    "EXECUTION_OTEL_PLUGIN_FACTORY",
+    "INVOCATION_OTEL_PLUGIN_FACTORY",
     "ContextExtractor",
     "DeterministicIdGenerator",
     "ExecutionOtelPlugin",
+    "ExecutionOtelPluginFactory",
     "ExtractedContext",
     "OtelPluginConfig",
     "InvocationOtelPlugin",
+    "InvocationOtelPluginFactory",
     "OtelContextLogFilter",
     "Sampling",
     "ProviderResult",

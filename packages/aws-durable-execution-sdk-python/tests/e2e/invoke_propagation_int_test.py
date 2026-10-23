@@ -28,9 +28,12 @@ from aws_durable_execution_sdk_python.lambda_service import (
 )
 from aws_durable_execution_sdk_python.plugin import (
     DurableInstrumentationPlugin,
+    DurableInstrumentationPluginFactory,
+    InvocationStartInfo,
     PropagationInput,
     PropagationMetadata,
 )
+from tests.test_helpers import plugin_factory
 
 
 ARN = (
@@ -110,8 +113,8 @@ class RecordingService:
 
 
 class RecordingPlugin(DurableInstrumentationPlugin):
-    def __init__(self, mode: str = "value") -> None:
-        self.calls: list[PropagationInput] = []
+    def __init__(self, mode: str, calls: list[PropagationInput]) -> None:
+        self.calls = calls
         self.mode = mode
 
     def provide_propagation_metadata(
@@ -125,6 +128,17 @@ class RecordingPlugin(DurableInstrumentationPlugin):
         if self.mode == "blank":
             return PropagationMetadata(" \t\n")
         return PropagationMetadata(f"header-{len(self.calls)}")
+
+
+class RecordingPluginFactory:
+    """Create fresh plugins that contribute to one cross-invocation recorder."""
+
+    def __init__(self, mode: str = "value") -> None:
+        self.calls: list[PropagationInput] = []
+        self.mode = mode
+
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        return RecordingPlugin(self.mode, self.calls)
 
 
 def body(_event: Any, context: DurableContext) -> Any:
@@ -149,7 +163,7 @@ def test_public_invoke_pending_and_terminal_replay_do_not_recollect(
     monkeypatch: pytest.MonkeyPatch, terminal: OperationStatus
 ) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
-    plugin = RecordingPlugin()
+    plugin = RecordingPluginFactory()
     service = RecordingService()
     handler = durable_execution(body, plugins=[plugin])
     with patch(
@@ -203,11 +217,11 @@ def test_public_invoke_without_a_contribution_keeps_legacy_request(
     monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
-    plugin = RecordingPlugin(mode)
-    plugins: list[DurableInstrumentationPlugin] = (
+    plugin = RecordingPluginFactory(mode)
+    plugins: list[DurableInstrumentationPluginFactory] = (
         []
         if mode == "no-plugins"
-        else [DurableInstrumentationPlugin()]
+        else [plugin_factory(DurableInstrumentationPlugin())]
         if mode == "absent-hook"
         else [plugin]
     )
@@ -229,7 +243,7 @@ def test_public_invoke_recollects_after_failed_uncommitted_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
-    plugin = RecordingPlugin()
+    plugin = RecordingPluginFactory()
     service = RecordingService()
     handler = durable_execution(body, plugins=[plugin])
     with patch(
@@ -258,7 +272,7 @@ def test_blank_plugin_does_not_mask_later_header_on_real_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
-    blank, healthy = RecordingPlugin("blank"), RecordingPlugin()
+    blank, healthy = RecordingPluginFactory("blank"), RecordingPluginFactory()
     service = RecordingService()
     handler = durable_execution(body, plugins=[blank, healthy])
     with patch(

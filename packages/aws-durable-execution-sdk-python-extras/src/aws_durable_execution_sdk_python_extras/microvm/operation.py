@@ -35,6 +35,12 @@ from aws_durable_execution_sdk_python.retries import RetryDecision
 from aws_durable_execution_sdk_python.serdes import JsonSerDes
 from botocore.exceptions import ClientError
 
+from aws_durable_execution_sdk_python_extras.microvm.aws_errors import (
+    add_request_id,
+    decide_on_original_error,
+    error_code,
+    with_request_id,
+)
 from aws_durable_execution_sdk_python_extras.microvm.config import (
     MAX_MICROVM_DURATION_SECONDS,
     LambdaMicrovmsClient,
@@ -60,6 +66,7 @@ from aws_durable_execution_sdk_python_extras.microvm.lifecycle import (
     EnsureRunningOptions,
     MicrovmStateError,
     ensure_running,
+    microvm_not_found,
 )
 from aws_durable_execution_sdk_python_extras.microvm.request import (
     DEFAULT_MICROVM_JOB_PATH,
@@ -134,8 +141,9 @@ and a segment of three dots are not dot segments.
 class LaunchResult:
     """What the launch step checkpoints.
 
-    Wire names: ``microvmId``, ``endpoint``, and ``delivery``. The JavaScript
-    operation checkpoints the same document.
+    Wire names: ``microvmId``, ``endpoint``, ``delivery``, and
+    ``resumeBeforeDelivery``. The JavaScript operation checkpoints the same
+    document.
     """
 
     microvm_id: str
@@ -144,15 +152,29 @@ class LaunchResult:
     so every replay follows the delivery that the launch prepared for."""
     endpoint: str | None = None
     """The MicroVM's endpoint. Present only for HTTP delivery."""
+    resume_before_delivery: bool | None = None
+    """Whether each session job checks the MicroVM state, and resumes a
+    suspended MicroVM, before delivery. Only a session launch records it.
+    Replay reads it from the checkpoint. So every replay follows the mode that
+    the launch prepared the MicroVM for. A launch checkpoint from code that
+    predates this field does not have it."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LaunchResult:
         # A checkpoint without a delivery gets an empty one. The operation
         # then terminates the MicroVM as for any delivery it does not know.
+        # Only a bool is a resume mode. In Python True == 1, so a check by
+        # equality would accept 1. Any other value reads as no resume mode.
+        resume_before_delivery = data.get("resumeBeforeDelivery")
         return cls(
             microvm_id=data["microvmId"],
             delivery=data.get("delivery", ""),
             endpoint=data.get("endpoint"),
+            resume_before_delivery=(
+                resume_before_delivery
+                if isinstance(resume_before_delivery, bool)
+                else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -160,6 +182,10 @@ class LaunchResult:
         if self.endpoint is not None:
             data["endpoint"] = self.endpoint
         data["delivery"] = self.delivery
+        # A microvm() launch records no resume mode. So its checkpoint has no
+        # such key, as in the JavaScript operation.
+        if self.resume_before_delivery is not None:
+            data["resumeBeforeDelivery"] = self.resume_before_delivery
         return data
 
 
@@ -232,11 +258,16 @@ def microvm(
         TypeError: When ``job_input`` is not JSON-serializable. No durable
             operation starts.
         MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
+        MicrovmNotRunningError: When ``CreateMicrovmAuthToken`` reports that
+            the MicroVM no longer exists. It is a ``MicrovmDeliveryError``.
         MicrovmDeliveryError: When the HTTP delivery fails after all retries,
             or the route answers a 4xx status such as 404, or a redirect.
         MicrovmJobFailedError: When the MicroVM reports a failure, or sends a
             result that is not valid JSON.
         MicrovmTimeoutError: When no result or heartbeat arrives in time.
+
+    The message of a failed Lambda MicroVMs call ends with its request ID,
+    for example ``RunMicrovm request ID: <id>.``.
     """
     scope = _OperationScope.create(context, name, job_input, config)
 
@@ -252,6 +283,22 @@ def microvm(
 _STATE_ERROR_TYPE = f"{MicrovmStateError.__module__}.{MicrovmStateError.__qualname__}"
 """The error type that a request step checkpoints for a MicroVM that can no
 longer run a job. The SDK records the fully-qualified class name."""
+
+
+def step_retry_strategy(
+    config: MicrovmBaseConfig,
+) -> Callable[[Exception, int], RetryDecision]:
+    """Return the retry strategy of the launch, request, and terminate steps.
+
+    It is the configured strategy, or :func:`default_microvm_retry_strategy`.
+    It decides on the error that botocore raised, without the request ID in
+    the message. See :func:`decide_on_original_error`. A session passes the
+    same strategy to each job. So this applies to every AWS call of both
+    operations.
+    """
+    return decide_on_original_error(
+        config.retry_strategy or default_microvm_retry_strategy
+    )
 
 
 def _validate_base(name: str, config: MicrovmBaseConfig, timeout: Duration) -> int:
@@ -363,11 +410,15 @@ class _MicrovmScope:
         payload: str,
         delivery: str,
         idle_policy: Mapping[str, Any] | None = None,
+        resume_before_delivery: bool | None = None,
     ) -> LaunchResult:
         """Run the launch step, ``<name>.launch``.
 
         The client token is the SHA-256 hex digest of ``token_source``. It
         must be unique per launch and stable across retries and replays.
+
+        ``resume_before_delivery`` is the resume mode to record. Only a
+        session launch sets it.
 
         Raises:
             MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
@@ -376,7 +427,11 @@ class _MicrovmScope:
             return LaunchResult.from_dict(
                 child.step(
                     lambda _: self._launch_call(
-                        token_source, payload, delivery, idle_policy
+                        token_source,
+                        payload,
+                        delivery,
+                        idle_policy,
+                        resume_before_delivery,
                     ).to_dict(),
                     name=f"{self.name}.launch",
                     config=StepConfig(
@@ -418,6 +473,11 @@ class _MicrovmScope:
         resumes a suspended one. It then sends the job to the endpoint that
         ``GetMicrovm`` reports. A session sets it when its MicroVM can be
         suspended.
+
+        ``GetMicrovm``, ``ResumeMicrovm``, and ``CreateMicrovmAuthToken``
+        answer ``ResourceNotFoundException`` for a removed MicroVM. An
+        attempt raises ``MicrovmStateError`` for that answer of any of the
+        three calls. The default retry strategy does not retry it.
 
         Raises:
             MicrovmNotRunningError: When the MicroVM can no longer run a job.
@@ -470,22 +530,42 @@ class _MicrovmScope:
 
                 endpoint = running(retry_window_seconds) or endpoint
                 recheck = running
-            send_job(
-                SendJobOptions(
-                    client=client,
-                    microvm_id=launched.microvm_id,
-                    endpoint=endpoint,
-                    path=path,
-                    port=port,
-                    body=body,
-                    retry_window_seconds=retry_window_seconds,
-                    remaining_seconds=remaining_seconds,
-                    logger=step_context.logger,
-                    opener=self.config.opener,
-                    window_started_at=window_started_at,
-                    recheck=recheck,
+            # Only CreateMicrovmAuthToken can raise ResourceNotFoundException
+            # here:
+            #
+            # 1. _create_auth_token raises that answer unchanged.
+            # 2. send_job calls new_token() outside any try. So the error
+            #    leaves send_job unchanged.
+            # 3. _run_with_limit re-raises the same error object.
+            # 4. ensure_running turns the same answer of GetMicrovm and
+            #    ResumeMicrovm into MicrovmStateError. So neither call raises
+            #    a ClientError with that code.
+            #
+            # So the step raises MicrovmStateError for CreateMicrovmAuthToken.
+            # The default retry strategy does not retry that error.
+            try:
+                send_job(
+                    SendJobOptions(
+                        client=client,
+                        microvm_id=launched.microvm_id,
+                        endpoint=endpoint,
+                        path=path,
+                        port=port,
+                        body=body,
+                        retry_window_seconds=retry_window_seconds,
+                        remaining_seconds=remaining_seconds,
+                        logger=step_context.logger,
+                        opener=self.config.opener,
+                        window_started_at=window_started_at,
+                        recheck=recheck,
+                    )
                 )
-            )
+            except ClientError as error:
+                if error_code(error) == "ResourceNotFoundException":
+                    raise microvm_not_found(
+                        launched.microvm_id, "CreateMicrovmAuthToken", error
+                    ) from error
+                raise
 
         try:
             child.step(
@@ -540,6 +620,7 @@ class _MicrovmScope:
         payload: str,
         delivery: str,
         idle_policy: Mapping[str, Any] | None,
+        resume_before_delivery: bool | None = None,
     ) -> LaunchResult:
         """Call ``RunMicrovm``, and return what the launch step checkpoints."""
         over_http = delivery == HTTP_DELIVERY
@@ -576,19 +657,27 @@ class _MicrovmScope:
             request["logging"] = dict(config.logging)
         if idle_policy is not None:
             request["idlePolicy"] = dict(idle_policy)
-        response = self._client().run_microvm(**request)
+        try:
+            response = self._client().run_microvm(**request)
+        except ClientError as error:
+            # add_request_id returns the error, or a copy whose __cause__ is
+            # the error. So the raise has no `from`.
+            raise add_request_id("RunMicrovm", error)
+        # A missing field fails the step. So the message names the request
+        # ID of the answer.
         microvm_id = response.get("microvmId")
         if not microvm_id:
             msg = "RunMicrovm returned no microvmId"
-            raise RuntimeError(msg)
+            raise RuntimeError(with_request_id(msg, "RunMicrovm", response))
         endpoint = response.get("endpoint")
         if over_http and not endpoint:
             msg = "RunMicrovm returned no endpoint"
-            raise RuntimeError(msg)
+            raise RuntimeError(with_request_id(msg, "RunMicrovm", response))
         return LaunchResult(
             microvm_id=microvm_id,
             delivery=delivery,
             endpoint=endpoint if over_http else None,
+            resume_before_delivery=resume_before_delivery,
         )
 
     def _terminate_call(self, microvm_id: str) -> None:
@@ -597,11 +686,10 @@ class _MicrovmScope:
         except ClientError as error:
             # TerminateMicrovm succeeds for a terminated MicroVM. The service
             # answers ResourceNotFoundException for a MicroVM whose record it
-            # has removed. Either way, the MicroVM is gone.
-            if error.response.get("Error", {}).get("Code") != (
-                "ResourceNotFoundException"
-            ):
-                raise
+            # has removed. Either way, the MicroVM is gone. Any other error
+            # gets the request ID. See add_request_id.
+            if error_code(error) != "ResourceNotFoundException":
+                raise add_request_id("TerminateMicrovm", error)
 
     def _connector_arn(self, connector: str) -> str:
         return (
@@ -653,7 +741,7 @@ class _OperationScope(_MicrovmScope):
             heartbeat_timeout_seconds=heartbeat_timeout_seconds,
             request=request,
             retry_window_seconds=retry_window_seconds,
-            retry_strategy=config.retry_strategy or default_microvm_retry_strategy,
+            retry_strategy=step_retry_strategy(config),
         )
 
     def run_job(self, child: DurableContext, job_input: Any) -> Any:

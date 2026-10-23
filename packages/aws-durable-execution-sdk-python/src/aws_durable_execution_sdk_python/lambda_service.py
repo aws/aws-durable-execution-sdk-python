@@ -217,7 +217,7 @@ class ErrorObject:
         )
 
     @classmethod
-    def from_exception(cls, exception: Exception) -> ErrorObject:
+    def from_exception(cls, exception: BaseException) -> ErrorObject:
         # SerDesError and subclasses pin to the base discriminator so replay
         # always reconstructs them as SerDesError.
         if isinstance(exception, SerDesError):

@@ -91,31 +91,58 @@ class MicrovmLaunchError(MicrovmError):
     then runs the job, and the operation cannot terminate it, because it never
     learned the MicroVM's ID. The MicroVM ends at its maximum duration. So a
     caller that runs the job again after this error can run it twice.
+
+    When the service answered, the message ends with
+    ``RunMicrovm request ID: <id>.``.
     """
 
 
 class MicrovmDeliveryError(MicrovmError):
-    """The job could not be delivered to the MicroVM."""
+    """The job could not be delivered to the MicroVM.
+
+    When a Lambda MicroVMs call failed, the message ends with its request
+    ID, for example ``CreateMicrovmAuthToken request ID: <id>.``.
+    """
 
 
 class MicrovmNotRunningError(MicrovmDeliveryError):
-    """The session's MicroVM can no longer run a job.
+    """The MicroVM can no longer run a job.
 
-    The MicroVM is terminating, terminated, or removed. A session MicroVM
-    lives at most its session ``timeout`` plus 5 minutes, and never longer
-    than 8 hours, running or suspended. A ``TerminateMicrovm`` call from
-    outside the session ends it too. It is a :class:`MicrovmDeliveryError`,
-    so code that catches delivery failures also catches it.
+    The MicroVM is terminating, terminated, or removed. A MicroVM lives at
+    most its ``timeout`` plus 5 minutes, and never longer than 8 hours,
+    running or suspended. A ``TerminateMicrovm`` call from outside the
+    operation ends it too. It is a :class:`MicrovmDeliveryError`, so code
+    that catches delivery failures also catches it. A later attempt finds
+    the same state, so the job is not retried. To continue a session, start
+    a new session.
 
-    Only a session that checks the MicroVM state before each job raises it.
-    It checks when ``auto_suspend_on_idle`` is ``True``, or when an
-    ``idle_policy`` is set. A later attempt finds the same state, so the job
-    is not retried. To continue, start a new session.
+    Two checks raise it:
 
-    Without the check, the session makes no ``GetMicrovm`` call. The endpoint
-    of a terminated MicroVM answers 502, and the request step retries a 502
-    as a MicroVM that is still starting. So the job fails with a plain
-    :class:`MicrovmDeliveryError`, after the retries of both tiers.
+    1. A session that checks the MicroVM state before each job. It checks
+       when ``auto_suspend_on_idle`` is ``True``, or when an ``idle_policy``
+       is set. ``GetMicrovm`` or ``ResumeMicrovm`` then reports the state.
+    2. Every job over HTTP, of a session or of :func:`microvm`. The request
+       step calls ``CreateMicrovmAuthToken`` before the first request, and
+       again after a 401 or 403. That call can answer
+       ``ResourceNotFoundException``.
+
+    The message ends with the request ID of the call that reported the
+    state, for example ``GetMicrovm request ID: <id>.``. The core SDK
+    records only the message of the failure. So a support case can quote
+    the request ID from the message, on the first run and on replay.
+
+    Without the state check, a session makes no ``GetMicrovm`` call. The
+    request step still calls ``CreateMicrovmAuthToken`` first. When that
+    call answers ``ResourceNotFoundException``, the job fails with this
+    error. When it returns a token, the request goes to the endpoint. The
+    endpoint of a terminated MicroVM answers 502, and the request step
+    retries a 502 as a MicroVM that is still starting. So the job then fails
+    with a plain :class:`MicrovmDeliveryError`, after the retries of both
+    tiers.
+
+    The live service's answer of ``CreateMicrovmAuthToken`` for a removed
+    MicroVM is not verified. The API model lists
+    ``ResourceNotFoundException`` for that call.
     """
 
 
