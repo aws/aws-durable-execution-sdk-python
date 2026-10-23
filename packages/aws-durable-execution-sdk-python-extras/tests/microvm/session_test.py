@@ -1197,6 +1197,49 @@ def handler_across_deploy(
     return handler, invocations
 
 
+class _InvocationLog(list[Any]):
+    """A request list for the fake endpoint. It also records, for each
+    request, the number of the invocation that sent it."""
+
+    def __init__(self, invocations: list[int]) -> None:
+        super().__init__()
+        self._invocations = invocations
+        self.sent_in: list[int] = []
+
+    def append(self, request: Any) -> None:
+        # The request step blocks its invocation until the POST gets an
+        # answer or times out. The fake endpoint answers at once. The local
+        # runner runs one invocation at a time. So the invocation that sent
+        # the request is the last one that started.
+        self.sent_in.append(len(self._invocations))
+        super().append(request)
+
+
+def record_invocation_of_each_request(
+    endpoint: Any, invocations: list[int]
+) -> list[int]:
+    """Return a list that gets the invocation number of each request that
+    ``endpoint`` receives, in order. ``invocations`` is the counter of
+    :func:`handler_across_deploy`."""
+    log = _InvocationLog(invocations)
+    endpoint.requests = log
+    return log.sent_in
+
+
+def two_jobs_with_a_wait_between(
+    vm: MicrovmSession, ctx: DurableContext, event: Any
+) -> Any:
+    """Two jobs with a durable wait between them.
+
+    In the local runner, a durable wait ends the invocation. So the second
+    job is delivered in a later invocation than the first, after the deploy
+    of :func:`handler_across_deploy`."""
+    build = vm.invoke(ctx, "build", job_input=event, options=job("/build"))
+    ctx.wait(Duration.from_seconds(1), name="pause")
+    test = vm.invoke(ctx, "test", job_input=build, options=job())
+    return {"build": build, "test": test, "microvm": vm.microvm_id}
+
+
 def checkpoint_launch_as(monkeypatch: pytest.MonkeyPatch, **fields: Any) -> None:
     """Make the launch step checkpoint the MicroVM fields of a real launch,
     plus ``fields``, and no resume mode of its own. So a test controls the
@@ -1257,14 +1300,22 @@ def test_still_resumes_before_each_job_when_a_deploy_turns_suspending_off(
     client = fake_client(
         endpoint=endpoint.url, states=["RUNNING", "SUSPENDED", "RUNNING"]
     )
-    handler, invocations = handler_across_deploy(client, first, {}, two_jobs)
+    handler, invocations = handler_across_deploy(
+        client, first, {}, two_jobs_with_a_wait_between
+    )
+    sent_in = record_invocation_of_each_request(endpoint, invocations)
 
     result = run(handler, None, [("build", succeed_with(1)), ("test", succeed_with(2))])
 
     assert outcome(result)["result"]["test"] == 2
-    assert len(invocations) > 1
-    # The second job runs after the deploy. It checks the state, and resumes
-    # the MicroVM before delivery.
+    # The first job runs in the first invocation, with the launch's config.
+    # The second job runs in a later invocation, after the deploy.
+    assert len(sent_in) == 2
+    assert sent_in[0] == 1
+    assert sent_in[1] > sent_in[0]
+    # The first job checks the state once: RUNNING. The second job checks it
+    # after the deploy: SUSPENDED. It resumes the MicroVM, and checks the
+    # state again before delivery: RUNNING.
     assert len(client.requests("get_microvm")) == 3
     assert client.requests("resume_microvm") == [{"microvmIdentifier": "mvm-1"}]
     assert len(endpoint.requests) == 2
@@ -1280,15 +1331,21 @@ def test_makes_no_state_check_when_a_deploy_turns_suspending_on(
     endpoint = fake_endpoint()
     client = fake_client(endpoint=endpoint.url)
     handler, invocations = handler_across_deploy(
-        client, {}, {"auto_suspend_on_idle": True}, two_jobs
+        client, {}, {"auto_suspend_on_idle": True}, two_jobs_with_a_wait_between
     )
+    sent_in = record_invocation_of_each_request(endpoint, invocations)
 
     result = run(handler, None, [("build", succeed_with(1)), ("test", succeed_with(2))])
 
     assert outcome(result)["result"]["test"] == 2
-    assert len(invocations) > 1
+    # The first job runs in the first invocation, with the launch's config.
+    # The second job runs in a later invocation, after the deploy.
+    assert len(sent_in) == 2
+    assert sent_in[0] == 1
+    assert sent_in[1] > sent_in[0]
     [launch] = client.requests("run_microvm")
     assert "autoSuspendIdleSeconds" not in json.loads(launch["runHookPayload"])
+    # The second job runs after the deploy. It still checks no state.
     assert client.requests("get_microvm") == []
     assert len(endpoint.requests) == 2
     assert launch_checkpoint(result)["resumeBeforeDelivery"] is False

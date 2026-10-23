@@ -95,6 +95,18 @@ UNKNOWN_TERMINATING = (
     "MicroVM is terminating, so the worker refuses jobs and does not try the "
     "call again."
 )
+UNKNOWN_ENDED = (
+    "the suspend call for the idle MicroVM had an unknown outcome. The refusal "
+    "of jobs already ended during the call, on a resume hook or after 30 "
+    "seconds. So the worker accepts jobs. It tries the call again one idle "
+    "time after the call and every job end."
+)
+UNKNOWN_ENDED_CLOSED = (
+    "the suspend call for the idle MicroVM had an unknown outcome. The refusal "
+    "of jobs already ended during the call, on a resume hook or after 30 "
+    "seconds. So the worker accepts jobs. The worker is closed, so it does not "
+    "try the call again."
+)
 
 LAMBDA_HEADERS = {"Host": "localhost:8080"}
 FORWARDED_HEADERS = {
@@ -1240,8 +1252,8 @@ def end_failed_call(h: Harness) -> None:
 
 @pytest.mark.parametrize(
     "hooks",
-    [["terminate"], ["suspend", "terminate"]],
-    ids=["terminate", "suspend-then-terminate"],
+    [["terminate"], ["suspend", "terminate"], ["resume", "terminate"]],
+    ids=["terminate", "suspend-then-terminate", "resume-then-terminate"],
 )
 @pytest.mark.parametrize(
     ("failure", "text"),
@@ -1401,6 +1413,131 @@ def test_says_the_microvm_keeps_running_after_a_rejection_when_the_hook_refusal_
     h.advance(0.001)
     assert h.microvms.suspended == ["mvm-1", "mvm-1"]
     assert logger.messages("warning") == [REJECTED]
+
+
+@pytest.mark.parametrize("then", ["job", "no-job"])
+@pytest.mark.parametrize(
+    ("during", "failure"),
+    [
+        # The own call suspended the MicroVM, and its answer was lost across
+        # the freeze. The resume hook arrives, and the connection then drops.
+        ("resume", ConnectionResetError("reset")),
+        ("suspend-resume", suspend_error("InternalServerException", 500, 2)),
+        # botocore cannot cancel an attempt in flight. A client from
+        # create_microvms_client with 60-second timeouts can outlast the
+        # hook's 30 seconds.
+        ("suspend-grace", ConnectionResetError("reset")),
+    ],
+    ids=["resume", "suspend-resume", "suspend-grace"],
+)
+def test_says_the_refusal_ended_after_an_unknown_outcome_when_it_ended_during_the_call(
+    start: Any, logger: Any, during: str, failure: BaseException, then: str
+) -> None:
+    # The refusal of jobs ends during the call: on a resume hook, or 30
+    # seconds after a suspend hook. An unknown outcome then starts no new
+    # refusal. So the worker accepts jobs. It calls again one idle time after
+    # the call and every job end.
+    h = start()
+    hold_failed_call(h, failure)
+    if during == "resume":
+        assert h.hook("resume") == 200
+    elif during == "suspend-resume":
+        assert h.hook("suspend") == 200
+        assert h.hook("resume") == 200
+    else:
+        assert h.hook("suspend") == 200
+        h.advance(GRACE - 0.001)
+        assert h.job("cb-0") == 503
+        h.advance(0.001)
+        # The call still runs. So no second call started.
+        assert h.microvms.suspended == ["mvm-1"]
+        assert logger.messages("warning") == []
+    end_failed_call(h)
+
+    assert logger.messages("warning") == [UNKNOWN_ENDED]
+    if then == "job":
+        assert h.job("cb-1") == 202
+        assert eventually(lambda: h.started("cb-1"))
+        h.advance(GRACE)
+        assert h.microvms.suspended == ["mvm-1"]
+        h.finish_job("cb-1")
+    h.advance(IDLE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+    assert logger.messages("warning") == [UNKNOWN_ENDED]
+
+
+def test_calls_again_one_idle_time_after_the_last_job_after_an_unknown_outcome(
+    start: Any, logger: Any
+) -> None:
+    # A resume hook ends the refusal during the call. A job then starts
+    # during the call. A running job cancels the idle time. So the next call
+    # comes one idle time after the last job ends, not after the call.
+    h = start()
+    hold_failed_call(h, ConnectionResetError("reset"))
+    assert h.hook("resume") == 200
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+    end_failed_call(h)
+
+    assert logger.messages("warning") == [UNKNOWN_ENDED]
+    assert h.job("cb-2") == 202
+    h.advance(IDLE * 3)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.finish_job("cb-1")
+    h.advance(IDLE)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.finish_job("cb-2")
+    h.advance(IDLE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+    assert logger.messages("warning") == [UNKNOWN_ENDED]
+
+
+def test_says_that_no_call_follows_an_unknown_outcome_after_close_and_a_resume_hook(
+    start: Any, logger: Any
+) -> None:
+    # A closed listener starts no idle time. So the resume hook ends the
+    # refusal, and no call follows.
+    h = start()
+    hold_failed_call(h, suspend_error("InternalServerException", 500, 2))
+    h.listener.close()
+    assert h.hook("resume") == 200
+    end_failed_call(h)
+
+    assert logger.messages("warning") == [UNKNOWN_ENDED_CLOSED]
+    assert h.job("cb-1") == 202
+    h.finish_job("cb-1")
+    h.advance(IDLE + GRACE * 4)
+    assert h.microvms.suspended == ["mvm-1"]
+
+
+@pytest.mark.parametrize("during", ["no-hook", "suspend", "close"])
+def test_keeps_the_refusal_text_after_an_unknown_outcome_while_the_refusal_lasts(
+    start: Any, logger: Any, during: str
+) -> None:
+    # The refusal is still in effect when the call ends. So the worker
+    # refuses jobs for 30 seconds after the call, or until the resume hook.
+    h = start()
+    hold_failed_call(h, suspend_error("InternalServerException", 500, 2))
+    if during == "suspend":
+        assert h.hook("suspend") == 200
+    elif during == "close":
+        h.listener.close()
+    end_failed_call(h)
+
+    assert logger.messages("warning") == [UNKNOWN]
+    assert h.job("cb-1") == 503
+    h.advance(GRACE - 0.001)
+    assert h.job("cb-2") == 503
+    h.advance(0.001)
+    assert h.job("cb-3") == 202
+    h.finish_job("cb-3")
+    h.advance(IDLE)
+    expected = ["mvm-1"] if during == "close" else ["mvm-1", "mvm-1"]
+    assert h.microvms.suspended == expected
 
 
 @pytest.mark.parametrize(
