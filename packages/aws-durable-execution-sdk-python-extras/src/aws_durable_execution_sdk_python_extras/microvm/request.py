@@ -273,14 +273,13 @@ def send_job(options: SendJobOptions) -> int:
     3. Any other 4xx, or a 3xx: raise :class:`MicrovmRequestRejectedError`
        at once.
 
-    The function does not follow a redirect. The JavaScript SDK's ``fetch``
-    follows one, and it differs in two ways. A 301, 302, or 303 turns the
-    POST into a GET without the job, and the GET's 2xx counts as accepted.
-    So the job never starts, and the operation waits until its timeout. A
-    307 or 308 to another host receives the auth token. So a redirect fails
-    the delivery at once, with the ``Location`` in the message. The headers
-    are added as unredirected headers, so an opener that follows a redirect
-    does not send the auth token on either.
+    The function does not follow a redirect, and neither does the JavaScript
+    operation. A followed 301, 302, or 303 would turn the POST into a GET
+    without the job. A followed 307 or 308 to another host would receive the
+    auth token. So a redirect fails the delivery at once, with the
+    ``Location`` in the message. The headers are added as unredirected
+    headers, so an opener that follows a redirect does not send the auth
+    token on either.
 
     The delay starts at 250 milliseconds and doubles up to 4 seconds. The
     tier ends at the retry window, or 10 seconds before the invocation times
