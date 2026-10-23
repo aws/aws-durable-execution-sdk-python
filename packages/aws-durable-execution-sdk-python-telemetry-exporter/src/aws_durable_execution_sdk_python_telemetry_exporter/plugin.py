@@ -149,9 +149,26 @@ def _resolve_sampling_rate(rate: float | None) -> float:
     return float(rate)
 
 
+def _format_record_timestamp(ts: datetime.datetime) -> str:
+    """Format a record timestamp as ``YYYY-MM-DDTHH:MM:SS.sssZ`` in UTC.
+
+    Stores such as DynamoDB compare these values as text. Text order equals
+    time order only when every value has the same width. Plain ``isoformat()``
+    writes 6 fraction digits, and no fraction when microseconds are 0. So this
+    always writes exactly 3 fraction digits and a literal ``Z``. JavaScript's
+    ``Date.prototype.toISOString()`` writes the same format.
+    ``timespec="milliseconds"`` truncates the microseconds; it does not round.
+    """
+    return (
+        ts.astimezone(datetime.UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
 def _iso(ts: Any) -> str | None:
     if isinstance(ts, datetime.datetime):
-        return ts.astimezone(datetime.UTC).isoformat().replace("+00:00", "Z")
+        return _format_record_timestamp(ts)
     return None
 
 
@@ -746,9 +763,7 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
         record: dict[str, Any] = {
             "recordType": "DurableExecutionTelemetry",
             "schemaVersion": "1.0",
-            "emittedAt": datetime.datetime.now(datetime.UTC)
-            .isoformat()
-            .replace("+00:00", "Z"),
+            "emittedAt": _format_record_timestamp(datetime.datetime.now(datetime.UTC)),
             "executionArn": self._execution_arn,
         }
         if arn.get("executionName"):
