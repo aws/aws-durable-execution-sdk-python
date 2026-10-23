@@ -35,6 +35,12 @@ from aws_durable_execution_sdk_python.retries import RetryDecision
 from aws_durable_execution_sdk_python.serdes import JsonSerDes
 from botocore.exceptions import ClientError
 
+from aws_durable_execution_sdk_python_extras.microvm.aws_errors import (
+    add_request_id,
+    decide_on_original_error,
+    error_code,
+    with_request_id,
+)
 from aws_durable_execution_sdk_python_extras.microvm.config import (
     MAX_MICROVM_DURATION_SECONDS,
     LambdaMicrovmsClient,
@@ -251,11 +257,16 @@ def microvm(
         TypeError: When ``job_input`` is not JSON-serializable. No durable
             operation starts.
         MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
+        MicrovmNotRunningError: When ``CreateMicrovmAuthToken`` reports that
+            the MicroVM no longer exists. It is a ``MicrovmDeliveryError``.
         MicrovmDeliveryError: When the HTTP delivery fails after all retries,
             or the route answers a 4xx status such as 404, or a redirect.
         MicrovmJobFailedError: When the MicroVM reports a failure, or sends a
             result that is not valid JSON.
         MicrovmTimeoutError: When no result or heartbeat arrives in time.
+
+    The message of a failed Lambda MicroVMs call ends with its request ID,
+    for example ``RunMicrovm request ID: <id>.``.
     """
     scope = _OperationScope.create(context, name, job_input, config)
 
@@ -271,6 +282,22 @@ def microvm(
 _STATE_ERROR_TYPE = f"{MicrovmStateError.__module__}.{MicrovmStateError.__qualname__}"
 """The error type that a request step checkpoints for a MicroVM that can no
 longer run a job. The SDK records the fully-qualified class name."""
+
+
+def step_retry_strategy(
+    config: MicrovmBaseConfig,
+) -> Callable[[Exception, int], RetryDecision]:
+    """Return the retry strategy of the launch, request, and terminate steps.
+
+    It is the configured strategy, or :func:`default_microvm_retry_strategy`.
+    It decides on the error that botocore raised, without the request ID in
+    the message. See :func:`decide_on_original_error`. A session passes the
+    same strategy to each job. So this applies to every AWS call of both
+    operations.
+    """
+    return decide_on_original_error(
+        config.retry_strategy or default_microvm_retry_strategy
+    )
 
 
 def _validate_base(name: str, config: MicrovmBaseConfig, timeout: Duration) -> int:
@@ -604,15 +631,22 @@ class _MicrovmScope:
             request["logging"] = dict(config.logging)
         if idle_policy is not None:
             request["idlePolicy"] = dict(idle_policy)
-        response = self._client().run_microvm(**request)
+        try:
+            response = self._client().run_microvm(**request)
+        except ClientError as error:
+            # add_request_id returns the error, or a copy whose __cause__ is
+            # the error. So the raise has no `from`.
+            raise add_request_id("RunMicrovm", error)
+        # A missing field fails the step. So the message names the request
+        # ID of the answer.
         microvm_id = response.get("microvmId")
         if not microvm_id:
             msg = "RunMicrovm returned no microvmId"
-            raise RuntimeError(msg)
+            raise RuntimeError(with_request_id(msg, "RunMicrovm", response))
         endpoint = response.get("endpoint")
         if over_http and not endpoint:
             msg = "RunMicrovm returned no endpoint"
-            raise RuntimeError(msg)
+            raise RuntimeError(with_request_id(msg, "RunMicrovm", response))
         return LaunchResult(
             microvm_id=microvm_id,
             delivery=delivery,
@@ -626,11 +660,10 @@ class _MicrovmScope:
         except ClientError as error:
             # TerminateMicrovm succeeds for a terminated MicroVM. The service
             # answers ResourceNotFoundException for a MicroVM whose record it
-            # has removed. Either way, the MicroVM is gone.
-            if error.response.get("Error", {}).get("Code") != (
-                "ResourceNotFoundException"
-            ):
-                raise
+            # has removed. Either way, the MicroVM is gone. Any other error
+            # gets the request ID. See add_request_id.
+            if error_code(error) != "ResourceNotFoundException":
+                raise add_request_id("TerminateMicrovm", error)
 
     def _connector_arn(self, connector: str) -> str:
         return (
@@ -682,7 +715,7 @@ class _OperationScope(_MicrovmScope):
             heartbeat_timeout_seconds=heartbeat_timeout_seconds,
             request=request,
             retry_window_seconds=retry_window_seconds,
-            retry_strategy=config.retry_strategy or default_microvm_retry_strategy,
+            retry_strategy=step_retry_strategy(config),
         )
 
     def run_job(self, child: DurableContext, job_input: Any) -> Any:
