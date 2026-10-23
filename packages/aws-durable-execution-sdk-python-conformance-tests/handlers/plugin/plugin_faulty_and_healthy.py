@@ -1,9 +1,10 @@
 """10-17: Faulty plugin does not affect a healthy plugin.
 
-Two plugins are registered together, in order: a faulty plugin whose every
-exercised hook logs a line and then raises, and a healthy plugin that logs
-normally. The exercised hooks span the full lifecycle: invocation-start,
-operation-start, attempt-start, attempt-end, operation-end, and invocation-end.
+Two plugins are registered together, through their factories, in order: a faulty
+plugin whose every exercised hook logs a line and then raises, and a healthy
+plugin that logs normally. The exercised hooks span the full lifecycle:
+invocation-start, operation-start, attempt-start, attempt-end, operation-end, and
+invocation-end.
 In the Python SDK the per-attempt hooks are the real ``on_user_function_start`` /
 ``on_user_function_end`` callbacks (the latter carries the attempt ``outcome``),
 and the operation hooks are ``on_operation_start`` / ``on_operation_end``.
@@ -103,6 +104,21 @@ class FaultyPlugin(DurableInstrumentationPlugin):
         raise RuntimeError("faulty invocation-end")
 
 
+class FaultyPluginFactory:
+    """Builds one :class:`FaultyPlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> FaultyPlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return FaultyPlugin()
+
+
 class HealthyPlugin(DurableInstrumentationPlugin):
     def __init__(self) -> None:
         # Operation/attempt hooks do not carry the execution ARN, so capture it
@@ -182,12 +198,27 @@ class HealthyPlugin(DurableInstrumentationPlugin):
         )
 
 
+class HealthyPluginFactory:
+    """Builds one :class:`HealthyPlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> HealthyPlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return HealthyPlugin()
+
+
 @durable_step
 def greet(_step_context: StepContext, name: str) -> str:
     return f"Hello, {name}!"
 
 
-@durable_execution(plugins=[FaultyPlugin(), HealthyPlugin()])
+@durable_execution(plugins=[FaultyPluginFactory(), HealthyPluginFactory()])
 def handler(event: Any, context: DurableContext) -> str:
     result: str = context.step(greet(event))
     return result

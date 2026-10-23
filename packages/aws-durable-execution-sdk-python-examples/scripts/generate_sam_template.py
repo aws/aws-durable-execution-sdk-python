@@ -9,6 +9,12 @@ from typing import Any
 DEFAULT_FUNCTION_NAME_PREFIX = "DurablePythonExample-"
 DEFAULT_DURABLE_LOGGING_CONFIG: dict[str, str] = {"LogFormat": "JSON"}
 LOG_RETENTION_DAYS = 7
+MICROVM_CONDITION = "HasMicrovmImage"
+
+
+def uses_microvm(example: dict[str, Any]) -> bool:
+    """Return true when the catalog example launches a MicroVM."""
+    return example.get("usesMicrovm") is True
 
 
 def load_catalog() -> dict[str, Any]:
@@ -67,9 +73,47 @@ def build_template(examples: list[dict[str, Any]]) -> dict[str, Any]:
                 "Type": "String",
                 "Description": "ARN of the ADOT Python Lambda layer.",
             },
+            # A deploy can pass both parameters while no example uses them.
+            # CloudFormation rejects an override of an undeclared parameter.
+            # So the template always declares both.
+            "MicrovmImageArn": {
+                "Type": "String",
+                "Default": "",
+                "Description": (
+                    "ARN of the MicroVM image for the MicroVM examples. "
+                    "Empty leaves the MicroVM examples out of the stack."
+                ),
+            },
+            "MicrovmExecutionRoleArn": {
+                "Type": "String",
+                "Default": "",
+                "Description": (
+                    "ARN of the IAM role that the MicroVMs of the MicroVM "
+                    "examples run with."
+                ),
+            },
         },
         "Resources": {},
     }
+
+    # A MicroVM example launches the image named by MicrovmImageArn. Without an
+    # image and a role, every invocation of its function would fail. So the
+    # function and its log group exist only when both parameters are set.
+    # CloudFormation linters flag an unused condition. So the template declares
+    # the condition only when an example uses it.
+    if any(uses_microvm(example) for example in examples):
+        template["Conditions"] = {
+            MICROVM_CONDITION: {
+                "Fn::And": [
+                    {"Fn::Not": [{"Fn::Equals": [{"Ref": "MicrovmImageArn"}, ""]}]},
+                    {
+                        "Fn::Not": [
+                            {"Fn::Equals": [{"Ref": "MicrovmExecutionRoleArn"}, ""]}
+                        ]
+                    },
+                ]
+            }
+        }
 
     for example in examples:
         logical_id = to_logical_id(example["handler"])
@@ -99,15 +143,23 @@ def build_template(examples: list[dict[str, Any]]) -> dict[str, Any]:
         if "tracing" in example:
             properties["Tracing"] = example["tracing"]
 
-        if "environment" in example:
-            properties["Environment"] = {"Variables": example["environment"]}
+        if "timeout" in example:
+            properties["Timeout"] = example["timeout"]
 
-        template["Resources"][logical_id] = {
+        variables: dict[str, Any] = dict(example.get("environment", {}))
+        if uses_microvm(example):
+            # SAM merges these variables with the Globals variables.
+            variables["MICROVM_IMAGE_ARN"] = {"Ref": "MicrovmImageArn"}
+            variables["MICROVM_EXECUTION_ROLE_ARN"] = {"Ref": "MicrovmExecutionRoleArn"}
+        if variables:
+            properties["Environment"] = {"Variables": variables}
+
+        function_resource: dict[str, Any] = {
             "Type": "AWS::Serverless::Function",
             "DependsOn": [f"{logical_id}LogGroup"],
             "Properties": properties,
         }
-        template["Resources"][f"{logical_id}LogGroup"] = {
+        log_group_resource: dict[str, Any] = {
             "Type": "AWS::Logs::LogGroup",
             "Properties": {
                 "LogGroupName": {
@@ -116,6 +168,14 @@ def build_template(examples: list[dict[str, Any]]) -> dict[str, Any]:
                 "RetentionInDays": LOG_RETENTION_DAYS,
             },
         }
+        if uses_microvm(example):
+            # SAM copies the condition of a function to the resources that it
+            # generates for the function.
+            function_resource["Condition"] = MICROVM_CONDITION
+            log_group_resource["Condition"] = MICROVM_CONDITION
+
+        template["Resources"][logical_id] = function_resource
+        template["Resources"][f"{logical_id}LogGroup"] = log_group_resource
 
     return template
 

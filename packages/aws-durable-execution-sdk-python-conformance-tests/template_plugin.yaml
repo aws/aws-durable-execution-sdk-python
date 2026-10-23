@@ -38,6 +38,9 @@ Resources:
       CodeUri: lambda-build/
       Handler: plugin.plugin_invocation_lifecycle.handler
       Description: Plugin invocation lifecycle hooks (start and end)
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: INFO
       Role:
         Fn::GetAtt:
         - DurableFunctionRole

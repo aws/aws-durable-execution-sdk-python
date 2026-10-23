@@ -41,7 +41,7 @@ _WAIT_NAME = "pause"
 
 
 class _CaptureExporter:
-    """Records every telemetry record delivered to it (destination boundary only)."""
+    """Records every insight record delivered to it (destination boundary only)."""
 
     def __init__(self) -> None:
         self.max_record_size_bytes: int | None = None
@@ -57,7 +57,7 @@ class _CaptureExporter:
         return None
 
 
-def _telemetry_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
+def _insight_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG001
     """A named step, then a wait that suspends the execution, then completion."""
     context.step(lambda _step_ctx: "greeted", name=_STEP_NAME)
     context.wait(Duration.from_seconds(1), name=_WAIT_NAME)
@@ -66,12 +66,15 @@ def _telemetry_handler(event: Any, context: DurableContext) -> str:  # noqa: ARG
 
 def test_terminal_record_includes_prior_step_and_completed_wait() -> None:
     capture = _CaptureExporter()
-    plugin = durable_execution_telemetry(
+    factory = durable_execution_telemetry(
         DurableExecutionTelemetryConfig(exporters=[capture])
     )
     # Functional form (not the decorator-factory form) so the wrapped handler's
-    # static type stays a plain 2-arg callable for the runner.
-    handler = durable_execution(_telemetry_handler, plugins=[plugin])
+    # static type stays a plain 2-arg callable for the runner. `factory` is the
+    # plugin factory the SDK calls once per invocation, so the two invocations
+    # this test drives run on two instances -- which is what makes the assertions
+    # below about the resuming invocation meaningful.
+    handler = durable_execution(_insight_handler, plugins=[factory])
 
     with DurableFunctionTestRunner(handler=handler, execution_timeout=15) as runner:
         result: DurableFunctionTestResult = runner.run(input="{}")

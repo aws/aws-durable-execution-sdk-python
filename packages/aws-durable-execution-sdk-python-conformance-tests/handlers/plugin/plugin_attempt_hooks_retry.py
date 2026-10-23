@@ -79,6 +79,21 @@ class AttemptPlugin(DurableInstrumentationPlugin):
         )
 
 
+class AttemptPluginFactory:
+    """Builds one :class:`AttemptPlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> AttemptPlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return AttemptPlugin()
+
+
 @durable_step
 def unreliable_operation(step_context: StepContext) -> str:
     # Fail on the first attempt, succeed on the second, using the SDK's built-in
@@ -89,7 +104,7 @@ def unreliable_operation(step_context: StepContext) -> str:
     return "Operation succeeded"
 
 
-@durable_execution(plugins=[AttemptPlugin()])
+@durable_execution(plugins=[AttemptPluginFactory()])
 def handler(_event: Any, context: DurableContext) -> str:
     retry_config = RetryStrategyConfig(
         max_attempts=3,

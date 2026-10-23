@@ -23,6 +23,7 @@ from aws_durable_execution_sdk_python.lambda_service import (
     OperationUpdate,
 )
 from aws_durable_execution_sdk_python.plugin import (
+    InvocationStartInfo,
     OperationStartInfo,
     PropagationInput,
     PropagationMetadata,
@@ -36,7 +37,9 @@ from opentelemetry.trace import SpanContext
 
 from aws_durable_execution_sdk_python_otel import (
     ExecutionOtelPlugin,
+    ExecutionOtelPluginFactory,
     InvocationOtelPlugin,
+    InvocationOtelPluginFactory,
     ExtractedContext,
     OtelPluginConfig,
     Sampling,
@@ -49,19 +52,21 @@ ARN = (
 TRACE = 0x68E1BE000123456789ABCDEF01234567
 
 
-@pytest.mark.parametrize("plugin_type", [ExecutionOtelPlugin, InvocationOtelPlugin])
+@pytest.mark.parametrize(
+    "factory_type", [ExecutionOtelPluginFactory, InvocationOtelPluginFactory]
+)
 @pytest.mark.parametrize("sampled", [False, True])
 def test_parallel_invokes_carry_distinct_actual_operation_parents(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    plugin_type: type[ExecutionOtelPlugin] | type[InvocationOtelPlugin],
+    factory_type: type[ExecutionOtelPluginFactory] | type[InvocationOtelPluginFactory],
     sampled: bool,
 ) -> None:
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    plugin = plugin_type(
+    factory = factory_type(
         OtelPluginConfig(
             tracer_provider=provider,
             enrich_logger=False,
@@ -72,22 +77,31 @@ def test_parallel_invokes_carry_distinct_actual_operation_parents(
     )
     inputs: list[PropagationInput] = []
     actual_contexts: dict[str, SpanContext] = {}
-    producer = plugin.provide_propagation_metadata
-    start = plugin.on_operation_start
+    instances: list[ExecutionOtelPlugin | InvocationOtelPlugin] = []
+    create_plugin = factory.create_plugin
 
-    def produce(info: PropagationInput) -> PropagationMetadata | None:
-        inputs.append(info)
-        return producer(info)
+    def create(info: InvocationStartInfo) -> ExecutionOtelPlugin | InvocationOtelPlugin:
+        plugin = create_plugin(info)
+        instances.append(plugin)
+        producer = plugin.provide_propagation_metadata
+        start = plugin.on_operation_start
 
-    def started(info: OperationStartInfo) -> None:
-        start(info)
-        if info.operation_type is HookOperationType.CHAINED_INVOKE:
-            span = plugin._get_span(info.operation_id)
-            assert span is not None
-            actual_contexts[info.operation_id] = span.get_span_context()
+        def produce(info: PropagationInput) -> PropagationMetadata | None:
+            inputs.append(info)
+            return producer(info)
 
-    monkeypatch.setattr(plugin, "provide_propagation_metadata", produce)
-    monkeypatch.setattr(plugin, "on_operation_start", started)
+        def started(info: OperationStartInfo) -> None:
+            start(info)
+            if info.operation_type is HookOperationType.CHAINED_INVOKE:
+                span = plugin._get_span(info.operation_id)
+                assert span is not None
+                actual_contexts[info.operation_id] = span.get_span_context()
+
+        monkeypatch.setattr(plugin, "provide_propagation_metadata", produce)
+        monkeypatch.setattr(plugin, "on_operation_start", started)
+        return plugin
+
+    monkeypatch.setattr(factory, "create_plugin", create)
     updates_seen: list[OperationUpdate] = []
     operations: dict[str, Operation] = {}
     timestamp = datetime.now(UTC)
@@ -159,7 +173,7 @@ def test_parallel_invokes_carry_distinct_actual_operation_parents(
             config=ParallelConfig(max_concurrency=2),
         ).get_results()
 
-    handler = durable_execution(user_handler, plugins=[plugin])
+    handler = durable_execution(user_handler, plugins=[factory])
     invocation: dict[str, Any] = {
         "DurableExecutionArn": ARN,
         "CheckpointToken": "checkpoint-token",
@@ -202,6 +216,7 @@ def test_parallel_invokes_carry_distinct_actual_operation_parents(
                 )
                 assert handler(invocation, lambda_context) == output
             assert trace.get_current_span() is ambient
+        assert len(instances) == 2 and instances[0] is not instances[1]
         assert len(inputs) == 2
         invokes = [
             u for u in updates_seen if u.operation_type is OperationType.CHAINED_INVOKE

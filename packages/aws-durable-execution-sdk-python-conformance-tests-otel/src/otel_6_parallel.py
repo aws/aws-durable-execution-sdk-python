@@ -15,7 +15,7 @@ from aws_durable_execution_sdk_python import (
     durable_step,
 )
 from aws_durable_execution_sdk_python.config import ParallelConfig
-from common import otel_plugin, require_scenario
+from common import otel_plugin_factory, require_scenario
 
 
 @durable_step
@@ -39,7 +39,7 @@ def run_parallel_branch_b(context: DurableContext) -> str:
     )
 
 
-@durable_execution(plugins=[otel_plugin()])
+@durable_execution(plugins=[otel_plugin_factory()])
 def handler(event: dict[str, Any], context: DurableContext) -> list[str]:
     require_scenario(event, "parallel-hierarchy")
     return context.parallel(

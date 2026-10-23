@@ -27,7 +27,9 @@ from opentelemetry.trace import NoOpTracerProvider
 
 from aws_durable_execution_sdk_python_otel import (
     ExecutionOtelPlugin,
+    ExecutionOtelPluginFactory,
     InvocationOtelPlugin,
+    InvocationOtelPluginFactory,
     OtelPluginConfig,
     ExtractedContext,
     Sampling,
@@ -42,7 +44,12 @@ END = START + timedelta(seconds=1)
 ARN = "arn:aws:lambda:us-west-2:123456789012:function:propagation:1/durable-execution/test/id"
 TRACE_ID = 0x12345678901234567890123456789012
 INPUT = PropagationInput(ARN, "invoke-1", "target:1")
-PluginType = type[ExecutionOtelPlugin] | type[InvocationOtelPlugin]
+FactoryType = type[ExecutionOtelPluginFactory] | type[InvocationOtelPluginFactory]
+
+
+class _NoopFactory:
+    def create_plugin(self, info: InvocationStartInfo) -> DurableInstrumentationPlugin:
+        return DurableInstrumentationPlugin()
 
 
 class _Starts(SpanProcessor):
@@ -55,8 +62,8 @@ class _Starts(SpanProcessor):
         self.count += 1
 
 
-@pytest.fixture(params=[ExecutionOtelPlugin, InvocationOtelPlugin])
-def plugin_type(request: pytest.FixtureRequest) -> PluginType:
+@pytest.fixture(params=[ExecutionOtelPluginFactory, InvocationOtelPluginFactory])
+def factory_type(request: pytest.FixtureRequest) -> FactoryType:
     return request.param
 
 
@@ -131,7 +138,7 @@ def end_operation(plugin: ExecutionOtelPlugin | InvocationOtelPlugin) -> None:
     ],
 )
 def test_collector_encodes_operation_parent_without_side_effects(
-    plugin_type: PluginType,
+    factory_type: FactoryType,
     extracted: ExtractedContext | None,
     sampler: Sampler,
     sampled: bool,
@@ -141,16 +148,18 @@ def test_collector_encodes_operation_parent_without_side_effects(
     starts = _Starts()
     provider.add_span_processor(starts)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    plugin = plugin_type(
+    factory = factory_type(
         OtelPluginConfig(
             tracer_provider=provider,
             context_extractor=lambda _: extracted,
             enrich_logger=False,
         )
     )
-    collector = PluginExecutor([DurableInstrumentationPlugin(), plugin])
+    collector = PluginExecutor([_NoopFactory(), factory])
     assert collector.provide_propagation_metadata(INPUT).x_amzn_trace_id is None
-    plugin.on_invocation_start(start_info())
+    collector.on_invocation_start(ARN, True, START, None)
+    plugin = collector._plugins[-1]
+    assert isinstance(plugin, (ExecutionOtelPlugin, InvocationOtelPlugin))
     try:
         starts_before = starts.count
         current_before = trace.get_current_span()
@@ -210,18 +219,20 @@ def test_invocation_continuation_uses_actual_fresh_operation_span() -> None:
     provider = TracerProvider()
     exporter = InMemorySpanExporter()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    plugin = InvocationOtelPlugin(
+    factory = InvocationOtelPluginFactory(
         OtelPluginConfig(
             tracer_provider=provider,
             context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
+    plugin = factory.create_plugin(start_info())
     try:
         plugin.on_invocation_start(start_info())
         start_operation(plugin)
         first = plugin.provide_propagation_metadata(INPUT)
         plugin.on_invocation_end(end_info(InvocationStatus.PENDING))
+        plugin = factory.create_plugin(start_info(first=False))
         plugin.on_invocation_start(start_info(first=False))
         start_operation(plugin, replayed=True)
         continued = plugin.provide_propagation_metadata(INPUT)
@@ -246,36 +257,39 @@ def test_invocation_continuation_uses_actual_fresh_operation_span() -> None:
 
 
 def test_unbound_provider_does_not_produce_metadata(
-    plugin_type: PluginType,
+    factory_type: FactoryType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: NoOpTracerProvider())
-    plugin = plugin_type(
+    factory = factory_type(
         OtelPluginConfig(
             context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
+    plugin = factory.create_plugin(start_info())
     plugin.on_invocation_start(start_info())
     assert plugin.provide_propagation_metadata(INPUT) is None
     plugin.on_invocation_end(end_info())
 
 
 def test_resume_preserves_logical_identity_and_rejects_old_execution(
-    plugin_type: PluginType,
+    factory_type: FactoryType,
 ) -> None:
     provider = TracerProvider()
-    plugin = plugin_type(
+    factory = factory_type(
         OtelPluginConfig(
             tracer_provider=provider,
             context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
+    plugin = factory.create_plugin(start_info())
     try:
         plugin.on_invocation_start(start_info())
         first = plugin.provide_propagation_metadata(INPUT)
         plugin.on_invocation_end(end_info(InvocationStatus.RETRY))
+        plugin = factory.create_plugin(start_info(first=False))
         plugin.on_invocation_start(start_info(first=False))
         assert plugin.provide_propagation_metadata(INPUT) == first
         plugin.on_invocation_end(end_info())
@@ -285,6 +299,7 @@ def test_resume_preserves_logical_identity_and_rejects_old_execution(
             execution_start_time=START,
             is_first_invocation=True,
         )
+        plugin = factory.create_plugin(other_start)
         plugin.on_invocation_start(other_start)
         assert plugin.provide_propagation_metadata(INPUT) is None
         plugin.on_invocation_end(end_info())
@@ -293,7 +308,7 @@ def test_resume_preserves_logical_identity_and_rejects_old_execution(
 
 
 def test_failed_invocation_setup_cannot_supply_stale_metadata(
-    plugin_type: PluginType,
+    factory_type: FactoryType,
 ) -> None:
     provider = TracerProvider()
     fail = False
@@ -303,16 +318,18 @@ def test_failed_invocation_setup_cannot_supply_stale_metadata(
             raise ValueError("invalid extraction")
         return None
 
-    plugin = plugin_type(
+    factory = factory_type(
         OtelPluginConfig(
             tracer_provider=provider, context_extractor=extract, enrich_logger=False
         )
     )
+    plugin = factory.create_plugin(start_info())
     try:
         plugin.on_invocation_start(start_info())
         assert plugin.provide_propagation_metadata(INPUT) is not None
         plugin.on_invocation_end(end_info())
         fail = True
+        plugin = factory.create_plugin(start_info(first=False))
         with pytest.raises(ValueError, match="invalid extraction"):
             plugin.on_invocation_start(start_info(first=False))
         assert plugin.provide_propagation_metadata(INPUT) is None
@@ -321,21 +338,22 @@ def test_failed_invocation_setup_cannot_supply_stale_metadata(
         provider.shutdown()
 
 
-def test_legacy_core_keeps_tracing_without_propagation_contract(
-    plugin_type: PluginType,
+def test_missing_propagation_contract_keeps_tracing(
+    factory_type: FactoryType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delattr(core_plugin, "PropagationMetadata")
     provider = TracerProvider()
     exporter = InMemorySpanExporter()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    plugin = plugin_type(
+    factory = factory_type(
         OtelPluginConfig(
             tracer_provider=provider,
             context_extractor=lambda _: None,
             enrich_logger=False,
         )
     )
+    plugin = factory.create_plugin(start_info())
     try:
         plugin.on_invocation_start(start_info())
         assert plugin.provide_propagation_metadata(INPUT) is None

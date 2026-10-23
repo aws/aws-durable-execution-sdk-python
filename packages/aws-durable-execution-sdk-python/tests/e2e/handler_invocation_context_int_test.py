@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from tests.test_helpers import plugin_factory
+
+
 import contextvars
 import json
 from typing import Any
@@ -60,7 +63,7 @@ def test_invocation_plugins_restore_host_context_across_resume(
         return saved
 
     durable_handler = durable_execution(
-        body, plugins=[ScopePlugin(name) for name in names]
+        body, plugins=[plugin_factory(ScopePlugin(name)) for name in names]
     )
 
     def host(event: Any, context: Any) -> Any:

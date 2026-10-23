@@ -102,6 +102,19 @@ jobs:
         hatch run examples:build
         hatch run examples:generate-sam-template
 
+    - name: Ensure MicroVM image
+      # The worker runs in the MicroVM, not in the function. So one image
+      # serves every function runtime. Only the Python 3.13 job builds the
+      # image, deploys the MicroVM examples, and runs their tests. The other
+      # jobs pass no image, so their stacks leave the MicroVM examples out.
+      if: matrix.python-version == '3.13'
+      env:
+        TEST_ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
+        # The script warns when the functions use a non-default endpoint,
+        # because the worker sends its callbacks to the default endpoint.
+        LAMBDA_ENDPOINT: ${{ github.event.inputs.lambda_endpoint || vars.TEST_LAMBDA_ENDPOINT }}
+      run: hatch run examples:ensure-microvm-image --output "$RUNNER_TEMP/microvm-image.json"
+
     - name: Deploy all examples with SAM
       id: deploy
       env:
@@ -111,6 +124,7 @@ jobs:
         STACK_NAME: ${{ matrix.python-prefix }}-python-examples
         FUNCTION_NAME_PREFIX: ${{ matrix.python-prefix }}-
         GH_TOKEN: ${{ github.token }}
+        MICROVM_EXAMPLES: ${{ matrix.python-version == '3.13' }}
       run: |
         echo "Building SAM application"
         sam build --template-file packages/aws-durable-execution-sdk-python-examples/template.generated.json
@@ -154,9 +168,25 @@ jobs:
           echo "Using custom Lambda endpoint override"
         fi
 
+        # The MicroVM examples deploy only with an image. Without one, the
+        # template leaves them out, and the name map omits their tests.
+        NAME_MAP_ARGS=()
+        if [ "$MICROVM_EXAMPLES" = "true" ]; then
+          MICROVM_IMAGE_FILE="$RUNNER_TEMP/microvm-image.json"
+          MICROVM_IMAGE_ARN=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["imageArn"])' "$MICROVM_IMAGE_FILE")
+          MICROVM_EXECUTION_ROLE_ARN=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["executionRoleArn"])' "$MICROVM_IMAGE_FILE")
+          PARAMETER_OVERRIDES+=(
+            MicrovmImageArn="$MICROVM_IMAGE_ARN"
+            MicrovmExecutionRoleArn="$MICROVM_EXECUTION_ROLE_ARN"
+          )
+          NAME_MAP_ARGS+=(--include-microvm)
+          echo "Deploying the MicroVM examples with image $MICROVM_IMAGE_ARN"
+        fi
+
         PYTEST_FUNCTION_NAME_MAP=$(
           python packages/aws-durable-execution-sdk-python-examples/scripts/generate_function_name_map.py \
-            --function-name-prefix "$FUNCTION_NAME_PREFIX"
+            --function-name-prefix "$FUNCTION_NAME_PREFIX" \
+            "${NAME_MAP_ARGS[@]}"
         )
 
         # TODO: Remove this one-time cleanup after existing CI stacks adopt the
