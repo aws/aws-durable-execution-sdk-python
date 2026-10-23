@@ -138,6 +138,15 @@ class MicrovmBaseConfig:
     It is the second retry tier. The first tier retries inside one step
     attempt: the boto3 client retries each call, and the request step retries
     the POST. Defaults to :func:`default_microvm_retry_strategy`.
+
+    For a failed Lambda MicroVMs call, the strategy receives the
+    ``ClientError`` that botocore raised, with its class, its ``response``,
+    and its message. The step records a copy whose message ends with the
+    request ID. So a strategy that matches the message, such as
+    ``create_retry_strategy(RetryStrategyConfig(retryable_errors=[...]))``,
+    decides on the message of the service. An error that the operation
+    creates itself, such as "RunMicrovm returned no microvmId", has the
+    request ID in its message when the strategy receives it.
     """
 
     opener: urllib.request.OpenerDirector | None = None
