@@ -29,7 +29,7 @@ Build reliable, long-running AWS Lambda workflows with checkpointed steps, waits
 
 ## Dynamic instrumentation plugins
 
-Upgrading an existing application? Follow the [2.x to 3.0 migration guide](../../docs/migration-2.x-to-3.0.md)
+Upgrading an existing application? Follow the [2.x to 3.0 migration guide](https://github.com/aws/aws-durable-execution-sdk-python/blob/main/docs/migration-2.x-to-3.0.md)
 for dependency versions, before/after examples, provider packaging, and validation.
 
 Instrumentation plugins can be selected at Lambda cold start without importing
