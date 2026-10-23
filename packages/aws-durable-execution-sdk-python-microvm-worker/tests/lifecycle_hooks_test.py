@@ -98,7 +98,8 @@ UNKNOWN_TERMINATING = (
 UNKNOWN_ENDED = (
     "the suspend call for the idle MicroVM had an unknown outcome. The refusal "
     "of jobs already ended during the call, on a resume hook or after 30 "
-    "seconds. So the worker accepts jobs, and the idle time starts again."
+    "seconds. So the worker accepts jobs. It tries the call again one idle "
+    "time after the call and every job end."
 )
 UNKNOWN_ENDED_CLOSED = (
     "the suspend call for the idle MicroVM had an unknown outcome. The refusal "
@@ -1434,8 +1435,8 @@ def test_says_the_refusal_ended_after_an_unknown_outcome_when_it_ended_during_th
 ) -> None:
     # The refusal of jobs ends during the call: on a resume hook, or 30
     # seconds after a suspend hook. An unknown outcome then starts no new
-    # refusal. So the worker accepts jobs, and the idle time that the end of
-    # the refusal asked for starts when the call ends.
+    # refusal. So the worker accepts jobs. It calls again one idle time after
+    # the call and every job end.
     h = start()
     hold_failed_call(h, failure)
     if during == "resume":
@@ -1460,6 +1461,34 @@ def test_says_the_refusal_ended_after_an_unknown_outcome_when_it_ended_during_th
         h.advance(GRACE)
         assert h.microvms.suspended == ["mvm-1"]
         h.finish_job("cb-1")
+    h.advance(IDLE - 0.001)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.advance(0.001)
+    assert h.microvms.suspended == ["mvm-1", "mvm-1"]
+    assert logger.messages("warning") == [UNKNOWN_ENDED]
+
+
+def test_calls_again_one_idle_time_after_the_last_job_after_an_unknown_outcome(
+    start: Any, logger: Any
+) -> None:
+    # A resume hook ends the refusal during the call. A job then starts
+    # during the call. A running job cancels the idle time. So the next call
+    # comes one idle time after the last job ends, not after the call.
+    h = start()
+    hold_failed_call(h, ConnectionResetError("reset"))
+    assert h.hook("resume") == 200
+    assert h.job("cb-1") == 202
+    assert eventually(lambda: h.started("cb-1"))
+    end_failed_call(h)
+
+    assert logger.messages("warning") == [UNKNOWN_ENDED]
+    assert h.job("cb-2") == 202
+    h.advance(IDLE * 3)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.finish_job("cb-1")
+    h.advance(IDLE)
+    assert h.microvms.suspended == ["mvm-1"]
+    h.finish_job("cb-2")
     h.advance(IDLE - 0.001)
     assert h.microvms.suspended == ["mvm-1"]
     h.advance(0.001)

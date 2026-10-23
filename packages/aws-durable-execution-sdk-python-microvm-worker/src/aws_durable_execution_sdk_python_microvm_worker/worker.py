@@ -216,8 +216,8 @@ def _failed_call_warning(
     8. An unknown outcome after the refusal of jobs ended during the call:
        a resume hook ended it, or the 30-second limit of a suspend hook's
        refusal. The listener starts no new refusal after an unknown outcome
-       when ``suspending`` is false. So it accepts jobs. The idle time starts
-       again when the call and every job have ended.
+       when ``suspending`` is false. So it accepts jobs. It calls again one
+       idle time after the call and every job end.
     9. The same after ``close()`` during the call: the listener accepts
        jobs. ``_start_idle_time`` starts no idle time. So the listener never
        calls again.
@@ -243,8 +243,9 @@ def _failed_call_warning(
             return (
                 "the suspend call for the idle MicroVM had an unknown outcome. "
                 "The refusal of jobs already ended during the call, on a "
-                "resume hook or after 30 seconds. So the worker accepts jobs, "
-                "and the idle time starts again."
+                "resume hook or after 30 seconds. So the worker accepts jobs. "
+                "It tries the call again one idle time after the call and "
+                "every job end."
             )
         return (
             "the suspend call for the idle MicroVM had an unknown outcome. The "
@@ -455,6 +456,10 @@ class MicrovmWorkerListener:
        successful call. The service may have suspended the MicroVM anyway.
        No attempt of the call starts after 10 seconds. An attempt already in
        flight runs until it ends, and the refusal lasts at least until then.
+       A `resume` hook during the call, or the end of a `suspend` hook's 30
+       seconds during the call, has already ended the refusal. The worker
+       then accepts jobs at once, and tries the call again one idle time
+       after the call and every job end.
 
     When the image enables the ``suspend`` and ``terminate`` hooks, the
     listener acts on them:
@@ -1615,9 +1620,12 @@ class MicrovmWorkerListener:
             deferred = []
             with self._lock:
                 # The warning depends on this state. The block reads it
-                # before it changes it. So the text matches the decision
-                # below, whatever another thread does after the lock is
-                # released.
+                # before it changes it. For a rejection and a refusal for
+                # now, this block also makes the decision. So for these two
+                # outcomes, the text matches the decision, whatever another
+                # thread does after the lock is released. For an unknown
+                # outcome, the block at the end of this method decides
+                # whether the 30-second refusal starts. See issue #820.
                 hook_arrived = self._suspend_hooks != hooks_before
                 terminating = self._terminating
                 closed = self._closed
