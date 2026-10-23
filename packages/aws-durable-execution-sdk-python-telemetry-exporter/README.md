@@ -267,6 +267,13 @@ compare these values as text. Text order equals time order only when every
 value has the same width. So a text comparison of two record timestamps orders
 them by time.
 
+`emittedAt` strictly increases within one invocation. In `on-change` mode, one
+invocation can build two records in the same millisecond. The SQS FIFO
+deduplication id and the default DynamoDB sort key both use `emittedAt`. So
+equal values would drop or overwrite a record. So when the clock has not
+passed the previous `emittedAt`, the plugin writes the previous value plus 1
+millisecond.
+
 > **Note (asynchronous export).** Export rendering, truncation, `export()`, and
 > `flush()` run on one lazy background worker per registered factory. Checkpoint
 > hooks only replace the latest pending snapshot and wake the worker. Consecutive

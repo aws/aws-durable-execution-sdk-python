@@ -24,6 +24,7 @@ from aws_durable_execution_sdk_python.plugin import (
     InvocationEndInfo,
     InvocationStartInfo,
     InvocationStatus,
+    OperationChangeInfo,
     OperationEndInfo,
     OperationType,
 )
@@ -31,6 +32,12 @@ from aws_durable_execution_sdk_python.plugin import (
 from aws_durable_execution_sdk_python_telemetry_exporter import (
     DurableExecutionTelemetryConfig,
     durable_execution_telemetry,
+)
+from aws_durable_execution_sdk_python_telemetry_exporter import (
+    plugin as plugin_module,
+)
+from aws_durable_execution_sdk_python_telemetry_exporter._export_scheduler import (
+    _ExportState,
 )
 from aws_durable_execution_sdk_python_telemetry_exporter.plugin import (
     _format_record_timestamp,
@@ -170,3 +177,125 @@ def test_every_record_timestamp_is_fixed_width() -> None:
     assert record["startTime"] == "2026-10-23T18:42:40.000Z"
     assert record["operations"][0]["startTime"] == "2026-10-23T18:42:40.784Z"
     assert record["operations"][0]["endTime"] == "2026-10-23T18:42:46.999Z"
+
+
+# 2026-10-23T18:42:40.123Z in epoch milliseconds.
+FROZEN_MS = 1792780960123
+
+
+def _on_change_emitted_at(
+    monkeypatch: pytest.MonkeyPatch, clock_ms: list[int]
+) -> list[str]:
+    """Run one on-change invocation and return each record's emittedAt.
+
+    The invocation emits RUNNING (start), RUNNING (operation change) and the
+    terminal record. ``clock_ms`` supplies the time each build reads, in order.
+    The scheduler can merge a pending record into a newer one. So the test
+    drains after every hook, and the exporter receives all three records.
+    """
+    readings = iter(clock_ms)
+    monkeypatch.setattr(plugin_module, "_utc_now_ms", lambda: next(readings))
+    op = OperationEndInfo(
+        operation_id="op-1",
+        operation_type=OperationType.STEP,
+        sub_type=OperationSubType.STEP,
+        name="greet",
+        parent_id=None,
+        start_time=None,
+        is_replayed=False,
+        status=OperationStatus.SUCCEEDED,
+        end_time=None,
+        result=None,
+        error=None,
+        attempt=1,
+    )
+    exporter = _CaptureExporter()
+    factory = durable_execution_telemetry(
+        DurableExecutionTelemetryConfig(exporters=[exporter], emit_mode="on-change")
+    )
+
+    def drain() -> None:
+        factory._scheduler.drain(_ExportState())
+
+    start = InvocationStartInfo(
+        request_id=None,
+        execution_arn=ARN,
+        is_first_invocation=True,
+        execution_start_time=None,
+        execution_input="World",
+        operations={},
+    )
+    plugin = factory.create_plugin(start)
+    plugin.on_invocation_start(start)
+    drain()
+    plugin.on_operation_change(
+        OperationChangeInfo(
+            execution_arn=ARN,
+            updated_operations={op.operation_id: op},
+            operations={op.operation_id: op},
+        )
+    )
+    drain()
+    plugin.on_invocation_end(
+        InvocationEndInfo(
+            request_id=None,
+            execution_arn=ARN,
+            is_first_invocation=True,
+            execution_start_time=None,
+            status=InvocationStatus.SUCCEEDED,
+            error=None,
+            execution_result='"Hello, World!"',
+            operations={op.operation_id: op},
+        )
+    )
+    drain()
+
+    assert [r["status"] for r in exporter.records] == [
+        "RUNNING",
+        "RUNNING",
+        "SUCCEEDED",
+    ]
+    return [r["emittedAt"] for r in exporter.records]
+
+
+def test_emitted_at_strictly_increases_when_the_clock_is_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _on_change_emitted_at(monkeypatch, [FROZEN_MS] * 3) == [
+        "2026-10-23T18:42:40.123Z",
+        "2026-10-23T18:42:40.124Z",
+        "2026-10-23T18:42:40.125Z",
+    ]
+
+
+def test_emitted_at_uses_the_clock_once_it_passes_the_last_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [FROZEN_MS, FROZEN_MS, FROZEN_MS + 10]
+    assert _on_change_emitted_at(monkeypatch, clock) == [
+        "2026-10-23T18:42:40.123Z",
+        "2026-10-23T18:42:40.124Z",
+        "2026-10-23T18:42:40.133Z",
+    ]
+
+
+def test_emitted_at_strictly_increases_when_the_clock_moves_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [FROZEN_MS + 5, FROZEN_MS, FROZEN_MS + 6]
+    assert _on_change_emitted_at(monkeypatch, clock) == [
+        "2026-10-23T18:42:40.128Z",
+        "2026-10-23T18:42:40.129Z",
+        "2026-10-23T18:42:40.130Z",
+    ]
+
+
+def test_utc_now_ms_truncates_to_whole_milliseconds() -> None:
+    before = datetime.datetime.now(UTC)
+    now_ms = plugin_module._utc_now_ms()
+    after = datetime.datetime.now(UTC)
+    assert isinstance(now_ms, int)
+    text = _format_record_timestamp(
+        plugin_module._EPOCH + now_ms * plugin_module._ONE_MS
+    )
+    assert _format_record_timestamp(before) <= text <= _format_record_timestamp(after)
