@@ -50,7 +50,7 @@ jobs:
     # non-cloud harness still runs on every PR and main push.
     if: github.event_name == 'workflow_dispatch' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 80
+    timeout-minutes: 120
     permissions:
       contents: read
       id-token: write
@@ -95,7 +95,7 @@ jobs:
             --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --runtime "$LMI_RUNTIME" --stack-name "$LMI_STACK_NAME"
       - name: Run cloud regressions (red until issue 741 is fixed)
-        timeout-minutes: 20
+        timeout-minutes: 60
         run: hatch run lmi:cloud --junitxml=lmi_tests/artifacts/cloud.xml
       - name: Collect service history and runtime evidence
         if: always()

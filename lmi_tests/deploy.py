@@ -83,14 +83,22 @@ def build():
     if directory.exists():
         shutil.rmtree(directory)
     directory.mkdir()
-    # Hatch builds this checkout's wheel; pip resolves only its dependencies.
-    subprocess.run(
-        ["hatch", "build", "-t", "wheel", str(directory)],
-        cwd=ROOT / "packages/aws-durable-execution-sdk-python",
-        env={k: v for k, v in os.environ.items() if k != "HATCH_ENV_ACTIVE"},
-        check=True,
-    )
-    wheel = next(directory.glob("*.whl"))
+    # Both SDK artifacts come from this checkout; pip resolves only their
+    # dependencies. A published core/plugin must not replace either artifact.
+    for package in (
+        "aws-durable-execution-sdk-python",
+        "aws-durable-execution-sdk-python-otel",
+    ):
+        subprocess.run(
+            ["hatch", "build", "-t", "wheel", str(directory)],
+            cwd=ROOT / "packages" / package,
+            env={k: v for k, v in os.environ.items() if k != "HATCH_ENV_ACTIVE"},
+            check=True,
+        )
+    wheels = sorted(directory.glob("*.whl"))
+    if len(wheels) != 2:
+        raise ProvisioningError("Expected exactly the checked-out core and OTel wheels")
+    wheel = next(directory.glob("aws_durable_execution_sdk_python-*.whl"))
     target = directory / "package"
     subprocess.run(
         [
@@ -99,17 +107,32 @@ def build():
             "pip",
             "install",
             "--only-binary=:all:",
+            "--platform",
+            "manylinux2014_aarch64",
+            "--platform",
+            "manylinux_2_28_aarch64",
+            "--python-version",
+            "3.14",
+            "--implementation",
+            "cp",
+            "--abi",
+            "cp314",
             "--no-compile",
             "--target",
             str(target),
-            str(wheel),
+            "--report",
+            str(directory / "dependencies.json"),
+            *map(str, wheels),
+            "opentelemetry-sdk>=1.20.0",
+            "opentelemetry-propagator-aws-xray",
         ],
         check=True,
     )
     (target / "lmi_tests").mkdir()
-    for name in ("__init__.py", "fixture.py"):
+    for name in ("__init__.py", "fixture.py", "telemetry.py"):
         shutil.copy(ROOT / "lmi_tests" / name, target / "lmi_tests" / name)
     artifact = directory / "function.zip"
+    resolved = json.loads((directory / "dependencies.json").read_text())
     with zipfile.ZipFile(artifact, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(target.rglob("*")):
             if path.is_file():
@@ -123,6 +146,20 @@ def build():
                 ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
             ).strip(),
             "wheel": wheel.name,
+            "wheels": {
+                item.name: hashlib.sha256(item.read_bytes()).hexdigest()
+                for item in wheels
+            },
+            "dependencies": [
+                {
+                    "name": item["metadata"]["name"],
+                    "version": item["metadata"]["version"],
+                    "hashes": item.get("download_info", {})
+                    .get("archive_info", {})
+                    .get("hashes", {}),
+                }
+                for item in resolved["install"]
+            ],
             "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
         },
     )
@@ -365,6 +402,8 @@ def deploy(args):
         "runtime": args.runtime,
         "concurrencies": CONCURRENCIES,
         "commit": built["commit"],
+        "wheels": built.get("wheels", {}),
+        "dependencies": built.get("dependencies", []),
         "codeKey": "code/" + digest.hex() + ".zip",
         "codeSha256": base64.b64encode(digest).decode(),
         "invocationTimeout": 60,

@@ -22,8 +22,25 @@ from lmi_tests.evidence import (
 class RunnerClient:
     """Share paced history reads with the public runner; other APIs are unchanged."""
 
-    def __init__(self, cloud):
+    def __init__(self, cloud, trace_header=None):
         self.cloud = cloud
+        self.trace_header = trace_header
+
+    def invoke(self, **kwargs):
+        if self.trace_header is None:
+            return self.cloud.lam.invoke(**kwargs)
+        # An instrumented caller's HTTP carrier goes through the real Lambda
+        # service. Never inject a synthetic header into the function payload.
+        isolated = client("lambda")
+
+        def add_carrier(params, **_kwargs):
+            params["headers"]["X-Amzn-Trace-Id"] = self.trace_header
+
+        isolated.meta.events.register("before-call.lambda.Invoke", add_carrier)
+        try:
+            return isolated.invoke(**kwargs)
+        finally:
+            isolated.close()
 
     def __getattr__(self, name):
         return getattr(self.cloud.lam, name)
@@ -60,13 +77,31 @@ class Cloud:
     def concurrency(self):
         return self.manifest["concurrencies"][self.configuration]
 
-    def start(self, scenario, gate=None, target_environment=None):
+    def start(
+        self,
+        scenario,
+        gate=None,
+        target_environment=None,
+        *,
+        otel_view=None,
+        trace_header=None,
+        otel_export="success",
+    ):
         if self.configuration not in self.manifest["functions"]:
             raise ProvisioningError(
                 "Select a deployed concurrency configuration before Invoke"
             )
         marker = scenario + "-" + uuid.uuid4().hex[:12]
         payload = {"scenario": scenario, "marker": marker, "run": self.manifest["run"]}
+        if otel_view is not None:
+            if otel_view not in {"invocation", "execution"}:
+                raise ValueError("Unknown OTel view")
+            if otel_export not in {"success", "failure", "held"}:
+                raise ValueError("Unknown exporter fault")
+            payload.update(otel_view=otel_view, otel_export=otel_export)
+            if otel_export == "held":
+                payload["otel_export_gate"] = marker + "-export"
+                self.hold(payload["otel_export_gate"])
         if target_environment is not None:
             payload["target_environment"] = target_environment
         if gate:
@@ -90,7 +125,7 @@ class Cloud:
             self.manifest["functions"][self.configuration],
             region=self.manifest["region"],
         )
-        runner.lambda_client = RunnerClient(self)
+        runner.lambda_client = RunnerClient(self, trace_header)
         try:
             arn = runner.run_async(input=payload)
             if not arn:
@@ -107,6 +142,7 @@ class Cloud:
             "configuration": self.configuration,
             "runner": runner,
             "started": time.time(),
+            "trace_header": trace_header,
         }
         self.invocations.append(item)
         print(f"LMI {scenario}: marker={marker}, execution={arn}", flush=True)
@@ -117,6 +153,7 @@ class Cloud:
                 "arn": arn,
                 "function": runner.function_name,
                 "started": item["started"],
+                "trace_header": trace_header,
             },
         )
         return item

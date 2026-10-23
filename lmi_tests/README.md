@@ -84,7 +84,7 @@ any evidence you need before starting another run. The run manifest is invalidat
 first, so a failed build, invalid configuration, or account/provider check cannot
 make an exit trap collect or clean up the preceding run. This deployment supplies both native
 environment-concurrency settings, `1` and `2`, on Python 3.14. The single cloud
-command runs all 14 scenarios for each setting (28 cases), sequentially, without
+command runs 14 lifecycle and 24 observability cases for each setting (76 cases), sequentially, without
 redeploying or changing function configuration between cases. Independent SDK
 branch-concurrency settings include 1, 2, and 3.
 
@@ -224,9 +224,9 @@ transport timeout). Invocation and callback writes are not retried by this layer
 | Cleanup acceptance grace | 5 s |
 | Fault-fixture emergency I/O release | 150 s |
 | Per-case retirement after assertions | 30 s |
-| Workflow cloud assertions (all 28 cases) | 20 min |
+| Workflow cloud assertions (all 76 cases) | 60 min |
 | Waiting for prior executions before updating | 270 s |
-| Single cloud job including deployment/run cleanup | 80 min |
+| Single cloud job including deployment/run cleanup | 120 min |
 
 Artifacts contain JUnit, configuration/provider readbacks, qualified targets,
 commit/wheel/code hash, invocation inputs/ARNs, all lifecycle and side-effect records,
@@ -299,3 +299,44 @@ and GitHub artifacts retain seven days. There is no automatic infrastructure del
 or janitor. The test-account owner manages final retirement of the persistent stack,
 functions, bucket, and provider. A forced runner termination can interrupt run
 cleanup; inspect artifacts and let prior executions settle before the next update.
+
+## OpenTelemetry acceptance
+
+The same two functions now also run the observability scope in #742. Both OTel
+views use the real public factory registration and a process-owned provider.
+The exporter writes the unmodified span identity, attributes, timing and status
+to the existing private S3 evidence ledger. A separate invocation identity in
+each record lets the assertions detect wrong attribution rather than deriving
+the expected owner from the span itself.
+
+The cloud suite adds native X-Ray sampled/unsampled cases, sequential
+success/failure/replay with proven process reuse, concurrent-worker attribution,
+export failure/recovery, held export, and the original deadline, retry, PENDING,
+late-operation and in-flight-return contracts with each OTel view enabled.
+It still runs the original plugin-free lifecycle cases. The cloud assertion
+budget is 60 minutes within a 120-minute job; provider capacity and the two
+persistent functions are unchanged.
+
+An instrumented test caller supplies `X-Amzn-Trace-Id` on the real Invoke HTTP
+request. The function records the actual runtime `_X_AMZN_TRACE_ID`; it never
+substitutes a payload header into the runtime. Native acceptance requires the
+observed runtime carrier and actual exported spans. Missing/invalid header
+fallbacks are separately labeled local public-wrapper fixtures. OTel's explicit
+`Sampled=0` decision can remain authoritative even when the trace ID is invalid.
+
+`hatch run lmi:unit` includes public-wrapper sampling, process-owned provider
+reuse, real local suspension/replay, exporter failures, and negative evidence
+controls for wrong execution/trace/parent attribution, missing/duplicate spans,
+and leaked context. On non-Linux development hosts, unit-only resource snapshots
+retain real thread identity while leaving RSS/FD measurement to the deployed
+Linux fixture.
+
+`lmi:build` builds and installs both the checkout's core and OTel wheels with
+the existing standalone OTel dependencies. `build.json` and the deployment
+manifest retain both wheel hashes; `build/dependencies.json` records dependency
+resolution. No published core/plugin substitutes for the checkout.
+
+The new tests do not close #742 without a fresh deployed acceptance run.
+Plugin-enabled lifecycle cases still expose unresolved #741 behavior; local
+green telemetry tests do not imply bounded non-cooperative cleanup or guaranteed
+export after a runtime timeout.

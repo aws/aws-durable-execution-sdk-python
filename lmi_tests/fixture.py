@@ -452,11 +452,22 @@ def handler(event, context):
     injected = DurableExecutionInvocationInputWithClient.from_durable_execution_invocation_input(
         invocation, client
     )
-    decorated = durable_execution(lambda e, c: workflow(e, c, trace))
+
+    def invoke(plugins=None):
+        decorated = durable_execution(
+            lambda e, c: workflow(e, c, trace), plugins=plugins
+        )
+        return decorated(injected, context)
+
     before = resources()
     trace.emit("WRAPPER_ENTER", resources=before)
     try:
-        result = decorated(injected, context)
+        if payload.get("otel_view"):
+            from lmi_tests.telemetry import invoke as invoke_with_telemetry
+
+            result = invoke_with_telemetry(trace, invoke)
+        else:
+            result = invoke()
         trace.emit("WRAPPER_RETURN", status=result["Status"], resources=resources())
         return result
     except BaseException as error:
