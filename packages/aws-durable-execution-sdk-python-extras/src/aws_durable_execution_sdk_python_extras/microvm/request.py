@@ -332,9 +332,12 @@ def send_job(options: SendJobOptions) -> int:
         MicrovmRequestRejectedError: When the endpoint rejects the job.
         MicrovmRequestUnauthorizedError: When a new auth token is refused.
         MicrovmEndpointUnavailableError: When the tier ends.
-        MicrovmStateError: When ``CreateMicrovmAuthToken`` reports that the
-            MicroVM no longer exists. The message ends with
-            ``CreateMicrovmAuthToken request ID: <id>.``.
+        ClientError: When ``CreateMicrovmAuthToken`` answers
+            ``ResourceNotFoundException``. It is the error that the client
+            raised, unchanged. The request step turns it into
+            ``MicrovmStateError``.
+        MicrovmStateError: When ``recheck`` reports that the MicroVM can no
+            longer run a job.
         Exception: When ``CreateMicrovmAuthToken`` fails otherwise. The
             message of a botocore error ends with the request ID.
     """
@@ -462,20 +465,21 @@ def send_job(options: SendJobOptions) -> int:
 def _create_auth_token(options: SendJobOptions) -> Mapping[str, str]:
     """Call ``CreateMicrovmAuthToken``, and return the token headers.
 
-    1. The API model lists ``ResourceNotFoundException`` for this call. The
-       MicroVM was removed after the launch or after the state check.
-    2. A later attempt finds the same MicroVM removed.
-    3. So the function raises ``MicrovmStateError``, as ``GetMicrovm`` does
-       for a removed MicroVM. The default retry strategy does not retry it,
-       and the delivery raises ``MicrovmNotRunningError``.
+    The function handles a failed call this way:
 
-    Any other error is raised with its class and its ``response``, and its
-    message ends with the request ID. See :func:`add_request_id`.
+    1. The API model lists ``ResourceNotFoundException`` for this call. It
+       means that the MicroVM was removed after the launch or after the
+       state check. The function raises that error unchanged. The request
+       step in ``operation.py`` turns it into ``MicrovmStateError``, with
+       the error as its ``__cause__``.
+    2. Any other error is raised with its class and its ``response``, and
+       its message ends with the request ID. See :func:`add_request_id`.
 
     Raises:
-        MicrovmStateError: When the MicroVM no longer exists.
         RuntimeError: When the answer has no ``authToken``.
-        ClientError: When the call fails otherwise.
+        ClientError: When the call fails. A ``ResourceNotFoundException``
+            is the error that the client raised. Any other error can be the
+            copy that :func:`add_request_id` returns.
     """
     try:
         response = options.client.create_microvm_auth_token(
@@ -485,15 +489,7 @@ def _create_auth_token(options: SendJobOptions) -> Mapping[str, str]:
         )
     except ClientError as error:
         if error_code(error) == "ResourceNotFoundException":
-            # The lifecycle module imports this module. So this import runs
-            # at call time, after both modules exist.
-            from aws_durable_execution_sdk_python_extras.microvm.lifecycle import (
-                microvm_not_found,
-            )
-
-            raise microvm_not_found(
-                options.microvm_id, "CreateMicrovmAuthToken", error
-            ) from error
+            raise
         # add_request_id returns the error, or a copy whose __cause__ is
         # the error. So the raise has no `from`.
         raise add_request_id("CreateMicrovmAuthToken", error)

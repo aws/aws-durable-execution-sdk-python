@@ -265,13 +265,24 @@ class _TokenClient:
     [([], []), ([403], [{"authToken": {"x-t": "t"}}])],
     ids=["first-token", "new-token-after-403"],
 )
-def test_send_job_raises_the_state_error_for_a_removed_microvm(
-    fake_endpoint: Any, statuses: list[int], before: list[Any]
+@pytest.mark.parametrize(
+    "remaining", [None, 600.0], ids=["no-deadline", "in-a-daemon-thread"]
+)
+def test_send_job_raises_the_not_found_answer_of_the_token_call_unchanged(
+    fake_endpoint: Any,
+    statuses: list[int],
+    before: list[Any],
+    remaining: float | None,
 ) -> None:
+    """The request step turns the answer into ``MicrovmStateError``. So
+    ``send_job`` raises the error that the client raised, without a copy.
+    With a deadline, the call runs in the daemon thread of
+    ``_run_with_limit``, which re-raises the same object."""
     endpoint = fake_endpoint(statuses)
     not_found = ClientError(
         response(code="ResourceNotFoundException"), "CreateMicrovmAuthToken"
     )
+    original = str(not_found)
     options = SendJobOptions(
         client=_TokenClient([*before, not_found]),  # type: ignore[arg-type]
         microvm_id="mvm-1",
@@ -280,17 +291,16 @@ def test_send_job_raises_the_state_error_for_a_removed_microvm(
         port=8080,
         body=b"{}",
         retry_window_seconds=60,
-        remaining_seconds=lambda: None,
+        remaining_seconds=lambda: remaining,
         logger=logging.getLogger("test"),
         sleep=lambda seconds: None,
     )
 
-    with pytest.raises(MicrovmStateError) as raised:
+    with pytest.raises(ClientError) as raised:
         send_job(options)
 
-    assert raised.value.state is None
-    assert str(raised.value).endswith(" CreateMicrovmAuthToken request ID: req-1.")
-    assert raised.value.__cause__ is not_found
+    assert raised.value is not_found
+    assert str(not_found) == original
     assert len(endpoint.requests) == len(statuses)
 
 

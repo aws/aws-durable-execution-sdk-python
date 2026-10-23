@@ -66,6 +66,7 @@ from aws_durable_execution_sdk_python_extras.microvm.lifecycle import (
     EnsureRunningOptions,
     MicrovmStateError,
     ensure_running,
+    microvm_not_found,
 )
 from aws_durable_execution_sdk_python_extras.microvm.request import (
     DEFAULT_MICROVM_JOB_PATH,
@@ -473,6 +474,11 @@ class _MicrovmScope:
         ``GetMicrovm`` reports. A session sets it when its MicroVM can be
         suspended.
 
+        ``GetMicrovm``, ``ResumeMicrovm``, and ``CreateMicrovmAuthToken``
+        answer ``ResourceNotFoundException`` for a removed MicroVM. An
+        attempt raises ``MicrovmStateError`` for that answer of any of the
+        three calls. The default retry strategy does not retry it.
+
         Raises:
             MicrovmNotRunningError: When the MicroVM can no longer run a job.
             MicrovmDeliveryError: When the delivery fails after all retries.
@@ -524,22 +530,42 @@ class _MicrovmScope:
 
                 endpoint = running(retry_window_seconds) or endpoint
                 recheck = running
-            send_job(
-                SendJobOptions(
-                    client=client,
-                    microvm_id=launched.microvm_id,
-                    endpoint=endpoint,
-                    path=path,
-                    port=port,
-                    body=body,
-                    retry_window_seconds=retry_window_seconds,
-                    remaining_seconds=remaining_seconds,
-                    logger=step_context.logger,
-                    opener=self.config.opener,
-                    window_started_at=window_started_at,
-                    recheck=recheck,
+            # Only CreateMicrovmAuthToken can raise ResourceNotFoundException
+            # here:
+            #
+            # 1. _create_auth_token raises that answer unchanged.
+            # 2. send_job calls new_token() outside any try. So the error
+            #    leaves send_job unchanged.
+            # 3. _run_with_limit re-raises the same error object.
+            # 4. ensure_running turns the same answer of GetMicrovm and
+            #    ResumeMicrovm into MicrovmStateError. So neither call raises
+            #    a ClientError with that code.
+            #
+            # So the step raises MicrovmStateError for CreateMicrovmAuthToken.
+            # The default retry strategy does not retry that error.
+            try:
+                send_job(
+                    SendJobOptions(
+                        client=client,
+                        microvm_id=launched.microvm_id,
+                        endpoint=endpoint,
+                        path=path,
+                        port=port,
+                        body=body,
+                        retry_window_seconds=retry_window_seconds,
+                        remaining_seconds=remaining_seconds,
+                        logger=step_context.logger,
+                        opener=self.config.opener,
+                        window_started_at=window_started_at,
+                        recheck=recheck,
+                    )
                 )
-            )
+            except ClientError as error:
+                if error_code(error) == "ResourceNotFoundException":
+                    raise microvm_not_found(
+                        launched.microvm_id, "CreateMicrovmAuthToken", error
+                    ) from error
+                raise
 
         try:
             child.step(
