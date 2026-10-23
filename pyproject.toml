@@ -155,9 +155,15 @@ typecheck = "mypy --install-types --non-interactive packages/aws-durable-executi
 js-examples = "python .github/scripts/js_examples/run.py {args}"
 
 [tool.hatch.envs.dev-examples]
+# The MicroVM examples import the extras. test-pypi-examples is meant to run
+# the examples against the packages on PyPI. The extras are not published
+# there. So the examples package does not depend on the extras. The
+# environments that run the examples from this checkout add the extras as a
+# workspace member instead.
 workspace.members = [
   "packages/aws-durable-execution-sdk-python",
   "packages/aws-durable-execution-sdk-python-examples",
+  "packages/aws-durable-execution-sdk-python-extras",
   "packages/aws-durable-execution-sdk-python-otel",
   "packages/aws-durable-execution-sdk-python-testing",
 ]
@@ -234,6 +240,7 @@ test = "pytest packages/aws-durable-execution-sdk-python-examples/test {args}"
 workspace.members = [
   "packages/aws-durable-execution-sdk-python",
   "packages/aws-durable-execution-sdk-python-examples",
+  "packages/aws-durable-execution-sdk-python-extras",
   "packages/aws-durable-execution-sdk-python-otel",
 ]
 
