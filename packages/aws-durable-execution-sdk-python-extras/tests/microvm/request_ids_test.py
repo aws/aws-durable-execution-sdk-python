@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import datetime
 import functools
+import gc
+import logging
 import re
 import threading
+import weakref
 from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -46,6 +49,8 @@ from aws_durable_execution_sdk_python_extras.microvm import (
     MicrovmNotRunningError,
     MicrovmRequestConfig,
     MicrovmSessionConfig,
+    aws_errors,
+    default_microvm_retry_strategy,
     microvm,
     microvm_session,
 )
@@ -860,6 +865,105 @@ def test_gives_a_custom_strategy_the_error_that_botocore_raised(
         MicrovmDeliveryError,
         f"{DELIVERY}{text}. CreateMicrovmAuthToken request ID: req-2.",
     )
+
+
+def _fail_five_tokens_of_a_session_job(
+    endpoint_url: str,
+) -> tuple[list[weakref.ref[ClientError]], list[weakref.ref[ClientError]]]:
+    """Run a session job whose 5 ``CreateMicrovmAuthToken`` calls are
+    throttled. The handler catches the error and keeps no reference to it.
+
+    Return weak references to the copies and to the originals. The strategy
+    finds each copy in the map while the copy is alive.
+    """
+    tokens = throttled("CreateMicrovmAuthToken", with_id=True)
+    originals: list[weakref.ref[ClientError]] = [
+        weakref.ref(error) for error in tokens if isinstance(error, ClientError)
+    ]
+    client = ScriptedClient(endpoint_url, create_microvm_auth_token=tokens)
+    del tokens
+    copies: list[weakref.ref[ClientError]] = []
+    threaded: list[bool] = []
+
+    def strategy(error: Exception, attempt: int) -> RetryDecision:
+        with aws_errors._originals_lock:
+            found = [copy for copy in aws_errors._originals if copy.__cause__ is error]
+        copies.extend(weakref.ref(copy) for copy in found)
+        threaded.extend(
+            "_run_with_limit" in _frame_names(copy.__traceback__) for copy in found
+        )
+        del found
+        return default_microvm_retry_strategy(error, attempt)
+
+    fields = base_fields(client, strategy)
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        try:
+            microvm_session(
+                context,
+                "pipeline",
+                config=MicrovmSessionConfig(**fields, timeout=Duration.from_hours(1)),
+                handler=lambda vm, ctx: vm.invoke(
+                    ctx,
+                    "job",
+                    job_input=1,
+                    options=MicrovmInvokeOptions(
+                        path="/job", timeout=Duration.from_minutes(10)
+                    ),
+                ),
+            )
+        except MicrovmError:
+            return "caught"
+        return "unexpected"  # pragma: no cover - the job fails
+
+    runner = DurableFunctionTestRunner(handler=handler, poll_interval=0.05)
+    try:
+        arn = runner.run_async(input="null", execution_timeout=WAIT)
+        result = runner.wait_for_result(arn, timeout=WAIT)
+    finally:
+        runner.close()
+    assert result.status is InvocationStatus.SUCCEEDED, result.error
+    assert result.result == '"caught"'
+    assert client.calls["create_microvm_auth_token"] == 5
+    assert len(copies) == 5
+    # The local test runner gives the invocation a remaining time. So each
+    # call ran in the daemon thread of _run_with_limit.
+    assert threaded == [True] * 5
+    return copies, originals
+
+
+def _frame_names(traceback: Any) -> list[str]:
+    names = []
+    while traceback is not None:
+        names.append(traceback.tb_frame.f_code.co_name)
+        traceback = traceback.tb_next
+    return names
+
+
+def test_keeps_no_error_of_a_throttled_token_call_after_the_execution(
+    fake_endpoint: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1. The traceback of each original holds the frame of the thread
+       function of ``_run_with_limit``. That frame holds the copy.
+    2. So a map that held the original strongly would keep the copy alive.
+    3. So after the execution, the copies and the originals must be
+       collected, and the map must be empty.
+
+    The core SDK logs each failed step attempt with the error. pytest keeps
+    each log record until the test ends, and a record holds its error. So
+    the test turns off the step logger.
+    """
+    step_logger = logging.getLogger("aws_durable_execution_sdk_python.operation.step")
+    monkeypatch.setattr(step_logger, "disabled", True)
+    copies, originals = _fail_five_tokens_of_a_session_job(fake_endpoint().url)
+
+    gc.collect()
+
+    assert [copy() for copy in copies] == [None] * 5
+    assert [original() for original in originals] == [None] * 5
+    with aws_errors._originals_lock:
+        assert len(aws_errors._originals) == 0
 
 
 @pytest.mark.parametrize(

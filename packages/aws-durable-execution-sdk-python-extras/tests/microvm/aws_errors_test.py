@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import gc
 import logging
+import weakref
 from typing import Any
 
 import boto3
@@ -14,6 +16,7 @@ from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.retries import RetryDecision
 from botocore.exceptions import ClientError
 
+from aws_durable_execution_sdk_python_extras.microvm import aws_errors
 from aws_durable_execution_sdk_python_extras.microvm.aws_errors import (
     add_request_id,
     decide_on_original_error,
@@ -289,3 +292,117 @@ def test_send_job_raises_the_state_error_for_a_removed_microvm(
     assert str(raised.value).endswith(" CreateMicrovmAuthToken request ID: req-1.")
     assert raised.value.__cause__ is not_found
     assert len(endpoint.requests) == len(statuses)
+
+
+def _entries() -> int:
+    with aws_errors._originals_lock:
+        return len(aws_errors._originals)
+
+
+def _frame_names(error: BaseException) -> list[str]:
+    names = []
+    traceback = error.__traceback__
+    while traceback is not None:
+        names.append(traceback.tb_frame.f_code.co_name)
+        traceback = traceback.tb_next
+    return names
+
+
+def _fail_a_token_call_under_a_deadline(
+    endpoint_url: str,
+) -> tuple[weakref.ref[ClientError], weakref.ref[ClientError]]:
+    """Fail one ``CreateMicrovmAuthToken`` call in the daemon thread of
+    ``_run_with_limit``, and return weak references to the copy and the
+    original.
+
+    The thread function stores the copy in its closure. The traceback of the
+    original holds the frame of that function.
+    """
+    original = ClientError(response("req-1"), "CreateMicrovmAuthToken")
+    options = SendJobOptions(
+        client=_TokenClient([original]),  # type: ignore[arg-type]
+        microvm_id="mvm-1",
+        endpoint=endpoint_url,
+        path="/job",
+        port=8080,
+        body=b"{}",
+        retry_window_seconds=60,
+        remaining_seconds=lambda: 600.0,
+        logger=logging.getLogger("test"),
+        sleep=lambda seconds: None,
+    )
+    copy: ClientError | None = None
+    try:
+        send_job(options)
+    except ClientError as error:
+        copy = error
+    assert copy is not None
+    assert copy.__cause__ is original
+    assert str(copy).endswith(" CreateMicrovmAuthToken request ID: req-1.")
+    # The remaining time sets a deadline. So the call ran in the daemon thread.
+    assert "_run_with_limit" in _frame_names(copy)
+    return weakref.ref(copy), weakref.ref(original)
+
+
+def test_keeps_no_error_of_a_token_call_that_failed_under_a_deadline(
+    fake_endpoint: Any,
+) -> None:
+    copy, original = _fail_a_token_call_under_a_deadline(fake_endpoint().url)
+
+    gc.collect()
+
+    assert copy() is None
+    assert original() is None
+    assert _entries() == 0
+
+
+def _keep_the_copy_in_the_frame_of_the_caller() -> tuple[
+    weakref.ref[ClientError], weakref.ref[ClientError]
+]:
+    """Keep the copy in a local variable of the frame that called the failing
+    call, as a handler can in a closure. The traceback of the original holds
+    that frame."""
+    original = ClientError(response(), "RunMicrovm")
+
+    def call() -> None:
+        try:
+            raise original
+        except ClientError as error:
+            # The copy already has the error as its __cause__.
+            raise add_request_id("RunMicrovm", error)
+
+    held: dict[str, ClientError] = {}
+    try:
+        call()
+    except ClientError as error:
+        held["copy"] = error
+    assert held["copy"].__cause__ is original
+    return weakref.ref(held["copy"]), weakref.ref(original)
+
+
+def test_keeps_no_error_whose_traceback_reaches_the_copy() -> None:
+    copy, original = _keep_the_copy_in_the_frame_of_the_caller()
+
+    gc.collect()
+
+    assert copy() is None
+    assert original() is None
+    assert _entries() == 0
+
+
+def test_passes_the_copy_unchanged_when_its_original_is_gone() -> None:
+    """Code can replace ``__cause__``. The copy then no longer holds the
+    original, and the original can be collected first."""
+    labelled = add_request_id("RunMicrovm", ClientError(response(), "RunMicrovm"))
+    labelled.__cause__ = None
+    gc.collect()
+    seen: list[Exception] = []
+
+    def strategy(received: Exception, attempt: int) -> RetryDecision:
+        seen.append(received)
+        return RetryDecision.no_retry()
+
+    decide_on_original_error(strategy)(labelled, 1)
+
+    assert seen == [labelled]
+    assert seen[0] is labelled

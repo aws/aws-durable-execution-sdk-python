@@ -93,12 +93,22 @@ def with_request_id(
     return f"{message}{end} {sentence}"
 
 
-_originals: weakref.WeakKeyDictionary[ClientError, ClientError] = (
+_originals: weakref.WeakKeyDictionary[ClientError, weakref.ref[ClientError]] = (
     weakref.WeakKeyDictionary()
 )
-"""The error that botocore raised, for each copy that :func:`add_request_id`
-made. A weak key does not keep a copy alive. So an entry exists only while
-its copy exists."""
+"""A weak reference to the error that botocore raised, for each copy that
+:func:`add_request_id` made.
+
+1. The module keeps the map for the life of the process. An entry is removed
+   only when its key, the copy, is collected.
+2. The traceback of the original can reach the copy. For example, the frame
+   of a thread function can hold the copy in a local variable, and the
+   traceback of the original holds that frame.
+3. A strong reference to the original as the value would then keep the copy
+   alive. So the entry would never be removed.
+4. So the key and the value are both weak references. The copy holds the
+   original as its ``__cause__``. So the original lives at least as long as
+   the copy, unless code replaces ``__cause__``."""
 
 _originals_lock = threading.Lock()
 """A ``CreateMicrovmAuthToken`` call runs in its own thread when the
@@ -165,7 +175,7 @@ def add_request_id(operation: MicrovmApiOperation, error: ClientError) -> Client
         return error
     labelled.__cause__ = error
     with _originals_lock:
-        _originals[labelled] = error
+        _originals[labelled] = weakref.ref(error)
     return labelled
 
 
@@ -196,10 +206,11 @@ def decide_on_original_error(strategy: RetryStrategy) -> RetryStrategy:
     """
 
     def decide(error: Exception, attempt: int) -> RetryDecision:
-        original: Any = error
+        original: Any = None
         if isinstance(error, ClientError):
             with _originals_lock:
-                original = _originals.get(error, error)
-        return strategy(original, attempt)
+                ref = _originals.get(error)
+            original = None if ref is None else ref()
+        return strategy(error if original is None else original, attempt)
 
     return decide
