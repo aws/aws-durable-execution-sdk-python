@@ -1,12 +1,13 @@
 """10-1: Plugin invocation lifecycle hooks (start and end on a single invocation).
 
 Registers an instrumentation plugin through the SDK's real ``plugins=[...]``
-parameter on ``durable_execution``. The plugin emits its lines from the SDK's
-``on_invocation_start`` / ``on_invocation_end`` hooks; the step body logs its
-running line via the SDK-provided step context logger (mirrors handler 1-7).
+parameter on ``durable_execution``, which takes the plugin's factory. The plugin
+emits its lines from the SDK's ``on_invocation_start`` / ``on_invocation_end``
+hooks; the step body logs its running line via the SDK-provided step context
+logger (mirrors handler 1-7).
 """
 
-import json
+import logging
 from typing import Any
 
 from aws_durable_execution_sdk_python.context import (
@@ -28,7 +29,10 @@ def _emit(record: dict[str, Any], execution_arn: str | None) -> None:
     # execution. Omit the field when the ARN is unset (never invent a value).
     if execution_arn:
         record = {"durableExecutionArn": execution_arn, **record}
-    print(json.dumps(record), flush=True)
+    # Use the same logging transport as the step context logger. Mixing stdout
+    # and Lambda's logging sink can invert their CloudWatch timestamps even
+    # though invocation-start runs synchronously before the handler.
+    logging.getLogger().info("Plugin invocation lifecycle", extra=record)
 
 
 class LifecyclePlugin(DurableInstrumentationPlugin):
@@ -50,13 +54,28 @@ class LifecyclePlugin(DurableInstrumentationPlugin):
         )
 
 
+class LifecyclePluginFactory:
+    """Builds one :class:`LifecyclePlugin` for each invocation.
+
+    ``durable_execution(plugins=[...])`` takes factory objects whose
+    ``create_plugin`` the SDK calls once per invocation. A bare callable is
+    rejected while the handler is being initialized, so registering one would
+    stop this handler from importing. This factory exists only to construct the
+    plugin.
+    """
+
+    def create_plugin(self, info: InvocationStartInfo) -> LifecyclePlugin:
+        """Return this invocation's plugin. ``info`` is unused."""
+        return LifecyclePlugin()
+
+
 @durable_step
 def greet(step_context: StepContext, name: str) -> str:
     step_context.logger.info(f"Greeting step running for: {name}")
     return f"Hello, {name}!"
 
 
-@durable_execution(plugins=[LifecyclePlugin()])
+@durable_execution(plugins=[LifecyclePluginFactory()])
 def handler(event: Any, context: DurableContext) -> str:
     result: str = context.step(greet(event))
     return result

@@ -7,6 +7,7 @@ from collections.abc import Callable
 import contextlib
 import datetime
 import json
+import logging
 import queue
 import threading
 import time
@@ -18,7 +19,6 @@ import pytest
 
 from aws_durable_execution_sdk_python.exceptions import (
     BackgroundThreadError,
-    CheckpointError,
     DurableApiErrorCategory,
     GetExecutionStateError,
     NonDeterministicExecutionError,
@@ -63,6 +63,7 @@ from aws_durable_execution_sdk_python.state import (
     QueuedOperation,
 )
 from aws_durable_execution_sdk_python.threading import CompletionEvent
+from tests.test_helpers import plugin_factory, plugin_invocation
 
 
 def test_checkpointed_result_create_from_operation_step():
@@ -2137,16 +2138,16 @@ def _step_start(operation_id: str) -> OperationUpdate:
             ],
             id="mixed-terminal",
         ),
-        pytest.param([_step_start("op1")], id="non-terminal-only"),
     ],
 )
-def test_checkpoint_missing_token_with_updates_completes(updates):
-    """A batch that sent any updates and gets no token back completes.
+def test_checkpoint_missing_token_on_terminal_update_completes(updates):
+    """A batch carrying the execution's own terminal update completes.
 
-    The service omits the token only at a terminal state - completion, or a
-    failure such as a quota limit - so any non-empty batch with a missing token
-    is treated as completion and its waiters settle cleanly rather than failing.
-    This holds whether or not the batch carried an explicit EXECUTION update.
+    The service omits the token on this batch because the execution is then
+    finished: there is nothing left to suspend. This holds whether the
+    terminal update is a SUCCEED or a FAIL (operation type EXECUTION is what
+    is checked, not the action), and whether or not other updates share the
+    batch.
     """
     mock_lambda_client = Mock(spec=LambdaClient)
     mock_lambda_client.checkpoint.return_value = CheckpointOutput(
@@ -2178,15 +2179,28 @@ def test_checkpoint_missing_token_with_updates_completes(updates):
         thread.join(timeout=2.0)
 
     assert state._execution_completed.is_set()
+    assert not state._checkpoint_token_revoked.is_set()
 
 
-def test_settle_after_execution_completed_orphans_pending_operations():
-    """When the execution completes, still-queued operations are settled as orphaned.
+def test_checkpoint_missing_token_without_terminal_update_is_revoked(caplog):
+    """A batch with no EXECUTION update and no token back must not be treated as completion.
 
-    Their waiters must be released with OrphanedChildException rather than left
-    blocking or sent with the consumed token, and checkpointing must stop.
+    This invocation must stop checkpointing and report PENDING instead. The
+    accepted batch's waiter must not be resolved as succeeded, the
+    execution-completed latch must stay clear (that latch gates
+    OrphanedChildException, which must never reach customer handler code),
+    the revoked latch must be set instead, no GetDurableExecutionState
+    pagination call may be made with the now-invalid token, and exactly one
+    warning must be logged naming the condition.
     """
     mock_lambda_client = Mock(spec=LambdaClient)
+    mock_lambda_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token=None,
+        new_execution_state=CheckpointUpdatedExecutionState(
+            operations=[], next_marker="more-pages"
+        ),
+    )
+
     state = ExecutionState(
         durable_execution_arn="test_arn",
         initial_checkpoint_token="token123",  # noqa: S106
@@ -2196,23 +2210,341 @@ def test_settle_after_execution_completed_orphans_pending_operations():
     )
 
     completion_event = CompletionEvent()
-    state._checkpoint_queue.put(
-        QueuedOperation(
-            OperationUpdate(
-                operation_id="orphan_op",
-                operation_type=OperationType.STEP,
-                action=OperationAction.START,
-            ),
-            completion_event,
-        )
+    state._checkpoint_queue.put(QueuedOperation(_step_start("op1"), completion_event))
+
+    thread = threading.Thread(daemon=True, target=state.checkpoint_batches_forever)
+    try:
+        with caplog.at_level(logging.WARNING):
+            thread.start()
+            with pytest.raises(SuspendExecution):
+                completion_event.wait(timeout=2.0)
+    finally:
+        state.stop_checkpointing()
+        thread.join(timeout=2.0)
+
+    assert state._checkpoint_token_revoked.is_set()
+    assert not state._execution_completed.is_set()
+    assert state.is_checkpoint_token_revoked
+    mock_lambda_client.get_execution_state.assert_not_called()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+
+
+def test_checkpoint_missing_token_on_empty_refresh_batch_is_revoked(caplog):
+    """A refresh-only batch, with no real operation updates, must be treated
+    the same as a batch carrying other non-terminal updates: a token-less
+    response means this invocation stops checkpointing and reports PENDING,
+    not CheckpointError. Refresh-only batches have operation_update=None, so
+    an empty-updates batch is a normal production shape, not just a test
+    construction.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    mock_lambda_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token=None,
+        new_execution_state=CheckpointUpdatedExecutionState(
+            operations=[], next_marker=None
+        ),
     )
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+
+    refresh = state.schedule_refresh(time.time() - 1)
+
+    thread = threading.Thread(daemon=True, target=state.checkpoint_batches_forever)
+    try:
+        with caplog.at_level(logging.WARNING):
+            thread.start()
+            with pytest.raises(SuspendExecution):
+                refresh.completion_event.wait(timeout=2.0)
+    finally:
+        state.stop_checkpointing()
+        thread.join(timeout=2.0)
+
+    assert state._checkpoint_token_revoked.is_set()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "expected_error"),
+    [
+        ("revoked", SuspendExecution),
+        ("completed", OrphanedChildException),
+        ("failed", BackgroundThreadError),
+    ],
+)
+def test_checkpoint_exit_settles_unsent_operations(
+    stop_reason: str, expected_error: type[BaseException]
+) -> None:
+    """Each exit settles unsent work without submitting another batch."""
+    client = Mock(spec=LambdaClient)
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+    sent_update = (
+        OperationUpdate.create_execution_succeed(payload="{}")
+        if stop_reason == "completed"
+        else _step_start("sent")
+    )
+    overflow_event = CompletionEvent()
+    queued_event = CompletionEvent()
+
+    def checkpoint_and_queue_more(**_kwargs) -> CheckpointOutput:
+        # The submitted batch is already collected, so this work remains unsent.
+        with state._completion_lock:
+            state._overflow_queue.put(
+                QueuedOperation(_step_start("overflow"), overflow_event)
+            )
+            state._checkpoint_queue.put(
+                QueuedOperation(_step_start("queued"), queued_event)
+            )
+        if stop_reason == "failed":
+            raise RuntimeError("Checkpoint API error")
+        return CheckpointOutput(
+            checkpoint_token=None,
+            new_execution_state=CheckpointUpdatedExecutionState(),
+        )
+
+    client.checkpoint.side_effect = checkpoint_and_queue_more
+    state._checkpoint_queue.put(QueuedOperation(sent_update))
+    thread = threading.Thread(daemon=True, target=state.checkpoint_batches_forever)
+    try:
+        thread.start()
+        for event in (overflow_event, queued_event):
+            with pytest.raises(expected_error):
+                event.wait(timeout=2.0)
+
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+    finally:
+        state.stop_checkpointing()
+        thread.join(timeout=2.0)
+
+    client.checkpoint.assert_called_once()
+    assert state._overflow_queue.empty()
+    assert state._checkpoint_queue.empty()
+
+
+@pytest.mark.parametrize("queue_name", ["_overflow_queue", "_checkpoint_queue"])
+def test_drain_unsent_operations_handles_empty_after_check(queue_name: str) -> None:
+    """A stale nonempty check must not prevent draining the other queue."""
+    state = _refresh_state()
+    pending_queue = getattr(state, queue_name)
+    other_queue = (
+        state._checkpoint_queue
+        if queue_name == "_overflow_queue"
+        else state._overflow_queue
+    )
+
+    operation = QueuedOperation(_step_start("unsent"))
+    other_queue.put(operation)
+
+    with state._completion_lock:
+        with patch.object(pending_queue, "empty", return_value=False) as empty:
+            assert state._drain_unsent_operations() == [operation]
+            empty.assert_called_once()
+
+    assert state._overflow_queue.empty()
+    assert state._checkpoint_queue.empty()
+
+
+def test_drain_unsent_operations_preserves_order_without_settling() -> None:
+    """Draining returns only operations; callers decide how to settle them."""
+    state = _refresh_state()
+    overflow = [
+        QueuedOperation(_step_start("overflow"), CompletionEvent()),
+        QueuedOperation(None),
+    ]
+    queued = [
+        QueuedOperation(None, CompletionEvent()),
+        QueuedOperation(_step_start("queued")),
+    ]
+
+    for operation in overflow:
+        state._overflow_queue.put(operation)
+    state._checkpoint_queue.put(_Signal.REFRESH_WAKE)
+    for operation in queued:
+        state._checkpoint_queue.put(operation)
+
+    with state._completion_lock:
+        drained = state._drain_unsent_operations()
+        assert state._drain_unsent_operations() == []
+
+    assert drained == overflow + queued
+    assert state._overflow_queue.empty()
+    assert state._checkpoint_queue.empty()
+    for operation in drained:
+        if operation.completion_event is not None:
+            assert not operation.completion_event.is_set()
+
+
+@pytest.mark.parametrize(
+    ("update_count", "refresh_count"),
+    [(2, 0), (0, 2), (2, 1)],
+    ids=["updates", "refreshes", "mixed"],
+)
+def test_revocation_warning_counts_only_accepted_updates(
+    caplog: pytest.LogCaptureFixture, update_count: int, refresh_count: int
+) -> None:
+    """The warning excludes refresh entries and work not submitted to the service."""
+    state = _refresh_state()
+    batch = [QueuedOperation(_step_start(f"op{i}")) for i in range(update_count)]
+    batch.extend(QueuedOperation(None) for _ in range(refresh_count))
+    state._overflow_queue.put(QueuedOperation(_step_start("unsent_overflow")))
+    state._checkpoint_queue.put(QueuedOperation(_step_start("unsent_queued")))
+
+    with caplog.at_level(logging.WARNING):
+        state._handle_revoked_checkpoint_token(batch)
+
+    warnings = [
+        record for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert f"{update_count} accepted update(s)" in message
+    assert state.durable_execution_arn in message
+
+
+def test_create_checkpoint_rejects_once_token_revoked():
+    """create_checkpoint refuses once the token is revoked.
+
+    The work must not be enqueued: _handle_revoked_checkpoint_token drains
+    the queue exactly once, so anything landing afterwards is never drained
+    and its waiter would block until the Lambda timeout.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+    mock_lambda_client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token=None,
+        new_execution_state=CheckpointUpdatedExecutionState(
+            operations=[], next_marker=None
+        ),
+    )
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+    state._checkpoint_token_revoked.set()
+
+    with pytest.raises(SuspendExecution):
+        state.create_checkpoint(_step_start("op1"), is_sync=True)
+
+    assert state._checkpoint_queue.empty()
+    mock_lambda_client.checkpoint.assert_not_called()
+
+
+def test_schedule_refresh_rejects_once_token_revoked():
+    """schedule_refresh refuses once the token is revoked, for the same reason
+    create_checkpoint does.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+    state._checkpoint_token_revoked.set()
+
+    with pytest.raises(SuspendExecution):
+        state.schedule_refresh(earliest_check_time=0.0)
+
+    assert state._pending_refreshes == []
+    assert state._checkpoint_queue.empty()
+
+
+def test_parent_done_guard_runs_before_revoked_token_guard() -> None:
+    """An orphaned operation is rejected before token revocation is checked."""
+    state = _refresh_state()
+    state._parent_done.add("op1")
+    state._checkpoint_token_revoked.set()
+
+    with pytest.raises(OrphanedChildException) as exc_info:
+        state.create_checkpoint(_step_start("op1"), is_sync=True)
+
+    assert exc_info.value.operation_id == "op1"
+    assert state._checkpoint_queue.empty()
+
+
+def test_checkpoint_failure_guard_runs_before_revoked_token_guard() -> None:
+    """A recorded background failure is raised before revocation is checked."""
+    state = _refresh_state()
+    failure = BackgroundThreadError("Checkpoint creation failed", RuntimeError("boom"))
+    state._checkpointing_failed.set(failure)
+    state._checkpoint_token_revoked.set()
+
+    with pytest.raises(BackgroundThreadError) as exc_info:
+        state.create_checkpoint(_step_start("op1"), is_sync=True)
+
+    assert exc_info.value is failure
+    assert state._checkpoint_queue.empty()
+
+
+def test_revoked_token_guard_runs_before_execution_completed_guard():
+    """With both latches set, the revoked-token guard decides the exit.
+
+    create_checkpoint and schedule_refresh check revocation first, so the
+    caller sees a suspension. OrphanedChildException would tell a map or
+    parallel branch that its parent context completed, which is a different
+    and wrong diagnosis for a service-side revocation.
+    """
+    mock_lambda_client = Mock(spec=LambdaClient)
+
+    state = ExecutionState(
+        durable_execution_arn="test_arn",
+        initial_checkpoint_token="token123",  # noqa: S106
+        operations={},
+        service_client=mock_lambda_client,
+        plugin_executor=PluginExecutor(plugins=None),
+    )
+    state._execution_completed.set()
+    state._checkpoint_token_revoked.set()
+
+    with pytest.raises(SuspendExecution):
+        state.create_checkpoint(_step_start("op1"), is_sync=True)
+
+    with pytest.raises(SuspendExecution):
+        state.schedule_refresh(earliest_check_time=0.0)
+
+
+@pytest.mark.parametrize(
+    ("update", "expected_id"),
+    [(_step_start("orphan_op"), "orphan_op"), (None, "")],
+    ids=["operation", "empty-checkpoint"],
+)
+def test_settle_after_execution_completed_orphans_pending_operations(
+    update: OperationUpdate | None, expected_id: str
+) -> None:
+    """Completion preserves orphan IDs and handles entries without waiters."""
+    state = _refresh_state()
+    completion_event = CompletionEvent()
+    state._overflow_queue.put(QueuedOperation(_step_start("async_op")))
+    state._checkpoint_queue.put(QueuedOperation(update, completion_event))
 
     state._settle_after_execution_completed()
 
     assert state._execution_completed.is_set()
     assert state._checkpointing_stopped.is_set()
-    with pytest.raises(OrphanedChildException):
-        completion_event.wait()
+    with pytest.raises(OrphanedChildException) as exc_info:
+        completion_event.wait(timeout=2.0)
+    assert exc_info.value.operation_id == expected_id
+    assert state._overflow_queue.empty()
+    assert state._checkpoint_queue.empty()
 
 
 def _arm_execution_completed(state: ExecutionState) -> None:
@@ -2399,11 +2731,12 @@ def test_completion_lock_rejects_producer_racing_completion():
     assert state._checkpoint_queue.empty()
 
 
-def test_checkpoint_missing_token_on_empty_only_batch_fails():
-    """An empty-only batch (no updates) returning no token is invalid.
+def test_checkpoint_missing_token_on_empty_only_batch_is_revoked():
+    """An empty-only batch (no updates) returning no token is revoked, not malformed.
 
-    With nothing sent, a missing token cannot mean completion, so it must fail
-    the checkpoint rather than be treated as terminal.
+    With nothing sent, a missing token cannot mean completion; it is treated
+    the same as any other non-terminal batch with no token - this invocation
+    stops checkpointing and reports PENDING.
     """
     mock_lambda_client = Mock(spec=LambdaClient)
     mock_lambda_client.checkpoint.return_value = CheckpointOutput(
@@ -2429,11 +2762,9 @@ def test_checkpoint_missing_token_on_empty_only_batch_fails():
     thread.join(timeout=2.0)
 
     assert empty_event.is_set()
-    try:
+    with pytest.raises(SuspendExecution):
         empty_event.wait()
-        pytest.fail("Should have raised BackgroundThreadError")
-    except BackgroundThreadError as bg_error:
-        assert isinstance(bg_error.source_exception, CheckpointError)
+    assert state._checkpoint_token_revoked.is_set()
 
 
 def test_collect_checkpoint_batch_shutdown_path():
@@ -3105,6 +3436,31 @@ def test_multiple_sync_operations_all_remain_blocked_on_error():
             pytest.fail(f"Event {i} should have raised BackgroundThreadError")
         except BackgroundThreadError:
             pass  # Expected
+
+
+def test_checkpoint_failure_preserves_cause_for_unsent_waiter() -> None:
+    """The queued waiter receives the service error despite an entry without a waiter."""
+    client = Mock(spec=LambdaClient)
+    state = _refresh_state(client)
+    completion_event = CompletionEvent()
+    service_error = RuntimeError("Checkpoint API error")
+
+    def fail_with_unsent_work(**_kwargs) -> CheckpointOutput:
+        with state._completion_lock:
+            state._overflow_queue.put(QueuedOperation(_step_start("async_op")))
+            state._checkpoint_queue.put(QueuedOperation(None, completion_event))
+        raise service_error
+
+    client.checkpoint.side_effect = fail_with_unsent_work
+    state._checkpoint_queue.put(QueuedOperation(_step_start("sent")))
+
+    state.checkpoint_batches_forever()
+
+    with pytest.raises(BackgroundThreadError) as exc_info:
+        completion_event.wait(timeout=2.0)
+    assert exc_info.value.source_exception is service_error
+    assert state._overflow_queue.empty()
+    assert state._checkpoint_queue.empty()
 
 
 def test_async_operations_not_affected_by_error_handling():
@@ -4618,7 +4974,7 @@ def test_execution_state_accepts_plugin_executor_parameter():
     """Test that ExecutionState can be created with a plugin_executor parameter."""
     mock_client = Mock(spec=LambdaClient)
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
 
     state = ExecutionState(
         durable_execution_arn="test_arn",
@@ -4651,8 +5007,8 @@ def test_plugin_executor_on_operation_action_called_on_checkpoint():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -4685,8 +5041,8 @@ def test_plugin_executor_on_operation_action_called_on_checkpoint():
 def test_async_operation_start_precedes_user_function_start():
     """Async START notifies plugins before the user function begins."""
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -4707,7 +5063,12 @@ def test_async_operation_start_precedes_user_function_start():
         )
         plugin_executor.on_user_function_start(operation_identifier, attempt=1)
 
-    assert plugin.calls[:2] == [
+    # Drop the per-invocation instance's own invocation-start hook, which now
+    # always precedes the operation hooks under test.
+    operation_calls = [
+        call for call in plugin.calls if not call.startswith("invocation_")
+    ]
+    assert operation_calls[:2] == [
         f"operation_start:{operation_id}",
         f"user_function_start:{operation_id}",
     ]
@@ -4737,8 +5098,8 @@ def test_existing_operation_start_is_reported_as_replayed():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -4787,9 +5148,9 @@ def test_create_checkpoint_reads_previous_operation_without_copying_map(
 ) -> None:
     """START replay detection reads one entry instead of copying the map."""
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
     with (
-        plugin_executor.run(),
+        plugin_invocation(plugin_executor),
         patch.object(
             ExecutionState, "operations", new_callable=PropertyMock
         ) as operations_property,
@@ -4839,8 +5200,8 @@ def test_plugin_executor_on_operation_update_called_for_terminal_operations():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -4889,8 +5250,8 @@ def test_plugin_executor_not_called_for_non_terminal_operations():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -4947,8 +5308,8 @@ def test_plugin_executor_called_for_multiple_updates_in_batch():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         config = CheckpointBatcherConfig(
             max_batch_time_seconds=0.2,
             max_batch_operations=10,
@@ -5019,7 +5380,7 @@ def test_plugin_executor_on_operation_change_called_for_status_changes():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
     with plugin_executor.run():
         plugin_executor.on_invocation_start(
             execution_arn="test_arn",
@@ -5124,8 +5485,8 @@ def test_operation_start_plugin_hook_fires_before_checkpoint_failure():
     mock_client.checkpoint.side_effect = RuntimeError("API error")
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -5182,8 +5543,8 @@ def test_plugin_executor_exception_does_not_break_checkpointing():
             raise RuntimeError("plugin exploded")
 
     exploding_plugin = _ExplodingPlugin()
-    plugin_executor = PluginExecutor(plugins=[exploding_plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(exploding_plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -5225,8 +5586,8 @@ def test_wrap_user_function_suspend_fires_incomplete_end_hook():
         def on_user_function_end(self, info: UserFunctionEndInfo) -> None:
             captured.append(info)
 
-    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -5283,8 +5644,8 @@ def test_plugin_executor_not_called_for_pending_operations():
     )
 
     plugin = _RecordingPlugin()
-    plugin_executor = PluginExecutor(plugins=[plugin])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(plugin)])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -5350,8 +5711,8 @@ def test_emit_operation_replay_hook_skips_terminal_operation(
         def on_operation_end(self, info):
             captured.append(("end", info.operation_id, info.is_replayed, info.status))
 
-    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -5385,8 +5746,8 @@ def test_emit_operation_replay_hook_fires_only_start_for_non_terminal_operation(
         def on_operation_end(self, info):
             captured.append(("end", info.operation_id, info.is_replayed, info.status))
 
-    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -5408,8 +5769,8 @@ def test_emit_operation_replay_hook_skips_execution_and_ready():
         def on_operation_start(self, info):
             captured.append(info.operation_id)
 
-    plugin_executor = PluginExecutor(plugins=[_CapturingPlugin()])
-    with plugin_executor.run():
+    plugin_executor = PluginExecutor(plugins=[plugin_factory(_CapturingPlugin())])
+    with plugin_invocation(plugin_executor):
         state = ExecutionState(
             durable_execution_arn="test_arn",
             initial_checkpoint_token="token123",  # noqa: S106
@@ -5672,7 +6033,13 @@ def test_batch_failure_settles_pending_refresh():
 
 def test_execution_completion_settles_pending_refresh():
     """When the service ends the execution, a deferred refresh can never be
-    sent. Its waiter is settled as orphaned."""
+    sent. Its waiter is settled as orphaned.
+
+    Uses the execution's own terminal update to trigger genuine completion -
+    a token-less response on any other update is the revoked-token path, not
+    completion, and is covered separately by
+    test_checkpoint_missing_token_without_terminal_update_is_revoked.
+    """
     client = Mock(spec=LambdaClient)
     client.checkpoint.return_value = CheckpointOutput(
         checkpoint_token="",
@@ -5684,13 +6051,48 @@ def test_execution_completion_settles_pending_refresh():
     try:
         refreshes = [state.schedule_refresh(time.time() + 60 * n) for n in (1, 2)]
         state._checkpoint_queue.join()
-        state.create_checkpoint(_step_update(OperationAction.SUCCEED))
+        state.create_checkpoint(OperationUpdate.create_execution_succeed(payload="{}"))
         for refresh in refreshes:
             with pytest.raises(OrphanedChildException):
                 refresh.wait(timeout=5)
     finally:
         state.stop_checkpointing()
         batcher.shutdown(wait=True)
+
+    assert state._execution_completed.is_set()
+    assert not state._checkpoint_token_revoked.is_set()
+
+
+def test_checkpoint_token_revocation_settles_pending_refresh():
+    """When the service revokes the token, a deferred refresh can never be
+    sent. Its waiter is woken with SuspendExecution.
+
+    The completion twin above settles the same refresh as orphaned instead.
+    The two exits stay distinguishable: a refresh abandoned by a revoked token
+    is not an orphaned child.
+    """
+    client = Mock(spec=LambdaClient)
+    client.checkpoint.return_value = CheckpointOutput(
+        checkpoint_token="",
+        new_execution_state=CheckpointUpdatedExecutionState(),
+    )
+    state = _refresh_state(client)
+    batcher = ThreadPoolExecutor(max_workers=1)
+    batcher.submit(state.checkpoint_batches_forever)
+    try:
+        refreshes = [state.schedule_refresh(time.time() + 60 * n) for n in (1, 2)]
+        state._checkpoint_queue.join()
+        # Async so the revocation reaches the refreshes, not this caller.
+        state.create_checkpoint(_step_update(OperationAction.SUCCEED), is_sync=False)
+        for refresh in refreshes:
+            with pytest.raises(SuspendExecution):
+                refresh.wait(timeout=5)
+    finally:
+        state.stop_checkpointing()
+        batcher.shutdown(wait=True)
+
+    assert state._checkpoint_token_revoked.is_set()
+    assert not state._execution_completed.is_set()
 
 
 def test_stop_settles_every_pending_refresh():
@@ -6015,7 +6417,7 @@ def _wrapping_state(plugin: _RecordingPlugin) -> ExecutionState:
         initial_checkpoint_token="token123",  # noqa: S106
         operations={},
         service_client=Mock(spec=LambdaClient),
-        plugin_executor=PluginExecutor(plugins=[plugin]),
+        plugin_executor=PluginExecutor(plugins=[plugin_factory(plugin)]),
     )
 
 
@@ -6050,10 +6452,13 @@ def test_wrap_user_function_reports_incomplete_when_no_outcome(raised):
     def user_function():
         raise raised
 
-    with state._plugin_executor.run(), pytest.raises(type(raised)):
+    with plugin_invocation(state._plugin_executor), pytest.raises(type(raised)):
         _wrapped(state, user_function)()
 
     assert plugin.calls == [
+        # The plugin instance is built for this invocation, so its
+        # invocation-start hook always precedes the operation hooks.
+        "invocation_start",
         "user_function_start:step-1",
         "user_function_end:step-1",
     ]
@@ -6068,10 +6473,13 @@ def test_wrap_user_function_does_not_report_incomplete_on_success():
     plugin = _RecordingPlugin()
     state = _wrapping_state(plugin)
 
-    with state._plugin_executor.run():
+    with plugin_invocation(state._plugin_executor):
         assert _wrapped(state, lambda: "done")() == "done"
 
     assert plugin.calls == [
+        # The plugin instance is built for this invocation, so its
+        # invocation-start hook always precedes the operation hooks.
+        "invocation_start",
         "user_function_start:step-1",
         "user_function_end:step-1",
     ]
@@ -6088,10 +6496,16 @@ def test_wrap_user_function_does_not_report_incomplete_on_failure():
     def user_function():
         raise ValueError("boom")
 
-    with state._plugin_executor.run(), pytest.raises(ValueError, match="boom"):
+    with (
+        plugin_invocation(state._plugin_executor),
+        pytest.raises(ValueError, match="boom"),
+    ):
         _wrapped(state, user_function)()
 
     assert plugin.calls == [
+        # The plugin instance is built for this invocation, so its
+        # invocation-start hook always precedes the operation hooks.
+        "invocation_start",
         "user_function_start:step-1",
         "user_function_end:step-1",
     ]
@@ -6115,7 +6529,7 @@ def test_wrap_user_function_incomplete_runs_on_the_user_function_thread():
         initial_checkpoint_token="token123",  # noqa: S106
         operations={},
         service_client=Mock(spec=LambdaClient),
-        plugin_executor=PluginExecutor(plugins=[plugin]),
+        plugin_executor=PluginExecutor(plugins=[plugin_factory(plugin)]),
     )
 
     def user_function():
@@ -6128,7 +6542,10 @@ def test_wrap_user_function_incomplete_runs_on_the_user_function_thread():
         with contextlib.suppress(SuspendExecution):
             _wrapped(state, user_function)()
 
-    with state._plugin_executor.run(), ThreadPoolExecutor(max_workers=1) as worker:
+    with (
+        plugin_invocation(state._plugin_executor),
+        ThreadPoolExecutor(max_workers=1) as worker,
+    ):
         worker.submit(run_on_worker).result()
 
     assert hook_threads == worker_threads

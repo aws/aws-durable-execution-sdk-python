@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from tests.test_helpers import plugin_factory
+
+
 import contextvars
 import json
 import threading
@@ -23,7 +26,7 @@ from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestR
 @pytest.mark.parametrize("kind", ["map", "parallel"])
 @pytest.mark.parametrize("concurrency", [1, 2])
 @pytest.mark.parametrize("failed_start", [False, True])
-def test_partial_branch_resume_uses_fresh_successful_start_bindings(
+def test_partial_branch_resume_uses_fresh_invocation_bindings(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     kind: str,
@@ -33,6 +36,7 @@ def test_partial_branch_resume_uses_fresh_successful_start_bindings(
     monkeypatch.delenv("DURABLE_EXECUTION_PLUGINS", raising=False)
     marker = contextvars.ContextVar("resumed-branch", default="host")
     partial = contextvars.ContextVar[str]("partial-start")
+    expected_binding = "failed" if failed_start else "plugin"
     observations: list[tuple[int, str]] = []
     visits = {0: 0, 1: 0}
     bodies: list[int] = []
@@ -68,8 +72,11 @@ def test_partial_branch_resume_uses_fresh_successful_start_bindings(
             visits[index] += 1
             first_visit = visits[index] == 1
             observations.append((index, marker.get()))
-        with pytest.raises(LookupError):
-            partial.get()
+        if failed_start:
+            assert partial.get() == "failed"
+        else:
+            with pytest.raises(LookupError):
+                partial.get()
         marker.set(f"branch-{index}")
         if barrier is not None and first_visit:
             barrier.wait(timeout=10)
@@ -84,7 +91,7 @@ def test_partial_branch_resume_uses_fresh_successful_start_bindings(
         return saved
 
     def handler(_event: Any, durable: DurableContext) -> list[str]:
-        assert marker.get() == "plugin"
+        assert marker.get() == expected_binding
         result: BatchResult[str]
         if kind == "map":
             result = durable.map(
@@ -99,18 +106,20 @@ def test_partial_branch_resume_uses_fresh_successful_start_bindings(
                 name="parallel",
                 config=ParallelConfig(max_concurrency=concurrency),
             )
-        assert marker.get() == "plugin"
+        assert marker.get() == expected_binding
         durable.wait(Duration.from_seconds(1), name="after-batch")
         return result.get_results()
 
-    wrapped = durable_execution(handler, plugins=plugins)
+    wrapped = durable_execution(
+        handler, plugins=[plugin_factory(plugin) for plugin in plugins]
+    )
     with DurableFunctionTestRunner(handler=wrapped) as runner:
         result = runner.run(input="{}", timeout=30)
     assert result.status.value == "SUCCEEDED"
     assert json.loads(result.result) == ["saved-0", "saved-1"]
     assert sorted(bodies) == [0, 1]
     assert all(count >= 2 for count in visits.values())
-    assert all(binding == "plugin" for _, binding in observations)
+    assert all(binding == expected_binding for _, binding in observations)
     assert InvocationStatus.PENDING in statuses
     assert statuses[-1] is InvocationStatus.SUCCEEDED
     assert marker.get() == "host" and plugin.token is None

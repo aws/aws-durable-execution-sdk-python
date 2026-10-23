@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from tests.test_helpers import plugin_factory
+
+
 import contextvars
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -140,7 +143,9 @@ def test_public_worker_lifecycle_owns_context_and_outcome(
         finally:
             phases.append(("finally", threading.get_ident(), marker.get()))
 
-    handler = durable_execution(body, plugins=[] if mode == "none" else [Plugin()])
+    handler = durable_execution(
+        body, plugins=[] if mode == "none" else [plugin_factory(Plugin())]
+    )
     event, context = invocation()
     token = marker.set("host")
     try:
@@ -175,13 +180,7 @@ def test_public_worker_lifecycle_owns_context_and_outcome(
         assert len({p[1] for p in batch}) == 1
         assert batch[0][1] != caller_thread
     bodies = [p for p in phases if p[0] == "body"]
-    expected = (
-        "fresh-worker"
-        if mode == "none"
-        else "host"
-        if mode == "failed-start"
-        else "start-binding"
-    )
+    expected = "fresh-worker" if mode == "none" else "start-binding"
     assert [p[2] for p in bodies] == [expected, expected]
     for role, tid, before, after in boundary:
         if role == "invocation":
@@ -204,7 +203,7 @@ def test_public_worker_lifecycle_owns_context_and_outcome(
 
 @pytest.mark.parametrize("bad_first", [False, True])
 @pytest.mark.parametrize("outcome", ["success", "failure", "retry", "pending"])
-def test_failed_start_preserves_clean_bindings_and_original_token_owners(
+def test_failed_start_keeps_bindings_in_the_invocation_context(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     bad_first: bool,
@@ -215,12 +214,12 @@ def test_failed_start_preserves_clean_bindings_and_original_token_owners(
     added = contextvars.ContextVar[str]("failed-start-added")
     events: list[tuple[str, str, int]] = []
     cleanup_contexts: list[str] = []
+    start_bindings: list[tuple[str, str]] = []
     original_close = ExecutionState.close
 
     def close(state: ExecutionState) -> None:
         cleanup_contexts.append(marker.get())
-        with pytest.raises(LookupError):
-            added.get()
+        assert added.get() == "partial"
         original_close(state)
 
     monkeypatch.setattr(ExecutionState, "close", close)
@@ -233,6 +232,7 @@ def test_failed_start_preserves_clean_bindings_and_original_token_owners(
 
         def on_invocation_start(self, _info: InvocationStartInfo) -> None:
             events.append(("start", self.name, threading.get_ident()))
+            start_bindings.append((self.name, marker.get()))
             self.token = marker.set(self.name)
             if self.name == "bad":
                 self.added = added.set("partial")
@@ -249,9 +249,8 @@ def test_failed_start_preserves_clean_bindings_and_original_token_owners(
 
     def body(_event: Any, _context: DurableContext) -> str:
         events.append(("body", "handler", threading.get_ident()))
-        assert marker.get() == "healthy"
-        with pytest.raises(LookupError):
-            added.get()
+        assert marker.get() == names[-1]
+        assert added.get() == "partial"
         if outcome == "retry":
             raise failure
         if outcome == "failure":
@@ -261,7 +260,9 @@ def test_failed_start_preserves_clean_bindings_and_original_token_owners(
         return "ok"
 
     names = ["bad", "healthy"] if bad_first else ["healthy", "bad"]
-    handler = durable_execution(body, plugins=[Plugin(name) for name in names])
+    handler = durable_execution(
+        body, plugins=[plugin_factory(Plugin(name)) for name in names]
+    )
     event, context = invocation()
     for _ in range(2):
         if outcome == "retry":
@@ -278,7 +279,8 @@ def test_failed_start_preserves_clean_bindings_and_original_token_owners(
         assert marker.get() == "host"
         with pytest.raises(LookupError):
             added.get()
-    assert cleanup_contexts == ["healthy"] * 2
+    assert cleanup_contexts == [names[-1]] * 2
+    assert start_bindings == [(names[0], "host"), (names[1], names[0])] * 2
     for offset in (0, 5):
         batch = events[offset : offset + 5]
         assert [(x[0], x[1]) for x in batch] == [("start", n) for n in names] + [
@@ -393,7 +395,7 @@ def test_worker_prepares_output_joins_branches_waits_checkpoint_then_ends(
         finally:
             record("finally")
 
-    handler = durable_execution(body, plugins=[Plugin()])
+    handler = durable_execution(body, plugins=[plugin_factory(Plugin())])
     event, context = invocation()
     output = handler(event, context)
     record("caller")
@@ -446,7 +448,7 @@ def test_removed_handler_scope_api_is_not_inspected(
         },
     }
     plugin = type("LegacyPlugin", (DurableInstrumentationPlugin,), choices[shape])()
-    handler = durable_execution(lambda _e, _c: "ok", plugins=[plugin])
+    handler = durable_execution(lambda _e, _c: "ok", plugins=[plugin_factory(plugin)])
     event, context = invocation()
     assert handler(event, context)["Status"] == "SUCCEEDED"
     assert calls == []
@@ -530,7 +532,7 @@ def test_checkpoint_failure_reports_prepared_outcome_after_worker_cleanup(
             record("finally")
 
     plugin = Plugin()
-    handler = durable_execution(body, plugins=[plugin])
+    handler = durable_execution(body, plugins=[plugin_factory(plugin)])
     client = Mock(spec=DurableServiceClient)
     client.checkpoint.side_effect = service_checkpoint
     event, context = invocation(client)

@@ -25,6 +25,22 @@ def test_durable_functions_test_error_base_exception() -> None:
     assert isinstance(error, Exception)
 
 
+def test_invalid_invocation_output_error() -> None:
+    """Test InvalidInvocationOutputError for handler outputs that cannot be parsed."""
+    error = exceptions.InvalidInvocationOutputError("Invalid invocation output: bad")
+
+    assert str(error) == "Invalid invocation output: bad"
+    assert error.request_id is None
+    assert isinstance(error, exceptions.DurableFunctionsTestError)
+
+    error = exceptions.InvalidInvocationOutputError(
+        "Invalid invocation output: bad", request_id="request-1"
+    )
+
+    assert str(error) == "Invalid invocation output: bad"
+    assert error.request_id == "request-1"
+
+
 def test_durable_functions_local_runner_error_base_exception() -> None:
     """Test DurableFunctionsLocalRunnerError base exception."""
     error = exceptions.DurableFunctionsLocalRunnerError("Local runner error")

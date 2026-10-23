@@ -25,7 +25,7 @@ dependencies = [
   # (CallbackTimeoutError and CallbackExternalError) and register_operation_error.
   # The upper bound guards one read of the SDK's internal ExecutionState, for
   # the error type that a MicroVM reports. See _reported_error_type.
-  "aws-durable-execution-sdk-python>=2.0.0,<3",
+  "aws-durable-execution-sdk-python>=2.0.0,<4",
   # botocore 1.43.35 is the first release with the lambda-microvms client.
   # The core SDK requires only boto3 1.42.1.
   "boto3>=1.43.35",
