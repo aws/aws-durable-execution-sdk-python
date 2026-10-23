@@ -331,8 +331,8 @@ and converted to plain JSON:
   `2**53 - 1`. Otherwise a float when the float round-trips exactly and is
   within DynamoDB's number range (magnitude 1E-130 to 9.99...E+125). Otherwise `str(value)`, for example `"9007199254740993"`,
   `"12345678901234567.89"` or `"1E+299"`. NaN and Infinity become `null`.
-  Negative zero (`Decimal("-0")`, `Decimal("-0.0")`) is integral, so it becomes
-  `0` and loses its sign.
+  Every zero, of any sign or exponent (`Decimal("-0")`, `Decimal("-0E+20")`),
+  becomes `0` and loses its sign.
 - `datetime` and `date`: `isoformat()`. `UUID`: string. `bytes`: base64.
   `tuple`: list. `BatchResult`: `to_dict()`.
 

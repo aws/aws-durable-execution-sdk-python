@@ -276,7 +276,7 @@ def _to_json_compatible(value: Any) -> Any:
     ``Decimal``: an int when integral and ``abs(n) <= 2**53 - 1``, else a float
     when it round-trips exactly and is within DynamoDB's number range
     (magnitude 1E-130 to 9.99...E+125), else ``str(value)``; NaN and Infinity
-    become ``None``. Negative zero becomes ``0``. ``datetime`` / ``date`` -> ``isoformat()``, ``UUID`` -> string,
+    become ``None``. Every zero, of any sign or exponent, becomes ``0``. ``datetime`` / ``date`` -> ``isoformat()``, ``UUID`` -> string,
     ``bytes`` -> base64, ``tuple`` -> list, ``BatchResult`` -> ``to_dict()``.
     Non-finite floats become ``None``.
     """
@@ -315,6 +315,10 @@ def _scalar_to_json_compatible(value: Any) -> Any:
     if isinstance(value, decimal.Decimal):
         if not value.is_finite():
             return None
+        # A zero of any sign or exponent ("-0E+20", "0E+16") is integer 0.
+        # Its adjusted() can be large, so the integer check below would miss it.
+        if value.is_zero():
+            return 0
         # adjusted() is checked first so Decimal("1E+1000000") never builds a
         # million-digit int.
         if (
@@ -324,9 +328,7 @@ def _scalar_to_json_compatible(value: Any) -> Any:
             as_int = int(value)
             if abs(as_int) <= _MAX_SAFE_INTEGER:
                 return as_int
-        if value and not (
-            _MIN_NUMBER_ADJUSTED <= value.adjusted() <= _MAX_NUMBER_ADJUSTED
-        ):
+        if not (_MIN_NUMBER_ADJUSTED <= value.adjusted() <= _MAX_NUMBER_ADJUSTED):
             return str(value)
         as_float = float(value)
         written = decimal.Decimal(repr(as_float))
