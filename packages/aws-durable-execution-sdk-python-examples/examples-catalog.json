@@ -796,6 +796,31 @@
         "ExecutionTimeout": 300
       },
       "path": "./src/error_handling/catch_typed_step_error.py"
+    },
+    {
+      "name": "MicroVM Run Job",
+      "description": "Runs one job in a Lambda MicroVM and returns the result that the MicroVM reports",
+      "handler": "microvm_run_job.handler",
+      "integration": true,
+      "usesMicrovm": true,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 900
+      },
+      "path": "./src/microvm/microvm_run_job.py"
+    },
+    {
+      "name": "MicroVM Session",
+      "description": "Runs two jobs in one Lambda MicroVM, with a durable wait between them",
+      "handler": "microvm_session.handler",
+      "integration": true,
+      "usesMicrovm": true,
+      "timeout": 120,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 900
+      },
+      "path": "./src/microvm/microvm_session.py"
     }
   ]
 }

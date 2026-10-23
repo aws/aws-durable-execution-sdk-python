@@ -676,10 +676,12 @@ def test_default_exporter_actually_emits_to_stdout(capsys):
     factory = durable_execution_telemetry(DurableExecutionTelemetryConfig())
     _run(factory, ops=[_step("greet")])
     out = capsys.readouterr().out
-    assert (
-        '"recordType":"DurableExecutionTelemetry"' in out
-    )  # compact JSON via LambdaLogExporter
-    assert '"operationsByName"' in out
+    # compact JSON envelope via LambdaLogExporter; the record is its message
+    envelope = json.loads(out.strip())
+    assert envelope["level"] == "INFO"
+    record = json.loads(envelope["message"])
+    assert record["recordType"] == "DurableExecutionTelemetry"
+    assert "operationsByName" in record
 
 
 # -- terminal timestamps: end time only for SUCCEEDED/FAILED (comment 3) ------

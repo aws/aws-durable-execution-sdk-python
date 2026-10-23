@@ -106,7 +106,9 @@ def microvm_session(
     its own MicroVM when no job has run for ``auto_suspend_idle_time``. With
     that setting or an ``idle_policy``, the request step of each job calls
     ``GetMicrovm`` first. It resumes a suspended MicroVM, and it returns at
-    once for a new MicroVM that is still booting.
+    once for a new MicroVM that is still booting. The launch checkpoint
+    records whether the MicroVM can be suspended. Replay follows that record,
+    not the current config.
 
     A failed :meth:`MicrovmSession.invoke` raises inside the handler. The
     handler can catch the error and continue with the same MicroVM. An
@@ -198,9 +200,16 @@ class MicrovmSession:
     ``map`` and ``parallel`` items.
     """
 
-    def __init__(self, scope: _SessionScope, launched: LaunchResult) -> None:
+    def __init__(
+        self,
+        scope: _SessionScope,
+        launched: LaunchResult,
+        *,
+        resume_before_delivery: bool,
+    ) -> None:
         self._scope = scope
         self._launched = launched
+        self._resume_before_delivery = resume_before_delivery
 
     @property
     def microvm_id(self) -> str:
@@ -283,6 +292,7 @@ class MicrovmSession:
         heartbeat_timeout_seconds = _validate_heartbeat(name, options.heartbeat_timeout)
         _validate_input(name, job_input)
         launched = self._launched
+        resume = self._resume_before_delivery
 
         def run(job_context: DurableContext) -> Any:
             callback = create_job_callback(
@@ -297,7 +307,7 @@ class MicrovmSession:
                 heartbeat_timeout_seconds=heartbeat_timeout_seconds,
                 request=options,
                 retry_window_seconds=retry_window_seconds,
-                resume=scope.resume_before_delivery,
+                resume=resume,
             )
             try:
                 return callback.result()
@@ -327,11 +337,13 @@ class _SessionScope(_MicrovmScope):
     in it would be outside the session's child context."""
 
     @property
-    def resume_before_delivery(self) -> bool:
-        """Whether each job must check the MicroVM state, and resume it.
+    def resume_from_config(self) -> bool:
+        """Whether the current config asks each job to check the MicroVM
+        state, and resume it.
 
         The worker suspends an idle MicroVM, and an idle policy can suspend
-        it too. Either way, each job must resume it first.
+        it too. Either way, each job must resume it first. A session launch
+        records this value as its resume mode.
         """
         return (
             self.auto_suspend_idle_seconds is not None or self.idle_policy is not None
@@ -381,14 +393,38 @@ class _SessionScope(_MicrovmScope):
             ),
             delivery=HTTP_DELIVERY,
             idle_policy=self.idle_policy,
+            resume_before_delivery=self.resume_from_config,
         )
         if launched.delivery != HTTP_DELIVERY:
             # A launch checkpoint from a release with another delivery. Every
             # session job goes over HTTP, so this release cannot run one.
             self.terminate(child, launched.microvm_id)
             raise unknown_delivery_error(self.name, launched)
+        # 1. The worker reads its idle time once, from the run hook payload of
+        #    the launch. RunMicrovm sets the idle policy once, at the launch.
+        # 2. The launch step's result comes from the checkpoint on replay.
+        # 3. So a deploy that changes auto_suspend_on_idle or idle_policy does
+        #    not change what the running MicroVM does.
+        # 4. A job that skips the state check of a suspended MicroVM gets a
+        #    502. The request step retries a 502 until both retry tiers end.
+        # 5. So each job follows the resume mode that the launch recorded,
+        #    not the current config.
+        # A launch checkpoint from code that predates the resumeBeforeDelivery
+        # field has no such field. That code computed the mode from the
+        # current config on every replay. So the session does the same for
+        # such a checkpoint.
+        resume_before_delivery = (
+            launched.resume_before_delivery
+            if launched.resume_before_delivery is not None
+            else self.resume_from_config
+        )
         try:
-            result = handler(MicrovmSession(self, launched), child)
+            result = handler(
+                MicrovmSession(
+                    self, launched, resume_before_delivery=resume_before_delivery
+                ),
+                child,
+            )
         except ExecutionError:
             # A replay that does not match the history raises
             # NonDeterministicExecutionError, and the execution fails without

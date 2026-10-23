@@ -134,8 +134,9 @@ and a segment of three dots are not dot segments.
 class LaunchResult:
     """What the launch step checkpoints.
 
-    Wire names: ``microvmId``, ``endpoint``, and ``delivery``. The JavaScript
-    operation checkpoints the same document.
+    Wire names: ``microvmId``, ``endpoint``, ``delivery``, and
+    ``resumeBeforeDelivery``. The JavaScript operation checkpoints the same
+    document.
     """
 
     microvm_id: str
@@ -144,15 +145,29 @@ class LaunchResult:
     so every replay follows the delivery that the launch prepared for."""
     endpoint: str | None = None
     """The MicroVM's endpoint. Present only for HTTP delivery."""
+    resume_before_delivery: bool | None = None
+    """Whether each session job checks the MicroVM state, and resumes a
+    suspended MicroVM, before delivery. Only a session launch records it.
+    Replay reads it from the checkpoint. So every replay follows the mode that
+    the launch prepared the MicroVM for. A launch checkpoint from code that
+    predates this field does not have it."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LaunchResult:
         # A checkpoint without a delivery gets an empty one. The operation
         # then terminates the MicroVM as for any delivery it does not know.
+        # Only a bool is a resume mode. In Python True == 1, so a check by
+        # equality would accept 1. Any other value reads as no resume mode.
+        resume_before_delivery = data.get("resumeBeforeDelivery")
         return cls(
             microvm_id=data["microvmId"],
             delivery=data.get("delivery", ""),
             endpoint=data.get("endpoint"),
+            resume_before_delivery=(
+                resume_before_delivery
+                if isinstance(resume_before_delivery, bool)
+                else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -160,6 +175,10 @@ class LaunchResult:
         if self.endpoint is not None:
             data["endpoint"] = self.endpoint
         data["delivery"] = self.delivery
+        # A microvm() launch records no resume mode. So its checkpoint has no
+        # such key, as in the JavaScript operation.
+        if self.resume_before_delivery is not None:
+            data["resumeBeforeDelivery"] = self.resume_before_delivery
         return data
 
 
@@ -363,11 +382,15 @@ class _MicrovmScope:
         payload: str,
         delivery: str,
         idle_policy: Mapping[str, Any] | None = None,
+        resume_before_delivery: bool | None = None,
     ) -> LaunchResult:
         """Run the launch step, ``<name>.launch``.
 
         The client token is the SHA-256 hex digest of ``token_source``. It
         must be unique per launch and stable across retries and replays.
+
+        ``resume_before_delivery`` is the resume mode to record. Only a
+        session launch sets it.
 
         Raises:
             MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
@@ -376,7 +399,11 @@ class _MicrovmScope:
             return LaunchResult.from_dict(
                 child.step(
                     lambda _: self._launch_call(
-                        token_source, payload, delivery, idle_policy
+                        token_source,
+                        payload,
+                        delivery,
+                        idle_policy,
+                        resume_before_delivery,
                     ).to_dict(),
                     name=f"{self.name}.launch",
                     config=StepConfig(
@@ -540,6 +567,7 @@ class _MicrovmScope:
         payload: str,
         delivery: str,
         idle_policy: Mapping[str, Any] | None,
+        resume_before_delivery: bool | None = None,
     ) -> LaunchResult:
         """Call ``RunMicrovm``, and return what the launch step checkpoints."""
         over_http = delivery == HTTP_DELIVERY
@@ -589,6 +617,7 @@ class _MicrovmScope:
             microvm_id=microvm_id,
             delivery=delivery,
             endpoint=endpoint if over_http else None,
+            resume_before_delivery=resume_before_delivery,
         )
 
     def _terminate_call(self, microvm_id: str) -> None:
