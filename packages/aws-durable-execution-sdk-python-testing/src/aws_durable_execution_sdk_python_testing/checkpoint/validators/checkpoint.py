@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 
     from aws_durable_execution_sdk_python_testing.execution import Execution
 
-MAX_ERROR_PAYLOAD_SIZE_BYTES = 32768
+MAX_ERROR_PAYLOAD_SIZE_BYTES = 1048576
 
 
 class CheckpointValidator:
@@ -120,9 +120,11 @@ class CheckpointValidator:
         execution returns to its parent, are each capped at 1 MiB.
         """
         if update.error is not None:
-            payload = json.dumps(update.error.to_dict())
-            if len(payload) > MAX_ERROR_PAYLOAD_SIZE_BYTES:
-                msg: str = f"Error object size must be less than {MAX_ERROR_PAYLOAD_SIZE_BYTES} bytes."
+            payload = json.dumps(
+                update.to_dict(), separators=(",", ":"), ensure_ascii=False
+            )
+            if payload_size_bytes(payload) > MAX_ERROR_PAYLOAD_SIZE_BYTES:
+                msg: str = f"Error object size must be less than or equal to {MAX_ERROR_PAYLOAD_SIZE_BYTES} bytes."
                 raise InvalidParameterValueException(msg)
         if update.payload is None:
             return
