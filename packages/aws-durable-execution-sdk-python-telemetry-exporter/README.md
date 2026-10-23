@@ -257,6 +257,23 @@ and `top-level` vs `full-tree` operation detail all mirror the JS plugin.
 Behavior is validated cross-SDK by the `telemetry` conformance suite
 (`aws-durable-execution-conformance-tests-telemetry`).
 
+Record timestamps (`emittedAt`, `startTime`, `endTime`, and each operation's
+`startTime` and `endTime`) use one fixed-width UTC format:
+`YYYY-MM-DDTHH:MM:SS.sssZ`, for example `2026-10-23T18:42:40.784Z`. The
+fraction always has exactly 3 digits, and the suffix is always `Z`. The plugin
+converts each time to UTC and truncates it to milliseconds. JavaScript's
+`Date.prototype.toISOString()` writes the same format. Stores such as DynamoDB
+compare these values as text. Text order equals time order only when every
+value has the same width. So a text comparison of two record timestamps orders
+them by time.
+
+`emittedAt` strictly increases within one invocation. In `on-change` mode, one
+invocation can build two records in the same millisecond. The SQS FIFO
+deduplication id and the default DynamoDB sort key both use `emittedAt`. So
+equal values would drop or overwrite a record. So when the clock has not
+passed the previous `emittedAt`, the plugin writes the previous value plus 1
+millisecond.
+
 > **Note (asynchronous export).** Export rendering, truncation, `export()`, and
 > `flush()` run on one lazy background worker per registered factory. Checkpoint
 > hooks only replace the latest pending snapshot and wake the worker. Consecutive
