@@ -4,7 +4,6 @@ The local runner cannot launch a MicroVM. So the test is cloud-only.
 """
 
 import hashlib
-import json
 
 import pytest
 from aws_durable_execution_sdk_python.execution import InvocationStatus
@@ -35,7 +34,7 @@ TEXT = "the quick brown fox jumps over the lazy dog"
 )
 def test_runs_the_job_in_a_microvm_and_returns_its_result(durable_runner):
     with durable_runner:
-        result = durable_runner.run(input=json.dumps({"text": TEXT}), timeout=300)
+        result = durable_runner.run(input={"text": TEXT}, timeout=300)
 
     assert result.status is InvocationStatus.SUCCEEDED, result.error
     output = deserialize_operation_payload(result.result)

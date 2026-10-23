@@ -3,7 +3,6 @@
 The local runner cannot launch a MicroVM. So the test is cloud-only.
 """
 
-import json
 import uuid
 
 import pytest
@@ -50,7 +49,7 @@ def test_runs_both_jobs_in_the_same_microvm(durable_runner):
     key = str(uuid.uuid4())
 
     with durable_runner:
-        result = durable_runner.run(input=json.dumps({"key": key}), timeout=300)
+        result = durable_runner.run(input={"key": key}, timeout=300)
 
     assert result.status is InvocationStatus.SUCCEEDED, result.error
     output = deserialize_operation_payload(result.result)
