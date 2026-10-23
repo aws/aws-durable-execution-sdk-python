@@ -808,6 +808,19 @@
         "ExecutionTimeout": 900
       },
       "path": "./src/microvm/microvm_run_job.py"
+    },
+    {
+      "name": "MicroVM Session",
+      "description": "Runs two jobs in one Lambda MicroVM, with a durable wait between them",
+      "handler": "microvm_session.handler",
+      "integration": true,
+      "usesMicrovm": true,
+      "timeout": 120,
+      "durableConfig": {
+        "RetentionPeriodInDays": 7,
+        "ExecutionTimeout": 900
+      },
+      "path": "./src/microvm/microvm_session.py"
     }
   ]
 }
