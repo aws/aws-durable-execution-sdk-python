@@ -1208,8 +1208,9 @@ class _InvocationLog(list[Any]):
 
     def append(self, request: Any) -> None:
         # The request step blocks its invocation until the POST gets an
-        # answer. The local runner runs one invocation at a time. So the
-        # invocation that sent the request is the last one that started.
+        # answer or times out. The fake endpoint answers at once. The local
+        # runner runs one invocation at a time. So the invocation that sent
+        # the request is the last one that started.
         self.sent_in.append(len(self._invocations))
         super().append(request)
 
@@ -1225,14 +1226,14 @@ def record_invocation_of_each_request(
     return log.sent_in
 
 
-def two_jobs_in_two_invocations(
+def two_jobs_with_a_wait_between(
     vm: MicrovmSession, ctx: DurableContext, event: Any
 ) -> Any:
     """Two jobs with a durable wait between them.
 
-    A durable wait always ends the invocation. So the second job is delivered
-    in a later invocation than the first, after the deploy of
-    :func:`handler_across_deploy`."""
+    In the local runner, a durable wait ends the invocation. So the second
+    job is delivered in a later invocation than the first, after the deploy
+    of :func:`handler_across_deploy`."""
     build = vm.invoke(ctx, "build", job_input=event, options=job("/build"))
     ctx.wait(Duration.from_seconds(1), name="pause")
     test = vm.invoke(ctx, "test", job_input=build, options=job())
@@ -1300,14 +1301,13 @@ def test_still_resumes_before_each_job_when_a_deploy_turns_suspending_off(
         endpoint=endpoint.url, states=["RUNNING", "SUSPENDED", "RUNNING"]
     )
     handler, invocations = handler_across_deploy(
-        client, first, {}, two_jobs_in_two_invocations
+        client, first, {}, two_jobs_with_a_wait_between
     )
     sent_in = record_invocation_of_each_request(endpoint, invocations)
 
     result = run(handler, None, [("build", succeed_with(1)), ("test", succeed_with(2))])
 
     assert outcome(result)["result"]["test"] == 2
-    assert len(invocations) > 1
     # The first job runs in the first invocation, with the launch's config.
     # The second job runs in a later invocation, after the deploy.
     assert len(sent_in) == 2
@@ -1331,14 +1331,13 @@ def test_makes_no_state_check_when_a_deploy_turns_suspending_on(
     endpoint = fake_endpoint()
     client = fake_client(endpoint=endpoint.url)
     handler, invocations = handler_across_deploy(
-        client, {}, {"auto_suspend_on_idle": True}, two_jobs_in_two_invocations
+        client, {}, {"auto_suspend_on_idle": True}, two_jobs_with_a_wait_between
     )
     sent_in = record_invocation_of_each_request(endpoint, invocations)
 
     result = run(handler, None, [("build", succeed_with(1)), ("test", succeed_with(2))])
 
     assert outcome(result)["result"]["test"] == 2
-    assert len(invocations) > 1
     # The first job runs in the first invocation, with the launch's config.
     # The second job runs in a later invocation, after the deploy.
     assert len(sent_in) == 2
