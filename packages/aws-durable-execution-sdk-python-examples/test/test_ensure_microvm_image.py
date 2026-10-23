@@ -217,6 +217,28 @@ def test_creates_again_after_the_visibility_window():
     assert clock.time >= ensure_microvm_image.CREATE_VISIBILITY_SECONDS
 
 
+def test_rebuilds_at_once_when_the_build_fails_inside_the_visibility_window():
+    # The first create runs at 0 s. The build fails at 10 s, inside the
+    # 60-second window. The delete finishes at 30 s. The delete clears the
+    # create time. So the rebuild starts at 30 s, not at 60 s.
+    clock = FakeClock()
+    create_times = []
+
+    def after_create(creates):
+        create_times.append(clock.now())
+        return ["CREATE_FAILED"] if creates == 1 else ["CREATING", "CREATED"]
+
+    service = FakeImageService([MISSING], after_create=after_create)
+
+    result = ensure_microvm_image.ensure_image(
+        service, NAME, now=clock.now, sleep=clock.sleep, log=lambda _m: None
+    )
+
+    assert result == "1.0"
+    assert service.deletes == 1
+    assert create_times == [0.0, 30.0]
+
+
 def test_raises_when_the_image_stays_missing_after_two_creates():
     service = FakeImageService([MISSING], after_create=lambda _creates: [MISSING])
 
@@ -712,6 +734,53 @@ def test_main_writes_the_image_and_role_arns(monkeypatch, tmp_path):
         "imageArn": image_arn,
         "executionRoleArn": "arn:aws:iam::123456789012:role/microvm-execution",
     }
+
+
+OVERRIDES = [
+    "MICROVM_ARTIFACT_BUCKET",
+    "MICROVM_IMAGE_BUILD_ROLE_ARN",
+    "MICROVM_EXECUTION_ROLE_ARN",
+]
+
+
+@pytest.mark.parametrize("empty", OVERRIDES)
+def test_main_treats_an_empty_override_as_unset(empty, monkeypatch, tmp_path):
+    # GitHub passes an unset secret to a step as an empty string. So main()
+    # must use the default resource name for an empty override.
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+    monkeypatch.setenv("TEST_ACCOUNT_ID", "123456789012")
+    monkeypatch.delenv("LAMBDA_ENDPOINT", raising=False)
+    for variable in OVERRIDES:
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv(empty, "")
+    monkeypatch.setattr(
+        ensure_microvm_image,
+        "build_artifact",
+        lambda settings: ensure_microvm_image.ImageArtifact(
+            zip_path=tmp_path / "z.zip", zip_bytes=b"zip", content_hash="0123456789ab"
+        ),
+    )
+    monkeypatch.setattr(
+        ensure_microvm_image.boto3, "client", lambda service_name, region_name: None
+    )
+    services = []
+    monkeypatch.setattr(
+        ensure_microvm_image,
+        "ensure_image",
+        lambda service, name: services.append(service),
+    )
+    output = tmp_path / "image.json"
+
+    assert ensure_microvm_image.main(["--output", str(output)]) == 0
+
+    [service] = services
+    assert service.bucket == "microvm-image-artifacts-123456789012-us-west-2"
+    assert service.settings["buildRoleArn"] == (
+        "arn:aws:iam::123456789012:role/microvm-image-build"
+    )
+    assert json.loads(output.read_text())["executionRoleArn"] == (
+        "arn:aws:iam::123456789012:role/microvm-execution"
+    )
 
 
 def test_main_requires_the_account(monkeypatch, tmp_path):
