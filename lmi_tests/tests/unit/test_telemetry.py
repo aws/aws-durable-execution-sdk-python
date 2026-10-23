@@ -253,3 +253,19 @@ def test_instrumented_invoke_owns_header_client_and_closes_it(monkeypatch, raise
         assert caller.invoke(Payload=b"payload")["DurableExecutionArn"] == "execution"
     isolated.close.assert_called_once()
     owner.lam.invoke.assert_not_called()
+
+
+def test_post_call_evidence_does_not_move_the_sdk_boundary(monkeypatch):
+    original = MemoryTrace.emit
+
+    def delayed(self, phase, **fields):
+        record = original(self, phase, **fields)
+        if phase == "OTEL_EXIT":
+            time.sleep(0.02)  # Controlled diagnostic I/O latency, not a durable wait.
+        return record
+
+    monkeypatch.setattr(MemoryTrace, "emit", delayed)
+    events = run(monkeypatch, "invocation", "boundary")
+    boundary = next(event for event in events if event["phase"] == "WRAPPER_RETURN")
+    evidence_exit = next(event for event in events if event["phase"] == "OTEL_EXIT")
+    assert boundary["time"] <= evidence_exit["time"]

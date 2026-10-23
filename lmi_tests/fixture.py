@@ -68,6 +68,8 @@ class Trace:
         self.bucket = os.environ["LMI_BUCKET"]
         self.lock = threading.Lock()
         self.sequence = 0
+        self.sdk_completed_at = None
+        self.sdk_resources = None
         self.identity = {
             "run": os.environ["LMI_RUN_ID"],
             "commit": os.environ["LMI_COMMIT"],
@@ -457,7 +459,12 @@ def handler(event, context):
         decorated = durable_execution(
             lambda e, c: workflow(e, c, trace), plugins=plugins
         )
-        return decorated(injected, context)
+        try:
+            return decorated(injected, context)
+        finally:
+            # Preserve the actual SDK boundary before post-call evidence I/O.
+            trace.sdk_completed_at = time.time()
+            trace.sdk_resources = resources()
 
     before = resources()
     trace.emit("WRAPPER_ENTER", resources=before)
@@ -468,8 +475,18 @@ def handler(event, context):
             result = invoke_with_telemetry(trace, invoke)
         else:
             result = invoke()
-        trace.emit("WRAPPER_RETURN", status=result["Status"], resources=resources())
+        trace.emit(
+            "WRAPPER_RETURN",
+            status=result["Status"],
+            resources=trace.sdk_resources,
+            time=trace.sdk_completed_at,
+        )
         return result
     except BaseException as error:
-        trace.emit("WRAPPER_RAISE", error=type(error).__name__, resources=resources())
+        trace.emit(
+            "WRAPPER_RAISE",
+            error=type(error).__name__,
+            resources=getattr(trace, "sdk_resources", None) or resources(),
+            time=getattr(trace, "sdk_completed_at", None) or time.time(),
+        )
         raise
