@@ -94,9 +94,24 @@ jobs:
           hatch run lmi:python -m lmi_tests.deploy deploy \
             --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --runtime "$LMI_RUNTIME" --stack-name "$LMI_STACK_NAME"
+      - name: Refresh credentials for cloud assertions
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.TEST_ROLE_ARN }}
+          role-session-name: python-lmi-assertions
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ secrets.TEST_ACCOUNT_ID }}
       - name: Run cloud regressions (red until issue 741 is fixed)
         timeout-minutes: 60
         run: hatch run lmi:cloud --junitxml=lmi_tests/artifacts/cloud.xml
+      - name: Refresh credentials for evidence and cleanup
+        if: always() && hashFiles('lmi_tests/artifacts/manifest.json') != ''
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.TEST_ROLE_ARN }}
+          role-session-name: python-lmi-cleanup
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ secrets.TEST_ACCOUNT_ID }}
       - name: Collect service history and runtime evidence
         if: always()
         timeout-minutes: 5
