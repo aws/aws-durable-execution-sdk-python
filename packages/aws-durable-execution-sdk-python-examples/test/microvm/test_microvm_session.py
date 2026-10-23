@@ -49,7 +49,15 @@ def test_runs_both_jobs_in_the_same_microvm(durable_runner):
     key = str(uuid.uuid4())
 
     with durable_runner:
-        result = durable_runner.run(input={"key": key}, timeout=300)
+        # A synchronous Invoke returns only when the execution ends. The cloud
+        # runner's boto3 client reads for at most 60 seconds, and it sends the
+        # Invoke again after a read timeout. Each resend starts a new
+        # execution, which launches its own MicroVM. So the test starts the
+        # execution asynchronously and polls for its result.
+        execution_arn = durable_runner.run_async(input={"key": key}, timeout=300)
+        result = durable_runner.wait_for_result(
+            execution_arn=execution_arn, timeout=300
+        )
 
     assert result.status is InvocationStatus.SUCCEEDED, result.error
     output = deserialize_operation_payload(result.result)

@@ -34,7 +34,15 @@ TEXT = "the quick brown fox jumps over the lazy dog"
 )
 def test_runs_the_job_in_a_microvm_and_returns_its_result(durable_runner):
     with durable_runner:
-        result = durable_runner.run(input={"text": TEXT}, timeout=300)
+        # A synchronous Invoke returns only when the execution ends. The cloud
+        # runner's boto3 client reads for at most 60 seconds, and it sends the
+        # Invoke again after a read timeout. Each resend starts a new
+        # execution, which launches its own MicroVM. So the test starts the
+        # execution asynchronously and polls for its result.
+        execution_arn = durable_runner.run_async(input={"text": TEXT}, timeout=300)
+        result = durable_runner.wait_for_result(
+            execution_arn=execution_arn, timeout=300
+        )
 
     assert result.status is InvocationStatus.SUCCEEDED, result.error
     output = deserialize_operation_payload(result.result)
