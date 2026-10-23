@@ -140,6 +140,16 @@ def test_my_example(durable_runner):
 
 `scripts/generate_function_name_map.py` leaves out the `usesMicrovm` examples unless you pass `--include-microvm`. Pass it only when the stack was deployed with an image. A test whose example is missing from the map is skipped.
 
+### MicroVM Image
+`microvm-image/` holds the app, the Dockerfile, and the dependency pins of the MicroVM image that the MicroVM examples run. `hatch run examples:ensure-microvm-image --output image.json` builds the image or reuses it. It needs `TEST_ACCOUNT_ID`, `AWS_REGION`, and AWS credentials for the test account.
+
+1. The script builds the worker wheel from `packages/aws-durable-execution-sdk-python-microvm-worker`, and zips it with the files in `microvm-image/`.
+2. The image name is `sdk-python-examples-<hash>`. The hash covers the worker's source and `pyproject.toml`, the files in `microvm-image/`, and the `CreateMicrovmImage` settings.
+3. So a run with unchanged inputs reuses the image. A change to any input builds a new image.
+4. The script writes `{"imageArn": ..., "executionRoleArn": ...}` to `--output`. CI passes both to `sam deploy` as `MicrovmImageArn` and `MicrovmExecutionRoleArn`, in the Python 3.13 job only.
+
+`MICROVM_ARTIFACT_BUCKET`, `MICROVM_IMAGE_BUILD_ROLE_ARN`, and `MICROVM_EXECUTION_ROLE_ARN` override the resource names for another account.
+
 ### Cloud-Only Tests
 `@pytest.mark.durable_execution(..., cloud_only=True)` marks a test that needs a service the local runner cannot provide, such as a MicroVM. Local mode skips the test with the reason `cloud_only: runs only against the deployed function`. Cloud mode runs it.
 
