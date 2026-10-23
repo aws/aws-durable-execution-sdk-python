@@ -50,9 +50,11 @@ from aws_durable_execution_sdk_python_extras.microvm import (
     MicrovmRequestConfig,
     MicrovmSessionConfig,
     aws_errors,
-    default_microvm_retry_strategy,
     microvm,
     microvm_session,
+)
+from aws_durable_execution_sdk_python_extras.microvm import (
+    operation as operation_module,
 )
 
 
@@ -868,13 +870,18 @@ def test_gives_a_custom_strategy_the_error_that_botocore_raised(
 
 
 def _fail_five_tokens_of_a_session_job(
-    endpoint_url: str,
+    endpoint_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[list[weakref.ref[ClientError]], list[weakref.ref[ClientError]]]:
     """Run a session job whose 5 ``CreateMicrovmAuthToken`` calls are
     throttled. The handler catches the error and keeps no reference to it.
 
-    Return weak references to the copies and to the originals. The strategy
-    finds each copy in the map while the copy is alive.
+    Return weak references to the copies and to the originals.
+
+    1. The core SDK calls the step retry strategy with the copy.
+    2. :func:`decide_on_original_error` passes the original on to the
+       strategy in the config.
+    3. So the test wraps :func:`decide_on_original_error` where the
+       operation calls it, and records each copy that it receives.
     """
     tokens = throttled("CreateMicrovmAuthToken", with_id=True)
     originals: list[weakref.ref[ClientError]] = [
@@ -885,17 +892,19 @@ def _fail_five_tokens_of_a_session_job(
     copies: list[weakref.ref[ClientError]] = []
     threaded: list[bool] = []
 
-    def strategy(error: Exception, attempt: int) -> RetryDecision:
-        with aws_errors._originals_lock:
-            found = [copy for copy in aws_errors._originals if copy.__cause__ is error]
-        copies.extend(weakref.ref(copy) for copy in found)
-        threaded.extend(
-            "_run_with_limit" in _frame_names(copy.__traceback__) for copy in found
-        )
-        del found
-        return default_microvm_retry_strategy(error, attempt)
+    def recording(strategy: Any) -> Any:
+        decide = aws_errors.decide_on_original_error(strategy)
 
-    fields = base_fields(client, strategy)
+        def record(error: Exception, attempt: int) -> RetryDecision:
+            if isinstance(error, ClientError) and "_original_error" in vars(error):
+                copies.append(weakref.ref(error))
+                threaded.append("_run_with_limit" in _frame_names(error.__traceback__))
+            return decide(error, attempt)
+
+        return record
+
+    monkeypatch.setattr(operation_module, "decide_on_original_error", recording)
+    fields = base_fields(client, None)
 
     @durable_execution
     def handler(event: Any, context: DurableContext) -> Any:
@@ -946,9 +955,10 @@ def test_keeps_no_error_of_a_throttled_token_call_after_the_execution(
 ) -> None:
     """1. The traceback of each original holds the frame of the thread
        function of ``_run_with_limit``. That frame holds the copy.
-    2. So a map that held the original strongly would keep the copy alive.
-    3. So after the execution, the copies and the originals must be
-       collected, and the map must be empty.
+    2. The copy holds the original in ``_original_error``. So the copy and
+       the original refer to each other.
+    3. No module state holds either error. So after the execution, the
+       garbage collector must free the copies and the originals.
 
     The core SDK logs each failed step attempt with the error. pytest keeps
     each log record until the test ends, and a record holds its error. So
@@ -956,14 +966,14 @@ def test_keeps_no_error_of_a_throttled_token_call_after_the_execution(
     """
     step_logger = logging.getLogger("aws_durable_execution_sdk_python.operation.step")
     monkeypatch.setattr(step_logger, "disabled", True)
-    copies, originals = _fail_five_tokens_of_a_session_job(fake_endpoint().url)
+    copies, originals = _fail_five_tokens_of_a_session_job(
+        fake_endpoint().url, monkeypatch
+    )
 
     gc.collect()
 
     assert [copy() for copy in copies] == [None] * 5
     assert [original() for original in originals] == [None] * 5
-    with aws_errors._originals_lock:
-        assert len(aws_errors._originals) == 0
 
 
 @pytest.mark.parametrize(

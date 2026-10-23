@@ -16,7 +16,6 @@ from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.retries import RetryDecision
 from botocore.exceptions import ClientError
 
-from aws_durable_execution_sdk_python_extras.microvm import aws_errors
 from aws_durable_execution_sdk_python_extras.microvm.aws_errors import (
     add_request_id,
     decide_on_original_error,
@@ -97,6 +96,8 @@ def test_copies_a_modeled_error_with_the_request_id_in_its_message() -> None:
     assert labelled.operation_name == "RunMicrovm"
     assert labelled.__notes__ == ["a note"]
     assert labelled.__cause__ is error
+    assert vars(labelled)["_original_error"] is error
+    assert "_original_error" not in vars(error)
     assert labelled.__suppress_context__
     assert str(labelled) == f"{original}. RunMicrovm request ID: req-1."
     assert labelled.args == (str(labelled),)
@@ -197,6 +198,21 @@ def test_passes_any_other_error_unchanged(error: Exception) -> None:
     decide_on_original_error(strategy)(error, 1)
 
     assert seen == [error]
+    assert seen[0] is error
+
+
+def test_passes_a_client_error_whose_original_is_not_a_client_error() -> None:
+    """Only a ``ClientError`` in ``_original_error`` replaces the error."""
+    error = ClientError(response(), "RunMicrovm")
+    error.__dict__["_original_error"] = RuntimeError("not botocore")
+    seen: list[Exception] = []
+
+    def strategy(received: Exception, attempt: int) -> RetryDecision:
+        seen.append(received)
+        return RetryDecision.no_retry()
+
+    decide_on_original_error(strategy)(error, 1)
+
     assert seen[0] is error
 
 
@@ -304,11 +320,6 @@ def test_send_job_raises_the_not_found_answer_of_the_token_call_unchanged(
     assert len(endpoint.requests) == len(statuses)
 
 
-def _entries() -> int:
-    with aws_errors._originals_lock:
-        return len(aws_errors._originals)
-
-
 def _frame_names(error: BaseException) -> list[str]:
     names = []
     traceback = error.__traceback__
@@ -363,7 +374,6 @@ def test_keeps_no_error_of_a_token_call_that_failed_under_a_deadline(
 
     assert copy() is None
     assert original() is None
-    assert _entries() == 0
 
 
 def _keep_the_copy_in_the_frame_of_the_caller() -> tuple[
@@ -397,13 +407,13 @@ def test_keeps_no_error_whose_traceback_reaches_the_copy() -> None:
 
     assert copy() is None
     assert original() is None
-    assert _entries() == 0
 
 
-def test_passes_the_copy_unchanged_when_its_original_is_gone() -> None:
-    """Code can replace ``__cause__``. The copy then no longer holds the
-    original, and the original can be collected first."""
-    labelled = add_request_id("RunMicrovm", ClientError(response(), "RunMicrovm"))
+def test_gives_the_strategy_the_original_after_code_replaces_the_cause() -> None:
+    """Code can replace ``__cause__``. The copy holds the original in
+    ``_original_error`` too. So the strategy still receives the original."""
+    error = ClientError(response(), "RunMicrovm")
+    labelled = add_request_id("RunMicrovm", error)
     labelled.__cause__ = None
     gc.collect()
     seen: list[Exception] = []
@@ -414,5 +424,41 @@ def test_passes_the_copy_unchanged_when_its_original_is_gone() -> None:
 
     decide_on_original_error(strategy)(labelled, 1)
 
-    assert seen == [labelled]
-    assert seen[0] is labelled
+    assert seen == [error]
+    assert seen[0] is error
+
+
+def test_keeps_the_original_after_a_raise_from_another_error() -> None:
+    """``raise ... from ...`` sets ``__cause__``. It does not change
+    ``_original_error``."""
+    error = ClientError(response(), "RunMicrovm")
+    labelled = add_request_id("RunMicrovm", error)
+    other = RuntimeError("other")
+
+    with pytest.raises(ClientError) as raised:
+        raise labelled from other
+
+    assert raised.value.__cause__ is other
+    seen: list[Exception] = []
+
+    def strategy(received: Exception, attempt: int) -> RetryDecision:
+        seen.append(received)
+        return RetryDecision.no_retry()
+
+    decide_on_original_error(strategy)(raised.value, 1)
+
+    assert seen[0] is error
+
+
+def test_names_the_error_it_received_as_the_original_of_a_copy_of_a_copy() -> None:
+    """A copy of a copy takes ``__dict__`` of the first copy. The function
+    replaces ``_original_error`` with the first copy."""
+    error = ClientError(response("req-1"), "RunMicrovm")
+    first = add_request_id("RunMicrovm", error)
+
+    second = add_request_id("RunMicrovm", first)
+
+    assert second is not first
+    assert vars(first)["_original_error"] is error
+    assert vars(second)["_original_error"] is first
+    assert second.__cause__ is first

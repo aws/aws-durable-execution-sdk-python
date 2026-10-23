@@ -13,10 +13,8 @@ message can carry the request ID to the handler and to the execution history.
 
 from __future__ import annotations
 
-import threading
-import weakref
 from collections.abc import Callable, Mapping
-from typing import Any, Literal
+from typing import Literal
 
 from aws_durable_execution_sdk_python.retries import RetryDecision
 from botocore.exceptions import ClientError
@@ -93,29 +91,6 @@ def with_request_id(
     return f"{message}{end} {sentence}"
 
 
-_originals: weakref.WeakKeyDictionary[ClientError, weakref.ref[ClientError]] = (
-    weakref.WeakKeyDictionary()
-)
-"""A weak reference to the error that botocore raised, for each copy that
-:func:`add_request_id` made.
-
-1. The module keeps the map for the life of the process. An entry is removed
-   only when its key, the copy, is collected.
-2. The traceback of the original can reach the copy. For example, the frame
-   of a thread function can hold the copy in a local variable, and the
-   traceback of the original holds that frame.
-3. A strong reference to the original as the value would then keep the copy
-   alive. So the entry would never be removed.
-4. So the key and the value are both weak references. The copy holds the
-   original as its ``__cause__``. So the original lives at least as long as
-   the copy, unless code replaces ``__cause__``."""
-
-_originals_lock = threading.Lock()
-"""A ``CreateMicrovmAuthToken`` call runs in its own thread when the
-invocation has a deadline. So the map is written from more than one
-thread."""
-
-
 def add_request_id(operation: MicrovmApiOperation, error: ClientError) -> ClientError:
     """Return a copy of ``error`` whose message ends with the request ID of
     the failed call, or ``error`` itself.
@@ -133,16 +108,17 @@ def add_request_id(operation: MicrovmApiOperation, error: ClientError) -> Client
        class of ``error``. A wrapper of another class would change the
        recorded error type.
     3. The copy has the class of ``error``, the same ``response``, and the
-       same ``operation_name``. Only ``args`` and ``__cause__`` differ.
-       ``args`` gives ``str()``. So :func:`default_microvm_retry_strategy`,
-       which reads the class, the error code, and the HTTP status, decides
-       the same way.
+       same ``operation_name``. Only ``args``, ``__cause__``, and
+       ``_original_error`` differ. ``args`` gives ``str()``. So
+       :func:`default_microvm_retry_strategy`, which reads the class, the
+       error code, and the HTTP status, decides the same way.
     4. A fake or a custom client can raise one error object for several
        calls. ``error`` keeps its message, and each call builds its copy from
        that message. So the message names only the call that raised it.
     5. A custom strategy can match the message, for example with
        ``create_retry_strategy(RetryStrategyConfig(retryable_errors=[...]))``.
-       The longer message could change its decision. So
+       The longer message could change its decision. So the copy holds
+       ``error`` in its ``_original_error`` attribute, and
        :func:`decide_on_original_error` gives the strategy ``error`` instead
        of the copy. The core SDK builds the step record before it calls the
        strategy. So the record keeps the message with the request ID.
@@ -150,7 +126,17 @@ def add_request_id(operation: MicrovmApiOperation, error: ClientError) -> Client
     The copy is made without ``__init__``. A subclass of ``ClientError`` can
     take other arguments, so ``__init__`` could fail. The copy takes
     ``__dict__`` of ``error``, which holds ``response``, ``operation_name``,
-    and any notes.
+    and any notes. ``_original_error`` is set in the same ``__dict__``. When
+    ``error`` is itself a copy, its ``_original_error`` is replaced with
+    ``error``. So the attribute always names the error that this call
+    received.
+
+    ``raise ... from ...`` sets ``__cause__``, and code can set
+    ``__cause__`` too. Neither changes ``_original_error``. So the strategy
+    receives ``error`` even after ``__cause__`` changes. No module state
+    holds an error. The copy holds ``error``. So ``error`` lives at least as
+    long as the copy, and the garbage collector frees both when nothing
+    else refers to them.
 
     The function returns ``error`` itself in these cases:
 
@@ -171,8 +157,7 @@ def add_request_id(operation: MicrovmApiOperation, error: ClientError) -> Client
     if str(labelled) != message:
         return error
     labelled.__cause__ = error
-    with _originals_lock:
-        _originals[labelled] = weakref.ref(error)
+    labelled.__dict__["_original_error"] = error
     return labelled
 
 
@@ -184,12 +169,15 @@ def decide_on_original_error(strategy: RetryStrategy) -> RetryStrategy:
     botocore raised.
 
     The step raises the copy that :func:`add_request_id` made. The core SDK
-    calls the step retry strategy with that copy. The function passes on the
-    error that botocore raised instead: the same object as before the
-    request ID existed, with its message. So every strategy decides as it
-    did before. Any other error passes unchanged, including the errors that
-    the MicroVM operation creates itself, such as ``MicrovmStateError``.
-    Their messages have the request ID.
+    calls the step retry strategy with that copy. The copy holds the error
+    that botocore raised in its ``_original_error`` attribute. The function
+    passes on that error instead: the same object as before the request ID
+    existed, with its message. So every strategy decides as it did before.
+
+    Any other error passes unchanged. This includes a ``ClientError`` without
+    ``_original_error``, and the errors that the MicroVM operation creates
+    itself, such as ``MicrovmStateError``. Their messages have the request
+    ID.
 
     The core SDK records the step failure before it calls the strategy. So
     the record, and the handler, keep the message with the request ID.
@@ -200,11 +188,13 @@ def decide_on_original_error(strategy: RetryStrategy) -> RetryStrategy:
     """
 
     def decide(error: Exception, attempt: int) -> RetryDecision:
-        original: Any = None
-        if isinstance(error, ClientError):
-            with _originals_lock:
-                ref = _originals.get(error)
-            original = None if ref is None else ref()
-        return strategy(error if original is None else original, attempt)
+        original = (
+            getattr(error, "_original_error", None)
+            if isinstance(error, ClientError)
+            else None
+        )
+        return strategy(
+            original if isinstance(original, ClientError) else error, attempt
+        )
 
     return decide
