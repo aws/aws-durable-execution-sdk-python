@@ -179,6 +179,24 @@ class TestRunnerAdapter:
         return None
 
 
+CLOUD_ONLY_SKIP_REASON = (
+    "cloud_only: runs only against the deployed function (--runner-mode=cloud)"
+)
+
+
+def cloud_only_skip_reason(
+    marker_kwargs: dict[str, Any], runner_mode: str
+) -> str | None:
+    """Return the skip reason for a cloud-only test in local mode, else None.
+
+    A test marked ``cloud_only=True`` depends on a service that the local
+    runner cannot provide, such as a MicroVM. So the local run skips it.
+    """
+    if marker_kwargs.get("cloud_only") and runner_mode != RunnerMode.CLOUD:
+        return CLOUD_ONLY_SKIP_REASON
+    return None
+
+
 @pytest.fixture
 def durable_runner(request):
     """Pytest fixture that provides a test runner based on configuration.
@@ -207,6 +225,8 @@ def durable_runner(request):
             with durable_runner:
                 result = durable_runner.run(input="test", timeout=10)
             assert result.status == InvocationStatus.SUCCEEDED
+
+    Marker keyword ``cloud_only=True`` skips the test in local mode.
     """
     # Get marker with test configuration
     marker = request.node.get_closest_marker("durable_execution")
@@ -218,6 +238,10 @@ def durable_runner(request):
 
     # Get runner mode from CLI option
     runner_mode: str = request.config.getoption("--runner-mode")
+
+    skip_reason = cloud_only_skip_reason(marker.kwargs, runner_mode)
+    if skip_reason:
+        pytest.skip(skip_reason)
 
     logger.info("Running test in %s mode", runner_mode.upper())
 

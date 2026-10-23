@@ -155,9 +155,18 @@ typecheck = "mypy --install-types --non-interactive packages/aws-durable-executi
 js-examples = "python .github/scripts/js_examples/run.py {args}"
 
 [tool.hatch.envs.dev-examples]
+# The MicroVM examples import the extras. test-pypi-examples is meant to run
+# the examples against the packages on PyPI. The extras are not published
+# there. So the examples package does not depend on the extras. The
+# environments that run the examples from this checkout add the extras as a
+# workspace member instead. test-pypi-examples sets no workspace. So it
+# inherits the default members and installs the extras from this checkout
+# too. The MicroVM test modules call pytest.importorskip. So an environment
+# without the extras skips them.
 workspace.members = [
   "packages/aws-durable-execution-sdk-python",
   "packages/aws-durable-execution-sdk-python-examples",
+  "packages/aws-durable-execution-sdk-python-extras",
   "packages/aws-durable-execution-sdk-python-otel",
   "packages/aws-durable-execution-sdk-python-testing",
 ]
@@ -234,13 +243,15 @@ test = "pytest packages/aws-durable-execution-sdk-python-examples/test {args}"
 workspace.members = [
   "packages/aws-durable-execution-sdk-python",
   "packages/aws-durable-execution-sdk-python-examples",
+  "packages/aws-durable-execution-sdk-python-extras",
   "packages/aws-durable-execution-sdk-python-otel",
 ]
 
 [tool.hatch.envs.examples.scripts]
 generate-sam-template = "python packages/aws-durable-execution-sdk-python-examples/scripts/generate_sam_template.py"
 build = "python packages/aws-durable-execution-sdk-python-examples/scripts/build_examples.py"
-clean = "rm -rf packages/aws-durable-execution-sdk-python-examples/build packages/aws-durable-execution-sdk-python-examples/template.generated.json .aws-sam"
+ensure-microvm-image = "python packages/aws-durable-execution-sdk-python-examples/scripts/ensure_microvm_image.py {args}"
+clean = "rm -rf packages/aws-durable-execution-sdk-python-examples/build packages/aws-durable-execution-sdk-python-examples/template.generated.json packages/aws-durable-execution-sdk-python-examples/.microvm-image-build .aws-sam"
 
 [tool.ruff]
 line-length = 88

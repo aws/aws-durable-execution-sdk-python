@@ -1,0 +1,15 @@
+# The image installs the worker wheel and its dependencies from PyPI.
+# scripts/ensure_microvm_image.py hashes this file into the image name.
+# These pins fix the installed versions. So an image with a given name always
+# holds the same dependency versions. A change to a pin builds a new image.
+#
+# The worker needs boto3 1.43.35 or later, the first release with the
+# lambda-microvms client. These are the versions that the repo's examples
+# environment resolved on 2026-10-22.
+boto3==1.43.118
+botocore==1.43.118
+jmespath==1.1.0
+python-dateutil==2.9.0.post0
+s3transfer==0.19.3
+six==1.17.0
+urllib3==2.8.0
