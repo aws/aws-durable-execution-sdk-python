@@ -271,3 +271,9 @@ orchestrator in the conformance repository and points it at this package with
 the commit under test. Pull requests run the invocation and execution suites plus
 a short (60-second) long-running cycle; the full multi-hour long-running cycle is
 driven by `workflow_dispatch` with `phase: launch` and `phase: check`.
+
+Case 27 (`chained-invoke-suspend`) invokes a child that performs a one-second
+durable wait and returns the original payload after resuming. Both views
+check two caller invocations, two child invocations and the child wait's
+parentage and continuation links. It replaces the suspended-child scenario
+formerly exercised by the short mode of `otel-long-running-4`.
