@@ -8,11 +8,17 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from aws_durable_execution_sdk_python.types import LoggerInterface
 from botocore.exceptions import ClientError
 
+from aws_durable_execution_sdk_python_extras.microvm.aws_errors import (
+    add_request_id,
+    error_code,
+    is_microvms_service_error,
+    with_request_id,
+)
 from aws_durable_execution_sdk_python_extras.microvm.request import (
     MicrovmEndpointUnavailableError,
     call_before_deadline,
@@ -37,8 +43,18 @@ class MicrovmStateError(Exception):
     """The MicroVM is terminating, terminated, or removed.
 
     The request step raises it. A later attempt finds the same state, so the
-    default retry strategy does not retry it. The session job then raises
+    default retry strategy does not retry it. The delivery then raises
     :class:`MicrovmNotRunningError`.
+
+    The message ends with the request ID of the AWS call that reported the
+    state, when that call has one. For a MicroVM that no longer exists,
+    ``__cause__`` is the botocore error. Only the step retry strategy of a
+    live attempt sees ``__cause__``. The core SDK records the message, not
+    the cause. So the message carries the request ID.
+
+    The request step records the fully-qualified name of this class as its
+    error type, and the operation compares the recorded type with that name.
+    So the class stays in this module.
     """
 
     def __init__(self, message: str, state: str | None = None) -> None:
@@ -79,7 +95,16 @@ def ensure_running(options: EnsureRunningOptions) -> str | None:
     4. ``SUSPENDING``: it waits. The MicroVM becomes ``SUSPENDED``, and the
        function then resumes it.
     5. ``TERMINATING``, ``TERMINATED``, or not found: it raises
-       :class:`MicrovmStateError`.
+       :class:`MicrovmStateError`. ``GetMicrovm`` or ``ResumeMicrovm`` can
+       report that the MicroVM is not found. The message ends with the
+       request ID of the call that reported the state, in the form
+       ``GetMicrovm request ID: <id>.``.
+
+    Any other ``GetMicrovm`` or ``ResumeMicrovm`` error, such as
+    ``AccessDeniedException``, is raised with its class and its
+    ``response``. Its message then ends with the request ID of the call. See
+    :func:`add_request_id`. A ``ConflictException`` from ``ResumeMicrovm``
+    is not an error: polling continues.
 
     It polls after 250 milliseconds, and doubles the wait up to 2 seconds. It
     stops after ``max_wait_seconds``, or 10 seconds before the invocation
@@ -96,6 +121,8 @@ def ensure_running(options: EnsureRunningOptions) -> str | None:
         MicrovmStateError: When the MicroVM can no longer run a job.
         MicrovmEndpointUnavailableError: When the MicroVM does not reach
             ``RUNNING`` in time.
+        ClientError: When ``GetMicrovm`` or ``ResumeMicrovm`` fails
+            otherwise.
     """
     started = time.monotonic()
     reserve = reserve_starts_at(options.remaining_seconds)
@@ -130,21 +157,18 @@ def ensure_running(options: EnsureRunningOptions) -> str | None:
             unavailable,
         )
 
-    def not_found() -> MicrovmStateError:
-        msg = (
-            f"MicroVM {microvm_id} no longer exists. A session MicroVM lives at "
-            "most its session timeout plus 5 minutes, and never longer than 8 "
-            "hours."
-        )
-        return MicrovmStateError(msg)
-
+    # GetMicrovm and ResumeMicrovm both answer ResourceNotFoundException for
+    # a removed MicroVM. So both raise the same MicrovmStateError. Every other
+    # error of either call keeps its class and its response, and its message
+    # gets the request ID. add_request_id returns the error, or a copy whose
+    # __cause__ is the error. So that raise has no `from`.
     while True:
         try:
             current = get_microvm()
         except ClientError as error:
-            if _code(error) == "ResourceNotFoundException":
-                raise not_found() from error
-            raise
+            if error_code(error) == "ResourceNotFoundException":
+                raise microvm_not_found(microvm_id, "GetMicrovm", error) from error
+            raise add_request_id("GetMicrovm", error)
         state = current.get("state")
         last_state = state
         if state == "RUNNING" or (state == "PENDING" and not resume_sent):
@@ -156,8 +180,10 @@ def ensure_running(options: EnsureRunningOptions) -> str | None:
             return current.get("endpoint")
         if state in {"TERMINATING", "TERMINATED"}:
             reason = current.get("stateReason")
+            # The GetMicrovm output carries the request ID. The state fails
+            # the step, so the message names that request ID.
             msg = f"MicroVM {microvm_id} is {state}{f': {reason}' if reason else ''}."
-            raise MicrovmStateError(msg, state)
+            raise MicrovmStateError(with_request_id(msg, "GetMicrovm", current), state)
         if state == "SUSPENDED" and not resume_sent:
             try:
                 resume_microvm()
@@ -166,11 +192,13 @@ def ensure_running(options: EnsureRunningOptions) -> str | None:
                 # progress, for example an auto-resume. Polling continues
                 # either way. ResourceNotFoundException means that the
                 # MicroVM was removed after the state check.
-                code = _code(error)
+                code = error_code(error)
                 if code == "ResourceNotFoundException":
-                    raise not_found() from error
+                    raise microvm_not_found(
+                        microvm_id, "ResumeMicrovm", error
+                    ) from error
                 if code != "ConflictException":
-                    raise
+                    raise add_request_id("ResumeMicrovm", error)
             resume_sent = True
             options.logger.info("resuming MicroVM", extra={"state": state})
 
@@ -180,5 +208,31 @@ def ensure_running(options: EnsureRunningOptions) -> str | None:
         delay = min(delay * 2, _MAX_POLL_SECONDS)
 
 
-def _code(error: ClientError) -> str | None:
-    return error.response.get("Error", {}).get("Code")
+def microvm_not_found(
+    microvm_id: str,
+    operation: Literal["GetMicrovm", "ResumeMicrovm", "CreateMicrovmAuthToken"],
+    error: ClientError,
+) -> MicrovmStateError:
+    """Return the :class:`MicrovmStateError` for a call that answered
+    ``ResourceNotFoundException``.
+
+    ``GetMicrovm``, ``ResumeMicrovm``, and ``CreateMicrovmAuthToken`` each
+    answer ``ResourceNotFoundException`` for a removed MicroVM. The request
+    step calls all three. So each call reports a removed MicroVM with the
+    same error. The core SDK records only the message of a step failure. So
+    the message names the call and its request ID. The caller raises the
+    result ``from error``. The caller matches the error by its code. So the
+    message names a request ID only when ``error`` is the answer of
+    ``operation``, as in :func:`add_request_id`.
+
+    The caller can be a session or :func:`microvm`. Both configs name the
+    MicroVM lifetime ``timeout``. Both launches set
+    ``maximumDurationInSeconds`` to ``timeout`` plus 5 minutes, at most 8
+    hours. So the message states that limit in words that fit both callers.
+    """
+    msg = (
+        f"MicroVM {microvm_id} no longer exists. A MicroVM lives at most its "
+        "`timeout` plus 5 minutes, and never longer than 8 hours."
+    )
+    response = error.response if is_microvms_service_error(operation, error) else None
+    return MicrovmStateError(with_request_id(msg, operation, response))

@@ -43,7 +43,8 @@ def _kv(key: str, value: str | int) -> dict[str, Any]:
 
 
 def _to_nano(iso: str) -> str:
-    # Keep the record's full microsecond precision (integer math, no float).
+    # Keep every fraction digit of the parsed timestamp, up to microseconds.
+    # Integer math avoids float rounding.
     delta = parse_iso_datetime(iso) - _EPOCH
     seconds = delta.days * 86_400 + delta.seconds
     return str(seconds * 1_000_000_000 + delta.microseconds * 1_000)

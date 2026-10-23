@@ -73,8 +73,9 @@ def truncate_record(
 
     ops: list[dict[str, Any]] = [dict(op) for op in record.get("operations", [])]
     kept = [True] * len(ops)
-    # Oldest-first by ISO startTime string (UTC 'Z' ISO timestamps sort
-    # chronologically as strings); operations without a startTime sort last.
+    # Oldest-first by the startTime string. Every record timestamp has the same
+    # fixed-width UTC format, so text order equals time order. Operations
+    # without a startTime sort last.
     order = sorted(
         range(len(ops)), key=lambda i: (ops[i].get("startTime") or "\uffff", i)
     )

@@ -21,6 +21,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from aws_durable_execution_sdk_python.types import LoggerInterface
+from botocore.exceptions import ClientError
+
+from aws_durable_execution_sdk_python_extras.microvm.aws_errors import (
+    add_request_id,
+    error_code,
+    with_request_id,
+)
 
 
 if TYPE_CHECKING:
@@ -325,7 +332,14 @@ def send_job(options: SendJobOptions) -> int:
         MicrovmRequestRejectedError: When the endpoint rejects the job.
         MicrovmRequestUnauthorizedError: When a new auth token is refused.
         MicrovmEndpointUnavailableError: When the tier ends.
-        Exception: When ``CreateMicrovmAuthToken`` fails.
+        ClientError: When ``CreateMicrovmAuthToken`` answers
+            ``ResourceNotFoundException``. It is the error that the client
+            raised, unchanged. The request step turns it into
+            ``MicrovmStateError``.
+        MicrovmStateError: When ``recheck`` reports that the MicroVM can no
+            longer run a job.
+        Exception: When ``CreateMicrovmAuthToken`` fails otherwise. The
+            message of a botocore error ends with the request ID.
     """
     require_time_for_call(options.remaining_seconds)
     started = (
@@ -449,14 +463,43 @@ def send_job(options: SendJobOptions) -> int:
 
 
 def _create_auth_token(options: SendJobOptions) -> Mapping[str, str]:
-    response = options.client.create_microvm_auth_token(
-        microvmIdentifier=options.microvm_id,
-        expirationInMinutes=_AUTH_TOKEN_MINUTES,
-        allowedPorts=[{"port": options.port}],
-    )
+    """Call ``CreateMicrovmAuthToken``, and return the token headers.
+
+    The function handles a failed call this way:
+
+    1. The API model lists ``ResourceNotFoundException`` for this call. It
+       means that the MicroVM was removed after the launch or after the
+       state check. The function raises that error unchanged. The request
+       step in ``operation.py`` turns it into ``MicrovmStateError``, with
+       the error as its ``__cause__``.
+    2. Any other error is raised with its class and its ``response``, and
+       its message ends with the request ID. See :func:`add_request_id`.
+
+    Raises:
+        RuntimeError: When the answer has no ``authToken``.
+        ClientError: When the call fails. A ``ResourceNotFoundException``
+            is the error that the client raised. Any other error can be the
+            copy that :func:`add_request_id` returns.
+    """
+    try:
+        response = options.client.create_microvm_auth_token(
+            microvmIdentifier=options.microvm_id,
+            expirationInMinutes=_AUTH_TOKEN_MINUTES,
+            allowedPorts=[{"port": options.port}],
+        )
+    except ClientError as error:
+        if error_code(error) == "ResourceNotFoundException":
+            raise
+        # add_request_id returns the error, or a copy whose __cause__ is
+        # the error. So the raise has no `from`.
+        raise add_request_id("CreateMicrovmAuthToken", error)
     token = response.get("authToken")
     if not token:
-        msg = "CreateMicrovmAuthToken returned no authToken"
+        msg = with_request_id(
+            "CreateMicrovmAuthToken returned no authToken",
+            "CreateMicrovmAuthToken",
+            response,
+        )
         raise RuntimeError(msg)
     return token
 
