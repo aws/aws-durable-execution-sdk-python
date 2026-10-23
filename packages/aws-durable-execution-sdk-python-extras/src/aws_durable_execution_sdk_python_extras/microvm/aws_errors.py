@@ -139,10 +139,7 @@ def add_request_id(operation: MicrovmApiOperation, error: ClientError) -> Client
        the same way.
     4. A fake or a custom client can raise one error object for several
        calls. ``error`` keeps its message, and each call builds its copy from
-       that message. So the message names only the call that raised it. The
-       JavaScript SDK changes the message of the error object itself. So it
-       keeps the original message of each changed error, and Python needs no
-       such record.
+       that message. So the message names only the call that raised it.
     5. A custom strategy can match the message, for example with
        ``create_retry_strategy(RetryStrategyConfig(retryable_errors=[...]))``.
        The longer message could change its decision. So
@@ -199,10 +196,7 @@ def decide_on_original_error(strategy: RetryStrategy) -> RetryStrategy:
 
     Neither error changes its message at any time. So a traceback that code
     formats during the strategy call shows the same message as at any other
-    time. The JavaScript SDK sets the message of one error back and forth
-    around the strategy call. V8 keeps the ``stack`` text that it builds on
-    the first read. So the JavaScript SDK reads ``stack`` before the change.
-    Python needs no such step.
+    time.
     """
 
     def decide(error: Exception, attempt: int) -> RetryDecision:

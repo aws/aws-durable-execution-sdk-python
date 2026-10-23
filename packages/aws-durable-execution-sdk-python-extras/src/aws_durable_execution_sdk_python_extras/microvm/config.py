@@ -147,6 +147,13 @@ class MicrovmBaseConfig:
     decides on the message of the service. An error that the operation
     creates itself, such as "RunMicrovm returned no microvmId", has the
     request ID in its message when the strategy receives it.
+
+    A ``ResourceNotFoundException`` from ``GetMicrovm``, ``ResumeMicrovm``,
+    or ``CreateMicrovmAuthToken`` is the exception. It means that the
+    MicroVM no longer exists. So the operation raises ``MicrovmStateError``
+    of ``aws_durable_execution_sdk_python_extras.microvm.lifecycle``
+    instead, and the strategy receives that error. Its ``__cause__`` is the
+    ``ClientError``, and its message ends with the request ID.
     """
 
     opener: urllib.request.OpenerDirector | None = None
