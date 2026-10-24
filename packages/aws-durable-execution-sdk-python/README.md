@@ -167,6 +167,14 @@ checkpointing is available, stops and waits for checkpoint processing, then call
 End before returning the outcome. The caller shuts down the handler executor.
 There is no separate handler-context hook or context-manager plugin API.
 
+Invocation Start exposes the input's visible `UpdatedOperationIds` through
+`InvocationStartInfo.updated_operations`. The operation hooks follow ordinary
+execution and replay. Repeated observations of a terminal checkpoint deliver one
+operation-end hook per invocation. Cached parent scopes can skip their descendant
+hooks when the completion is present only in the invocation input. Plugins that
+require completion delivery for those unvisited operations use the invocation
+snapshots and lifecycle hooks.
+
 When plugins are registered, the worker begins with a copy of the caller's
 context-variable bindings. Start hooks, the handler, serialization, resource
 cleanup and End hooks use that same Context. Changes made by a Start hook remain

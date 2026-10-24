@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -1466,7 +1467,7 @@ def test_user_function_start_preserves_baggage_in_current_context():
 
 def test_user_function_end_restores_enclosing_context_on_failure():
     """Verify the enclosing context is restored even when the step fails."""
-    plugin, _ = _create_plugin()
+    plugin, exporter = _create_plugin()
     plugin.on_invocation_start(_invocation_start_info())
     enclosing_context = otel_context.get_current()
 
@@ -1479,6 +1480,12 @@ def test_user_function_end_restores_enclosing_context_on_failure():
     assert otel_context.get_current() == enclosing_context
     assert set(plugin._context_tokens) == {"__invocation_context__"}
     plugin.on_invocation_end(_invocation_end_info())
+    events = [
+        (span, event) for span in exporter.get_finished_spans() for event in span.events
+    ]
+    assert len(events) == 1
+    for span, event in events:
+        assert span.start_time <= event.timestamp <= span.end_time
 
 
 def test_user_function_end_restores_enclosing_context_across_multiple_steps():
@@ -2179,7 +2186,9 @@ def test_detach_ignores_token_attached_on_another_thread():
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         executor.submit(
-            plugin.on_user_function_start, _user_function_start_info("step-1")
+            copy_context().run,
+            plugin.on_user_function_start,
+            _user_function_start_info("step-1"),
         ).result()
 
     plugin._detach_context("step-1:attempt:1")
@@ -2297,20 +2306,23 @@ def test_suspension_releases_the_scope_on_the_originating_worker():
     with ThreadPoolExecutor(max_workers=1) as worker:
 
         def suspend_on_worker() -> tuple[int, bool]:
+            worker_context = otel_context.get_current()
             plugin.on_user_function_start(_user_function_start_info(operation_id))
             attached_span_id = trace.get_current_span().get_span_context().span_id
             plugin.on_user_function_end(_user_function_incomplete_info(operation_id))
             return (
                 attached_span_id,
-                trace.get_current_span().get_span_context().is_valid,
+                otel_context.get_current() == worker_context,
             )
 
-        attached_span_id, span_still_current = worker.submit(suspend_on_worker).result()
+        attached_span_id, context_restored = worker.submit(
+            copy_context().run, suspend_on_worker
+        ).result()
         suspended_span = plugin._get_span(span_key)
 
         # The scope was released on the worker, and its span is left open.
         assert attached_span_id != 0
-        assert span_still_current is False
+        assert context_restored is True
         assert span_key not in plugin._context_tokens
         assert suspended_span is not None
         assert {s.name for s in exporter.get_finished_spans()} == {
@@ -2470,3 +2482,146 @@ def test_invocation_hooks_bind_parent_and_restore_baggage(
     finally:
         otel_context.detach(token)
         provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("status", "error", "expected"),
+    [
+        (OperationStatus.SUCCEEDED, None, StatusCode.OK),
+        (OperationStatus.FAILED, None, StatusCode.ERROR),
+        (OperationStatus.CANCELLED, None, StatusCode.UNSET),
+        (OperationStatus.TIMED_OUT, None, StatusCode.ERROR),
+        (OperationStatus.STOPPED, None, StatusCode.ERROR),
+        (
+            OperationStatus.FAILED,
+            ErrorObject(message="failure", type="Example", data=None, stack_trace=None),
+            StatusCode.ERROR,
+        ),
+    ],
+)
+def test_deferred_end_retains_real_parent_and_status_mapping(
+    status: OperationStatus, error: ErrorObject | None, expected: StatusCode
+) -> None:
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    end = OperationEndInfo(
+        operation_id="child",
+        operation_type=OperationType.WAIT,
+        sub_type=None,
+        name="deferred-child",
+        parent_id="parent",
+        start_time=START_TIME,
+        is_replayed=False,
+        status=status,
+        end_time=END_TIME,
+        error=error,
+    )
+    plugin.on_operation_end(end)
+    (root,) = exporter.get_finished_spans()
+    assert root.name == "DurableExecutionRoot"
+    assert root.start_time == root.end_time
+    assert plugin._pending_operation_ends == {"parent": {"child": end}}
+    plugin.on_user_function_start(
+        _user_function_start_info("parent", operation_type=OperationType.CONTEXT)
+    )
+    parent = plugin._get_span("parent")
+    assert parent is not None
+    same_root, child = exporter.get_finished_spans()
+    assert same_root is root
+    assert child.parent is not None and child.attributes is not None
+    assert child.parent.span_id == parent.get_span_context().span_id
+    assert child.status.status_code is expected
+    assert child.attributes["durable.operation.status"] == status.value
+    assert len(child.events) == (1 if error is not None else 0)
+    assert plugin._pending_operation_ends == {}
+    plugin.on_user_function_end(
+        _user_function_end_info("parent", operation_type=OperationType.CONTEXT)
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
+
+def test_deferred_descendants_drain_from_real_parent_completion_in_child_first_order() -> (
+    None
+):
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    for operation_id, parent_id, kind in [
+        ("child", "inner", OperationType.WAIT),
+        ("inner", "outer", OperationType.CONTEXT),
+    ]:
+        plugin.on_operation_end(
+            OperationEndInfo(
+                operation_id=operation_id,
+                operation_type=kind,
+                sub_type=None,
+                name=operation_id,
+                parent_id=parent_id,
+                start_time=START_TIME,
+                is_replayed=False,
+                status=OperationStatus.SUCCEEDED,
+                end_time=END_TIME,
+            )
+        )
+    (root,) = exporter.get_finished_spans()
+    assert root.name == "DurableExecutionRoot"
+    assert root.start_time == root.end_time
+    plugin.on_user_function_start(
+        _user_function_start_info("outer", operation_type=OperationType.CONTEXT)
+    )
+    same_root, child, inner = exporter.get_finished_spans()
+    assert same_root is root
+    assert [child.name, inner.name] == ["child", "inner"]
+    assert child.parent is not None and inner.parent is not None
+    assert child.parent.span_id == inner.context.span_id
+    outer = plugin._get_span("outer")
+    assert outer is not None
+    assert inner.parent.span_id == outer.get_span_context().span_id
+    assert child.end_time is not None and inner.end_time is not None
+    assert child.end_time <= inner.end_time
+    assert plugin._pending_operation_ends == {}
+    plugin.on_user_function_end(
+        _user_function_end_info("outer", operation_type=OperationType.CONTEXT)
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+
+
+def test_unresolved_parent_uses_invocation_fallback_and_is_not_carried_into_next_instance() -> (
+    None
+):
+    plugin, exporter = _create_plugin()
+    before = otel_context.get_current()
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_operation_end(
+        OperationEndInfo(
+            operation_id="missing-child",
+            operation_type=OperationType.WAIT,
+            sub_type=None,
+            name="missing-child",
+            parent_id="missing-parent",
+            start_time=START_TIME,
+            is_replayed=False,
+            status=OperationStatus.SUCCEEDED,
+            end_time=END_TIME,
+        )
+    )
+    plugin.on_invocation_end(_invocation_end_info())
+    assert otel_context.get_current() == before
+    assert plugin._operation_spans == {}
+    assert plugin._pending_operation_ends == {}
+    assert plugin._context_tokens == {}
+    assert {span.name for span in exporter.get_finished_spans()} == {
+        "DurableExecutionRoot",
+        "Invocation",
+        "Workflow",
+        "missing-child",
+    }
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    assert spans["missing-child"].parent is not None
+    assert spans["missing-child"].parent.span_id == spans["Invocation"].context.span_id
+    plugin, exporter = _create_plugin()
+    plugin.on_invocation_start(_invocation_start_info())
+    plugin.on_invocation_end(_invocation_end_info(InvocationStatus.PENDING))
+    assert not [
+        span for span in exporter.get_finished_spans() if span.name == "missing-child"
+    ]
+    assert plugin._pending_operation_ends == {}
