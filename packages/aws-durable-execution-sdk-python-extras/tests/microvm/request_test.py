@@ -383,11 +383,55 @@ def test_rejects_a_redirect_without_following_it(
     assert raised.value.status == status
     assert str(raised.value) == (
         f"The MicroVM answered the job at /durable-execution/v1/job with HTTP "
-        f"{status}, a redirect to /moved. The operation does not follow "
-        "redirects, so set the path that the route serves."
+        f"{status}, a redirect. The operation does not follow redirects, so set "
+        "the path that the route serves."
     )
     # A followed 301, 302, or 303 would arrive as a GET without the job.
     assert [r["path"] for r in endpoint.requests] == ["/durable-execution/v1/job"]
+
+
+@pytest.mark.parametrize("status", [302, 304])
+def test_rejects_a_3xx_without_a_location(
+    fake_client: Any, fake_endpoint: Any, status: int
+) -> None:
+    endpoint = fake_endpoint([status], location=None)
+
+    with pytest.raises(MicrovmRequestRejectedError) as raised:
+        send_job(options(fake_client(), endpoint.url, []))
+
+    assert raised.value.status == status
+    assert str(raised.value) == (
+        f"The MicroVM answered the job at /durable-execution/v1/job with HTTP {status}"
+    )
+
+
+def test_rejects_a_3xx_with_an_empty_location(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    # An empty Location names no target. So it counts as no Location.
+    endpoint = fake_endpoint([302], location="")
+
+    with pytest.raises(MicrovmRequestRejectedError) as raised:
+        send_job(options(fake_client(), endpoint.url, []))
+
+    assert raised.value.status == 302
+    assert str(raised.value) == (
+        "The MicroVM answered the job at /durable-execution/v1/job with HTTP 302"
+    )
+
+
+def test_omits_the_location_of_a_redirect_from_the_message(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    # The execution history stores the message. A query in the Location can
+    # hold a secret. So the message must not contain any part of it.
+    endpoint = fake_endpoint([302], location="https://example.com/x?token=secret")
+
+    with pytest.raises(MicrovmRequestRejectedError) as raised:
+        send_job(options(fake_client(), endpoint.url, []))
+
+    assert "example.com" not in str(raised.value)
+    assert "secret" not in str(raised.value)
 
 
 @pytest.mark.parametrize(
@@ -439,14 +483,33 @@ def test_rejects_a_redirect_that_the_callers_opener_followed(
 
     assert str(raised.value) == (
         "The MicroVM answered the job at /durable-execution/v1/job with a "
-        f"redirect to {endpoint.url}/moved, and the opener followed it. The "
-        "operation does not follow redirects, so set the path that the route "
-        "serves."
+        "redirect, and the opener followed it. The operation does not follow "
+        "redirects, so set the path that the route serves, and pass an opener "
+        "that follows no redirect."
     )
     assert [r["path"] for r in endpoint.requests] == [
         "/durable-execution/v1/job",
         "/moved",
     ]
+
+
+def test_omits_the_followed_url_from_the_message(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    # The opener follows the 302 to the URL with the query. The message must
+    # not contain that URL.
+    endpoint = fake_endpoint([302], location="/x?token=secret")
+
+    with pytest.raises(MicrovmRequestRejectedError) as raised:
+        send_job(
+            options(
+                fake_client(), endpoint.url, [], opener=urllib.request.build_opener()
+            )
+        )
+
+    assert endpoint.requests[-1]["path"] == "/x?token=secret"
+    assert "?token=" not in str(raised.value)
+    assert "secret" not in str(raised.value)
 
 
 def test_builds_the_default_opener_once() -> None:
