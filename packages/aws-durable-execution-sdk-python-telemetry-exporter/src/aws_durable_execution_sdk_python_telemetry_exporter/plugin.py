@@ -496,9 +496,10 @@ class DurableExecutionTelemetryPlugin(DurableInstrumentationPlugin, _ExportState
         # operation_id -> OperationInfo, adopted verbatim from the SDK's
         # authoritative snapshot (invocation start/end and operation-change).
         self._operations: dict[str, OperationInfo] = {}
-        # Set once this invocation has ended. A hook that arrives afterwards (an
-        # operation-change for a checkpoint that completed just before the end)
-        # must emit nothing (mirrors the Java ExecutionState.closed flag).
+        # Set once this invocation has ended. A hook that arrives afterwards
+        # must emit nothing (mirrors the Java ExecutionState.closed flag). The
+        # SDK delivers every pending operation-change before the end hook; the
+        # guard covers a caller that does not.
         self._closed = False
         # A duplicate End must wait for the admitted closing build before its
         # drain captures scheduler state. Nested callbacks defer that wait to

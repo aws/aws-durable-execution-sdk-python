@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     import datetime
     from collections.abc import MutableMapping
 
+    from aws_durable_execution_sdk_python.plugin import _EndHookClaim
+
 logger = logging.getLogger(__name__)
 
 # Longest wait on an empty queue before re-checking the shutdown signal.
@@ -462,6 +464,7 @@ class ExecutionState:
         initial_operations: list[Operation],
         checkpoint_token: str,
         next_marker: str | None,
+        before_publish: Callable[[list[Operation]], None] | None = None,
     ) -> list[Operation]:
         """Add initial operations and fetch all paginated operations from the Durable Functions API. This method is thread_safe.
 
@@ -471,6 +474,11 @@ class ExecutionState:
             initial_operations: initial operations to be added to ExecutionState
             checkpoint_token: checkpoint token used to call Durable Functions API.
             next_marker: a marker indicates that there are paginated operations.
+            before_publish: called with the fetched operations right before
+                they become readable through get_checkpoint_result. The
+                checkpoint loop records the operations' plugin end hooks here,
+                so a thread that reads a terminal operation always finds its
+                hook recorded.
         Returns:
             List of all operations fetched from the Durable Functions API
 
@@ -501,6 +509,8 @@ class ExecutionState:
         finally:
             # Always store whatever operations we successfully fetched
             if all_operations:
+                if before_publish is not None:
+                    before_publish(all_operations)
                 with self._operations_lock:
                     self._operations.update(
                         {op.operation_id: op for op in all_operations}
@@ -549,7 +559,9 @@ class ExecutionState:
                 for op in self._operations.values()
             )
 
-    def get_checkpoint_result(self, checkpoint_id: str) -> CheckpointedResult:
+    def get_checkpoint_result(
+        self, checkpoint_id: str, *, claim_end_hook: bool = True
+    ) -> CheckpointedResult:
         """Get checkpoint result.
 
         Note this does not invoke the Durable Functions API. It only checks
@@ -560,6 +572,14 @@ class ExecutionState:
 
         Args:
             checkpoint_id: str - id for checkpoint to retrieve.
+            claim_end_hook: With plugins, a read of a terminal operation also
+                runs, or waits for, the end hook a checkpoint response recorded
+                for it during this invocation (see the comment in the body).
+                The default. A read that only inspects a checkpoint passes
+                False: DurableContext reads the next operation's checkpoint to
+                place the replay boundary, and an operation's identity before
+                it runs. Neither read consumes the result, so neither takes the
+                hook; the read that consumes it does.
 
         Returns:
             CheckpointedResult with is_succeeded True if the checkpoint exists and its
@@ -567,9 +587,37 @@ class ExecutionState:
                 SUCCEEDED, or if the checkpoint doesn't exist, then return
                 CheckpointedResult with is_succeeded=False,result=None.
         """
-        # checking status are deliberately under a lighter non-serialized lock
-        with self._operations_lock:
-            checkpoint = self._operations.get(checkpoint_id)
+        if not self._plugin_executor.has_plugins or not claim_end_hook:
+            # checking status are deliberately under a lighter non-serialized lock
+            with self._operations_lock:
+                checkpoint = self._operations.get(checkpoint_id)
+        else:
+            # Every thread that consumes a result it did not checkpoint itself
+            # reads it here: the operation executors through
+            # OperationExecutor._get_checkpoint_result, Callback.result, and
+            # the map and parallel coordinators for their branches. So this is
+            # where such a thread takes the end hook of an operation a
+            # checkpoint response completed during this invocation, to run it
+            # before it acts on the result, or to wait for it if another
+            # thread owns it. The replay-boundary reads in DurableContext pass
+            # claim_end_hook=False and take the branch above: they inspect the
+            # checkpoint without consuming the result, so the hook stays for
+            # the read that does, on the thread that does. The checkpoint
+            # loop records the hook before it publishes the operation, so a
+            # reader that sees the terminal state finds the hook. The read and
+            # the decision happen under the plugin executor's claim lock,
+            # which every claim takes, so no other thread's claim is decided
+            # between the two. Only a terminal read takes a hook: a read of
+            # the older, non-terminal state did not see the completion. The
+            # hook itself runs below, outside every lock.
+            claim: _EndHookClaim | None = None
+            with self._plugin_executor.claim_lock:
+                with self._operations_lock:
+                    checkpoint = self._operations.get(checkpoint_id)
+                if checkpoint and checkpoint.status in _TERMINAL_OPERATION_STATUSES:
+                    claim = self._plugin_executor.take_end_hook(checkpoint_id)
+            if claim is not None:
+                claim.run()
 
         if checkpoint:
             return CheckpointedResult.create_from_operation(checkpoint)
@@ -860,7 +908,25 @@ class ExecutionState:
                 raise DurableExecutionsError(msg)
 
             # Wait for completion - will raise BackgroundThreadError if background thread fails
-            completion_event.wait()
+            try:
+                completion_event.wait()
+            finally:
+                # This thread now observes the operation's result, so it runs
+                # the operation's end hook, if the response recorded one,
+                # before the operation returns or raises to user code. The
+                # hook therefore follows this operation's user-function hooks
+                # and precedes this thread's next operation. A wait that
+                # raises was woken by a failed, revoked or settled batch. A
+                # revoked or settled batch records nothing. A failed batch
+                # records nothing either, except when the failure is in
+                # fetching a later page: the pages already fetched are
+                # recorded and published, so a hook can run here while the
+                # BackgroundThreadError propagates, which is the order the
+                # hook would have had on a successful batch.
+                if operation_update is not None:
+                    self._plugin_executor.claim_end_hook(
+                        operation_update.operation_id, waiter=True
+                    )
         else:
             logger.debug("Enqueued checkpoint operation for asynchronous processing")
 
@@ -1111,13 +1177,38 @@ class ExecutionState:
                         if execution_completed
                         else output.new_execution_state.next_marker
                     )
+                    # No plugin hook runs on this thread. The response's end
+                    # hooks are recorded before its operations become readable,
+                    # so the thread that observes a terminal result (the waiter
+                    # woken below, or a later reader in get_checkpoint_result)
+                    # finds the hook and runs it before it acts on the result.
+                    # A hook whose operation has a waiter in this batch is
+                    # reserved for that waiter.
+                    waited_for = {
+                        queued_op.operation_update.operation_id
+                        for queued_op in batch
+                        if queued_op.operation_update is not None
+                        and queued_op.completion_event is not None
+                    }
                     updated_operations = self.fetch_paginated_operations(
                         output.new_execution_state.operations,
                         current_checkpoint_token,
                         fetch_marker,
+                        before_publish=(
+                            functools.partial(
+                                self._plugin_executor.record_end_hooks,
+                                waited_for=waited_for,
+                            )
+                            if has_plugins
+                            else None
+                        ),
                     )
-                    if has_plugins:
-                        self._plugin_executor.on_operation_update(
+                    if previous_operations is not None:
+                        # The change hook describes the whole response, so it
+                        # goes to the plugin change thread; it is submitted
+                        # before the waiters wake so that it is pending before
+                        # the invocation can end.
+                        self._plugin_executor.record_change(
                             updated_operations,
                             self.operations,
                             previous_operations,

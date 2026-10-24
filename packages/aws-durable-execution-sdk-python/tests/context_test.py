@@ -705,7 +705,7 @@ def test_operation_replay_aware_looks_up_allocated_operation_id():
         assert context._step_counter.get_current() == 1  # noqa: SLF001
 
     mock_state.get_checkpoint_result.assert_called_once_with(
-        operation_identifier.operation_id
+        operation_identifier.operation_id, claim_end_hook=False
     )
 
 
