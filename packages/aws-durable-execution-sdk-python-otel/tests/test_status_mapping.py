@@ -253,34 +253,58 @@ CASES = [
     ("KeyError", "missing key"),
     ("TimeoutError", "deadline exceeded"),
     ("custompkg.NotARealError", "boom"),
+    ("ExceptionGroup", "group failure (1 sub-exception)"),
+    ("BaseExceptionGroup", "base group failure (1 sub-exception)"),
 ]
 
 
+@pytest.mark.parametrize("is_replayed", [False, True])
 @pytest.mark.parametrize(("error_type", "message"), CASES)
 def test_operation_exception_event_preserves_original_type(
-    instrumented_view: InstrumentedView, error_type: str, message: str
+    instrumented_view: InstrumentedView,
+    error_type: str,
+    message: str,
+    is_replayed: bool,
 ) -> None:
     """The operation exception event must keep the SDK-supplied error type."""
     plugin, exporter = instrumented_view
     _start_invocation(plugin)
+    stack_trace = ["Traceback from checkpoint", f"{error_type}: {message}"]
     plugin.on_operation_end(
-        _operation_end_info(ErrorObject(message, error_type, None, None))
+        _operation_end_info(
+            ErrorObject(message, error_type, None, stack_trace),
+            is_replayed=is_replayed,
+        )
     )
     _end_invocation(plugin)
+    if is_replayed and isinstance(plugin, ExecutionOtelPlugin):
+        # The execution view suppresses duplicate logical operation spans.
+        assert all(s.name != "wait" for s in exporter.get_finished_spans())
+        return
     span = next(s for s in exporter.get_finished_spans() if s.name == "wait")
     attributes = _exception_attributes(span)
     assert attributes["exception.type"] == error_type
     assert attributes["exception.message"] == message
+    assert attributes["exception.stacktrace"] == "\n".join(stack_trace)
 
 
+@pytest.mark.parametrize("is_replayed", [False, True])
 @pytest.mark.parametrize(("error_type", "message"), CASES)
 def test_attempt_exception_event_preserves_original_type(
-    instrumented_view: InstrumentedView, error_type: str, message: str
+    instrumented_view: InstrumentedView,
+    error_type: str,
+    message: str,
+    is_replayed: bool,
 ) -> None:
     """A failed STEP attempt event must keep the SDK-supplied error type."""
     plugin, exporter = instrumented_view
     _start_invocation(plugin)
-    _run_failed_step_attempt(plugin, ErrorObject(message, error_type, None, None))
+    stack_trace = ["Traceback from checkpoint", f"{error_type}: {message}"]
+    _run_failed_step_attempt(
+        plugin,
+        ErrorObject(message, error_type, None, stack_trace),
+        is_replayed=is_replayed,
+    )
     _end_invocation(plugin)
     span = next(
         s for s in exporter.get_finished_spans() if s.name == "step-1 attempt 1"
@@ -288,6 +312,7 @@ def test_attempt_exception_event_preserves_original_type(
     attributes = _exception_attributes(span)
     assert attributes["exception.type"] == error_type
     assert attributes["exception.message"] == message
+    assert attributes["exception.stacktrace"] == "\n".join(stack_trace)
 
 
 def test_replay_attempt_event_uses_stored_error_metadata(
@@ -330,3 +355,49 @@ def test_failed_operation_without_type_falls_back(
     attributes = _exception_attributes(span)
     assert attributes["exception.message"] == "no type here"
     assert attributes["exception.type"] == "Exception"
+
+
+class ConstructorSideEffectError(Exception):
+    constructor_calls = 0
+
+    def __init__(self, message: str) -> None:
+        type(self).constructor_calls += 1
+        super().__init__(message)
+
+
+@pytest.mark.parametrize("is_replayed", [False, True])
+@pytest.mark.parametrize("event_kind", ["operation", "attempt"])
+def test_exception_event_does_not_repeat_custom_constructor(
+    instrumented_view: InstrumentedView,
+    monkeypatch: pytest.MonkeyPatch,
+    is_replayed: bool,
+    event_kind: str,
+) -> None:
+    """Exporting stored error metadata must not rerun application code."""
+    monkeypatch.setattr(ConstructorSideEffectError, "constructor_calls", 0)
+    original = ConstructorSideEffectError("custom failure")
+    error_type = f"{__name__}.ConstructorSideEffectError"
+    stack_trace = ["Traceback from checkpoint", f"{error_type}: {original}"]
+    error = ErrorObject(str(original), error_type, None, stack_trace)
+    plugin, exporter = instrumented_view
+    _start_invocation(plugin)
+    if event_kind == "operation":
+        plugin.on_operation_end(_operation_end_info(error, is_replayed=is_replayed))
+        span_name = "wait"
+    else:
+        _run_failed_step_attempt(plugin, error, is_replayed=is_replayed)
+        span_name = "step-1 attempt 1"
+    _end_invocation(plugin)
+    assert ConstructorSideEffectError.constructor_calls == 1
+    if (
+        is_replayed
+        and event_kind == "operation"
+        and isinstance(plugin, ExecutionOtelPlugin)
+    ):
+        assert all(s.name != span_name for s in exporter.get_finished_spans())
+        return
+    span = next(s for s in exporter.get_finished_spans() if s.name == span_name)
+    attributes = _exception_attributes(span)
+    assert attributes["exception.type"] == error_type
+    assert attributes["exception.message"] == str(original)
+    assert attributes["exception.stacktrace"] == "\n".join(stack_trace)
