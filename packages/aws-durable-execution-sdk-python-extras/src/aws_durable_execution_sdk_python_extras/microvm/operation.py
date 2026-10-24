@@ -157,7 +157,8 @@ class LaunchResult:
     suspended MicroVM, before delivery. Only a session launch records it.
     Replay reads it from the checkpoint. So every replay follows the mode that
     the launch prepared the MicroVM for. A ``microvm`` launch leaves it
-    ``None``."""
+    ``None``. ``from_dict`` keeps the checkpointed value as it is.
+    ``run_session`` reads only ``True`` as a resume mode."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LaunchResult:

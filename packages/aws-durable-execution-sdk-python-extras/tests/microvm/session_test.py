@@ -1240,15 +1240,16 @@ def two_jobs_with_a_wait_between(
     return {"build": build, "test": test, "microvm": vm.microvm_id}
 
 
-def checkpoint_launch_without_a_resume_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+def checkpoint_launch_as(monkeypatch: pytest.MonkeyPatch, **fields: Any) -> None:
     """Make the launch step checkpoint the MicroVM fields of a real launch,
-    without ``resumeBeforeDelivery``. Every replay then reads that
-    checkpoint."""
+    plus ``fields``, and no resume mode of its own. Every replay then reads
+    that checkpoint."""
     original = operation._MicrovmScope._launch_call  # noqa: SLF001
 
     def launch(self: Any, *args: Any) -> Any:
         data = original(self, *args).to_dict()
         del data["resumeBeforeDelivery"]
+        data.update(fields)
         return SimpleNamespace(to_dict=lambda: data)
 
     monkeypatch.setattr(operation._MicrovmScope, "_launch_call", launch)  # noqa: SLF001
@@ -1350,15 +1351,23 @@ def test_makes_no_state_check_when_a_deploy_turns_suspending_on(
     assert launch_checkpoint(result)["resumeBeforeDelivery"] is False
 
 
-def test_makes_no_state_check_for_a_launch_checkpoint_without_a_resume_mode(
+@pytest.mark.parametrize(
+    "fields",
+    [{}, {"resumeBeforeDelivery": "true"}, {"resumeBeforeDelivery": 1}],
+    ids=["missing", "string-true", "one"],
+)
+def test_makes_no_state_check_for_a_launch_checkpoint_without_a_bool_resume_mode(
     run: Any,
     fake_client: Any,
     fake_endpoint: Any,
     monkeypatch: pytest.MonkeyPatch,
+    fields: dict[str, Any],
 ) -> None:
-    # The current config asks for suspending. So only the missing field can
-    # make the jobs skip the state check.
-    checkpoint_launch_without_a_resume_mode(monkeypatch)
+    # The current config asks for suspending. So only the checkpoint can make
+    # these jobs skip the state check. In Python "true" and 1 are truthy. So a
+    # truthiness check would turn the state check on. A read of `is True`
+    # keeps it off.
+    checkpoint_launch_as(monkeypatch, **fields)
     client = fake_client(endpoint=fake_endpoint().url)
     config = session_config(client, auto_suspend_on_idle=True)
 
@@ -1369,5 +1378,10 @@ def test_makes_no_state_check_for_a_launch_checkpoint_without_a_resume_mode(
     )
 
     assert outcome(result)["result"]["test"] == 2
-    assert "resumeBeforeDelivery" not in launch_checkpoint(result)
+    assert launch_checkpoint(result) == {
+        "microvmId": "mvm-1",
+        "endpoint": client.endpoint,
+        "delivery": "http",
+        **fields,
+    }
     assert client.requests("get_microvm") == []

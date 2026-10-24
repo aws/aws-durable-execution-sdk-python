@@ -409,8 +409,8 @@ class _SessionScope(_MicrovmScope):
         #    502. The request step retries a 502 until both retry tiers end.
         # 5. So each job follows the resume mode that the launch recorded,
         #    not the current config.
-        # Every session launch records a bool. So a session checkpoint
-        # without the field reads as False.
+        # Every session launch records a boolean. So only `True` turns the
+        # state check on. A missing field, or any other value, reads as False.
         try:
             result = handler(
                 MicrovmSession(
