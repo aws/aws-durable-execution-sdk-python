@@ -157,18 +157,25 @@ class LaunchResult:
     suspended MicroVM, before delivery. Only a session launch records it.
     Replay reads it from the checkpoint. So every replay follows the mode that
     the launch prepared the MicroVM for. A ``microvm`` launch leaves it
-    ``None``. ``from_dict`` keeps the checkpointed value as it is.
-    ``run_session`` reads only ``True`` as a resume mode."""
+    ``None``. ``from_dict`` keeps only a bool, and reads any other value as
+    ``None``. ``run_session`` reads only ``True`` as a resume mode."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LaunchResult:
         # A checkpoint without a delivery gets an empty one. The operation
         # then terminates the MicroVM as for any delivery it does not know.
+        # The field is typed bool | None. to_dict() writes it back. So
+        # from_dict keeps only a bool, and reads any other value as None.
+        resume_before_delivery = data.get("resumeBeforeDelivery")
         return cls(
             microvm_id=data["microvmId"],
             delivery=data.get("delivery", ""),
             endpoint=data.get("endpoint"),
-            resume_before_delivery=data.get("resumeBeforeDelivery"),
+            resume_before_delivery=(
+                resume_before_delivery
+                if isinstance(resume_before_delivery, bool)
+                else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
