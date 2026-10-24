@@ -8,7 +8,10 @@ on:
   push:
     branches: ["main"]
   pull_request:
-    branches: ["main"]
+    branches:
+      - main
+      - test/otel-conformance-feasibility
+      - fix/python-testing-replay-state-20261021
     paths:
       - "packages/aws-durable-execution-sdk-python/**"
       - "packages/aws-durable-execution-sdk-python-conformance-tests/**"

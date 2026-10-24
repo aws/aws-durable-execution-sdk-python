@@ -170,6 +170,31 @@ flow, pagination, and a map of the code.
 
 ## Documentation
 
+### Operation state on replay
+
+Invocation input and `GetDurableExecutionState` follow the service's retained
+operation view. An operation is omitted when any ancestor is a `CONTEXT` that
+has `SUCCEEDED` or `FAILED` without `ReplayChildren: true`. The walk includes
+running intermediate contexts; a nested context's own retention flag cannot
+override a completed ancestor that prunes it. Roots and operations whose parent
+is absent are kept, and ordering does not change the rule.
+
+`ContextOptions.ReplayChildren` on START is ignored. A closing update records
+true only when it explicitly supplies true; otherwise it records false. Testing
+service responses include that closing false, while Core's public model and
+generic serialization contract remain unchanged.
+
+Checkpoint responses still contain all updated operations. `UpdatedOperationIds`
+can include an ID whose operation record is hidden from invocation input and
+GetState. Raw stores, history, results and nested operation inspection retain the
+complete execution. An updated ID alone does not restore missing metadata for a
+plugin. A real large child result retains its children through ReplayChildren
+when a test needs that public replay behavior.
+
+This corrects local service parity; it does not fix duplicate execution-view
+spans for virtual FLAT map iterations while their map is still running.
+
+
 ### Error Handling
 
 The testing framework implements AWS-compliant error responses that match the exact format expected by boto3 and AWS services. For detailed information about error response formats, exception types, and troubleshooting, see:

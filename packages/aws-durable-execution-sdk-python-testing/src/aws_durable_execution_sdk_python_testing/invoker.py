@@ -27,6 +27,9 @@ from aws_durable_execution_sdk_python_testing.exceptions import (
     ResourceNotFoundException,
 )
 from aws_durable_execution_sdk_python_testing.execution import OperationPaginatorState
+from aws_durable_execution_sdk_python_testing.operation_state import (
+    operation_state_to_dict,
+)
 from aws_durable_execution_sdk_python_testing.model import (
     LambdaContext,
     executed_version,
@@ -511,10 +514,15 @@ class LambdaInvoker(Invoker):
             input.durable_execution_arn, endpoint_url, region_name
         )
 
+        invocation_payload = input.to_json_dict()
+        invocation_payload["InitialExecutionState"]["Operations"] = [
+            operation_state_to_dict(operation, json_timestamps=True)
+            for operation in input.initial_execution_state.operations
+        ]
         invoke_kwargs: dict[str, Any] = {
             "FunctionName": function_name,
             "InvocationType": "RequestResponse",  # Synchronous invocation
-            "Payload": json.dumps(input.to_json_dict()),
+            "Payload": json.dumps(invocation_payload),
         }
         if tenant_id is not None:
             invoke_kwargs["TenantId"] = tenant_id
