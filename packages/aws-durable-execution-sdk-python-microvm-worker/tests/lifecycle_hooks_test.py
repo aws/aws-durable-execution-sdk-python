@@ -63,6 +63,31 @@ WARNING_FIELDS = [
 ]
 
 
+def assert_warning(
+    message: str,
+    data: dict[str, Any],
+    outcome: str,
+    *,
+    refusing_jobs: bool,
+    suspend_hook_arrived: bool = False,
+    terminating: bool = False,
+    closed: bool = False,
+) -> None:
+    """Assert that one warning for a failed SuspendMicrovm call has this
+    outcome and these fields."""
+    assert message == WARNINGS[outcome]
+    assert list(data) == WARNING_FIELDS
+    assert data["microvmId"] == "mvm-1"
+    assert sorted(data["error"]) == ["message", "name"]
+    assert {name: data[name] for name in WARNING_FIELDS[2:]} == {
+        "outcome": outcome,
+        "suspendHookArrived": suspend_hook_arrived,
+        "terminating": terminating,
+        "closed": closed,
+        "refusingJobs": refusing_jobs,
+    }
+
+
 def assert_one_warning(
     logger: Any,
     outcome: str,
@@ -78,17 +103,15 @@ def assert_one_warning(
     warnings = [(m, data) for level, m, data in logger.lines if level == "warning"]
     assert len(warnings) == 1
     message, data = warnings[0]
-    assert message == WARNINGS[outcome]
-    assert list(data) == WARNING_FIELDS
-    assert data["microvmId"] == "mvm-1"
-    assert sorted(data["error"]) == ["message", "name"]
-    assert {name: data[name] for name in WARNING_FIELDS[2:]} == {
-        "outcome": outcome,
-        "suspendHookArrived": suspend_hook_arrived,
-        "terminating": terminating,
-        "closed": closed,
-        "refusingJobs": refusing_jobs,
-    }
+    assert_warning(
+        message,
+        data,
+        outcome,
+        refusing_jobs=refusing_jobs,
+        suspend_hook_arrived=suspend_hook_arrived,
+        terminating=terminating,
+        closed=closed,
+    )
     return data
 
 
@@ -1017,8 +1040,12 @@ def test_retries_a_refusal_for_now_after_the_idle_time_or_30_seconds_if_longer(
     assert h.microvms.suspended == ["mvm-1", "mvm-1"]
     h.advance(0.001)
     assert h.microvms.suspended == ["mvm-1", "mvm-1", "mvm-1"]
-    # One warning per refusal.
-    assert logger.messages("warning") == [REFUSED] * 3
+    # One warning per call. The service refused each call for now. So after
+    # each call, the worker accepts jobs again.
+    warnings = [(m, data) for level, m, data in logger.lines if level == "warning"]
+    assert len(warnings) == 3
+    for message, data in warnings:
+        assert_warning(message, data, "refusedForNow", refusing_jobs=False)
 
 
 def test_makes_one_call_per_30_seconds_while_a_refusal_for_now_persists(

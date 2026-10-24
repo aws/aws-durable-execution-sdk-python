@@ -351,11 +351,18 @@ class MicrovmWorkerListener:
        seconds during the call, has already ended the refusal. The worker
        then accepts jobs at once, and tries the call again one idle time
        after the call and every job end.
-
-    Each failed call logs one warning. Its message names the outcome. Its
-    fields state whether a ``suspend`` hook arrived during the call,
-    whether the listener is terminating or closed, and whether it refuses
-    jobs after it has acted on the outcome.
+    9. The listener logs one warning for each failed call. The message
+       names the outcome. The fields are, in order, ``microvmId``,
+       ``error``, ``outcome``, ``suspendHookArrived``, ``terminating``,
+       ``closed``, and ``refusingJobs``. ``microvmId`` is the MicroVM ID of
+       the call. ``error`` holds the name and the message of the error.
+       ``outcome`` is ``rejected``, ``refusedForNow``, or ``unknown``.
+       ``suspendHookArrived`` states whether a ``suspend`` hook arrived
+       since the idle time ended. ``terminating`` states whether a
+       ``terminate`` hook came before the listener acted on the outcome.
+       ``closed`` states whether ``close()`` came before the listener acted
+       on the outcome. ``refusingJobs`` states whether the listener answers
+       jobs with HTTP 503 after it has acted on the outcome.
 
     When the image enables the ``suspend`` and ``terminate`` hooks, the
     listener acts on them:
