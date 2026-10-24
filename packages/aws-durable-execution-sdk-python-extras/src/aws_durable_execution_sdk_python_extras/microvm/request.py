@@ -289,8 +289,8 @@ def send_job(options: SendJobOptions) -> int:
 
     The execution history stores the message. A query in the ``Location``
     can hold a secret, for example a presigned signature. So the message
-    names only the path and the status. It omits the ``Location``, and the
-    URL that a followed redirect reached.
+    names the path, and the status of a 3xx answer. It omits the
+    ``Location``, and the URL that a followed redirect reached.
 
     The delay starts at 250 milliseconds and doubles up to 4 seconds. The
     tier ends at the retry window, or 10 seconds before the invocation times

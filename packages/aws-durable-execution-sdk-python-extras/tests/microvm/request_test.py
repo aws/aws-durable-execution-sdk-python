@@ -390,15 +390,33 @@ def test_rejects_a_redirect_without_following_it(
     assert [r["path"] for r in endpoint.requests] == ["/durable-execution/v1/job"]
 
 
-def test_rejects_a_3xx_without_a_location(fake_client: Any, fake_endpoint: Any) -> None:
-    endpoint = fake_endpoint([304], location=None)
+@pytest.mark.parametrize("status", [302, 304])
+def test_rejects_a_3xx_without_a_location(
+    fake_client: Any, fake_endpoint: Any, status: int
+) -> None:
+    endpoint = fake_endpoint([status], location=None)
 
     with pytest.raises(MicrovmRequestRejectedError) as raised:
         send_job(options(fake_client(), endpoint.url, []))
 
-    assert raised.value.status == 304
+    assert raised.value.status == status
     assert str(raised.value) == (
-        "The MicroVM answered the job at /durable-execution/v1/job with HTTP 304"
+        f"The MicroVM answered the job at /durable-execution/v1/job with HTTP {status}"
+    )
+
+
+def test_rejects_a_3xx_with_an_empty_location(
+    fake_client: Any, fake_endpoint: Any
+) -> None:
+    # An empty Location names no target. So it counts as no Location.
+    endpoint = fake_endpoint([302], location="")
+
+    with pytest.raises(MicrovmRequestRejectedError) as raised:
+        send_job(options(fake_client(), endpoint.url, []))
+
+    assert raised.value.status == 302
+    assert str(raised.value) == (
+        "The MicroVM answered the job at /durable-execution/v1/job with HTTP 302"
     )
 
 
