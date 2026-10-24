@@ -1603,6 +1603,99 @@ def test_reads_the_unknown_outcome_fields_in_the_block_that_decides_the_refusal(
     h.finish_job("cb-2")
 
 
+class _CallbackError(ClientError):
+    """A copy of a ClientError whose ``__str__()`` first calls ``callback``.
+
+    A client from create_microvms_client can raise any exception type. So
+    the caller of the listener controls ``__str__()``.
+    """
+
+    def __init__(self, base: ClientError, callback: Callable[[], None]) -> None:
+        super().__init__(base.response, base.operation_name)
+        self._callback = callback
+
+    def __str__(self) -> str:
+        self._callback()
+        return super().__str__()
+
+
+# One failure for each outcome. A rejection and a refusal for now take the
+# lock in the except block. An unknown outcome takes it after close().
+_EACH_OUTCOME = pytest.mark.parametrize(
+    ("failure", "outcome"),
+    [
+        (suspend_error("AccessDeniedException", 403), "rejected"),
+        (suspend_error("InvalidSignatureException", 403), "refusedForNow"),
+        (suspend_error("InternalServerException", 500, retries=2), "unknown"),
+    ],
+    ids=["rejected", "refused-for-now", "unknown"],
+)
+
+
+@_EACH_OUTCOME
+def test_describes_the_call_error_before_it_takes_the_lock(
+    start: Any, logger: Any, failure: ClientError, outcome: str
+) -> None:
+    # The listener's lock is not reentrant. The error's __str__() calls
+    # close(), which takes the lock. If the listener described the error
+    # under the lock, close() would wait for that lock forever. Every hook
+    # and job request would then wait too.
+    h = start()
+    closed = threading.Event()
+
+    def close() -> None:
+        h.listener.close()
+        closed.set()
+
+    h.microvms.failure = _CallbackError(failure, close)
+    h.run_hook(IDLE)
+    h.timers.advance(IDLE)
+    if not closed.wait(WAIT):
+        # threading.Lock lets any thread release it. So the test releases
+        # the lock that the suspend thread holds. close() then returns, and
+        # the fixture can close the worker.
+        h.listener._lock.release()  # noqa: SLF001
+        closed.wait(WAIT)
+        pytest.fail("close() in the error's __str__() waited for the lock")
+    h.settle()
+
+    # Only after an unknown outcome does the refusal continue.
+    assert_one_warning(logger, outcome, closed=True, refusing_jobs=outcome == "unknown")
+
+
+@_EACH_OUTCOME
+def test_answers_a_hook_that_the_call_error_sends(
+    start: Any, logger: Any, failure: ClientError, outcome: str
+) -> None:
+    # The error's __str__() sends a suspend hook. A request thread handles
+    # the hook, and takes the lock. If the listener described the error
+    # under the lock, the hook would wait until its HTTP timeout.
+    h = start()
+    statuses: list[int | BaseException] = []
+    answered = threading.Event()
+
+    def send_hook() -> None:
+        try:
+            statuses.append(h.hook("suspend"))
+        except Exception as error:  # noqa: BLE001
+            statuses.append(error)
+        finally:
+            answered.set()
+
+    h.microvms.failure = _CallbackError(failure, send_hook)
+    h.run_hook(IDLE)
+    h.timers.advance(IDLE)
+    # The hook's HTTP timeout is WAIT. So this wait ends in either case.
+    assert answered.wait(2 * WAIT)
+    assert statuses == [200]
+    h.settle()
+
+    # The hook arrived before the listener acted on the outcome. So its
+    # refusal stays.
+    assert_one_warning(logger, outcome, suspend_hook_arrived=True, refusing_jobs=True)
+    assert h.job("cb-1") == 503
+
+
 @pytest.mark.parametrize(
     ("idle", "waited"), [(1.0, GRACE), (45.0, 45.0)], ids=["idle-1s", "idle-45s"]
 )

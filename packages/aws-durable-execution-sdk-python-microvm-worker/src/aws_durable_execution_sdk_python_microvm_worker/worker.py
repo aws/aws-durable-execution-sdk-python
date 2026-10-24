@@ -1520,17 +1520,24 @@ class MicrovmWorkerListener:
         # continues after an unknown outcome. The warning reads its fields in
         # that block. So for an unknown outcome, the warning comes after
         # close().
-        unknown_error: Exception | None = None
+        unknown_described: object | None = None
         try:
             suspend_microvm(client, target, SUSPEND_CALL_TIMEOUT_SECONDS)
         except Exception as error:  # noqa: BLE001
             outcome = classify_suspend_error(error)
+            # describe() calls str(error). A client from
+            # create_microvms_client can raise any exception type. So the
+            # caller of the listener controls __str__(). That method can be
+            # slow, or can call the listener. A listener method takes the
+            # lock, and the lock is not reentrant. So the error is described
+            # here, before either locked block.
+            described = describe(error)
             if outcome is SuspendOutcome.UNKNOWN:
                 # A timeout, a conflict, a server error, or an error after a
                 # retried attempt does not show whether the service suspended
                 # the MicroVM. So the refusal continues, as after a successful
                 # call. The block after the client is closed acts on it.
-                unknown_error = error
+                unknown_described = described
             else:
                 deferred = []
                 with self._lock:
@@ -1548,7 +1555,7 @@ class MicrovmWorkerListener:
                         if outcome is SuspendOutcome.REFUSED_FOR_NOW:
                             self._start_idle_time(after_refusal=True)
                     message, extra = self._failed_call_log(
-                        outcome, error, target, hooks_before
+                        outcome, described, target, hooks_before
                     )
                 self._logger.warning(message, extra=extra)
                 self._launch_deferred(deferred)
@@ -1570,17 +1577,17 @@ class MicrovmWorkerListener:
             # closed listener does not refuse jobs forever.
             if self._suspending:
                 self._start_grace()
-            if unknown_error is None:
+            if unknown_described is None:
                 return
             message, extra = self._failed_call_log(
-                SuspendOutcome.UNKNOWN, unknown_error, target, hooks_before
+                SuspendOutcome.UNKNOWN, unknown_described, target, hooks_before
             )
         self._logger.warning(message, extra=extra)
 
     def _failed_call_log(
         self,
         outcome: SuspendOutcome,
-        error: Exception,
+        described: object,
         microvm_id: str,
         hooks_before: int,
     ) -> tuple[str, dict[str, object]]:
@@ -1594,11 +1601,16 @@ class MicrovmWorkerListener:
         the same locked block. So the fields state what the listener does
         after the outcome. The caller logs the warning after it releases the
         lock.
+
+        This method runs under the lock. So it must not call code that the
+        caller of the listener controls. ``described`` is the result of
+        :func:`describe`, which calls ``str()`` on the error. So the caller
+        describes the error before it takes the lock.
         """
         name, message = _FAILED_CALL_WARNINGS[outcome]
         return message, {
             "microvmId": microvm_id,
-            "error": describe(error),
+            "error": described,
             "outcome": name,
             "suspendHookArrived": self._suspend_hooks != hooks_before,
             "terminating": self._terminating,
