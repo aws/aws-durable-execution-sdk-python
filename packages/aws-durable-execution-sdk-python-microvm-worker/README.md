@@ -173,8 +173,6 @@ The `runHookPayload` string holds:
 
 A document that does not match raises `InvalidRunHookPayloadError`. When the document named a non-empty callback ID, the error carries `callback_id` and `region`, so the worker can fail that callback at once.
 
-The worker parses with Python's `json` module. It accepts the `NaN`, `Infinity`, and `-Infinity` tokens, which are not JSON. The number fields reject a value that is not finite. `input` can hold such a value, and the handler receives it as a `float`. The JavaScript worker answers HTTP 400 for these tokens. No SDK sends them.
-
 ## Reporting
 
 `CallbackReporter.succeed` sends a JSON result of at most 256 KB. A larger result raises `ResultTooLargeError`, and a result that is not JSON-serializable raises `ResultSerializationError`. In both cases no call is made, so the caller can report a failure instead. A `float` that is `nan` or infinite is not JSON, so it raises `ResultSerializationError`.

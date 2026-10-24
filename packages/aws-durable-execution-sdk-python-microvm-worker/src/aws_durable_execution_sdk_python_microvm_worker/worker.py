@@ -47,6 +47,7 @@ from aws_durable_execution_sdk_python_microvm_worker.payload import (
     MicrovmJobDocument,
     MicrovmJobRequest,
     RunHookRequest,
+    loads_strict,
 )
 from aws_durable_execution_sdk_python_microvm_worker.self_suspend import (
     SUSPEND_CALL_TIMEOUT_SECONDS,
@@ -1954,7 +1955,7 @@ class _Exchange:
         """
         body = self._read_body(max_bytes)
         try:
-            return json.loads(body)
+            return loads_strict(body)
         except ValueError as error:
             msg = "request body is not valid JSON"
             raise InvalidRunHookPayloadError(msg) from error

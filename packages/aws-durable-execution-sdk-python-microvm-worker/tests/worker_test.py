@@ -9,7 +9,6 @@ import functools
 import http.client
 import io
 import json
-import math
 import socket
 import struct
 import threading
@@ -586,6 +585,7 @@ def test_creates_a_default_client_per_job_and_closes_it(
     ("raw", "message"),
     [
         (b"{not json", "request body is not valid JSON"),
+        (b"NaN", "request body is not valid JSON"),
         (b"", "request body is not valid JSON"),
     ],
 )
@@ -1564,24 +1564,6 @@ def test_fails_a_job_whose_handler_returns_a_coroutine(start: Any) -> None:
     # Without close(), Python warns that the coroutine was never awaited when
     # the garbage collector frees it.
     coroutine.close()
-
-
-def test_fails_a_job_that_returns_a_non_finite_number_from_its_input(
-    start: Any,
-) -> None:
-    """json.loads parses a NaN token in the input. A handler that returns it
-    fails at the report, because the result is not JSON."""
-    worker, client = start(lambda job_input, context: job_input)
-
-    assert request(worker, MICROVM_JOB_PATH, job_body(input={"x": math.nan})) == (
-        202,
-        {},
-    )
-    assert worker.idle(WAIT)
-
-    [(name, kwargs)] = completions(client)
-    assert name == "failure"
-    assert kwargs["Error"]["ErrorType"] == "ResultSerializationError"
 
 
 @pytest.mark.parametrize(
