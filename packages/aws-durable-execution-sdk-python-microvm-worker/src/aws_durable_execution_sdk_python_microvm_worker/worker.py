@@ -20,7 +20,6 @@ import socket
 import socketserver
 import sys
 import threading
-import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -120,14 +119,6 @@ _CONTENT_LENGTH = re.compile(r"[0-9]{1,19}")
 _CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]+")
 
 _MAX_CHUNK_LINE_BYTES = 1024
-
-_DISCARD_SECONDS = 10.0
-"""How long the worker reads and drops a body that it answered with 400."""
-
-_MAX_DISCARD_BYTES = 4 * MAX_JOB_BODY_BYTES
-"""How many bytes of such a body the worker reads and drops at most."""
-
-_DISCARD_READ_BYTES = 64 * 1024
 
 TERMINATE_REPORT_BUDGET_SECONDS = 5.0
 """How long the worker holds the ``terminate`` hook open while it fails the
@@ -590,9 +581,6 @@ class MicrovmWorkerListener:
             def handle_exchange(self) -> None:
                 listener.handle_request(self)
 
-            def handle_expect_100(self) -> bool:
-                return listener.handle_expect_100(self)
-
         return _Handler
 
     def handle_request(self, request: BaseHTTPRequestHandler) -> None:
@@ -610,31 +598,6 @@ class MicrovmWorkerListener:
             )
             if not exchange.responded:
                 exchange.respond(500, {"error": "internal error"})
-        finally:
-            exchange.discard_unread_body()
-
-    def handle_expect_100(self, request: BaseHTTPRequestHandler) -> bool:
-        """Answer a request that sent ``Expect: 100-continue``.
-
-        :attr:`request_handler_class` calls it before it reads the body.
-
-        1. A request whose ``Content-Length`` is over the path's limit gets
-           its HTTP 400 now, instead of ``100 Continue``. RFC 9110 section
-           10.1.1 allows a final answer in place of ``100 Continue``. The
-           client then does not send the body.
-        2. Every other request gets ``100 Continue``.
-
-        Returns:
-            Whether the base class goes on to read the request.
-        """
-        exchange = _Exchange(request, self._logger)
-        limit = self._body_limit(exchange)
-        length = exchange.declared_length()
-        if limit is not None and length is not None and length > limit:
-            self._reject(exchange.too_large(limit), exchange)
-            exchange.discard_unread_body()
-            return False
-        return BaseHTTPRequestHandler.handle_expect_100(request)
 
     def idle(self, timeout: float | None = None) -> bool:
         """Wait until every job started so far has ended.
@@ -828,19 +791,6 @@ class MicrovmWorkerListener:
     def _job_handler(self, path: str) -> MicrovmJobHandler | None:
         """The handler for a job route, or ``None`` for another path."""
         return self._handler if path == MICROVM_JOB_PATH else self._routes.get(path)
-
-    def _body_limit(self, exchange: _Exchange) -> int | None:
-        """The largest body that the request's path reads.
-
-        ``None`` for a request whose body the worker does not read.
-        """
-        if exchange.method != "POST":
-            return None
-        if exchange.path == f"{HOOK_PATH_PREFIX}run":
-            return MAX_HOOK_BODY_BYTES
-        if self._job_handler(exchange.path) is not None:
-            return MAX_JOB_BODY_BYTES
-        return None
 
     def _handle_run_hook(self, exchange: _Exchange) -> None:
         try:
@@ -1931,8 +1881,6 @@ class _Exchange:
         self._request = request
         self._logger = logger
         self.responded = False
-        # Set when the worker answers before it has read the whole body.
-        self._body_unread = False
 
     @property
     def method(self) -> str:
@@ -1945,20 +1893,6 @@ class _Exchange:
     def header(self, name: str) -> str | None:
         """A request header, or ``None``. The name is not case-sensitive."""
         return self._request.headers.get(name)
-
-    def declared_length(self) -> int | None:
-        """The body length from ``Content-Length``.
-
-        ``None`` when the body is chunked, or the header is absent or not
-        valid. Reading the body reports an invalid header.
-        """
-        headers = self._request.headers
-        if "chunked" in headers.get("Transfer-Encoding", "").lower():
-            return None
-        raw = headers.get("Content-Length")
-        if raw is None or not _CONTENT_LENGTH.fullmatch(raw.strip()):
-            return None
-        return int(raw)
 
     def read_json(self, max_bytes: int) -> Any:
         """Read the body, and parse it as JSON.
@@ -1974,17 +1908,6 @@ class _Exchange:
         except ValueError as error:
             msg = "request body is not valid JSON"
             raise InvalidRunHookPayloadError(msg) from error
-
-    def too_large(
-        self, max_bytes: int, part: str = "request body"
-    ) -> InvalidRunHookPayloadError:
-        """Return the error for a request part over ``max_bytes``.
-
-        The worker answers such a request before it reads the rest of the
-        body. So this method also marks the body unread.
-        """
-        self._body_unread = True
-        return InvalidRunHookPayloadError(f"{part} exceeds {max_bytes} bytes")
 
     def respond(self, status: int, body: Mapping[str, object]) -> None:
         """Send the answer. A client that has gone away is logged."""
@@ -2005,54 +1928,19 @@ class _Exchange:
                 extra={"status": status, "error": describe(error)},
             )
 
-    def discard_unread_body(self) -> None:
-        """Read and drop the rest of a body that the worker did not read.
-
-        1. The worker answers a body over the limit without reading it.
-        2. The connection then closes with unread bytes in its receive
-           buffer. So the kernel sends a TCP reset instead of a normal close.
-        3. A client that is still sending gets the reset before it reads the
-           answer. So the client never sees the 400.
-        4. The durable function fails at once on a 400, and retries a reset.
-           So the reset turns a clear rejection into retries.
-
-        So after the answer, the worker ends its side of the connection, and
-        reads and drops input until the client closes. The read stops after
-        :data:`_DISCARD_SECONDS` or :data:`_MAX_DISCARD_BYTES`. A client that
-        sends more still gets the reset.
-        """
-        if not self._body_unread:
-            return
-        connection = self._request.connection
-        try:
-            connection.shutdown(socket.SHUT_WR)
-            deadline = time.monotonic() + _DISCARD_SECONDS
-            discarded = 0
-            while discarded < _MAX_DISCARD_BYTES:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return
-                connection.settimeout(remaining)
-                data = connection.recv(_DISCARD_READ_BYTES)
-                if not data:
-                    return
-                discarded += len(data)
-        except OSError:
-            # The client has gone, or the time ran out in recv.
-            return
-
     def _read_body(self, max_bytes: int) -> bytes:
         headers = self._request.headers
         if "chunked" in headers.get("Transfer-Encoding", "").lower():
             return self._read_chunked(max_bytes)
-        if headers.get("Content-Length") is None:
+        raw = headers.get("Content-Length")
+        if raw is None:
             return b""
-        length = self.declared_length()
-        if length is None:
+        if not _CONTENT_LENGTH.fullmatch(raw.strip()):
             msg = "request Content-Length is not valid"
             raise InvalidRunHookPayloadError(msg)
+        length = int(raw)
         if length > max_bytes:
-            raise self.too_large(max_bytes)
+            raise _too_large(max_bytes)
         return self._read_exactly(length)
 
     def _read_chunked(self, max_bytes: int) -> bytes:
@@ -2081,9 +1969,7 @@ class _Exchange:
             line = self._request.rfile.readline(_MAX_CHUNK_LINE_BYTES)
             framing += len(line)
             if framing > max_bytes:
-                raise self.too_large(
-                    max_bytes, "the chunked framing of the request body"
-                )
+                raise _too_large(max_bytes, "the chunked framing of the request body")
             return line
 
         while True:
@@ -2101,7 +1987,7 @@ class _Exchange:
                 return b"".join(chunks)
             size += chunk_size
             if size > max_bytes:
-                raise self.too_large(max_bytes)
+                raise _too_large(max_bytes)
             chunks.append(self._read_exactly(chunk_size))
             if self._read_exactly(2) != b"\r\n":
                 raise _malformed_chunks()
@@ -2111,6 +1997,25 @@ class _Exchange:
         if len(data) < length:
             raise _ended_early()
         return data
+
+
+def _too_large(
+    max_bytes: int, part: str = "request body"
+) -> InvalidRunHookPayloadError:
+    """Return the error for a request part over ``max_bytes``.
+
+    1. The worker answers HTTP 400 without reading the rest of the body.
+    2. The answer closes the connection. So the unread bytes are never
+       parsed as the next request.
+    3. The connection closes with unread bytes. So the kernel sends a TCP
+       reset in place of a normal close.
+    4. A client that is still sending can get the reset before it reads
+       the 400.
+
+    The extras operations check the job input size before they send a job.
+    So only another sender can get the reset.
+    """
+    return InvalidRunHookPayloadError(f"{part} exceeds {max_bytes} bytes")
 
 
 def _malformed_chunks() -> InvalidRunHookPayloadError:
