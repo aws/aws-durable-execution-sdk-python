@@ -93,7 +93,7 @@ Every MicroVM failure is a `MicrovmError`. Catch the base class for all of them,
 
 | Error | When |
 |---|---|
-| `MicrovmLaunchError` | `RunMicrovm` failed after all retries. When the last attempt timed out or lost its connection, the service may have created the MicroVM anyway, and it then runs the job. So running the job again after this error can run it twice. |
+| `MicrovmLaunchError` | `RunMicrovm` failed after all retries. With `run` hook delivery, the launch request contains the job. A launch attempt that timed out or lost its connection can still have created the MicroVM, and that MicroVM then runs the job. So running the job again after this error can run it twice. An HTTP launch request contains no job. The request step starts only after a successful launch. So after an HTTP launch fails, no MicroVM runs the job. |
 | `MicrovmDeliveryError` | HTTP delivery failed after all retries, or the route answered a 4xx status such as 404, or a redirect. |
 | `MicrovmNotRunningError` | A `MicrovmDeliveryError`: the MicroVM is terminating, terminated, or removed. It is not retried. A session that checks the MicroVM state before each job reports it. Any job over HTTP also reports it when `CreateMicrovmAuthToken` reports the MicroVM removed. See [Suspending an idle MicroVM](#suspending-an-idle-microvm). |
 | `MicrovmJobFailedError` | The job handler in the MicroVM failed, or the MicroVM sent a result that is not valid JSON. The message includes the error type that the MicroVM reported. |
@@ -278,8 +278,8 @@ The MicroVM operations handle the network, the service, and the worker lifecycle
 1. Invoke the durable function through a published version or an alias, not `$LATEST`.
    - An execution started through a version or an alias is pinned to that version. Every replay runs the same code and the same configuration, including the environment variables.
    - An execution started through `$LATEST` is not pinned. After a deploy, it resumes on the new code. See [Invoking durable Lambda functions](https://docs.aws.amazon.com/lambda/latest/dg/durable-invoking.html).
-   - So under `$LATEST`, a deploy can land between two attempts of a session's launch step. The retry calls `RunMicrovm` with the new settings and the same client token. Assume that the first attempt created the MicroVM with suspending on, and that the new settings turn it off. If the service returns the MicroVM of the first attempt, the session records the resume mode of the new settings. So it skips the state check before each job. The MicroVM still suspends itself, and its endpoint then answers 502. So every later job fails with `MicrovmDeliveryError`, after the retries of both tiers. See [Suspending an idle MicroVM](#suspending-an-idle-microvm).
-2. Do not read MicroVM settings from a source that can change during an execution, such as an SSM parameter, AppConfig, or an S3 object. Code outside a step runs again on every replay. So it reads the value again, and a changed value causes the same mismatch as in rule 1. Read such a value inside a step. A replay then uses the checkpointed value.
+   - So under `$LATEST`, a deploy can land between two attempts of a launch step. A first attempt that timed out or lost its connection can still have created a MicroVM. The retry then calls `RunMicrovm` with that MicroVM's client token and the settings of the new deploy, such as a new `idle_policy`. `RunMicrovm` rejects a reused client token with different parameters with `ValidationException`. `default_microvm_retry_strategy` does not retry `ValidationException`. So the launch fails with `MicrovmLaunchError`. The operation runs no terminate step after a failed launch. It also never learned the ID of the first attempt's MicroVM. So that MicroVM runs, and is billed, until its maximum duration: the operation timeout plus 5 minutes, at most 8 hours. See [Errors](#errors).
+2. Do not read MicroVM settings from a source that can change during an execution, such as an SSM parameter, AppConfig, or an S3 object. Code outside a step runs again on every replay. So it reads the value again. A value that changes between two attempts of a launch step fails the launch, as in rule 1. Read such a value inside a step. A replay then uses the checkpointed value.
 3. The MicroVM packages are experimental. A release can change the durable operations that the MicroVM operations record. [Subtypes](#subtypes) describes one such change. An execution that replays its history on such a release fails with `NonDeterministicExecutionError`. So let executions that started on an earlier build end on that build. Under rule 1, this needs no extra step: a new version starts only new executions, and running executions continue on their own version. Under `$LATEST`, let the running executions end before you deploy a new build.
 
 ### Function timeout
@@ -292,12 +292,18 @@ The MicroVM operations handle the network, the service, and the worker lifecycle
 2. Keep the serialized job request at or under 6 MiB. The job request holds the input and a few job fields. Pass larger data by reference, for example as an S3 key.
    - The Python worker reads a job request body of at most 6 MiB. It answers a larger body with HTTP 400.
    - The operation does not check the size before it sends the job. So a larger body reaches the worker, and the job fails with `MicrovmDeliveryError`. It fails at once when the 400 reaches the operation. It fails only after the retries of both tiers when the connection is reset instead, and the MicroVM is billed meanwhile. [What the worker does](../aws-durable-execution-sdk-python-microvm-worker/README.md#what-the-worker-does) says when each case happens.
-3. Expect an input of more than about 3,600 code points to go over HTTP. A job over HTTP needs three things that a `run` hook job does not:
-   - `lambda:CreateMicrovmAuthToken` in the function's role. See [Permissions](#permissions).
-   - The function timeout of [Function timeout](#function-timeout).
-   - Ingress to the MicroVM. The operation gives such a MicroVM the `ALL_INGRESS` connector. If you set `ingress_network_connectors`, include a connector that allows ingress.
+3. Expect a job to go over HTTP in three cases:
+   - The `run` hook payload of a `microvm` job is over 4,096 code points. The payload holds the input, the callback ID, and a few other fields.
+   - The `microvm` config sets `request.path`. The job then goes over HTTP for any input size.
+   - The job is a session job. Every session job goes over HTTP.
 
-   Each missing item fails the job with `MicrovmDeliveryError`. Small inputs need none of them. So a function that passed its tests with small inputs can fail every large input. See [How the job reaches the MicroVM](#how-the-job-reaches-the-microvm).
+   A job over HTTP needs four things that a `run` hook job does not:
+   - `lambda:CreateMicrovmAuthToken` in the function's role. Without it, the job fails with `MicrovmDeliveryError`. See [Permissions](#permissions).
+   - The function timeout of [Function timeout](#function-timeout). With a shorter timeout, the job fails with `MicrovmDeliveryError`.
+   - Ingress to the MicroVM. The operation gives such a MicroVM the `ALL_INGRESS` connector. If you set `ingress_network_connectors`, include a connector that allows ingress. Without ingress, the request step cannot reach the MicroVM's endpoint.
+   - `lambda:PassNetworkConnector` on the `ALL_INGRESS` connector in the function's role. Its ARN is `arn:aws:lambda:<region>:aws:network-connector:aws-network-connector:ALL_INGRESS`. `RunMicrovm` authorizes each connector separately. So a role that allows only `NO_INGRESS` fails the launch with `MicrovmLaunchError`.
+
+   A `microvm` job whose payload fits the `run` hook, and whose config has no `request.path`, needs none of these four. So a function that passed its tests with such jobs can fail every job over HTTP. See [How the job reaches the MicroVM](#how-the-job-reaches-the-microvm).
 
 ### Job handlers
 
@@ -305,7 +311,7 @@ The MicroVM operations handle the network, the service, and the worker lifecycle
 2. Make the side effects of a job safe to repeat.
    - The worker ignores a second delivery of a callback ID. It remembers the callback IDs of its last 1,000 finished jobs, and it forgets them when its process restarts.
    - Each `microvm` call and each `vm.invoke` creates a new callback ID. So when your code runs a job again after a failure, the worker runs it again, also in the same MicroVM.
-   - A failure can follow a run that already changed something. After `MicrovmLaunchError`, the MicroVM can still run the job. After `MicrovmTimeoutError`, the job can have done part of its work. See [Errors](#errors).
+   - A failure can follow a run that already changed something. After `MicrovmLaunchError` with `run` hook delivery, the MicroVM can still run the job. An HTTP launch request contains no job. The request step starts only after the launch succeeds. So after `MicrovmLaunchError` with HTTP delivery, no MicroVM runs the job. After `MicrovmTimeoutError`, the job can have done part of its work. See [Errors](#errors).
 
 ### The HTTP job route
 
@@ -318,7 +324,12 @@ The MicroVM operations handle the network, the service, and the worker lifecycle
 ### Sessions
 
 1. Pass `vm.invoke` the context that the session handler receives, or a context nested in it. A job created in another context runs, and the next replay fails the execution with `NonDeterministicExecutionError`. `vm.invoke` raises `TypeError` only for the context that `microvm_session` was called with. It does not detect any other wrong context. See [`microvm_session`](#microvm_session-run-several-jobs-in-one-microvm).
-2. Set `auto_suspend_idle_time` to at least 10 seconds. A shorter time raises `ValidationError` before any durable operation starts. See [Suspending an idle MicroVM](#suspending-an-idle-microvm).
+2. Give `auto_suspend_idle_time` a value that meets three conditions:
+   - `auto_suspend_on_idle` is `True`.
+   - The idle time is at least 10 seconds.
+   - The idle time is at most the session `timeout`.
+
+   A value that breaks any one condition raises `ValidationError` when `microvm_session` is called, before any durable operation starts. See [Suspending an idle MicroVM](#suspending-an-idle-microvm).
 3. Change `auto_suspend_on_idle` or `idle_policy` only through a new version, as in [Deploys and versions](#deploys-and-versions). The launch records the resume mode, and a deploy changes it only for sessions that launch after it. Every job of a session that launched with suspending needs `lambda:GetMicrovm` and `lambda:ResumeMicrovm`, also after a deploy turns suspending off. So remove them from the function's role only as [Suspending an idle MicroVM](#suspending-an-idle-microvm) describes.
 
 ### Retry strategies
