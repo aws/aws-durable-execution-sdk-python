@@ -16,6 +16,7 @@ from aws_durable_execution_sdk_python_microvm_worker.payload import (
     MicrovmJobDocument,
     MicrovmJobRequest,
     RunHookRequest,
+    loads_strict,
 )
 
 
@@ -83,12 +84,13 @@ def test_run_hook_rejects_invalid_auto_suspend(idle):
         "job": JOB,
         "autoSuspendIdleSeconds": idle,
     }
-    # 1e309 is infinite as a float. json.dumps writes it as Infinity, and
-    # json.loads reads that token back as math.inf. The range check rejects it.
+    # 1e309 is infinite as a float. json.dumps writes it as Infinity, which
+    # the strict parser rejects as invalid JSON before the range check.
     with pytest.raises(InvalidRunHookPayloadError) as raised:
         RunHookRequest.from_dict(run_hook(payload))
-    assert raised.value.callback_id == "cb-1"
-    assert raised.value.region == "us-east-1"
+    if idle != 1e309:
+        assert raised.value.callback_id == "cb-1"
+        assert raised.value.region == "us-east-1"
 
 
 @pytest.mark.parametrize(
@@ -115,6 +117,7 @@ def test_run_hook_missing_id_error_names_the_job():
     [
         (3, "must be a string"),
         ("{", "not valid JSON"),
+        ("NaN", "not valid JSON"),
         ("[]", "must be an object"),
     ],
 )
@@ -232,41 +235,17 @@ def test_job_request_rejects(body, message, callback_id, region):
 
 # endregion job request
 
-# region non-finite numbers
+# region strict JSON
 
 
-@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
-@pytest.mark.parametrize(
-    ("template", "message"),
-    [
-        ('"version": {}', "not supported"),
-        ('"version": 1, "autoSuspendIdleSeconds": {}', "autoSuspendIdleSeconds"),
-        (
-            '"version": 1, "job": {{"callbackId": "cb-1", '
-            '"heartbeatTimeoutSeconds": {}}}',
-            "heartbeatTimeoutSeconds",
-        ),
-    ],
-)
-def test_run_hook_rejects_a_non_finite_number_field(token, template, message):
-    """json.loads parses the three tokens. The field checks reject them."""
-    text = '{"region": "us-east-1", ' + template.format(token) + "}"
-    with pytest.raises(InvalidRunHookPayloadError, match=message):
-        RunHookRequest.from_dict({"microvmId": "mvm-1", "runHookPayload": text})
+@pytest.mark.parametrize("text", ["NaN", "[Infinity]", '{"a": -Infinity}'])
+def test_loads_strict_rejects_non_json_constants(text):
+    with pytest.raises(ValueError, match="not valid JSON"):
+        loads_strict(text)
 
 
-def test_job_request_keeps_a_non_finite_number_in_the_input():
-    """The worker does not read the input. So a NaN token reaches the
-    handler as a float. The JavaScript worker answers 400 for it."""
-    body = json.loads(
-        '{"version": 1, "region": "us-east-1", "callbackId": "cb-1", '
-        '"input": {"x": NaN, "y": Infinity}}'
-    )
-
-    parsed = MicrovmJobRequest.from_dict(body)
-
-    assert math.isnan(parsed.job.input["x"])
-    assert parsed.job.input["y"] == math.inf
+def test_loads_strict_parses_json():
+    assert loads_strict(b'{"a": [1, 2.5, null, true]}') == {"a": [1, 2.5, None, True]}
 
 
 def test_large_integer_heartbeat_is_accepted():
@@ -275,7 +254,7 @@ def test_large_integer_heartbeat_is_accepted():
     assert parsed.job.heartbeat_timeout_seconds == math.inf
 
 
-# endregion non-finite numbers
+# endregion strict JSON
 
 
 # region dataclasses and callback IDs

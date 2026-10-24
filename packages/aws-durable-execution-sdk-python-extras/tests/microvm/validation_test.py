@@ -140,6 +140,11 @@ def config(**fields: Any) -> MicrovmConfig:
         ),
         (
             "build",
+            {"request": MicrovmRequestConfig(port=True)},
+            "the request port must be an integer between 1 and 65535",
+        ),
+        (
+            "build",
             {"request": MicrovmRequestConfig(port=8080.0)},  # type: ignore[arg-type]
             "the request port must be an integer between 1 and 65535",
         ),

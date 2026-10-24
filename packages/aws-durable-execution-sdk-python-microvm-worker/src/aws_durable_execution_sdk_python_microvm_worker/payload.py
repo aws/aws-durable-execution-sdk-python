@@ -64,8 +64,7 @@ class MicrovmJobDocument:
     callback_id: str
     """The callback that the worker completes with the job's outcome."""
     input: Any
-    """The caller's input, as parsed from JSON. It can hold a float that is
-    ``nan`` or infinite, because Python's ``json`` module parses one."""
+    """The caller's input, as parsed from JSON."""
     heartbeat_timeout_seconds: float | None = None
     """The heartbeat timeout in seconds, when the caller set one."""
 
@@ -128,7 +127,7 @@ class MicrovmRunHookPayload:
                 contract, or its version is not supported.
         """
         try:
-            payload = json.loads(text)
+            payload = loads_strict(text)
         except ValueError as error:
             # Keep the JSONDecodeError. Its line and column are the first
             # thing to check, because the payload comes from another SDK.
@@ -271,6 +270,25 @@ class MicrovmJobRequest:
         )
 
 
+def loads_strict(text: str | bytes) -> Any:
+    """Parse JSON, and reject ``NaN``, ``Infinity``, and ``-Infinity``.
+
+    Python's ``json`` module accepts those three tokens by default. They are
+    not JSON, and the durable function in another language never sends them.
+    A heartbeat timeout of ``Infinity`` would pass a check such as ``>= 1``.
+    So the worker rejects them when it parses.
+
+    Raises:
+        ValueError: When the text is not valid JSON.
+    """
+
+    def reject(token: str) -> Any:
+        msg = f"{token} is not valid JSON"
+        raise ValueError(msg)
+
+    return json.loads(text, parse_constant=reject)
+
+
 def _check_version(
     version: object, callback_id: str | None, region: str | None
 ) -> None:
@@ -302,10 +320,6 @@ def _non_empty_string(value: object) -> str | None:
 
 def is_finite_number(value: object) -> bool:
     """Whether a value is a JSON number that is finite.
-
-    Python's ``json`` module parses the ``NaN``, ``Infinity``, and
-    ``-Infinity`` tokens, and it parses ``1e309`` as ``math.inf``. So every
-    number field that the worker reads goes through this check.
 
     1. A ``bool`` is an ``int`` in Python, and JSON ``true`` is not a number.
        So a ``bool`` is not a number here.

@@ -998,7 +998,12 @@ def _validate_request(name: str, request: MicrovmRequestConfig) -> int:
         )
         raise ValidationError(msg)
     port = request.port
-    if port is not None and (not isinstance(port, int) or not 1 <= port <= _MAX_PORT):
+    # bool is an int subclass, and True would pass as port 1.
+    if port is not None and (
+        isinstance(port, bool)
+        or not isinstance(port, int)
+        or not 1 <= port <= _MAX_PORT
+    ):
         msg = f'MicroVM "{name}": the request port must be an integer between 1 and {_MAX_PORT}'
         raise ValidationError(msg)
     if request.retry_window is None:
