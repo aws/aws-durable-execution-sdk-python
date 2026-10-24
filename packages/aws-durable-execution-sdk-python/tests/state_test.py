@@ -381,6 +381,30 @@ def test_checkpointed_result_is_started():
     assert result_no_op.is_started() is False
 
 
+def test_checkpointed_result_to_error_object_returns_checkpoint_error():
+    """to_error_object preserves an ErrorObject already on the checkpoint."""
+    error = ErrorObject(
+        message="Test error", type="ValueError", data="d", stack_trace=["l"]
+    )
+    result = CheckpointedResult(error=error)
+
+    assert result.to_error_object(StepError) is error
+
+
+def test_checkpointed_result_to_error_object_without_error():
+    """to_error_object represents the typed error direct replay would raise."""
+    result = CheckpointedResult()
+
+    error = result.to_error_object(StepError)
+
+    assert error == ErrorObject(
+        message="Unknown error. No ErrorObject exists on the Checkpoint Operation.",
+        type="aws_durable_execution_sdk_python.exceptions.StepError",
+        data=None,
+        stack_trace=None,
+    )
+
+
 def test_checkpointed_result_raise_operation_error():
     """raise_operation_error wraps the checkpoint error in the given operation type."""
     error = ErrorObject(
@@ -404,8 +428,13 @@ def test_checkpointed_result_raise_operation_error_no_error():
     """raise_operation_error with no error raises the operation type with a default message."""
     result = CheckpointedResult()
 
-    with pytest.raises(StepError, match="Unknown error"):
+    with pytest.raises(StepError, match="Unknown error") as exc_info:
         result.raise_operation_error(StepError)
+
+    assert exc_info.value.error_type == (
+        "aws_durable_execution_sdk_python.exceptions.StepError"
+    )
+    assert exc_info.value.__cause__ is None
 
 
 def test_checkpointed_result_raise_operation_error_no_error_with_message():
