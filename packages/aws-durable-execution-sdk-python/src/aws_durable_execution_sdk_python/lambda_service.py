@@ -265,6 +265,26 @@ class ErrorObject:
             stack_trace=None,
         )
 
+    @classmethod
+    def for_missing_error(
+        cls,
+        operation_error_cls: builtins.type[DurableOperationError],
+        msg: str | None = None,
+    ) -> ErrorObject:
+        """Build the error for a FAILED operation that recorded none.
+
+        The service permits a FAILED operation without an ErrorObject. Replay
+        of such a checkpoint and deserialization of such a batch item both
+        call this, so a missing error has one representation: the operation's
+        own error type carrying a generic message.
+        """
+        return cls.from_exception(
+            operation_error_cls(
+                message=msg
+                or "Unknown error. No ErrorObject exists on the Checkpoint Operation."
+            )
+        )
+
     def to_dict(self) -> MutableMapping[str, Any]:
         result: MutableMapping[str, Any] = {}
         if self.message is not None:

@@ -396,6 +396,14 @@ def envelope_summary_generator(
 
 @dataclass(frozen=True)
 class BatchItem(Generic[R]):
+    """One branch of a map or parallel batch.
+
+    A FAILED item carries an error. The executor records the branch's error,
+    or the generic ChildContextError when a FAILED child-context checkpoint
+    has none, and :meth:`from_dict` fills in that same error when a payload
+    has a FAILED status and no error.
+    """
+
     index: int
     status: BatchItemStatus
     result: R | None = None
@@ -411,11 +419,16 @@ class BatchItem(Generic[R]):
 
     @classmethod
     def from_dict(cls, data: dict) -> BatchItem[R]:
+        status = BatchItemStatus(data["status"])
+        error = ErrorObject.from_dict(data["error"]) if data.get("error") else None
+        if status is BatchItemStatus.FAILED and error is None:
+            # The same error replay records for a FAILED checkpoint with none.
+            error = ErrorObject.for_missing_error(ChildContextError)
         return cls(
             index=data["index"],
-            status=BatchItemStatus(data["status"]),
+            status=status,
             result=data.get("result"),
-            error=ErrorObject.from_dict(data["error"]) if data.get("error") else None,
+            error=error,
         )
 
 
@@ -510,20 +523,11 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
         return any(item.status is BatchItemStatus.FAILED for item in self.all)
 
     def throw_if_error(self) -> None:
-        first_failed = next(
-            (item for item in self.all if item.status is BatchItemStatus.FAILED),
+        first_error = next(
+            (item.error for item in self.all if item.status is BatchItemStatus.FAILED),
             None,
         )
-        if first_failed is not None:
-            first_error = first_failed.error
-            if first_error is None:
-                raise ChildContextError(
-                    message=(
-                        f"Batch item {first_failed.index} failed "
-                        "without an ErrorObject."
-                    )
-                )
-
+        if first_error is not None:
             # Each item runs in a child context, so a failed item surfaces as a
             # ChildContextError wrapping the escaping error (reconstructed as its
             # typed form where possible, with __cause__ set). Remaining errors
@@ -541,13 +545,14 @@ class BatchResult(Generic[R], BatchResultProtocol[R]):  # noqa: PYI059
             if item.status is BatchItemStatus.SUCCEEDED
         ]
 
-    def get_errors(self) -> list[ErrorObject | None]:
-        """Return one entry per FAILED item, in branch order.
-
-        An entry may be None when a deserialized BatchItem contained no error.
-        """
+    def get_errors(self) -> list[ErrorObject]:
+        """Return one error per FAILED item, in branch order."""
+        # A FAILED item always carries an error (see BatchItem), so the cast
+        # states that invariant for the type checker.
         return [
-            item.error for item in self.all if item.status is BatchItemStatus.FAILED
+            cast(ErrorObject, item.error)
+            for item in self.all
+            if item.status is BatchItemStatus.FAILED
         ]
 
     @property

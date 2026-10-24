@@ -325,24 +325,12 @@ class CheckpointedResult:
         """Adapt a failed checkpoint to an ErrorObject at a replay boundary.
 
         Return the checkpoint's ErrorObject unchanged when one exists. The
-        service permits a FAILED operation without an ErrorObject. Synthesize
-        an operation-specific fallback when the service omitted it.
+        service permits a FAILED operation without an ErrorObject; for that
+        case return ``ErrorObject.for_missing_error`` for the operation.
         """
         if self.error is not None:
             return self.error
-
-        fallback_error = operation_error_cls(
-            message=(
-                msg
-                or "Unknown error. No ErrorObject exists on the Checkpoint Operation."
-            )
-        )
-        return ErrorObject(
-            message=fallback_error.message,
-            type=fallback_error.error_type,
-            data=fallback_error.data,
-            stack_trace=fallback_error.stack_trace,
-        )
+        return ErrorObject.for_missing_error(operation_error_cls, msg)
 
     def raise_operation_error(
         self,
