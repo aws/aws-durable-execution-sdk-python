@@ -44,6 +44,7 @@ from aws_durable_execution_sdk_python_microvm_worker import worker as worker_mod
 from aws_durable_execution_sdk_python_testing.runner import DurableFunctionTestRunner
 
 from aws_durable_execution_sdk_python_extras.microvm import (
+    MAX_JOB_INPUT_BYTES,
     MAX_RUN_HOOK_PAYLOAD_LENGTH,
     MicrovmConfig,
     MicrovmError,
@@ -300,6 +301,20 @@ def test_runs_a_job_too_large_for_the_run_hook_over_http(composed: Any) -> None:
     assert outcome == {"result": {"length": 4096, "microvm": "mvm-1"}}
     assert len(client.requests("create_microvm_auth_token")) == 1
     assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
+
+
+def test_runs_a_job_input_at_the_size_limit_in_the_worker(composed: Any) -> None:
+    # The job body adds the job fields to the input. The worker accepts the
+    # body, so the fields fit in the 8 KiB that the limit leaves.
+    def job(job_input: Any, context: MicrovmJobContext) -> Any:
+        return len(job_input)
+
+    # The JSON of the input is the limit, with the 2 quotes.
+    outcome, _, _ = composed(
+        job, "x" * (MAX_JOB_INPUT_BYTES - 2), heartbeat_timeout=Duration.from_hours(8)
+    )
+
+    assert outcome == {"result": MAX_JOB_INPUT_BYTES - 2}
 
 
 def test_runs_a_job_on_a_route_of_the_worker(composed: Any) -> None:

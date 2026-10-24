@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import threading
@@ -57,8 +56,10 @@ from aws_durable_execution_sdk_python_extras.microvm.errors import (
     MicrovmTimeoutError,
 )
 from aws_durable_execution_sdk_python_extras.microvm.job import (
+    MAX_JOB_INPUT_BYTES,
     JobRequest,
     RunHookPayload,
+    dumps,
     fits_run_hook,
     run_hook_payload_without_job,
 )
@@ -258,6 +259,9 @@ def microvm(
             value.
         TypeError: When ``job_input`` is not JSON-serializable. No durable
             operation starts.
+        ValueError: When the JSON of ``job_input`` is over
+            :data:`MAX_JOB_INPUT_BYTES` UTF-8 bytes. No durable operation
+            starts.
         MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
         MicrovmNotRunningError: When ``CreateMicrovmAuthToken`` reports that
             the MicroVM no longer exists. It is a ``MicrovmDeliveryError``.
@@ -356,16 +360,29 @@ def _validate_heartbeat(name: str, heartbeat_timeout: Duration | None) -> int | 
 
 
 def _validate_input(name: str, job_input: Any) -> None:
-    """Check that the job input is JSON-serializable.
+    """Check that the job input is JSON-serializable, and fits in a job body.
+
+    The size is the UTF-8 length of the JSON that the job body holds. So it
+    is measured on the output of :func:`dumps`.
 
     Raises:
-        TypeError: When it is not.
+        TypeError: When it is not JSON-serializable.
+        ValueError: When its JSON is over :data:`MAX_JOB_INPUT_BYTES` bytes.
     """
     try:
-        json.dumps(job_input, allow_nan=False)
+        text = dumps(job_input)
     except (TypeError, ValueError) as error:
         msg = f'MicroVM "{name}": the job input must be JSON-serializable: {error}'
         raise TypeError(msg) from error
+    size = len(text.encode())
+    if size > MAX_JOB_INPUT_BYTES:
+        msg = (
+            f'MicroVM "{name}": the job input is {size} bytes as JSON. The limit '
+            f"is {MAX_JOB_INPUT_BYTES} bytes, because the worker accepts a job "
+            "body of at most 6 MiB. Pass larger data by reference, for example "
+            "as an S3 key."
+        )
+        raise ValueError(msg)
 
 
 def _validate_region(context: DurableContext, name: str) -> tuple[str, str]:
@@ -726,6 +743,7 @@ class _OperationScope(_MicrovmScope):
             ValidationError: When ``name`` or ``config`` is not valid, or the
                 Region cannot be determined.
             TypeError: When ``job_input`` is not JSON-serializable.
+            ValueError: When the JSON of ``job_input`` is too large.
         """
         timeout_seconds = _validate_base(name, config, config.timeout)
         heartbeat_timeout_seconds = _validate_heartbeat(name, config.heartbeat_timeout)

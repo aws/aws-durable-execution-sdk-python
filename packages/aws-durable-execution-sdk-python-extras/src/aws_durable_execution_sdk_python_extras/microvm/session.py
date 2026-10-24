@@ -248,6 +248,8 @@ class MicrovmSession:
             TypeError: When ``context`` is not a durable context, or is the
                 context that ``microvm_session`` was called with, or
                 ``job_input`` is not JSON-serializable.
+            ValueError: When the JSON of ``job_input`` is over
+                ``MAX_JOB_INPUT_BYTES`` UTF-8 bytes.
             ValidationError: When ``name`` or ``options`` is not valid.
             MicrovmNotRunningError: When the session's MicroVM has ended. The
                 session reports it when it checks the MicroVM state before
