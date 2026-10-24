@@ -227,26 +227,6 @@ def test_error_object_from_message_empty():
     assert error.stack_trace is None
 
 
-def test_error_object_for_missing_error_uses_operation_type_and_default_message():
-    """A missing error is represented as the operation's own type."""
-    error = ErrorObject.for_missing_error(StepError)
-
-    assert error == ErrorObject(
-        message="Unknown error. No ErrorObject exists on the Checkpoint Operation.",
-        type="aws_durable_execution_sdk_python.exceptions.StepError",
-        data=None,
-        stack_trace=None,
-    )
-
-
-def test_error_object_for_missing_error_takes_custom_message():
-    """A caller-supplied message replaces the default text."""
-    error = ErrorObject.for_missing_error(StepError, "Custom error message")
-
-    assert error.message == "Custom error message"
-    assert error.type == "aws_durable_execution_sdk_python.exceptions.StepError"
-
-
 def test_invocation_output_create_pending_is_bare_pending():
     """A pending response contains neither a result nor an error."""
     output = DurableExecutionInvocationOutput.create_pending()

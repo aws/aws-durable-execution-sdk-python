@@ -317,21 +317,6 @@ class CheckpointedResult:
             return False
         return op.context_details.replay_children if op.context_details else False
 
-    def to_error_object(
-        self,
-        operation_error_cls: type[DurableOperationError],
-        msg: str | None = None,
-    ) -> ErrorObject:
-        """Adapt a failed checkpoint to an ErrorObject at a replay boundary.
-
-        Return the checkpoint's ErrorObject unchanged when one exists. The
-        service permits a FAILED operation without an ErrorObject; for that
-        case return ``ErrorObject.for_missing_error`` for the operation.
-        """
-        if self.error is not None:
-            return self.error
-        return ErrorObject.for_missing_error(operation_error_cls, msg)
-
     def raise_operation_error(
         self,
         operation_error_cls: type[DurableOperationError],
@@ -345,13 +330,11 @@ class CheckpointedResult:
         (invoke/callback) still surface as the correct per-operation error.
         """
         if self.error is None:
-            error = self.to_error_object(operation_error_cls, msg)
-            raise operation_error_cls(
-                message=error.message,
-                error_type=error.type,
-                data=error.data,
-                stack_trace=error.stack_trace,
+            err_msg: str = (
+                msg
+                or "Unknown error. No ErrorObject exists on the Checkpoint Operation."
             )
+            raise operation_error_cls(message=err_msg)
 
         # Reconstruct from the checkpointed ErrorObject. This is the same path the
         # handlers use on the first-run failure, so first run and replay surface

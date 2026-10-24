@@ -32,7 +32,6 @@ from aws_durable_execution_sdk_python.config import (
     NestingType,
 )
 from aws_durable_execution_sdk_python.exceptions import (
-    ChildContextError,
     DurableOperationError,
     ExecutionError,
     InvalidStateError,
@@ -798,9 +797,7 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
             return BatchItem(executable.index, BatchItemStatus.SUCCEEDED, result)
         if checkpoint.is_failed():
             return BatchItem(
-                executable.index,
-                BatchItemStatus.FAILED,
-                error=checkpoint.to_error_object(ChildContextError),
+                executable.index, BatchItemStatus.FAILED, error=checkpoint.error
             )
         if self.nesting_type is NestingType.FLAT:
             try:
@@ -853,7 +850,7 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 )
 
             elif checkpoint.is_failed():
-                error = checkpoint.to_error_object(ChildContextError)
+                error = checkpoint.error
                 status = BatchItemStatus.FAILED
             else:
                 status = BatchItemStatus.STARTED

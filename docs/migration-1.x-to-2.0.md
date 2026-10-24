@@ -348,8 +348,18 @@ result = context.map(items, process_item)
 try:
     result.throw_if_error()
 except (ChildContextError, SerDesError, BatchCompletionError):
-    for err in result.get_errors():   # every failed item's ErrorObject
-        context.logger.error("%s: %s", err.type, err.message)
+    for item in result.failed():
+        if item.error is None:
+            context.logger.error(
+                "Batch item %s failed without an ErrorObject",
+                item.index,
+            )
+        else:
+            context.logger.error(
+                "%s: %s",
+                item.error.type,
+                item.error.message,
+            )
 ```
 
 ## Serialize and Deserialize Round Trip

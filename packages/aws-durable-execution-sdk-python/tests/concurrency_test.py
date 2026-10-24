@@ -313,14 +313,8 @@ def test_batch_result_get_errors():
     assert error2 in errors
 
 
-def test_batch_result_from_dict_fills_in_missing_failed_item_error():
-    """A FAILED payload with no error gets the replay fallback error.
-
-    The same payload can arrive through ``BatchResult.from_dict`` directly or
-    through the default ``ExtendedTypeSerDes``. Both must yield an item whose
-    error equals the one replay records for a FAILED checkpoint with none, so
-    ``get_errors()`` keeps its ``list[ErrorObject]`` contract.
-    """
+def test_batch_result_preserves_missing_errors_through_serdes():
+    """Deserialization preserves one optional error per FAILED item."""
     real_error = ErrorObject("real error", "RealError", "data", ["line"])
     wire = {
         "all": [
@@ -334,84 +328,53 @@ def test_batch_result_from_dict_fills_in_missing_failed_item_error():
         ],
         "completionReason": "ALL_COMPLETED",
     }
-    expected_fallback = CheckpointedResult().to_error_object(ChildContextError)
 
     restored = BatchResult.from_dict(wire)
-    assert restored.get_errors() == [expected_fallback, real_error]
+    assert restored.get_errors() == [None, real_error]
     assert len(restored.get_errors()) == restored.failure_count == 2
 
     serdes = ExtendedTypeSerDes()
     round_tripped = serdes.deserialize(serdes.serialize(restored))
+
     assert isinstance(round_tripped, BatchResult)
-    assert round_tripped.get_errors() == [expected_fallback, real_error]
-
-    # The typed-caller pattern from the migration guide works on every entry.
-    assert [error.type for error in round_tripped.get_errors()] == [
-        "aws_durable_execution_sdk_python.exceptions.ChildContextError",
-        "RealError",
-    ]
+    assert round_tripped.get_errors() == [None, real_error]
+    assert len(round_tripped.get_errors()) == round_tripped.failure_count == 2
 
 
-def test_batch_result_from_dict_keeps_absent_error_on_non_failed_items():
-    """Only FAILED items get the fallback; SUCCEEDED and STARTED keep None."""
-    wire = {
-        "all": [
-            {"index": 0, "status": "SUCCEEDED", "result": None, "error": None},
-            {"index": 1, "status": "STARTED", "result": None, "error": None},
-        ],
-        "completionReason": "ALL_COMPLETED",
-    }
-
-    restored = BatchResult.from_dict(wire)
-
-    assert [item.error for item in restored.all] == [None, None]
-    assert restored.get_errors() == []
-
-
-def test_batch_result_throw_if_error_raises_filled_in_error():
-    """A deserialized FAILED item with no error raises the generic error."""
-    restored = BatchResult.from_dict(
-        {
-            "all": [{"index": 7, "status": "FAILED", "result": None, "error": None}],
-            "completionReason": "ALL_COMPLETED",
-        }
+def test_batch_result_throw_if_error_without_error_uses_item_index():
+    """A FAILED item without an ErrorObject raises a deterministic error."""
+    result = BatchResult(
+        [BatchItem(7, BatchItemStatus.FAILED)],
+        CompletionReason.ALL_COMPLETED,
     )
 
     with pytest.raises(ChildContextError) as exc_info:
-        restored.throw_if_error()
+        result.throw_if_error()
 
-    assert exc_info.value.message == (
-        "Unknown error. No ErrorObject exists on the Checkpoint Operation."
-    )
+    assert exc_info.value.message == "Batch item 7 failed without an ErrorObject."
     assert exc_info.value.error_type == (
         "aws_durable_execution_sdk_python.exceptions.ChildContextError"
     )
+    assert exc_info.value.__cause__ is None
 
 
 def test_batch_result_throw_if_error_uses_first_failed_item():
     """A later real error does not replace the first FAILED item."""
     later_error = ErrorObject("later error", "LaterError", None, None)
-    restored = BatchResult.from_dict(
-        {
-            "all": [
-                {"index": 3, "status": "FAILED", "result": None, "error": None},
-                {
-                    "index": 4,
-                    "status": "FAILED",
-                    "result": None,
-                    "error": later_error.to_dict(),
-                },
-            ],
-            "completionReason": "ALL_COMPLETED",
-        }
+    result = BatchResult(
+        [
+            BatchItem(3, BatchItemStatus.FAILED),
+            BatchItem(4, BatchItemStatus.FAILED, error=later_error),
+        ],
+        CompletionReason.ALL_COMPLETED,
     )
 
-    assert [error.type for error in restored.get_errors()] == [
-        "aws_durable_execution_sdk_python.exceptions.ChildContextError",
-        "LaterError",
-    ]
-    with pytest.raises(ChildContextError, match="No ErrorObject exists"):
-        restored.throw_if_error()
+    assert result.get_errors() == [None, later_error]
+    with pytest.raises(
+        ChildContextError,
+        match=r"Batch item 3 failed without an ErrorObject\.",
+    ):
+        result.throw_if_error()
 
 
 def test_batch_result_throw_if_error_preserves_real_first_error():
@@ -425,9 +388,7 @@ def test_batch_result_throw_if_error_preserves_real_first_error():
     result = BatchResult(
         [
             BatchItem(3, BatchItemStatus.FAILED, error=first_error),
-            BatchItem(
-                4, BatchItemStatus.FAILED, error=ErrorObject("x", "X", None, None)
-            ),
+            BatchItem(4, BatchItemStatus.FAILED),
         ],
         CompletionReason.ALL_COMPLETED,
     )
@@ -1170,10 +1131,12 @@ def test_flat_replay_rejects_failed_nested_container_checkpoint(replay_path):
 
 
 @pytest.mark.parametrize("replay_path", ["recorded-terminal", "fallback"])
-def test_replay_failed_checkpoint_without_error_records_child_context_error(
-    replay_path,
-):
-    """A FAILED branch checkpoint may carry no error; the item still gets one."""
+def test_replay_failed_checkpoint_without_error_keeps_none(replay_path):
+    """A FAILED branch checkpoint may carry no error; the item keeps None.
+
+    Replay stores the checkpoint error as recorded. The item stays FAILED,
+    get_errors() keeps its position, and throw_if_error() still raises.
+    """
     executor = _RecordingExecutor(
         executables=[Executable(0, lambda: "must-not-run")],
         max_concurrency=1,
@@ -1212,13 +1175,14 @@ def test_replay_failed_checkpoint_without_error_records_child_context_error(
         )
 
     assert [item.index for item in result.failed()] == [0]
-    errors = result.get_errors()
-    assert len(errors) == 1
-    assert errors[0].type == (
-        "aws_durable_execution_sdk_python.exceptions.ChildContextError"
-    )
-    with pytest.raises(ChildContextError, match="No ErrorObject exists"):
+    assert result.failed()[0].error is None
+    assert result.get_errors() == [None]
+    assert result.has_failure
+
+    with pytest.raises(ChildContextError, match="without an ErrorObject") as exc_info:
         result.throw_if_error()
+
+    assert exc_info.value.__cause__ is None
 
 
 @pytest.mark.parametrize(
@@ -1800,7 +1764,6 @@ def test_failed_branch_error_type_matches_across_execute_and_replay():
     failed_checkpoint.error = ErrorObject(
         message="Test error", type="ValueError", data=None, stack_trace=None
     )
-    failed_checkpoint.to_error_object.return_value = failed_checkpoint.error
     replay_state = Mock()
     replay_state.get_checkpoint_result = Mock(return_value=failed_checkpoint)
     replay_context = Mock()
