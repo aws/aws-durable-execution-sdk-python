@@ -4,8 +4,7 @@ name: Telemetry Conformance Tests
 
 on:
   pull_request:
-    # Include the parent PR branch while this change is stacked on PR #822. Remove that branch filter when retargeting this PR to main.
-    branches: [main, feat/conformance-tests-telemetry]
+    branches: [main]
     paths:
       - "packages/aws-durable-execution-sdk-python/**"
       - "packages/aws-durable-execution-sdk-python-telemetry-exporter/**"
